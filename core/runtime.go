@@ -132,3 +132,7 @@ func HLCObserve(remote uint64) uint64 {
 }
 
 func nextLocalSeq() uint64 { return localSq.Add(1) }
+
+// NextLocalSeq returns the next per-process monotonic sequence number. Used by
+// the exporter for synthetic events (e.g. sdk.dropped).
+func NextLocalSeq() uint64 { return nextLocalSeq() }

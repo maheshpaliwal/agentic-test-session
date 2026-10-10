@@ -1,12 +1,12 @@
-go 1.25
+go 1.26.0
 
 use (
 	.
 	./collector
-	./contrib/tsql
-	./contrib/tredis
-	./contrib/tmongo
 	./contrib/tdynamo
 	./contrib/tgrpc
+	./contrib/tmongo
 	./contrib/tqueue
+	./contrib/tredis
+	./contrib/tsql
 )
