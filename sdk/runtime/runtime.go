@@ -17,6 +17,9 @@ type Config struct {
 	CollectorURL    string // default http://127.0.0.1:7071
 	BufferSize      int    // ring capacity (default 8192)
 	Exporter        ExporterConfig
+	// Encoder selects the ingest wire format (default NDJSON); it overrides
+	// Exporter.Encoder when set. See BatchEncoder for the protobuf opt-in.
+	Encoder BatchEncoder
 	// PatchDefaultTransport wraps http.DefaultTransport with Transport
 	// (idempotent; restored by Stop).
 	PatchDefaultTransport bool
@@ -73,6 +76,9 @@ func Start(cfg Config) error {
 		cfg.CollectorURL = "http://127.0.0.1:7071"
 	}
 	cfg.Exporter.CollectorURL = cfg.CollectorURL
+	if cfg.Encoder != nil {
+		cfg.Exporter.Encoder = cfg.Encoder
+	}
 
 	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority})
 	s := &state{rec: NewRecorder(cfg.BufferSize)}

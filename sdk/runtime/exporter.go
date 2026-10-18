@@ -21,6 +21,7 @@ type ExporterConfig struct {
 	RetryBackoff  time.Duration // first backoff, doubles (default 100ms)
 	MaxCooldown   time.Duration // pause after a failed batch, capped (default 5s)
 	HTTPTimeout   time.Duration // per request (default 2s)
+	Encoder       BatchEncoder  // wire format (default NDJSON)
 }
 
 // Exporter drains a Recorder and ships batches to the collector from a single
@@ -60,6 +61,9 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 	}
 	if cfg.HTTPTimeout <= 0 {
 		cfg.HTTPTimeout = 2 * time.Second
+	}
+	if cfg.Encoder == nil {
+		cfg.Encoder = NDJSONEncoder{}
 	}
 	cfg.CollectorURL = strings.TrimRight(cfg.CollectorURL, "/")
 	e := &Exporter{
@@ -166,12 +170,10 @@ func oversizeStub(ev core.Event) core.Event {
 }
 
 func (e *Exporter) post(batch []core.Event) postResult {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	for i := range batch {
-		_ = enc.Encode(&batch[i])
+	body, err := e.cfg.Encoder.Encode(batch)
+	if err != nil {
+		return postFailed // encoding is deterministic; retrying will not help
 	}
-	body := buf.Bytes()
 	inst := core.GetConfig().Instance
 	backoff := e.cfg.RetryBackoff
 	for attempt := 0; attempt <= e.cfg.MaxRetries; attempt++ {
@@ -187,7 +189,7 @@ func (e *Exporter) post(batch []core.Event) postResult {
 		if err != nil {
 			return postFailed
 		}
-		req.Header.Set("Content-Type", "application/x-ndjson")
+		req.Header.Set("Content-Type", e.cfg.Encoder.ContentType())
 		req.Header.Set("X-TSession-Instance", inst)
 		resp, err := e.client.Do(req)
 		if err != nil {

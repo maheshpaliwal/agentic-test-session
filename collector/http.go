@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/proto/tsessionproto"
 )
 
 // Handler returns the collector HTTP API (ingest, read and internal
@@ -42,7 +44,7 @@ func (c *Collector) Handler() http.Handler {
 	guarded := core.LoopbackGuard(h, core.GuardConfig{
 		AllowedHosts:     c.cfg.AllowedHosts,
 		AllowedOrigins:   c.cfg.AllowedOrigins,
-		BodyContentTypes: []string{"application/x-ndjson", "application/json"},
+		BodyContentTypes: []string{"application/x-ndjson", "application/json", tsessionproto.ContentType},
 	})
 	// /healthz is exempt from the Host guard (GET only; reveals nothing) so
 	// container probes using service names work.
@@ -109,21 +111,36 @@ func readLine(br *bufio.Reader, max int) (line []byte, over bool, err error) {
 	}
 }
 
-func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, c.cfg.MaxBodyBytes)
-	br := bufio.NewReaderSize(r.Body, 64<<10)
+// ingestDecoder reads one request body into events. Items it cannot use are
+// recorded in res (reason -> count) without failing the request; a non-nil
+// error is a read failure (including *http.MaxBytesError) and aborts it.
+// Events decoded before an error are returned alongside it.
+type ingestDecoder func(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error)
+
+// ingestDecoders maps request media types to their decoder. A missing or
+// unrecognised Content-Type is read as NDJSON (the original behaviour); the
+// LoopbackGuard has already vetted the type for non-GET requests.
+var ingestDecoders = map[string]ingestDecoder{
+	"application/x-protobuf": decodeProtoBatch,
+}
+
+func pickDecoder(contentType string) ingestDecoder {
+	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
+		if d, ok := ingestDecoders[mt]; ok {
+			return d
+		}
+	}
+	return decodeNDJSONBatch
+}
+
+// decodeNDJSONBatch reads one JSON event per line.
+func decodeNDJSONBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error) {
+	br := bufio.NewReaderSize(body, 64<<10)
 	var evs []core.Event
-	var res IngestResult
 	for {
-		raw, over, err := readLine(br, c.cfg.MaxLineBytes)
+		raw, over, err := readLine(br, maxItem)
 		if err != nil && err != io.EOF {
-			var mbe *http.MaxBytesError
-			if errors.As(err, &mbe) {
-				writeErr(w, http.StatusRequestEntityTooLarge, errors.New("payload too large"))
-				return
-			}
-			writeErr(w, http.StatusBadRequest, err)
-			return
+			return evs, err
 		}
 		if over {
 			res.reject("oversize_line", 1)
@@ -136,8 +153,49 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err == io.EOF {
-			break
+			return evs, nil
 		}
+	}
+}
+
+// decodeProtoBatch reads a stream of length-delimited Event messages. A bad
+// message is rejected alone; broken framing ends the stream with one
+// invalid_proto, keeping the events decoded so far.
+func decodeProtoBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error) {
+	dec := tsessionproto.NewDecoder(body, maxItem)
+	var evs []core.Event
+	for {
+		e, err := dec.Next()
+		switch {
+		case err == nil:
+			evs = append(evs, e)
+		case err == io.EOF:
+			return evs, nil
+		case errors.Is(err, tsessionproto.ErrOversize):
+			res.reject("oversize_line", 1)
+		case errors.Is(err, tsessionproto.ErrInvalid):
+			res.reject("invalid_proto", 1)
+		case errors.Is(err, tsessionproto.ErrCorrupt):
+			res.reject("invalid_proto", 1)
+			return evs, nil
+		default:
+			return evs, err
+		}
+	}
+}
+
+func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, c.cfg.MaxBodyBytes)
+	var res IngestResult
+	evs, err := pickDecoder(r.Header.Get("Content-Type"))(r.Body, c.cfg.MaxLineBytes, &res)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeErr(w, http.StatusRequestEntityTooLarge, errors.New("payload too large"))
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err)
+		return
 	}
 	ir, err := c.Ingest(r.Context(), r.Header.Get("X-TSession-Instance"), evs)
 	res.Accepted, res.Duplicates = ir.Accepted, ir.Duplicates

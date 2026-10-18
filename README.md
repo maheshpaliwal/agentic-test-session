@@ -39,7 +39,7 @@ tsession provides that by combining three ideas:
  │ service A + SDK     │─────────▶│ collector :7071                        │
  │  thttp / tgrpc /    │ /v1/ingest│  idempotent ingest, reorder window,    │
  │  tsql / tredis /    │          │  gapless Seq, trace tree, entity views │
- │  tmongo / tdynamo / │          │  store: in-memory | Postgres           │
+ │  tmongo / tdynamo / │          │  store: mem | pg | mongo | dynamodb    │
  │  tqueue             │          └────────────────────────────────────────┘
  └─────────────────────┘
  ┌─────────────────────┐   (same SDK; sessions propagate via traceparent,
@@ -79,6 +79,45 @@ Screenshots from `go run ./cmd/dashboard -demo` (synthetic data).
 
 ![Entity mutation history](docs/images/entities.png)
 
+## Storage backends
+
+The collector persists sequenced events behind one small interface (`collector/store.Store`, 9 methods), so you
+choose the backend with `--store` (or `TSESSION_COLLECTOR_STORE`). Every backend runs the same conformance suite
+(`collector/store/storetest`).
+
+| `--store` | Use it for | Settings |
+|---|---|---|
+| `mem` (default) | local runs, tests; data is lost on restart | none |
+| `pg` | durable, SQL-queryable | `--pg-dsn`, `--pg-schema` |
+| `mongo` | document store; events kept as exact JSON plus indexed fields | `--mongo-uri`, `--mongo-db` |
+| `dynamodb` | serverless/AWS; large events are gzipped and chunked | `--dynamo-table`, `--dynamo-region`, `--dynamo-endpoint`, `--dynamo-create-table` |
+
+Connection strings can carry credentials, so prefer the `TSESSION_COLLECTOR_*` environment variables over flags
+(flag values show up in the process list). Backend specifics are in each package's doc comment
+(`collector/store/mongostore`, `collector/store/dynamostore`).
+
+Verification status: `mem` and the `mongo` backend have been run against a real MongoDB 7; `pg` runs when
+`TSESSION_TEST_PG_DSN` is set. The `dynamodb` backend is tested against an in-process fake that enforces
+DynamoDB's item and transaction limits, but **has not yet been run against a real DynamoDB or the emulator**;
+treat it as unproven until you run its live tests (`TSESSION_TEST_DYNAMO_ENDPOINT`).
+
+## Protobuf ingest
+
+`POST /v1/ingest` accepts NDJSON (default) or protobuf (`Content-Type: application/x-protobuf`, schema in
+`proto/tsession/v1/event.proto`). Protobuf is opt-in on the SDK side so the root module stays dependency-free:
+
+```go
+import (
+    "github.com/maheshpaliwal/agentic-test-session/proto/tsessionproto"
+    "github.com/maheshpaliwal/agentic-test-session/sdk/runtime"
+)
+
+cfg := runtime.Config{Encoder: tsessionproto.Encoder{}}
+```
+
+Batches are about 44% of the NDJSON size in a synthetic benchmark. Wire details are in
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
 ## Repository layout
 
 ```
@@ -86,14 +125,15 @@ core/            event model, span/payload API, redaction, bindings, loopback gu
 sdk/             runtime (recorder, exporter, subscriber), client, autoinit
 thttp/           HTTP server middleware + client transport
 controlplane/    session manager, drain/seal orchestration, bindings, names, file store
-collector/       ingest, sequencer, views, bundle, store/{mem,pg}                       (own module)
+collector/       ingest, sequencer, views, bundle, store/{mem,pg,mongostore,dynamostore}  (own module)
 dashboard/       Go proxy + embedded web UI, demo data
 cmd/             controlplane, dashboard, tracectl
 contrib/         tsql tredis tredisv8 tmongo tdynamo tgrpc tqueue tkafkaconfluent       (one module each)
 internal/redisx  Redis logic shared by tredis and tredisv8
+proto/           protobuf schema, generated code, codec + SDK encoder   (own module)
 integration/     end-to-end harness against real Postgres/Redis
 docker/          Dockerfiles, compose stack, env template
-docs/            protocol, bindings, module notes
+docs/            protocol, bindings
 ```
 
 ## Quick start
@@ -106,6 +146,7 @@ go run ./cmd/dashboard -demo            # http://127.0.0.1:7072
 
 # Real stack, three terminals
 go run ./collector/cmd/collector        # :7071 (in-memory store by default)
+# pick where sessions are stored: --store mem|pg|mongo|dynamodb (see "Storage backends")
 go run ./cmd/controlplane               # :7070
 go run ./cmd/dashboard                  # :7072
 
@@ -147,5 +188,5 @@ additive and documented in `docs/PROTOCOL.md`.
 
 ## Status
 
-v1 protocol, JSON over HTTP (NDJSON batches, SSE active set). No protobuf or codegen. Interfaces under
+v1 protocol, JSON over HTTP (NDJSON batches, SSE active set); protobuf ingest is optional. Interfaces under
 `internal/` are not stable.

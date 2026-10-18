@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -9,15 +10,12 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector"
-	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 )
 
 func main() {
+	sf := registerStoreFlags()
 	listen := flag.String("listen", svc.Env("TSESSION_COLLECTOR_LISTEN", "127.0.0.1:7071"), "listen address (keep on loopback)")
-	kind := flag.String("store", svc.Env("TSESSION_COLLECTOR_STORE", "mem"), "store backend: mem|pg")
-	dsn := flag.String("pg-dsn", os.Getenv("TSESSION_COLLECTOR_PG_DSN"), "Postgres DSN (store=pg)")
-	schema := flag.String("pg-schema", svc.Env("TSESSION_COLLECTOR_PG_SCHEMA", store.DefaultPGSchema), "Postgres schema for trace tables (store=pg)")
 	window := flag.Duration("window", svc.EnvDur("TSESSION_COLLECTOR_WINDOW", 500*time.Millisecond), "reorder window (0 = immediate)")
 	bundle := flag.String("bundle-dir", svc.Env("TSESSION_COLLECTOR_BUNDLE_DIR", "./bundles"), "directory for sealed bundles (empty disables)")
 	maxLine := flag.Int("max-line-bytes", svc.EnvInt("TSESSION_COLLECTOR_MAX_LINE_BYTES", 4<<20), "max bytes of one NDJSON event line; longer lines are rejected individually")
@@ -31,24 +29,14 @@ func main() {
 	ctx, stop := svc.SignalContext()
 	defer stop()
 
-	var st store.Store
-	switch *kind {
-	case "mem":
-		st = store.NewMem()
-	case "pg":
-		if *dsn == "" {
-			log.Error("store=pg requires --pg-dsn or TSESSION_COLLECTOR_PG_DSN")
+	st, err := sf.open(ctx)
+	if err != nil {
+		log.Error("open store", "store", *sf.kind, "err", err)
+		var ue usageError
+		if errors.As(err, &ue) {
 			os.Exit(2)
 		}
-		pg, err := store.OpenPGConfig(ctx, store.PGConfig{DSN: *dsn, Schema: *schema})
-		if err != nil {
-			log.Error("open postgres", "err", err)
-			os.Exit(1)
-		}
-		st = pg
-	default:
-		log.Error("unknown store", "store", *kind)
-		os.Exit(2)
+		os.Exit(1)
 	}
 	defer st.Close()
 
@@ -69,7 +57,7 @@ func main() {
 	defer col.Close()
 
 	srv := &http.Server{Addr: *listen, Handler: col.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	log.Info("collector listening", "addr", *listen, "store", *kind, "window", *window)
+	log.Info("collector listening", "addr", *listen, "store", *sf.kind, "window", *window)
 	if err := svc.Serve(ctx, srv, 5*time.Second, nil); err != nil {
 		log.Error("serve", "err", err)
 		os.Exit(1)

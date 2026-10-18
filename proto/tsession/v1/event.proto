@@ -1,0 +1,84 @@
+// Wire model for POST /v1/ingest (Content-Type: application/x-protobuf).
+// It mirrors core.Event field for field. A request body is a stream of
+// varint-length-delimited Event messages (see docs/PROTOCOL.md).
+//
+// Field numbers are part of the wire contract: never renumber or reuse one.
+// Regenerate with `make proto`.
+syntax = "proto3";
+
+package tsession.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/maheshpaliwal/agentic-test-session/proto/tsessionpb";
+
+// PayloadRef is core.PayloadRef: an inline, size-capped, redacted JSON payload.
+message PayloadRef {
+  bytes inline = 1; // JSON text, must be valid JSON when present
+  string blob_hash = 2;
+  int64 size = 3;
+  bool truncated = 4;
+  bool redacted = 5;
+}
+
+// FieldChange is core.FieldChange. An absent value is JSON null / omitted.
+message FieldChange {
+  string field = 1;
+  google.protobuf.Value old = 2;
+  google.protobuf.Value new = 3;
+}
+
+message ReadSummary {
+  string store = 1;
+  string entity = 2;
+  string statement = 3;
+  PayloadRef args = 4;
+  int64 row_count = 5;
+  repeated string pks = 6;
+  PayloadRef sample = 7;
+}
+
+message Mutation {
+  string store = 1;
+  string entity = 2;
+  map<string, google.protobuf.Value> pk = 3;
+  string op = 4;
+  PayloadRef before = 5;
+  PayloadRef after = 6;
+  repeated FieldChange diff = 7;
+  string source = 8;
+  // Tri-state: unset = unknown (resolved from the tx outcome), true, false.
+  optional bool effective = 9;
+}
+
+// Event is core.Event. Numbers inside google.protobuf.Value are doubles, which
+// matches what the JSON path yields (float64).
+message Event {
+  string session_id = 1;
+  string trace_id = 2;
+  string span_id = 3;
+  string parent_id = 4;
+  repeated string link_ids = 5;
+  string service = 6;
+  string instance = 7;
+  string kind = 8;
+  string name = 9;
+
+  uint64 hlc = 10;
+  uint64 end_hlc = 11;
+  uint64 local_seq = 12;
+  uint64 seq = 13;
+
+  int64 start_ns = 14;
+  int64 end_ns = 15;
+
+  PayloadRef req = 16;
+  PayloadRef resp = 17;
+  repeated Mutation mutations = 18;
+  repeated ReadSummary reads = 19;
+  string tx_id = 20;
+  int64 attempt = 21;
+  string err = 22;
+  map<string, string> attrs = 23;
+  repeated string flags = 24;
+}

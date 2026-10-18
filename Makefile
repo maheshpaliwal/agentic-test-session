@@ -28,3 +28,8 @@ demo: up
 	@id=$$(curl -fsS -X POST $(CP)/v1/sessions -d '{"name":"make-demo","mode":"header","initiated_by":"api"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
 	echo "session $$id"; curl -fsS $(CP)/v1/active; echo; \
 	curl -fsS -X POST $(CP)/v1/sessions/$$id/stop >/dev/null; echo "stopped; dashboard: http://127.0.0.1:7072"
+
+# Regenerate proto/tsessionpb/event.pb.go (needs protoc and protoc-gen-go v1.36.9 on PATH).
+.PHONY: proto
+proto:
+	cd proto && PATH="$$HOME/go/bin:$$PATH" protoc -I . --go_out=. --go_opt=module=github.com/maheshpaliwal/agentic-test-session/proto tsession/v1/event.proto

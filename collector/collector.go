@@ -23,7 +23,7 @@ type Config struct {
 	Window       time.Duration
 	BundleDir    string // empty disables bundle writing
 	MaxBodyBytes int64  // per ingest request
-	MaxLineBytes int    // per NDJSON line; longer lines are rejected individually
+	MaxLineBytes int    // per NDJSON line / protobuf message; longer ones are rejected individually
 	// IdleEvict is how long a sealed, idle session's actor (goroutine plus
 	// dedupe state) is kept before being evicted; negative disables eviction.
 	IdleEvict time.Duration
