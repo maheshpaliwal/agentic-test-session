@@ -13,4 +13,9 @@ use (
 )
 
 use ./contrib/tredisv8
+
 use ./contrib/tkafkaconfluent
+
+use ./proto
+
+replace github.com/maheshpaliwal/agentic-test-session/proto v0.0.0 => ./proto
