@@ -57,27 +57,27 @@ tsession provides that by combining three ideas:
 | **Wrappers** (`thttp/`, `contrib/*`) | Instrumentation for HTTP, gRPC, SQL, Redis (go-redis v8 and v9), Mongo, DynamoDB, queues (Kafka, SQS, AMQP). |
 
 Full wire contract, endpoints, ordering and hardening rules: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
-Bindings model: [`docs/BINDING.md`](docs/BINDING.md). Module layout: [`docs/MODULES.md`](docs/MODULES.md).
+Bindings model: [`docs/BINDING.md`](docs/BINDING.md).
 
-## Key design decisions
+## Dashboard
 
-- **`Seq` is completion order; structure is `ParentID`/`LinkIDs`.** The collector assigns a gapless `Seq` per
-  session from a short reorder window ordered by `(EndHLC, Service, LocalSeq)`. Nesting and async causality never
-  depend on arrival order.
-- **Async is a first-class citizen.** A `queue.publish` opens a ledger entry closed by the linked `worker.end`
-  or `worker.dlq`. Anything still open at seal is flagged `orphaned` (and `retry_pending` where applicable), and
-  the session seals `incomplete=true` rather than silently looking complete.
-- **Mutations are resolved late.** `db.write` events carry a `TxID`; commit/rollback sets `Effective`. Any
-  negative outcome for a tx is sticky regardless of arrival order.
-- **Redaction happens in the process that holds the secret.** Sensitive keys are masked structurally (JSON,
-  SQL args, Redis command semantics) before export, and sensitive values are never read just to be masked.
-- **Fail-open instrumentation.** Capture, image reads and exporters are bounded (caps, timeouts, budgets) and
-  must not change the behaviour of the host call.
-- **Local-only by default.** Every server binds `127.0.0.1` (all-interfaces addresses are refused) and wraps its
-  API in `core.LoopbackGuard`: Host allow-list, `Origin` rejection, and `Content-Type` enforcement.
-  `/v1/internal/*` additionally requires a loopback or allow-listed peer.
-- **Small dependency surface.** The root module is stdlib-only; each `contrib/*` module and the collector pull
-  only the libraries they need, so adopting one wrapper does not drag in the others.
+Screenshots from `go run ./cmd/dashboard -demo` (synthetic data).
+
+**Sessions**: live and sealed sessions, bindings, incomplete/dropped flags.
+
+![Sessions list](docs/images/sessions.png)
+
+**Timeline**: events grouped by trigger, with errors, rollbacks and per-trigger mutation summaries.
+
+![Timeline grouped by trigger](docs/images/timeline.png)
+
+**Call tree**: api → db/cache/queue → worker, with async work linked back to its publisher.
+
+![Call tree](docs/images/call-tree.png)
+
+**Entities**: per-row mutation history with before/after diffs and commit/rollback outcome.
+
+![Entity mutation history](docs/images/entities.png)
 
 ## Repository layout
 
@@ -144,21 +144,6 @@ make test      # unit + integration
 
 Conventions: a change stays inside one module's `go.mod`; wrappers must be fail-open; new wire fields are
 additive and documented in `docs/PROTOCOL.md`.
-
-## Known limitations and trade-offs
-
-- **Bindings attribute, they do not authenticate.** JWT claims are base64-decoded without signature
-  verification. A caller can spoof a binding value and land in another tester's session. Acceptable for a test
-  environment, never a security boundary.
-- **Not for production traffic or real customer data.** Redaction is key- and pattern-based and therefore
-  best-effort. Treat captured payloads as sensitive and keep the stack on trusted networks.
-- **Ordering is an approximation at the edges.** Events arriving after their reorder window closed get the next
-  `Seq`; use `ParentID`/`LinkIDs` for structure.
-- **No tagged releases yet.** Intra-repo requires are `v0.0.0` and resolve through `go.work`, so the modules are
-  not yet `go get`-able. Tagging plan and the `go mod tidy` workaround are in [`docs/MODULES.md`](docs/MODULES.md).
-- **Blob storage is a stub** in v1: large payloads are truncated inline.
-- **Single collector writer per session** is assumed; the Postgres store recovers from a second writer via
-  `ErrSeqConflict` catch-up but this is not a multi-writer design.
 
 ## Status
 

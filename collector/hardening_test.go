@@ -585,9 +585,8 @@ func TestSealedIdleActorEvicted(t *testing.T) {
 		t.Fatal("expected live actors right after sealing")
 	}
 	waitFor(t, "eviction", func() bool { return c.seq.actorCount() == 0 })
-	if g := runtime.NumGoroutine(); g > before+2 {
-		t.Fatalf("goroutines %d -> %d after eviction", before, g)
-	}
+	// actorCount() hits 0 before the evicted actors' goroutines have exited.
+	waitFor(t, "actor goroutines to exit", func() bool { return runtime.NumGoroutine() <= before+2 })
 	// state reloads on demand: dedupe and gapless Seq survive eviction
 	e := ev("a", core.KindAPIIn, 1, 1)
 	e.SessionID = "s7"
