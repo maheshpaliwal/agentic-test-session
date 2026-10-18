@@ -1,8 +1,6 @@
 package runtime
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,14 +16,7 @@ func TestExporterBisectsOn413(t *testing.T) {
 	var mu sync.Mutex
 	var got []core.Event
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sc := bufio.NewScanner(r.Body)
-		sc.Buffer(make([]byte, 1<<20), 8<<20)
-		var evs []core.Event
-		for sc.Scan() {
-			var e core.Event
-			_ = json.Unmarshal(sc.Bytes(), &e)
-			evs = append(evs, e)
-		}
+		evs := readFrames(r.Body)
 		for _, e := range evs {
 			if e.Attrs["big"] == "1" { // simulate size limit on the whole request
 				http.Error(w, "too big", http.StatusRequestEntityTooLarge)
@@ -71,11 +62,7 @@ func TestExporterCountsRejected(t *testing.T) {
 	var mu sync.Mutex
 	var drops []core.Event
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sc := bufio.NewScanner(r.Body)
-		sc.Buffer(make([]byte, 1<<20), 8<<20)
-		for sc.Scan() {
-			var e core.Event
-			_ = json.Unmarshal(sc.Bytes(), &e)
+		for _, e := range readFrames(r.Body) {
 			if e.Kind == core.KindSDKDropped {
 				mu.Lock()
 				drops = append(drops, e)

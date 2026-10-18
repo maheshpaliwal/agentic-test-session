@@ -18,7 +18,8 @@ func main() {
 	listen := flag.String("listen", svc.Env("TSESSION_COLLECTOR_LISTEN", "127.0.0.1:7071"), "listen address (keep on loopback)")
 	window := flag.Duration("window", svc.EnvDur("TSESSION_COLLECTOR_WINDOW", 500*time.Millisecond), "reorder window (0 = immediate)")
 	bundle := flag.String("bundle-dir", svc.Env("TSESSION_COLLECTOR_BUNDLE_DIR", "./bundles"), "directory for sealed bundles (empty disables)")
-	maxLine := flag.Int("max-line-bytes", svc.EnvInt("TSESSION_COLLECTOR_MAX_LINE_BYTES", 4<<20), "max bytes of one NDJSON event line; longer lines are rejected individually")
+	maxMsg := flag.Int("max-message-bytes", svc.EnvInt("TSESSION_COLLECTOR_MAX_MESSAGE_BYTES", 4<<20), "max encoded bytes of one protobuf Event message; longer ones are rejected individually")
+	maxLine := flag.Int("max-line-bytes", 0, "deprecated alias of --max-message-bytes")
 	idle := flag.Duration("idle-evict", svc.EnvDur("TSESSION_COLLECTOR_IDLE_EVICT", 5*time.Minute), "evict a sealed session's in-memory actor after this idle time (negative disables)")
 	hosts := flag.String("allowed-hosts", os.Getenv("TSESSION_COLLECTOR_ALLOWED_HOSTS"), "comma-separated extra Host values accepted besides loopback (e.g. docker service names)")
 	origins := flag.String("allowed-origins", os.Getenv("TSESSION_COLLECTOR_ALLOWED_ORIGINS"), "comma-separated browser origins allowed to call the API")
@@ -26,6 +27,20 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	// Deprecated names still apply (the flag wins over the new env var, the old
+	// env var only when the new one is unset) so old configs are not ignored.
+	set := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	switch _, oldEnv := os.LookupEnv("TSESSION_COLLECTOR_MAX_LINE_BYTES"); {
+	case set["max-line-bytes"]:
+		log.Warn("--max-line-bytes is deprecated; use --max-message-bytes")
+		if !set["max-message-bytes"] {
+			*maxMsg = *maxLine
+		}
+	case oldEnv && !set["max-message-bytes"] && os.Getenv("TSESSION_COLLECTOR_MAX_MESSAGE_BYTES") == "":
+		log.Warn("TSESSION_COLLECTOR_MAX_LINE_BYTES is deprecated; use TSESSION_COLLECTOR_MAX_MESSAGE_BYTES")
+		*maxMsg = svc.EnvInt("TSESSION_COLLECTOR_MAX_LINE_BYTES", *maxMsg)
+	}
 	ctx, stop := svc.SignalContext()
 	defer stop()
 
@@ -42,7 +57,7 @@ func main() {
 
 	cfg := collector.DefaultConfig()
 	cfg.Window, cfg.BundleDir, cfg.Logger = *window, *bundle, log
-	cfg.MaxLineBytes, cfg.IdleEvict = *maxLine, *idle
+	cfg.MaxMessageBytes, cfg.IdleEvict = *maxMsg, *idle
 	cfg.AllowedHosts, cfg.AllowedOrigins, cfg.InternalAllow = svc.SplitCSV(*hosts), svc.SplitCSV(*origins), svc.SplitCSV(*internal)
 	for _, c := range cfg.InternalAllow {
 		if _, err := collector.ParseCIDR(c); err != nil {

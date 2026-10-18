@@ -17,8 +17,8 @@ type Config struct {
 	CollectorURL    string // default http://127.0.0.1:7071
 	BufferSize      int    // ring capacity (default 8192)
 	Exporter        ExporterConfig
-	// Encoder selects the ingest wire format (default NDJSON); it overrides
-	// Exporter.Encoder when set. See BatchEncoder for the protobuf opt-in.
+	// Encoder overrides the ingest wire format (default ProtobufEncoder, the
+	// only format the collector accepts); it overrides Exporter.Encoder when set.
 	Encoder BatchEncoder
 	// PatchDefaultTransport wraps http.DefaultTransport with Transport
 	// (idempotent; restored by Stop).

@@ -10,6 +10,7 @@ require (
 	github.com/maheshpaliwal/agentic-test-session/contrib/tqueue v0.0.0
 	github.com/maheshpaliwal/agentic-test-session/contrib/tredis v0.0.0
 	github.com/maheshpaliwal/agentic-test-session/contrib/tsql v0.0.0
+	github.com/maheshpaliwal/agentic-test-session/proto v0.0.0
 )
 
 replace (
@@ -18,4 +19,5 @@ replace (
 	github.com/maheshpaliwal/agentic-test-session/contrib/tqueue => ../contrib/tqueue
 	github.com/maheshpaliwal/agentic-test-session/contrib/tredis => ../contrib/tredis
 	github.com/maheshpaliwal/agentic-test-session/contrib/tsql => ../contrib/tsql
+	github.com/maheshpaliwal/agentic-test-session/proto => ../proto
 )

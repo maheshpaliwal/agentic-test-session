@@ -21,7 +21,7 @@ type ExporterConfig struct {
 	RetryBackoff  time.Duration // first backoff, doubles (default 100ms)
 	MaxCooldown   time.Duration // pause after a failed batch, capped (default 5s)
 	HTTPTimeout   time.Duration // per request (default 2s)
-	Encoder       BatchEncoder  // wire format (default NDJSON)
+	Encoder       BatchEncoder  // wire format (default ProtobufEncoder)
 }
 
 // Exporter drains a Recorder and ships batches to the collector from a single
@@ -63,7 +63,7 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		cfg.HTTPTimeout = 2 * time.Second
 	}
 	if cfg.Encoder == nil {
-		cfg.Encoder = NDJSONEncoder{}
+		cfg.Encoder = ProtobufEncoder{}
 	}
 	cfg.CollectorURL = strings.TrimRight(cfg.CollectorURL, "/")
 	e := &Exporter{

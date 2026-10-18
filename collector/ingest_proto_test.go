@@ -42,11 +42,6 @@ func protoBody(t *testing.T, evs ...core.Event) []byte {
 	return b
 }
 
-func ndjsonBody(evs ...core.Event) []byte {
-	b, _ := runtime.NDJSONEncoder{}.Encode(evs)
-	return b
-}
-
 func TestProtoIngestAcceptedAndStored(t *testing.T) {
 	_, srv := newC(t, 0, "")
 	in := ev("a", core.KindDBWrite, 1, 1)
@@ -67,29 +62,25 @@ func TestProtoIngestAcceptedAndStored(t *testing.T) {
 	}
 }
 
-func TestProtoIdempotentAcrossFormats(t *testing.T) {
+func TestProtoIdempotent(t *testing.T) {
 	_, srv := newC(t, 0, "")
-	e := ev("a", core.KindAPIIn, 1, 1)
-	for _, order := range [][2]string{{"application/x-ndjson", ctProto}, {ctProto, "application/x-ndjson"}} {
-		e.SessionID = sid + "_" + order[0][len(order[0])-4:]
-		bodies := map[string][]byte{"application/x-ndjson": ndjsonBody(e), ctProto: protoBody(t, e)}
-		_, r1 := rawPost(t, srv.URL, order[0], bodies[order[0]])
-		_, r2 := rawPost(t, srv.URL, order[1], bodies[order[1]])
-		if r1.Accepted != 1 || r2.Accepted != 0 || r2.Duplicates != 1 {
-			t.Fatalf("%v: first=%+v second=%+v", order, r1, r2)
-		}
+	body := protoBody(t, ev("a", core.KindAPIIn, 1, 1))
+	_, r1 := rawPost(t, srv.URL, ctProto, body)
+	_, r2 := rawPost(t, srv.URL, ctProto, body)
+	if r1.Accepted != 1 || r2.Accepted != 0 || r2.Duplicates != 1 {
+		t.Fatalf("first=%+v second=%+v", r1, r2)
 	}
 }
 
 func TestProtoOversizeMessageRejectedAlone(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Window = 0
-	cfg.MaxLineBytes = 2000
+	cfg.MaxMessageBytes = 2000
 	_, srv := newC2(t, cfg)
 	big := ev("big", core.KindAPIIn, 2, 2)
 	big.Name = strings.Repeat("x", 5000)
 	code, r := rawPost(t, srv.URL, ctProto, protoBody(t, ev("a", core.KindAPIIn, 1, 1), big, ev("c", core.KindAPIIn, 3, 3)))
-	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_line"] != 1 {
+	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_message"] != 1 {
 		t.Fatalf("%d %+v", code, r)
 	}
 }
@@ -154,25 +145,46 @@ func TestProtoBodyLimit413(t *testing.T) {
 	}
 }
 
-func TestProtoWrongContentTypeKeepsExistingBehaviour(t *testing.T) {
+// NDJSON ingest was removed: anything but application/x-protobuf is a 415
+// with the JSON error shape naming the required type.
+func TestIngestRequiresProtobufContentType(t *testing.T) {
 	_, srv := newC(t, 0, "")
-	for _, ct := range []string{"text/plain", "application/x-protobuf-evil", "multipart/form-data"} {
-		if code, _ := rawPost(t, srv.URL, ct, protoBody(t, ev("a", core.KindAPIIn, 1, 1))); code != http.StatusUnsupportedMediaType {
-			t.Errorf("%s: status %d", ct, code)
+	good := protoBody(t, ev("a", core.KindAPIIn, 1, 1))
+	nd, _ := json.Marshal(ev("a", core.KindAPIIn, 1, 1))
+	nd = append(nd, '\n')
+	for _, tc := range []struct {
+		ct   string
+		body []byte
+	}{
+		{"application/x-ndjson", nd},
+		{"application/json", nd},
+		{"text/plain", good},
+		{"application/x-protobuf-evil", good},
+		{"multipart/form-data", good},
+		{"", nd}, // no Content-Type
+		{"application/x-ndjson", nil},
+		{"", nil},
+	} {
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/ingest", bytes.NewReader(tc.body))
+		if tc.ct != "" {
+			req.Header.Set("Content-Type", tc.ct)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnsupportedMediaType || !strings.Contains(e.Error, ctProto) {
+			t.Errorf("ct %q body %d bytes: status %d error %q", tc.ct, len(tc.body), resp.StatusCode, e.Error)
 		}
 	}
-	// protobuf bytes sent as NDJSON are just invalid JSON lines
-	code, r := rawPost(t, srv.URL, "application/x-ndjson", protoBody(t, ev("a", core.KindAPIIn, 1, 1)))
-	if code != 200 || r.Accepted != 0 || r.RejectedReasons["invalid_json"] == 0 {
+	// parameters on the right type are fine
+	if code, r := rawPost(t, srv.URL, ctProto+"; charset=binary", good); code != 200 || r.Accepted != 1 {
 		t.Fatalf("%d %+v", code, r)
-	}
-	// NDJSON still works with and without parameters
-	for i, ct := range []string{"application/x-ndjson", "application/json; charset=utf-8"} {
-		e := ev("n", core.KindAPIIn, 1, 1)
-		e.SessionID = "ts_ct" + string(rune('1'+i))
-		if code, r := rawPost(t, srv.URL, ct, ndjsonBody(e)); code != 200 || r.Accepted != 1 {
-			t.Fatalf("%s: %d %+v", ct, code, r)
-		}
 	}
 }
 

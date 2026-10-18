@@ -1,8 +1,6 @@
 package collector
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,9 +40,14 @@ func (c *Collector) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 	guarded := core.LoopbackGuard(h, core.GuardConfig{
-		AllowedHosts:     c.cfg.AllowedHosts,
-		AllowedOrigins:   c.cfg.AllowedOrigins,
-		BodyContentTypes: []string{"application/x-ndjson", "application/json", tsessionproto.ContentType},
+		AllowedHosts:   c.cfg.AllowedHosts,
+		AllowedOrigins: c.cfg.AllowedOrigins,
+		// Ingest is the only collector POST with a body (seal sends none), so
+		// protobuf is the only allowed type; the 415 keeps the JSON error shape.
+		BodyContentTypes: []string{tsessionproto.ContentType},
+		OnBadContentType: func(w http.ResponseWriter, _ *http.Request) {
+			writeErr(w, http.StatusUnsupportedMediaType, errBadContentType)
+		},
 	})
 	// /healthz is exempt from the Host guard (GET only; reveals nothing) so
 	// container probes using service names work.
@@ -88,75 +91,9 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
 
-// readLine reads one NDJSON line of at most max bytes. An over-long line is
-// consumed to its end and reported with over=true (its bytes are discarded),
-// so one huge event never costs the rest of the batch.
-func readLine(br *bufio.Reader, max int) (line []byte, over bool, err error) {
-	var acc []byte
-	for {
-		chunk, e := br.ReadSlice('\n')
-		if !over {
-			if len(acc)+len(chunk) > max+1 { // +1 for the newline
-				over, acc = true, nil
-			} else if e == nil && acc == nil {
-				return chunk, false, nil // common case: whole line, no copy
-			} else {
-				acc = append(acc, chunk...)
-			}
-		}
-		if e == bufio.ErrBufferFull {
-			continue
-		}
-		return acc, over, e
-	}
-}
-
-// ingestDecoder reads one request body into events. Items it cannot use are
-// recorded in res (reason -> count) without failing the request; a non-nil
-// error is a read failure (including *http.MaxBytesError) and aborts it.
-// Events decoded before an error are returned alongside it.
-type ingestDecoder func(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error)
-
-// ingestDecoders maps request media types to their decoder. A missing or
-// unrecognised Content-Type is read as NDJSON (the original behaviour); the
-// LoopbackGuard has already vetted the type for non-GET requests.
-var ingestDecoders = map[string]ingestDecoder{
-	"application/x-protobuf": decodeProtoBatch,
-}
-
-func pickDecoder(contentType string) ingestDecoder {
-	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
-		if d, ok := ingestDecoders[mt]; ok {
-			return d
-		}
-	}
-	return decodeNDJSONBatch
-}
-
-// decodeNDJSONBatch reads one JSON event per line.
-func decodeNDJSONBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error) {
-	br := bufio.NewReaderSize(body, 64<<10)
-	var evs []core.Event
-	for {
-		raw, over, err := readLine(br, maxItem)
-		if err != nil && err != io.EOF {
-			return evs, err
-		}
-		if over {
-			res.reject("oversize_line", 1)
-		} else if line := bytes.TrimSpace(raw); len(line) > 0 {
-			var e core.Event
-			if jerr := json.Unmarshal(store.StripNUL(line), &e); jerr != nil {
-				res.reject("invalid_json", 1)
-			} else {
-				evs = append(evs, e)
-			}
-		}
-		if err == io.EOF {
-			return evs, nil
-		}
-	}
-}
+// errBadContentType is the 415 message for ingest bodies that are not framed
+// protobuf (NDJSON ingest was removed).
+var errBadContentType = errors.New("unsupported Content-Type: POST /v1/ingest requires " + tsessionproto.ContentType)
 
 // decodeProtoBatch reads a stream of length-delimited Event messages. A bad
 // message is rejected alone; broken framing ends the stream with one
@@ -172,7 +109,7 @@ func decodeProtoBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Ev
 		case err == io.EOF:
 			return evs, nil
 		case errors.Is(err, tsessionproto.ErrOversize):
-			res.reject("oversize_line", 1)
+			res.reject("oversize_message", 1)
 		case errors.Is(err, tsessionproto.ErrInvalid):
 			res.reject("invalid_proto", 1)
 		case errors.Is(err, tsessionproto.ErrCorrupt):
@@ -185,9 +122,14 @@ func decodeProtoBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Ev
 }
 
 func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
+	// The guard only vets bodies; an empty request must be refused too.
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != tsessionproto.ContentType {
+		writeErr(w, http.StatusUnsupportedMediaType, errBadContentType)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, c.cfg.MaxBodyBytes)
 	var res IngestResult
-	evs, err := pickDecoder(r.Header.Get("Content-Type"))(r.Body, c.cfg.MaxLineBytes, &res)
+	evs, err := decodeProtoBatch(r.Body, c.cfg.MaxMessageBytes, &res)
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {

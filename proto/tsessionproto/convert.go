@@ -1,9 +1,8 @@
 // Package tsessionproto is the protobuf wire codec for tsession events:
 // conversion between core.Event and tsessionpb.Event, varint-length-delimited
-// framing, a streaming Decoder with a per-message size cap, and a
-// runtime.BatchEncoder so SDKs can opt into protobuf ingest:
-//
-//	runtime.Start(runtime.Config{Service: "orders", Encoder: tsessionproto.Encoder{}})
+// framing, a streaming Decoder with a per-message size cap, and a reference
+// runtime.BatchEncoder. The SDK itself uses the stdlib-only
+// runtime.ProtobufEncoder, which sdkwire_test.go checks against this package.
 //
 // It lives in its own module so the root module stays stdlib-only.
 package tsessionproto
@@ -178,7 +177,7 @@ func toPayload(p *pb.PayloadRef) (core.PayloadRef, error) {
 	}
 	out := core.PayloadRef{BlobHash: nonul(p.BlobHash), Size: int(p.Size), Truncated: p.Truncated, Redacted: p.Redacted}
 	if len(p.Inline) > 0 {
-		// The NDJSON path validates inline payloads while decoding the line;
+		// Inline payloads are validated like the JSON decoder would;
 		// do the same so the store never sees malformed RawMessage.
 		if !json.Valid(p.Inline) {
 			return core.PayloadRef{}, fmt.Errorf("inline payload is not valid JSON")
@@ -241,8 +240,8 @@ func toValue(v any) *structpb.Value {
 		}
 		return structpb.NewStructValue(&structpb.Struct{Fields: f})
 	}
-	// Any other type: normalise through JSON, exactly what the NDJSON path
-	// would have put on the wire. Unmarshalable values become null.
+	// Any other type: normalise through JSON, exactly what a JSON round
+	// trip would yield. Unmarshalable values become null.
 	b, err := json.Marshal(v)
 	if err != nil {
 		return structpb.NewNullValue()

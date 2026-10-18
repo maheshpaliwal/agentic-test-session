@@ -35,7 +35,7 @@ tsession provides that by combining three ideas:
                        └──────┬───────┘                      └───────┬───────┘
                               │ read API                  active-set │ drain-status / seal
                               ▼                            (SSE)     ▼
- ┌─────────────────────┐  NDJSON  ┌────────────────────────────────────────┐
+ ┌─────────────────────┐ protobuf ┌────────────────────────────────────────┐
  │ service A + SDK     │─────────▶│ collector :7071                        │
  │  thttp / tgrpc /    │ /v1/ingest│  idempotent ingest, reorder window,    │
  │  tsql / tredis /    │          │  gapless Seq, trace tree, entity views │
@@ -103,20 +103,12 @@ treat it as unproven until you run its live tests (`TSESSION_TEST_DYNAMO_ENDPOIN
 
 ## Protobuf ingest
 
-`POST /v1/ingest` accepts NDJSON (default) or protobuf (`Content-Type: application/x-protobuf`, schema in
-`proto/tsession/v1/event.proto`). Protobuf is opt-in on the SDK side so the root module stays dependency-free:
-
-```go
-import (
-    "github.com/maheshpaliwal/agentic-test-session/proto/tsessionproto"
-    "github.com/maheshpaliwal/agentic-test-session/sdk/runtime"
-)
-
-cfg := runtime.Config{Encoder: tsessionproto.Encoder{}}
-```
-
-Batches are about 44% of the NDJSON size in a synthetic benchmark. Wire details are in
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+`POST /v1/ingest` accepts only protobuf (`Content-Type: application/x-protobuf`, schema in
+`proto/tsession/v1/event.proto`); any other type gets `415`. NDJSON ingest was removed. Protobuf is the SDK default:
+the SDK ships a hand-written encoder, conformance-tested against the generated code, so the root module stays
+stdlib-only. `tsessionproto.Encoder{}` (in the `proto` module) produces the same bytes and is handy for tests and
+tools. Because of this, `curl` with a JSON body no longer works against the collector; see "curl is not enough any
+more" in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for a snippet that builds a test batch.
 
 ## Repository layout
 
@@ -188,5 +180,5 @@ additive and documented in `docs/PROTOCOL.md`.
 
 ## Status
 
-v1 protocol, JSON over HTTP (NDJSON batches, SSE active set); protobuf ingest is optional. Interfaces under
+v1 protocol, JSON over HTTP (SSE active set), protobuf-only ingest (NDJSON ingest was removed). Interfaces under
 `internal/` are not stable.

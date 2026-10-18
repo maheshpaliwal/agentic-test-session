@@ -1,9 +1,7 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -46,14 +44,7 @@ func (f *fakeCollector) handler(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	f.posts++
 	f.inst = r.Header.Get("X-TSession-Instance")
-	sc := bufio.NewScanner(r.Body)
-	sc.Buffer(make([]byte, 1<<20), 8<<20)
-	for sc.Scan() {
-		var e core.Event
-		if json.Unmarshal(sc.Bytes(), &e) == nil {
-			f.events = append(f.events, e)
-		}
-	}
+	f.events = append(f.events, readFrames(r.Body)...)
 	fmt.Fprint(w, `{"accepted":1,"duplicates":0}`)
 }
 

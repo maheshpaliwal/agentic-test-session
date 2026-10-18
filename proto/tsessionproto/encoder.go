@@ -2,8 +2,11 @@ package tsessionproto
 
 import "github.com/maheshpaliwal/agentic-test-session/core"
 
-// Encoder is a runtime.BatchEncoder that posts framed protobuf instead of
-// NDJSON. The collector selects the decoder from the Content-Type.
+// Encoder is a runtime.BatchEncoder backed by the generated protobuf code. It
+// is the reference implementation: the SDK default (runtime.ProtobufEncoder,
+// hand-written so the root module stays stdlib-only) is conformance-tested
+// against it, and non-SDK producers that already depend on protobuf can use it
+// directly.
 type Encoder struct{}
 
 func (Encoder) ContentType() string { return ContentType }

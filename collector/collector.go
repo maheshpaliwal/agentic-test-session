@@ -20,10 +20,10 @@ import (
 
 // Config tunes a Collector. Window 0 means "sequence immediately".
 type Config struct {
-	Window       time.Duration
-	BundleDir    string // empty disables bundle writing
-	MaxBodyBytes int64  // per ingest request
-	MaxLineBytes int    // per NDJSON line / protobuf message; longer ones are rejected individually
+	Window          time.Duration
+	BundleDir       string // empty disables bundle writing
+	MaxBodyBytes    int64  // per ingest request
+	MaxMessageBytes int    // per protobuf message; longer ones are rejected individually
 	// IdleEvict is how long a sealed, idle session's actor (goroutine plus
 	// dedupe state) is kept before being evicted; negative disables eviction.
 	IdleEvict time.Duration
@@ -48,7 +48,7 @@ type Config struct {
 // before its parent's batch (the parent ends later and so is exported
 // later). Anything shorter regularly inverts parent/child Seq order.
 func DefaultConfig() Config {
-	return Config{Window: 500 * time.Millisecond, MaxBodyBytes: 32 << 20, MaxLineBytes: 4 << 20,
+	return Config{Window: 500 * time.Millisecond, MaxBodyBytes: 32 << 20, MaxMessageBytes: 4 << 20,
 		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000}
 }
 
@@ -71,8 +71,8 @@ func New(st store.Store, cfg Config) *Collector {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = d.MaxBodyBytes
 	}
-	if cfg.MaxLineBytes <= 0 {
-		cfg.MaxLineBytes = d.MaxLineBytes
+	if cfg.MaxMessageBytes <= 0 {
+		cfg.MaxMessageBytes = d.MaxMessageBytes
 	}
 	if cfg.IdleEvict == 0 {
 		cfg.IdleEvict = d.IdleEvict
