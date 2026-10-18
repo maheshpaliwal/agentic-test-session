@@ -3,7 +3,6 @@ package tsql
 import (
 	"context"
 	"database/sql/driver"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,10 +52,27 @@ type stmtTrace struct {
 	write bool
 	skip  bool
 
+	sqlText string // query with sensitive literals masked; the only SQL text ever recorded
+	mask    []bool // args that must be masked
+	flagged map[string]bool
+
 	retAll   bool // result rows are full-row RETURNING * images
-	before   []map[string]any
+	before   []img
 	beforeOK bool
 }
+
+// flag adds a span flag once.
+func (t *stmtTrace) flag(f string) {
+	if t.flagged == nil {
+		t.flagged = map[string]bool{}
+	}
+	if !t.flagged[f] {
+		t.flagged[f] = true
+		t.span.AddFlag(f)
+	}
+}
+
+func (t *stmtTrace) pg() bool { return t.store == "postgres" || (t.store == "sql" && t.info.Dollar) }
 
 // startTrace returns nil when nothing should be recorded (SDK off, no active
 // session in ctx) so callers fall straight through to the driver.
@@ -78,11 +94,12 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 	if info.Kind.IsWrite() {
 		kind = core.KindDBWrite
 	}
-	_, sp := core.Begin(ctx, kind, capSQL(query, 2000))
+	sqlText := redactSQL(query, info)
+	_, sp := core.Begin(ctx, kind, capSQL(sqlText, 2000))
 	if sp == nil {
 		return nil
 	}
-	t = &stmtTrace{c: c, cfg: c.cfg, span: sp, ctx: ctx, info: info, query: query, args: args, write: info.Kind.IsWrite()}
+	t = &stmtTrace{c: c, cfg: c.cfg, span: sp, ctx: ctx, info: info, query: query, sqlText: sqlText, args: args, write: info.Kind.IsWrite()}
 	t.store = c.cfg.store
 	if t.store == "" {
 		switch {
@@ -95,12 +112,22 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 		}
 	}
 	t.skip = c.cfg.skipped(info.Schema, info.Table)
+	for _, tb := range info.Tables {
+		if c.cfg.skipped("", tb) {
+			t.skip = true
+		}
+	}
 	t.retAll = info.ReturningAll
-	req := map[string]any{"sql": capSQL(query, 8000)}
+	req := map[string]any{"sql": capSQL(sqlText, 8000)}
 	if t.skip {
-		sp.AddFlag("table_skipped")
+		t.flag("table_skipped")
 	} else {
-		req["args"] = argValues(args, c.cfg)
+		var cons bool
+		t.mask, cons = argMask(info, args)
+		if cons {
+			t.flag("args_redacted_conservatively")
+		}
+		req["args"] = argValues(args, c.cfg, t.mask)
 	}
 	sp.SetReq(req)
 	sp.SetTx(c.currentTx())
@@ -114,10 +141,17 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValue, run func() (driver.Result, error)) (driver.Result, error) {
 	t := c.startTrace(ctx, query, args)
 	if t == nil {
-		return run()
+		res, err := run()
+		if err == nil {
+			c.trackTxControl(query)
+		}
+		return res, err
 	}
 	safe(t.preImage)
 	res, err := run()
+	if err == nil {
+		c.trackTxControl(query)
+	}
 	safe(func() { t.finishExec(res, err) })
 	t.span.End()
 	return res, err
@@ -129,6 +163,9 @@ func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedVal
 	t := c.startTrace(ctx, query, args)
 	if t == nil {
 		r, rel, err := run(query)
+		if err == nil {
+			c.trackTxControl(query)
+		}
 		return wrapPlain(r, rel), err
 	}
 	safe(t.preImage)
@@ -142,7 +179,8 @@ func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedVal
 		t.span.End()
 		return nil, err
 	}
-	rw := &rows{inner: r, release: rel, onClose: t.finishRows}
+	c.trackTxControl(query)
+	rw := &rows{inner: r, release: rel, onClose: t.finishRows, pkCols: t.cfg.pk(t.info.Schema, t.info.Table)}
 	switch {
 	case t.write:
 		rw.cap = t.cfg.maxRows
@@ -183,64 +221,46 @@ func (t *stmtTrace) preImage() {
 	}
 	q, idx, reason := in.ImageSelect(t.cfg.maxRows + 1)
 	if reason != "" {
-		t.span.AddFlag("image_skipped")
+		t.flag("image_skipped")
 		t.span.SetAttr("image_skip_reason", reason)
 		return
 	}
 	vals := make([]driver.Value, len(idx))
 	for i, ai := range idx {
 		if ai < 0 || ai >= len(t.args) {
-			t.span.AddFlag("image_skipped")
+			t.flag("image_skipped")
 			t.span.SetAttr("image_skip_reason", "arg_mismatch")
 			return
 		}
 		vals[i] = t.args[ai].Value
 	}
-	rs, err := t.c.fetch(t.ctx, q, vals, t.cfg.maxRows+1)
-	if err != nil {
-		t.span.AddFlag("image_failed")
+	rs, ok := t.capture(q, vals, t.cfg.maxRows+1, "image_failed")
+	if !ok {
 		return
 	}
 	if len(rs) > t.cfg.maxRows {
 		rs = rs[:t.cfg.maxRows]
-		t.span.AddFlag("image_truncated")
+		t.flag("image_truncated")
 	}
 	t.before, t.beforeOK = rs, true
 }
 
-// fetch runs a capture query on the same connection as the application's
-// statement and returns up to limit rows.
-func (c *conn) fetch(ctx context.Context, q string, vals []driver.Value, limit int) (out []map[string]any, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("tsql: capture panic: %v", r)
-		}
-	}()
-	ctx, cancel := context.WithTimeout(ctx, c.cfg.captureTO)
-	defer cancel()
-	nv := make([]driver.NamedValue, len(vals))
-	for i, v := range vals {
-		nv[i] = driver.NamedValue{Ordinal: i + 1, Value: v}
+// capture runs a capture query and translates its outcome into span flags.
+func (t *stmtTrace) capture(q string, vals []driver.Value, limit int, failFlag string) ([]img, bool) {
+	rs, st := t.c.capture(t.ctx, t.pg(), q, vals, limit, t.cfg.pk(t.info.Schema, t.info.Table))
+	switch st {
+	case capOK:
+		return rs, true
+	case capSerializable:
+		t.flag("image_skipped")
+		t.flag("image_skipped:serializable")
+		t.span.SetAttr("image_skip_reason", "serializable")
+	case capTimeout:
+		t.flag("image_timeout")
+	default:
+		t.flag(failFlag)
 	}
-	r, rel, err := c.queryInner(ctx, q, nv)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		r.Close()
-		if rel != nil {
-			rel()
-		}
-	}()
-	cols := r.Columns()
-	dest := make([]driver.Value, len(cols))
-	for len(out) < limit {
-		if err := r.Next(dest); err != nil {
-			break
-		}
-		out = append(out, rowMap(cols, dest))
-	}
-	return out, nil
+	return nil, false
 }
 
 func (t *stmtTrace) finishExec(res driver.Result, err error) {
@@ -276,17 +296,17 @@ func (t *stmtTrace) finishRows(r *rows) {
 		if t.info.HasReturning && !t.info.ReturningAll && !t.skip {
 			t.span.AddFlag("returning_partial")
 		}
-		t.addMutations(nil, r.data, affected)
+		t.addMutations(nil, imgsOf(r.data, r.raws), affected)
 		return
 	}
 	rs := core.ReadSummary{
 		Store:     t.store,
 		Entity:    t.info.Table,
-		Statement: capSQL(t.query, 512),
+		Statement: capSQL(t.sqlText, 512),
 		RowCount:  r.count,
 	}
 	if !t.skip {
-		rs.Args = core.Payload(argValues(t.args, t.cfg))
+		rs.Args = core.Payload(argValues(t.args, t.cfg, t.mask))
 		pkCols := t.cfg.pk(t.info.Schema, t.info.Table)
 		for _, row := range r.data {
 			if pk := pkOf(row, pkCols); pk != nil && len(rs.PKs) < 20 {
@@ -294,54 +314,72 @@ func (t *stmtTrace) finishRows(r *rows) {
 			}
 		}
 		if len(r.data) > 0 {
-			rs.Sample = core.Payload(r.data)
+			rs.Sample = core.Payload(redactRows(r.data))
 		}
 	}
 	t.span.AddRead(rs)
 }
 
-func (t *stmtTrace) resolve(v mutation.Value) (any, bool) {
+// resolve evaluates an operand to its display form and the faithful driver
+// value (used for binding, never the lossy display form).
+func (t *stmtTrace) resolve(v mutation.Value) (disp any, raw driver.Value, ok bool) {
 	if v.Arg >= 0 {
 		if v.Arg >= len(t.args) {
-			return nil, false
+			return nil, nil, false
 		}
-		return toValue(t.args[v.Arg].Value, maxCellLen), true
+		raw = t.args[v.Arg].Value
+		return toValue(raw, maxCellLen), raw, true
 	}
-	return v.Literal, true
+	return v.Literal, v.Literal, true
 }
 
 // pkFromValues extracts a full PK from "col -> operand" maps (WHERE equalities
-// or INSERT values).
-func (t *stmtTrace) pkFromValues(m map[string]mutation.Value, pkCols []string) map[string]any {
+// or INSERT values). The zero pkRef means "not fully known".
+func (t *stmtTrace) pkFromValues(m map[string]mutation.Value, pkCols []string) pkRef {
 	if len(m) == 0 || len(pkCols) == 0 {
-		return nil
+		return pkRef{}
 	}
-	pk := make(map[string]any, len(pkCols))
+	ref := pkRef{disp: make(map[string]any, len(pkCols)), raw: make(map[string]driver.Value, len(pkCols))}
 	for _, c := range pkCols {
 		v, ok := m[c]
 		if !ok {
-			return nil
+			return pkRef{}
 		}
-		val, ok := t.resolve(v)
+		d, r, ok := t.resolve(v)
 		if !ok {
-			return nil
+			return pkRef{}
 		}
-		pk[c] = val
+		ref.disp[c], ref.raw[c] = d, r
 	}
-	return pk
+	return ref
 }
 
 func (t *stmtTrace) newMutation(op string) core.Mutation {
 	return core.Mutation{Store: t.store, Entity: t.info.Table, Op: op, Source: "sdk"}
 }
 
-func (t *stmtTrace) addMutations(res driver.Result, ret []map[string]any, affected int64) {
+// imgsOf pairs the display rows a rows wrapper captured with their raw PKs.
+func imgsOf(data []map[string]any, raws []map[string]driver.Value) []img {
+	if data == nil {
+		return nil
+	}
+	out := make([]img, len(data))
+	for i, d := range data {
+		out[i].disp = d
+		if i < len(raws) {
+			out[i].raw = raws[i]
+		}
+	}
+	return out
+}
+
+func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 	in := t.info
 	if !in.Kind.IsMutation() {
 		return
 	}
 	if in.Table == "" {
-		t.span.AddFlag("entity_unknown")
+		t.flag("entity_unknown")
 		return
 	}
 	if affected == 0 && in.Kind != mutation.Truncate {
@@ -354,142 +392,193 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []map[string]any, affect
 	}
 	pkCols := t.cfg.pk(in.Schema, in.Table)
 	var muts []core.Mutation
-	emit := func(before, after map[string]any, fallback map[string]any) {
+	emit := func(before, after *img, fallback map[string]any) {
 		m := t.newMutation(op)
-		m.PK = pkOf(after, pkCols)
+		var bd, ad map[string]any
+		if before != nil {
+			bd = before.disp
+		}
+		if after != nil {
+			ad = after.disp
+		}
+		m.PK = pkOf(ad, pkCols)
 		if m.PK == nil {
-			m.PK = pkOf(before, pkCols)
+			m.PK = pkOf(bd, pkCols)
 		}
 		if m.PK == nil {
 			m.PK = fallback
 		}
-		if before != nil {
-			m.Before = core.Payload(before)
+		if m.PK == nil {
+			t.flag("pk_unknown")
+		} else {
+			m.PK = redactMap(m.PK)
 		}
-		if after != nil {
-			m.After = core.Payload(after)
+		if bd != nil {
+			m.Before = core.Payload(core.RedactAny(bd))
 		}
-		if before != nil || after != nil {
-			m.Diff = diffMaps(before, after)
+		if ad != nil {
+			m.After = core.Payload(core.RedactAny(ad))
+		}
+		if bd != nil || ad != nil {
+			m.Diff = diffMaps(bd, ad)
 		}
 		muts = append(muts, m)
 	}
 
 	switch in.Kind {
 	case mutation.Update, mutation.Delete:
-		eqPK := t.pkFromValues(in.Equals, pkCols)
-		var after []map[string]any
+		eq := t.pkFromValues(in.Equals, pkCols)
+		var after []img
 		if in.Kind == mutation.Update && t.cfg.images {
 			switch {
 			case t.retAll && ret != nil:
 				after = ret
 			case t.beforeOK:
-				var pks []map[string]any
+				var refs []pkRef
 				for _, b := range t.before {
-					if pk := pkOf(b, pkCols); pk != nil {
-						pks = append(pks, pk)
+					if r := b.ref(pkCols); r.disp != nil {
+						refs = append(refs, r)
 					}
 				}
-				if len(pks) == len(t.before) {
-					after = t.reread(pks, pkCols)
+				if len(refs) == len(t.before) {
+					after = t.reread(refs, pkCols)
 				}
-			case eqPK != nil:
-				after = t.reread([]map[string]any{eqPK}, pkCols)
+			case eq.disp != nil:
+				after = t.reread([]pkRef{eq}, pkCols)
 			}
 		}
 		switch {
 		case t.beforeOK:
-			for i, b := range t.before {
-				emit(b, matchAfter(after, b, i, pkCols, len(t.before)), eqPK)
+			for i := range t.before {
+				b := t.before[i]
+				emit(&b, matchAfter(after, b, i, pkCols, len(t.before)), eq.disp)
 			}
 		case len(after) > 0:
-			for _, a := range after {
-				emit(nil, a, eqPK)
+			for i := range after {
+				emit(nil, &after[i], eq.disp)
 			}
 		default:
-			emit(nil, nil, eqPK)
+			emit(nil, nil, eq.disp)
 		}
 		if in.Kind == mutation.Update && t.cfg.images && len(muts) > 0 && muts[0].After.IsZero() {
-			t.span.AddFlag("after_unavailable")
+			t.flag("after_unavailable")
 		}
 	default: // insert, upsert
-		var after []map[string]any
-		if t.retAll && ret != nil {
+		var after []img
+		if in.Bulk {
+			t.flag("bulk_copy")
+		} else if t.retAll && ret != nil {
 			after = ret
 		} else if t.cfg.images {
 			row := map[string]any{}
 			for col, v := range in.Values {
-				if val, ok := t.resolve(v); ok {
-					row[col] = val
+				if d, _, ok := t.resolve(v); ok {
+					row[col] = d
 				}
 			}
-			pk := t.pkFromValues(in.Values, pkCols)
-			if pk == nil && len(pkCols) == 1 && t.store == "mysql" && res != nil && affected == 1 {
+			ref := t.pkFromValues(in.Values, pkCols)
+			// App-written partial RETURNING (e.g. "RETURNING id"): take the PK from the returned rows.
+			if ref.disp == nil {
+				var retRefs []pkRef
+				for _, rr := range ret {
+					if r := rr.ref(pkCols); r.disp != nil {
+						retRefs = append(retRefs, r)
+					}
+				}
+				if len(retRefs) == 1 {
+					ref = retRefs[0]
+				} else if len(retRefs) > 1 {
+					if rr := t.reread(retRefs, pkCols); len(rr) == len(retRefs) {
+						after = rr
+					}
+				}
+			}
+			if ref.disp == nil && len(pkCols) == 1 && t.store == "mysql" && res != nil && affected == 1 {
 				if id, err := res.LastInsertId(); err == nil && id > 0 {
-					pk = map[string]any{pkCols[0]: id}
+					ref = pkRef{disp: map[string]any{pkCols[0]: id}, raw: map[string]driver.Value{pkCols[0]: id}}
 				}
 			}
-			if pk != nil {
-				if rr := t.reread([]map[string]any{pk}, pkCols); len(rr) == 1 {
+			if ref.disp != nil && after == nil {
+				if rr := t.reread([]pkRef{ref}, pkCols); len(rr) == 1 {
 					after = rr
 				}
 			}
 			if after == nil && len(row) > 0 {
-				after = []map[string]any{row}
-				t.span.AddFlag("after_from_args")
+				after = []img{{disp: row}}
+				t.flag("after_from_args")
 			}
 		}
 		if in.MultiRow {
-			t.span.AddFlag("multi_row_insert")
+			t.flag("multi_row_insert")
 		}
 		if len(after) == 0 {
-			emit(nil, nil, t.pkFromValues(in.Values, pkCols))
+			emit(nil, nil, t.pkFromValues(in.Values, pkCols).disp)
 		}
-		for _, a := range after {
-			emit(nil, a, nil)
+		for i := range after {
+			emit(nil, &after[i], nil)
 		}
 	}
 	if len(muts) > t.cfg.maxRows {
 		muts = muts[:t.cfg.maxRows]
-		t.span.AddFlag("mutations_truncated")
+		t.flag("mutations_truncated")
 	}
 	for _, m := range muts {
 		t.span.AddMutation(m)
 	}
 }
 
-func matchAfter(after []map[string]any, before map[string]any, idx int, pkCols []string, nBefore int) map[string]any {
+func matchAfter(after []img, before img, idx int, pkCols []string, nBefore int) *img {
 	if len(after) == 0 {
 		return nil
 	}
-	if bp := pkOf(before, pkCols); bp != nil {
+	if before.raw != nil {
+		k := rawKey(before.raw, pkCols)
+		for i := range after {
+			if after[i].raw != nil && rawKey(after[i].raw, pkCols) == k {
+				return &after[i]
+			}
+		}
+		return nil
+	}
+	if bp := pkOf(before.disp, pkCols); bp != nil {
 		k := pkKey(bp, pkCols)
-		for _, a := range after {
-			if ap := pkOf(a, pkCols); ap != nil && pkKey(ap, pkCols) == k {
-				return a
+		for i := range after {
+			if ap := pkOf(after[i].disp, pkCols); ap != nil && pkKey(ap, pkCols) == k {
+				return &after[i]
 			}
 		}
 		return nil
 	}
 	if len(after) == nBefore && idx < len(after) {
-		return after[idx]
+		return &after[idx]
 	}
 	return nil
 }
 
 // reread loads the current rows for the given primary keys on the statement's
-// connection. Errors only drop the image (flagged); they never propagate.
-func (t *stmtTrace) reread(pks []map[string]any, pkCols []string) []map[string]any {
-	if len(pks) == 0 || len(pkCols) == 0 || t.info.TableSQL == "" {
+// connection. Keys are bound with their original driver values; if any key
+// part cannot be bound faithfully (NULL) nothing is read. Errors only drop the
+// image (flagged); they never propagate.
+func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
+	if len(refs) == 0 || len(pkCols) == 0 || t.info.TableSQL == "" {
 		return nil
 	}
-	if len(pks) > t.cfg.maxRows {
-		pks = pks[:t.cfg.maxRows]
+	if len(refs) > t.cfg.maxRows {
+		refs = refs[:t.cfg.maxRows]
 	}
-	dollar := t.store == "postgres" || (t.store == "sql" && t.info.Dollar)
+	for _, r := range refs {
+		for _, c := range pkCols {
+			if v, ok := r.raw[c]; !ok || v == nil {
+				t.flag("image_skipped")
+				t.flag("image_skipped:pk_unbindable")
+				return nil
+			}
+		}
+	}
+	dollar := t.pg()
 	var vals []driver.Value
-	ph := func() string {
-		vals = append(vals, nil)
+	ph := func(v driver.Value) string {
+		vals = append(vals, v)
 		if dollar {
 			return "$" + strconv.Itoa(len(vals))
 		}
@@ -500,16 +589,15 @@ func (t *stmtTrace) reread(pks []map[string]any, pkCols []string) []map[string]a
 	b.WriteString("SELECT * FROM " + t.info.TableSQL + " WHERE ")
 	if len(pkCols) == 1 {
 		b.WriteString(q(pkCols[0]) + " IN (")
-		for i, pk := range pks {
+		for i, r := range refs {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(ph())
-			vals[len(vals)-1] = pk[pkCols[0]]
+			b.WriteString(ph(r.raw[pkCols[0]]))
 		}
 		b.WriteString(")")
 	} else {
-		for i, pk := range pks {
+		for i, r := range refs {
 			if i > 0 {
 				b.WriteString(" OR ")
 			}
@@ -518,15 +606,13 @@ func (t *stmtTrace) reread(pks []map[string]any, pkCols []string) []map[string]a
 				if j > 0 {
 					b.WriteString(" AND ")
 				}
-				b.WriteString(q(c) + " = " + ph())
-				vals[len(vals)-1] = pk[c]
+				b.WriteString(q(c) + " = " + ph(r.raw[c]))
 			}
 			b.WriteString(")")
 		}
 	}
-	rs, err := t.c.fetch(t.ctx, b.String(), vals, t.cfg.maxRows)
-	if err != nil {
-		t.span.AddFlag("after_failed")
+	rs, ok := t.capture(b.String(), vals, t.cfg.maxRows, "after_failed")
+	if !ok {
 		return nil
 	}
 	return rs

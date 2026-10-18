@@ -7,7 +7,9 @@ package autoinit
 
 import (
 	"os"
+	"strings"
 
+	"tsession/core"
 	"tsession/sdk/runtime"
 )
 
@@ -21,5 +23,18 @@ func init() {
 		ControlPlaneURL:       os.Getenv("TSESSION_CONTROLPLANE_URL"),
 		CollectorURL:          os.Getenv("TSESSION_COLLECTOR_URL"),
 		PatchDefaultTransport: true,
+		PropagateHosts:        splitList(os.Getenv("TSESSION_PROPAGATE_HOSTS")),
+		BindPriority:          core.ParseBindPriority(os.Getenv("TSESSION_BIND_PRIORITY")),
+		NoPropagate:           splitList(os.Getenv("TSESSION_NO_PROPAGATE_HOSTS")),
 	})
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

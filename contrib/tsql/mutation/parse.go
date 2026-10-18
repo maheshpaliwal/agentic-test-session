@@ -81,6 +81,29 @@ type Info struct {
 	QMark        bool // uses ? placeholders
 	End          int  // byte offset just past the last non-';' token
 	Multi        bool // more than one statement in the text
+	CurrentOf    bool // WHERE CURRENT OF <cursor>
+	Bulk         bool // COPY ... FROM (bulk load, row set unknown)
+
+	// ArgCols maps a 0-based bind argument to the column(s) it is assigned to
+	// or compared with (INSERT column list vs VALUES, SET col = $n, col op $n,
+	// IN lists, ON CONFLICT DO UPDATE SET ...). A column "" marks an argument
+	// that is known to be harmless (LIMIT/OFFSET). Arguments absent from the
+	// map could not be attributed to a column.
+	ArgCols map[int][]string
+	// Idents lists every identifier/keyword word of the statement (lower
+	// case); callers use it to decide whether the statement touches a
+	// sensitive-named column when an argument could not be attributed.
+	Idents []string
+	// Literals lists every string/number literal with the column(s) it is
+	// assigned to or compared with (nil when unknown).
+	Literals []Literal
+}
+
+// Literal is a string or number literal located in the statement text.
+type Literal struct {
+	Start, End int
+	Cols       []string
+	Benign     bool // LIMIT/OFFSET operand
 }
 
 type parser struct {
@@ -90,20 +113,33 @@ type parser struct {
 }
 
 // Parse classifies sql. It never fails; unknown input yields Kind Other.
+// For multi-statement text the first write statement (else the first
+// statement) is described and Multi/Complex are set so no image is replayed.
 func Parse(sql string, d Dialect) Info {
 	toks, named := tokenize(sql, d)
 	for len(toks) > 0 && toks[len(toks)-1].isPunct(";") {
 		toks = toks[:len(toks)-1]
 	}
 	p := &parser{sql: sql, t: toks, d: d}
-	in := p.stmt(toks)
+	segs := splitStatements(toks)
+	var in Info
+	pick := 0
+	infos := make([]Info, len(segs))
+	for i, s := range segs {
+		infos[i] = p.stmt(s)
+		if i > 0 && !infos[pick].Kind.IsWrite() && infos[i].Kind.IsWrite() {
+			pick = i
+		}
+	}
+	if len(segs) > 0 {
+		in = infos[pick]
+	}
 	if len(toks) > 0 {
 		in.End = toks[len(toks)-1].end
 	}
-	for _, t := range toks {
-		if t.isPunct(";") {
-			in.Multi = true
-		}
+	if len(segs) > 1 {
+		in.Multi = true
+		in.Complex = true
 	}
 	in.Named = named
 	for _, t := range toks {
@@ -115,7 +151,42 @@ func Parse(sql string, d Dialect) Info {
 			}
 		}
 	}
+	in.ArgCols = map[int][]string{}
+	seen := map[string]bool{}
+	for i, s := range segs {
+		r := p.mapCols(infos[i].Columns, s)
+		for a, cs := range r.args {
+			for _, c := range cs {
+				in.ArgCols[a] = appendUniq(in.ArgCols[a], c)
+			}
+		}
+		in.Literals = append(in.Literals, r.lits...)
+		for _, id := range r.idents {
+			if !seen[id] {
+				seen[id] = true
+				in.Idents = append(in.Idents, id)
+			}
+		}
+	}
 	return in
+}
+
+// splitStatements splits on ';' tokens, dropping empty statements.
+func splitStatements(t []token) [][]token {
+	var out [][]token
+	start := 0
+	for i, tk := range t {
+		if tk.isPunct(";") {
+			if i > start {
+				out = append(out, t[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(t) {
+		out = append(out, t[start:])
+	}
+	return out
 }
 
 func (p *parser) stmt(t []token) Info {
@@ -219,7 +290,45 @@ func (p *parser) verb(t []token) Info {
 		if i < len(t) && t[i].isWord("TABLE") {
 			i++
 		}
+		i = skipWords(t, i, "ONLY")
+		i = p.tableName(&in, t, i)
+		for i+1 < len(t) && t[i].isPunct(",") {
+			var tmp Info
+			i = p.tableName(&tmp, t, i+1)
+			in.Tables = append(in.Tables, tmp.Table)
+			in.Complex = true
+		}
+	case "MERGE":
+		// MERGE INTO target [AS a] USING ...: a write whose rows we cannot replay.
+		in.Kind = Upsert
+		in.Complex = true
+		i := 1
+		if i < len(t) && t[i].isWord("INTO") {
+			i++
+		}
+		i = skipWords(t, i, "ONLY")
 		p.tableName(&in, t, i)
+		for j := range t {
+			if t[j].isWord("RETURNING") && t[j].depth == t[0].depth {
+				p.returning(&in, t, j)
+			}
+		}
+	case "COPY":
+		// COPY tbl [(cols)] FROM ... loads rows; COPY ... TO and COPY (query) TO read.
+		if len(t) > 1 && t[1].isIdent() {
+			var tmp Info
+			p.tableName(&tmp, t, 1)
+			for j := 1; j < len(t); j++ {
+				if t[j].depth == t[0].depth && t[j].isWord("FROM") {
+					in = Info{Verb: "COPY", Kind: Insert, Complex: true, Bulk: true,
+						Schema: tmp.Schema, Table: tmp.Table, TableSQL: tmp.TableSQL, TableRef: tmp.TableRef, Tables: tmp.Tables}
+					break
+				}
+				if t[j].depth == t[0].depth && t[j].isWord("TO") {
+					break
+				}
+			}
+		}
 	case "CREATE", "ALTER", "DROP", "RENAME", "GRANT", "REVOKE", "COMMENT":
 		in.Kind = DDL
 		for i := 1; i < len(t) && i < 8; i++ {
@@ -526,6 +635,10 @@ func (p *parser) tail(in *Info, t []token, i int, complexWord string) {
 		in.HasWhere = false
 		return
 	}
+	if len(wt) >= 2 && wt[0].isWord("CURRENT") && wt[1].isWord("OF") {
+		in.CurrentOf = true
+		in.Complex = true
+	}
 	startOff, endOff := wt[0].start, wt[len(wt)-1].end
 	in.Where = p.sql[startOff:endOff]
 	for _, tk := range wt {
@@ -615,6 +728,8 @@ func (in Info) ImageSelect(limit int) (query string, argIdx []int, reason string
 	switch {
 	case in.Kind != Update && in.Kind != Delete:
 		return "", nil, "not_update_or_delete"
+	case in.CurrentOf:
+		return "", nil, "where_current_of"
 	case in.Complex:
 		return "", nil, "complex_statement"
 	case in.Named:

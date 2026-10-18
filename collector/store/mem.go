@@ -50,6 +50,12 @@ func (m *Mem) Events(_ context.Context, sid string, from uint64, limit int) ([]c
 	return append([]core.Event(nil), all[start:end]...), nil
 }
 
+func (m *Mem) Head(_ context.Context, sid string) (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return uint64(len(m.ev[sid])), nil
+}
+
 func (m *Mem) TxOutcomes(_ context.Context, sid string) (map[string]bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

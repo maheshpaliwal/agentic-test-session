@@ -1,0 +1,9 @@
+.git
+**/*.test
+**/bundles
+docker/.env
+graphify-out
+**/node_modules
+docs
+*.md
+!docker/*.md

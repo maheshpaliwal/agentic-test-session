@@ -179,3 +179,68 @@ func TestMiddlewareIdempotent(t *testing.T) {
 		t.Fatalf("events=%d err=%v", len(rec.Events()), err)
 	}
 }
+
+func TestPlaceholdersResolvedAndRedacted(t *testing.T) {
+	c, _, rec, ctx := setup(t, func(string) string { return `{}` })
+	_, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String("t"),
+		Key:                       map[string]types.AttributeValue{"id": s("1")},
+		UpdateExpression:          aws.String("SET #p = :pw, #n = :nm, meta.#tk = :t2"),
+		ConditionExpression:       aws.String("#n <> :nm"),
+		ExpressionAttributeNames:  map[string]string{"#p": "password", "#n": "name", "#tk": "api_token"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pw": s("hunter2-secret"), ":nm": s("bob"), ":t2": s("tok-123")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"), Item: map[string]types.AttributeValue{
+		"id": s("2"), "password": s("pw-item-1"), "profile": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"token": s("tok-nested")}}}})
+	c.Query(ctx, &dynamodb.QueryInput{TableName: aws.String("t"), KeyConditionExpression: aws.String("id = :i"),
+		FilterExpression:          aws.String("#s = :sec"),
+		ExpressionAttributeNames:  map[string]string{"#s": "secret"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":i": s("1"), ":sec": s("sec-q-1")}})
+	var all strings.Builder
+	for _, e := range rec.Events() {
+		all.WriteString(string(e.Req.Inline))
+		for _, m := range e.Mutations {
+			all.WriteString(string(m.Before.Inline) + string(m.After.Inline))
+		}
+	}
+	txt := all.String()
+	for _, bad := range []string{"hunter2-secret", "tok-123", "pw-item-1", "tok-nested", "sec-q-1", "#p", "#tk"} {
+		if strings.Contains(txt, bad) {
+			t.Errorf("leaked/unresolved %q: %s", bad, txt)
+		}
+	}
+	for _, good := range []string{`password = \"[REDACTED]\"`, `name = \"bob\"`} {
+		if !strings.Contains(txt, good) && !strings.Contains(txt, strings.ReplaceAll(good, `\"`, `"`)) {
+			t.Errorf("missing %q: %s", good, txt)
+		}
+	}
+}
+
+func TestInjectedReturnValuesStrippedEvenIfFinishPanics(t *testing.T) {
+	c, _, rec, ctx := setup(t, func(string) string { return `{"Attributes":{"id":{"S":"1"}}}` })
+	finishHook = func() { panic("boom") }
+	t.Cleanup(func() { finishHook = nil })
+	for _, call := range []func() (map[string]types.AttributeValue, error){
+		func() (map[string]types.AttributeValue, error) {
+			o, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"), Item: map[string]types.AttributeValue{"id": s("1")}})
+			return o.Attributes, err
+		},
+		func() (map[string]types.AttributeValue, error) {
+			o, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String("t"), Key: map[string]types.AttributeValue{"id": s("1")}})
+			return o.Attributes, err
+		},
+		func() (map[string]types.AttributeValue, error) {
+			o, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String("t"), Key: map[string]types.AttributeValue{"id": s("1")}, UpdateExpression: aws.String("SET a = :a"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":a": n("1")}})
+			return o.Attributes, err
+		},
+	} {
+		attrs, err := call()
+		if err != nil || attrs != nil {
+			t.Fatalf("injected attributes leaked after finish panic: %v %v", attrs, err)
+		}
+	}
+	_ = rec
+}

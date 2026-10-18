@@ -54,23 +54,50 @@ func Begin(ctx context.Context, kind Kind, name string) (context.Context, *Span)
 // plane runs an exclusive session, the request is stamped with it. For
 // worker.start the publisher span is recorded as a link.
 func BeginIngress(ctx context.Context, kind Kind, name string, c Carrier) (context.Context, *Span) {
+	return BeginIngressAttrs(ctx, kind, name, c, nil)
+}
+
+// BeginIngressAttrs is BeginIngress plus attribute binding. Precedence:
+// session header > binding match > exclusive > untraced. attrs may be nil.
+// Attributes are only consulted when the carrier has no session header and the
+// SessionSet is a Binder; a binding match records attr bound_by=<source>:<name>
+// (never the value).
+func BeginIngressAttrs(ctx context.Context, kind Kind, name string, c Carrier, attrs Attributes) (context.Context, *Span) {
 	if !Enabled() {
 		return ctx, nil
 	}
 	sc, ok := ExtractSpanContext(c)
+	var boundBy BindingKey
+	var fallback bool
 	if ok {
 		if !activeSessions().IsActive(sc.SessionID) {
 			return ctx, nil
 		}
 	} else {
-		id, ex := activeSessions().Exclusive()
-		if !ex {
+		set := activeSessions()
+		if m := matchBinding(set, attrs); m.Ambiguous || (!m.OK && m.Key.Source != "") {
+			// Ambiguous (two sessions) or a priority key present but unbound:
+			// untraced, never fall through to other keys or exclusive mode.
+			return ctx, nil
+		} else if m.OK && set.IsActive(m.SessionID) {
+			sc = SpanContext{SessionID: m.SessionID, TraceID: NewTraceID()}
+			boundBy, fallback = m.Key, m.Fallback
+		} else if id, ex := set.Exclusive(); ex {
+			sc = SpanContext{SessionID: id, TraceID: NewTraceID()}
+		} else {
 			return ctx, nil
 		}
-		sc = SpanContext{SessionID: id, TraceID: NewTraceID()}
 	}
 	pubSpan := sc.SpanID
 	ctx, s := startSpan(ctx, sc, kind, name)
+	if boundBy.Source != "" {
+		s.SetAttr("bound_by", boundBy.String())
+		if fallback {
+			s.SetAttr("bound_fallback", "true")
+		}
+	} else if boundBy.Name == "?" {
+		s.SetAttr("bound_by", "binding")
+	}
 	if kind == KindWorkerStart && pubSpan != "" {
 		s.AddLink(pubSpan)
 	}
@@ -139,4 +166,22 @@ func (s *Span) End() {
 	s.mu.Unlock()
 	defer func() { _ = recover() }() // never let recording break the host app
 	record(ev)
+}
+
+// matchBinding returns key.Name=="?" when the set cannot say which key matched.
+func matchBinding(set SessionSet, a Attributes) BindingMatch {
+	if a == nil {
+		return BindingMatch{}
+	}
+	switch b := set.(type) {
+	case DetailBinder:
+		return b.MatchAttrsDetail(a)
+	case KeyBinder:
+		id, k, ok := b.MatchAttrsKey(a)
+		return BindingMatch{SessionID: id, Key: k, OK: ok}
+	case Binder:
+		id, ok := b.MatchAttrs(a)
+		return BindingMatch{SessionID: id, Key: BindingKey{Name: "?"}, OK: ok}
+	}
+	return BindingMatch{}
 }

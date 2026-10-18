@@ -2,7 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 )
@@ -17,9 +19,20 @@ type Config struct {
 	DefaultQuiesce  int // seconds; default 3
 	DefaultMaxDrain int // seconds; default 60
 
-	PollInterval    time.Duration // drain-status polling; default 500ms
-	SweepInterval   time.Duration // TTL janitor; default 1s
+	PollInterval  time.Duration // drain-status polling; default 500ms
+	SweepInterval time.Duration // TTL janitor; default 1s
+	// SealRetryBudget bounds how long a failing collector seal call is retried
+	// (exponential backoff from PollInterval, capped at 2s); default 30s.
+	SealRetryBudget time.Duration
 	HeartbeatPeriod time.Duration // SSE heartbeat; default 15s
+	// Retention is how long terminal sessions stay in the hot in-memory set
+	// before being evicted from it (still readable if the Store archives them,
+	// e.g. FileStore); default 24h.
+	Retention time.Duration
+	// AllowedHosts / AllowedOrigins extend the loopback-only Host/Origin guard
+	// (e.g. docker service names such as "controlplane:7070").
+	AllowedHosts   []string
+	AllowedOrigins []string
 	// TimeUnit is the duration of one "second" in ttl/quiesce/max_drain
 	// fields. Tests shrink it; default time.Second.
 	TimeUnit time.Duration
@@ -34,6 +47,11 @@ type Manager struct {
 	kill    bool
 	subs    map[chan ActiveSet]struct{}
 	cancels map[string]context.CancelFunc // in-flight drains
+
+	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
+	// O(all sessions ever). terminal queues finished sessions for eviction.
+	live     map[string]Session
+	terminal []termEntry
 
 	rootCtx context.Context
 	stop    context.CancelFunc
@@ -59,8 +77,17 @@ func NewManager(cfg Config) *Manager {
 	if cfg.SweepInterval <= 0 {
 		cfg.SweepInterval = time.Second
 	}
+	if cfg.SealRetryBudget <= 0 {
+		cfg.SealRetryBudget = 30 * time.Second
+	}
 	if cfg.HeartbeatPeriod <= 0 {
 		cfg.HeartbeatPeriod = 15 * time.Second
+	}
+	cfg.DefaultTTL = min(cfg.DefaultTTL, MaxDurationSeconds)
+	cfg.DefaultQuiesce = min(cfg.DefaultQuiesce, MaxDurationSeconds)
+	cfg.DefaultMaxDrain = min(cfg.DefaultMaxDrain, MaxDurationSeconds)
+	if cfg.Retention <= 0 {
+		cfg.Retention = 24 * time.Hour
 	}
 	if cfg.TimeUnit <= 0 {
 		cfg.TimeUnit = time.Second
@@ -74,15 +101,65 @@ func NewManager(cfg Config) *Manager {
 		cfg: cfg, log: log,
 		subs:    map[chan ActiveSet]struct{}{},
 		cancels: map[string]context.CancelFunc{},
+		live:    map[string]Session{},
 		rootCtx: ctx, stop: cancel,
 	}
 	// Resume drains that were in flight when a persistent store was last written.
 	for _, s := range cfg.Store.List() {
+		m.indexLocked(s)
 		if s.State == StateDraining {
 			m.startDrain(s.ID)
 		}
 	}
 	return m
+}
+
+// MaxDurationSeconds bounds ttl/quiesce/max_drain (7 days); it also keeps
+// seconds*time.Second far from Duration overflow.
+const MaxDurationSeconds = 7 * 24 * 3600
+
+type termEntry struct {
+	id    string
+	ended time.Time
+}
+
+// indexLocked updates the live/terminal indexes for s (caller holds m.mu or
+// is single-threaded in the constructor).
+func (m *Manager) indexLocked(s Session) {
+	if !s.State.Terminal() {
+		m.live[s.ID] = s
+		return
+	}
+	if _, was := m.live[s.ID]; was {
+		delete(m.live, s.ID)
+	}
+	ended := s.EndedAt
+	if ended.IsZero() {
+		ended = s.CreatedAt
+	}
+	m.terminal = append(m.terminal, termEntry{s.ID, ended})
+}
+
+// putLocked persists s and keeps the indexes in step.
+func (m *Manager) putLocked(s Session) error {
+	err := m.cfg.Store.Put(s)
+	m.indexLocked(s)
+	return err
+}
+
+// pruneLocked evicts terminal sessions older than Retention from the hot set.
+func (m *Manager) pruneLocked(now time.Time) {
+	ev, _ := m.cfg.Store.(Evictor)
+	n := 0
+	for n < len(m.terminal) && now.Sub(m.terminal[n].ended) > m.cfg.Retention {
+		if ev != nil {
+			ev.Evict(m.terminal[n].id)
+		}
+		n++
+	}
+	if n > 0 {
+		m.terminal = append(m.terminal[:0:0], m.terminal[n:]...)
+	}
 }
 
 // Run executes the TTL janitor until ctx is done.
@@ -107,12 +184,13 @@ func (m *Manager) Close() {
 
 // StartRequest is the body of POST /v1/sessions.
 type StartRequest struct {
-	Name            string `json:"name"`
-	Mode            Mode   `json:"mode"`
-	TTLSeconds      int    `json:"ttl_seconds"`
-	QuiesceSeconds  int    `json:"quiesce_seconds"`
-	MaxDrainSeconds int    `json:"max_drain_seconds"`
-	InitiatedBy     string `json:"initiated_by"`
+	Name            string    `json:"name"`
+	Mode            Mode      `json:"mode"`
+	TTLSeconds      int       `json:"ttl_seconds"`
+	QuiesceSeconds  int       `json:"quiesce_seconds"`
+	MaxDrainSeconds int       `json:"max_drain_seconds"`
+	InitiatedBy     string    `json:"initiated_by"`
+	Bindings        []Binding `json:"bindings"`
 }
 
 func (m *Manager) Start(req StartRequest) (Session, error) {
@@ -122,8 +200,17 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 	if req.Mode != ModeHeader && req.Mode != ModeExclusive {
 		return Session{}, ErrInvalid
 	}
-	if req.TTLSeconds < 0 || req.QuiesceSeconds < 0 || req.MaxDrainSeconds < 0 {
-		return Session{}, ErrInvalid
+	if req.Mode == ModeExclusive && len(req.Bindings) > 0 {
+		return Session{}, fmt.Errorf("%w: bindings cannot be combined with mode=exclusive", ErrInvalid)
+	}
+	bindings, err := NormalizeBindings(req.Bindings)
+	if err != nil {
+		return Session{}, err
+	}
+	for _, v := range []int{req.TTLSeconds, req.QuiesceSeconds, req.MaxDrainSeconds} {
+		if v < 0 || v > MaxDurationSeconds {
+			return Session{}, fmt.Errorf("%w: ttl/quiesce/max_drain seconds must be 0 (default) or 1..%d", ErrInvalid, MaxDurationSeconds)
+		}
 	}
 	def := func(v, d int) int {
 		if v == 0 {
@@ -135,12 +222,14 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 		req.InitiatedBy = "api"
 	}
 	now := time.Now().UTC()
+	name, auto := resolveName(req.Name, bindings, req.InitiatedBy, now)
 	s := Session{
-		ID: newID(now), Name: req.Name, Mode: req.Mode, State: StateCreated,
+		ID: newID(now), Name: name, NameAuto: auto, Mode: req.Mode, State: StateCreated,
 		InitiatedBy: req.InitiatedBy, CreatedAt: now,
 		TTLSeconds:      def(req.TTLSeconds, m.cfg.DefaultTTL),
 		QuiesceSeconds:  def(req.QuiesceSeconds, m.cfg.DefaultQuiesce),
 		MaxDrainSeconds: def(req.MaxDrainSeconds, m.cfg.DefaultMaxDrain),
+		Bindings:        bindings,
 	}
 
 	m.mu.Lock()
@@ -148,11 +237,11 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 	if s.Mode == ModeExclusive && m.exclusiveLocked() != "" {
 		return Session{}, ErrConflict
 	}
-	if err := m.cfg.Store.Put(s); err != nil {
-		return Session{}, err
+	if c := m.bindingConflictLocked(bindings); c != nil {
+		return Session{}, c
 	}
 	s.State, s.StartedAt = StateActive, now
-	if err := m.cfg.Store.Put(s); err != nil {
+	if err := m.putLocked(s); err != nil {
 		return Session{}, err
 	}
 	m.broadcastLocked()
@@ -175,7 +264,7 @@ func (m *Manager) Stop(id string) (Session, error) {
 		return s, ErrBadState
 	}
 	s.State = StateDraining
-	if err := m.cfg.Store.Put(s); err != nil {
+	if err := m.putLocked(s); err != nil {
 		return s, err
 	}
 	m.startDrainLocked(id)
@@ -201,30 +290,34 @@ func (m *Manager) Abort(id string) (Session, error) {
 		delete(m.cancels, id)
 	}
 	s.State, s.EndedAt = StateAborted, time.Now().UTC()
-	if err := m.cfg.Store.Put(s); err != nil {
+	if err := m.putLocked(s); err != nil {
 		return s, err
 	}
 	m.broadcastLocked()
 	return s, nil
 }
 
-// Sweep expires ACTIVE sessions whose TTL has elapsed as of now.
+// Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through
+// DRAINING and the normal seal path (reason=ttl); drain() records the final
+// state (EXPIRED on a clean seal, SEALED+incomplete+seal_error otherwise).
 func (m *Manager) Sweep(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	changed := false
-	for _, s := range m.cfg.Store.List() {
+	for _, s := range m.live {
 		if s.State != StateActive {
 			continue
 		}
 		if now.After(s.StartedAt.Add(time.Duration(s.TTLSeconds) * m.cfg.TimeUnit)) {
-			s.State, s.EndedAt = StateExpired, now.UTC()
-			if err := m.cfg.Store.Put(s); err != nil {
-				m.log.Error("persist expired session", "id", s.ID, "err", err)
+			s.State, s.Reason = StateDraining, "ttl"
+			if err := m.putLocked(s); err != nil {
+				m.log.Error("persist expiring session", "id", s.ID, "err", err)
 			}
+			m.startDrainLocked(s.ID)
 			changed = true
 		}
 	}
+	m.pruneLocked(now)
 	if changed {
 		m.broadcastLocked()
 	}
@@ -261,8 +354,8 @@ func (m *Manager) Active() ActiveSet {
 }
 
 func (m *Manager) exclusiveLocked() string {
-	for _, s := range m.cfg.Store.List() {
-		if s.Mode == ModeExclusive && (s.State == StateActive || s.State == StateDraining) {
+	for _, s := range m.live {
+		if s.Mode == ModeExclusive {
 			return s.ID
 		}
 	}
@@ -270,10 +363,19 @@ func (m *Manager) exclusiveLocked() string {
 }
 
 func (m *Manager) activeLocked() ActiveSet {
-	a := ActiveSet{Active: []string{}, Kill: m.kill, Exclusive: m.exclusiveLocked()}
-	for _, s := range m.cfg.Store.List() {
-		if s.State == StateActive || s.State == StateDraining {
-			a.Active = append(a.Active, s.ID)
+	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill}
+	for _, s := range m.live {
+		a.Active = append(a.Active, s.ID)
+		if s.Mode == ModeExclusive {
+			a.Exclusive = s.ID
+		}
+	}
+	sort.Strings(a.Active) // IDs are time-prefixed, so this is creation order
+	for _, id := range a.Active {
+		if s := m.live[id]; s.State == StateActive {
+			for _, b := range s.Bindings {
+				a.Bindings = append(a.Bindings, ActiveBinding{SessionID: id, Binding: b})
+			}
 		}
 	}
 	return a

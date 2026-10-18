@@ -20,7 +20,26 @@ type Config struct {
 	// PatchDefaultTransport wraps http.DefaultTransport with Transport
 	// (idempotent; restored by Stop).
 	PatchDefaultTransport bool
+	// PropagateHosts restricts session-header injection to these host suffixes
+	// (empty = everyone). NoPropagate hosts never get headers and always win.
+	// Requests to excluded hosts are still recorded as api.out.
+	PropagateHosts []string
+	NoPropagate    []string
+	// BindPriority is the ordered binding fallback chain (env
+	// TSESSION_BIND_PRIORITY). Local config, not read from the control plane:
+	// every service in one environment must use the same list.
+	BindPriority []core.BindingKey
 }
+
+// Stats is a point-in-time diagnostics snapshot.
+type Stats struct {
+	// BindingAmbiguous counts requests left untraced because their bindings
+	// matched two different sessions.
+	BindingAmbiguous uint64
+}
+
+// GetStats returns diagnostics counters.
+func GetStats() Stats { return Stats{BindingAmbiguous: core.BindingAmbiguous()} }
 
 type state struct {
 	rec      *Recorder
@@ -55,7 +74,7 @@ func Start(cfg Config) error {
 	}
 	cfg.Exporter.CollectorURL = cfg.CollectorURL
 
-	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true})
+	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority})
 	s := &state{rec: NewRecorder(cfg.BufferSize)}
 	s.exp = NewExporter(s.rec, cfg.Exporter)
 	s.sub = NewSubscriber(cfg.ControlPlaneURL)
@@ -64,7 +83,7 @@ func Start(cfg Config) error {
 	if cfg.PatchDefaultTransport {
 		if _, ok := http.DefaultTransport.(*Transport); !ok {
 			s.origTrip = http.DefaultTransport
-			http.DefaultTransport = &Transport{Base: s.origTrip}
+			http.DefaultTransport = &Transport{Base: s.origTrip, PropagateHosts: cfg.PropagateHosts, NoPropagate: cfg.NoPropagate}
 			s.patched = true
 		}
 	}

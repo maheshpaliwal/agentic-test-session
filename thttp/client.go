@@ -28,10 +28,11 @@ func (t tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	finish := func(resp *http.Response, respCap *limitBuf, err error) {
 		span.SetReq(message{
-			Method:  req.Method,
-			URL:     req.URL.Redacted(),
-			Headers: redactHeaders(req.Header),
-			Body:    reqCap.body(),
+			Method:   req.Method,
+			URL:      core.RedactURLBound(req.URL),
+			Headers:  redactHeaders(req.Header),
+			Body:     reqCap.body(req.Header.Get("Content-Type")),
+			BodySize: reqCap.size(),
 		})
 		if err != nil {
 			span.SetErr(err)
@@ -39,7 +40,7 @@ func (t tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if resp.StatusCode >= 500 {
 				span.SetErr(fmt.Errorf("HTTP %d", resp.StatusCode))
 			}
-			span.SetResp(message{Status: resp.StatusCode, Headers: redactHeaders(resp.Header), Body: respCap.body()})
+			span.SetResp(message{Status: resp.StatusCode, Headers: redactHeaders(resp.Header), Body: respCap.body(resp.Header.Get("Content-Type")), BodySize: respCap.size()})
 		}
 		if reqCap.truncated || (respCap != nil && respCap.truncated) {
 			span.AddFlag("truncated")

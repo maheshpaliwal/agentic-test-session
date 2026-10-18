@@ -31,8 +31,8 @@ func (s State) Terminal() bool {
 // validTransitions is the FSM edge set.
 var validTransitions = map[State][]State{
 	StateCreated:  {StateActive, StateAborted},
-	StateActive:   {StateDraining, StateAborted, StateExpired},
-	StateDraining: {StateSealed, StateAborted},
+	StateActive:   {StateDraining, StateAborted},
+	StateDraining: {StateSealed, StateExpired, StateAborted},
 }
 
 func canTransition(from, to State) bool {
@@ -54,6 +54,7 @@ const (
 type Session struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
+	NameAuto        bool      `json:"name_auto"`
 	Mode            Mode      `json:"mode"`
 	State           State     `json:"state"`
 	InitiatedBy     string    `json:"initiated_by"`
@@ -66,6 +67,14 @@ type Session struct {
 	Incomplete      bool      `json:"incomplete"`
 	DroppedEvents   int64     `json:"dropped_events"`
 	BundleURI       string    `json:"bundle_uri"`
+	// Reason is "ttl" when the session was ended by TTL expiry (empty otherwise).
+	Reason string `json:"reason,omitempty"`
+	// SealError is set when the collector seal could not be completed after
+	// bounded retries; the session is then SEALED with Incomplete=true.
+	SealError string `json:"seal_error,omitempty"`
+	// Bindings attribute requests carrying a matching attribute to this
+	// session (see docs/BINDING.md). Live only while the session is ACTIVE.
+	Bindings []Binding `json:"bindings,omitempty"`
 }
 
 // ActiveSet is the payload of GET /v1/active and the SSE stream.
@@ -73,6 +82,8 @@ type ActiveSet struct {
 	Active    []string `json:"active"`
 	Exclusive string   `json:"exclusive"`
 	Kill      bool     `json:"kill"`
+	// Bindings lists the bindings of ACTIVE sessions only (not DRAINING).
+	Bindings []ActiveBinding `json:"bindings,omitempty"`
 }
 
 var (
@@ -89,6 +100,13 @@ type Store interface {
 	List() []Session // ordered by CreatedAt ascending
 }
 
+// Evictor is an optional Store capability: drop a terminal session from the
+// hot in-memory set. Stores with durable backing (FileStore) keep it readable
+// via Get/List; MemStore simply forgets it.
+type Evictor interface {
+	Evict(id string)
+}
+
 // MemStore is the default in-memory Store.
 type MemStore struct {
 	mu sync.RWMutex
@@ -102,6 +120,13 @@ func (s *MemStore) Put(x Session) error {
 	s.m[x.ID] = x
 	s.mu.Unlock()
 	return nil
+}
+
+// Evict forgets a session (in-memory stores have no archive).
+func (s *MemStore) Evict(id string) {
+	s.mu.Lock()
+	delete(s.m, id)
+	s.mu.Unlock()
 }
 
 func (s *MemStore) Get(id string) (Session, bool) {

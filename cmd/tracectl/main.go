@@ -20,12 +20,17 @@ import (
 const usage = `usage: tracectl [--cp URL] <command> [flags]
 
 commands:
+  (--name templates: {bind} {bind.<name>} {initiated_by} {time} {date}; with no --name the server auto-names)
   start [--name N] [--mode header|exclusive] [--ttl S] [--quiesce S] [--max-drain S]
+        [--bind source:name=value]...   source header|jwt|jwt_claim|cookie|query (repeatable;
+        not with --mode exclusive). jwt reads an UNVERIFIED token: spoofable, test envs only.
+  rename <id|name> <new name>   (works on sealed sessions; templates allowed)
   stop <id|name> [--wait] [--timeout D]
   status <id|name>
   list [--state STATE]
   wait <id|name> [--timeout D]
   watch-docker [--docker BIN]   start/stop sessions from containers labelled tsession.id=<name>
+                                (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)
 
 --cp defaults to $TSESSION_CONTROLPLANE_URL or http://127.0.0.1:7070`
 
@@ -74,14 +79,35 @@ func dispatch(ctx context.Context, cp, cmd string, args []string, stdout, stderr
 		fs.IntVar(&opts.TTLSeconds, "ttl", 0, "ttl seconds")
 		fs.IntVar(&opts.QuiesceSeconds, "quiesce", 0, "quiesce seconds")
 		fs.IntVar(&opts.MaxDrainSeconds, "max-drain", 0, "max drain seconds")
+		var binds bindFlags
+		fs.Var(&binds, "bind", "source:name=value (repeatable; header|jwt|jwt_claim|cookie|query)")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
+		opts.Bindings = binds.list
+		warnJWT(stderr, opts.Bindings)
 		s, err := client.Start(ctx, opts)
 		if err != nil {
 			return err
 		}
 		printJSON(stdout, s.Info())
+
+	case "rename":
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if fs.NArg() < 2 {
+			return fmt.Errorf("usage: tracectl rename <id|name> <new name>")
+		}
+		s, err := resolve(ctx, opts, fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		info, err := s.Rename(ctx, strings.Join(fs.Args()[1:], " "))
+		if err != nil {
+			return err
+		}
+		printJSON(stdout, info)
 
 	case "stop":
 		wait := fs.Bool("wait", false, "wait until sealed")
@@ -116,7 +142,12 @@ func dispatch(ctx context.Context, cp, cmd string, args []string, stdout, stderr
 		if err != nil {
 			return err
 		}
-		printJSON(stdout, s.Info())
+		info := s.Info()
+		printJSON(stdout, info)
+		fmt.Fprintln(stdout, "name:", displayName(info))
+		if b := formatBindings(info.Bindings); b != "" {
+			fmt.Fprintln(stdout, "bindings:", b)
+		}
 
 	case "list":
 		state := fs.String("state", "", "filter by state")
@@ -128,7 +159,11 @@ func dispatch(ctx context.Context, cp, cmd string, args []string, stdout, stderr
 			return err
 		}
 		for _, i := range list {
-			fmt.Fprintf(stdout, "%-30s %-9s %-9s %s\n", i.ID, i.State, i.Mode, i.Name)
+			line := fmt.Sprintf("%-30s %-9s %-9s %s", i.ID, i.State, i.Mode, displayName(i))
+			if b := formatBindings(i.Bindings); b != "" {
+				line += "  [" + b + "]"
+			}
+			fmt.Fprintln(stdout, line)
 		}
 
 	case "wait":
@@ -157,9 +192,11 @@ func dispatch(ctx context.Context, cp, cmd string, args []string, stdout, stderr
 		opts.InitiatedBy = "docker"
 		w := &Watcher{
 			Logf: log.Printf,
-			Start: func(ctx context.Context, name string) (string, error) {
+			Start: func(ctx context.Context, name string, binds []client.Binding) (string, error) {
 				o := opts
 				o.Name = name
+				o.Bindings = binds
+				warnJWT(stderr, binds)
 				s, err := client.Start(ctx, o)
 				if err != nil {
 					return "", err
@@ -233,4 +270,63 @@ func resolve(ctx context.Context, o client.Options, ref string) (*client.Session
 		return nil, fmt.Errorf("no session named %q", ref)
 	}
 	return client.Attach(ctx, o, best.ID)
+}
+
+// displayName renders the name with an "(auto)" marker for generated names.
+func displayName(i client.Info) string {
+	if i.NameAuto {
+		return i.Name + " (auto)"
+	}
+	return i.Name
+}
+
+// bindFlags collects repeatable --bind values.
+type bindFlags struct{ list []client.Binding }
+
+func (b *bindFlags) String() string { return formatBindings(b.list) }
+
+func (b *bindFlags) Set(v string) error {
+	bd, err := client.ParseBinding(v)
+	if err != nil {
+		return err
+	}
+	b.list = append(b.list, bd)
+	return nil
+}
+
+// formatBindings renders "header:x-user-id=u_1,jwt_claim:sub=u_1".
+func formatBindings(bs []client.Binding) string {
+	parts := make([]string, len(bs))
+	for i, b := range bs {
+		parts[i] = b.Source + ":" + b.Name + "=" + b.Value
+	}
+	return strings.Join(parts, ",")
+}
+
+// warnJWT prints the spoofing warning when any binding reads a JWT.
+func warnJWT(w io.Writer, bs []client.Binding) {
+	for _, b := range bs {
+		if b.Source == "jwt_claim" {
+			fmt.Fprintln(w, "tracectl: WARNING: jwt bindings decode the token payload WITHOUT verifying its signature; "+
+				"anyone can spoof the claim and land traffic in this session. Attribution only, never a security boundary.")
+			return
+		}
+	}
+}
+
+// parseBindLabel parses the tsession.bind label value: comma-separated
+// source:name=value items (values therefore cannot contain commas).
+func parseBindLabel(v string) ([]client.Binding, error) {
+	var out []client.Binding
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item == "" {
+			continue
+		}
+		b, err := client.ParseBinding(item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }

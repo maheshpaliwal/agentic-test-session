@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"strings"
 	"sync"
 
 	"tsession/core"
@@ -16,8 +17,10 @@ type conn struct {
 	inner driver.Conn
 	cfg   *config
 
-	mu   sync.Mutex
-	txID string
+	mu     sync.Mutex
+	txID   string
+	serial bool // open tx runs at SERIALIZABLE
+	rawTx  bool // the app opened a transaction with a plain BEGIN statement
 }
 
 func newConn(inner driver.Conn, cfg *config) *conn { return &conn{inner: inner, cfg: cfg} }
@@ -28,16 +31,82 @@ func (c *conn) currentTx() string {
 	return c.txID
 }
 
-func (c *conn) setTx(id string) {
+func (c *conn) setTx(id string, serializable bool) {
 	c.mu.Lock()
 	c.txID = id
+	c.serial = serializable
 	c.mu.Unlock()
+}
+
+// txState reports whether a transaction is open on this conn and whether it is SERIALIZABLE.
+func (c *conn) txState() (open, serializable bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.txID != "" || c.rawTx, c.serial
+}
+
+// trackTxControl notices plain BEGIN/COMMIT/ROLLBACK statements so capture
+// never opens its own transaction inside one the app started by hand.
+func (c *conn) trackTxControl(query string) {
+	begin, end := txControl(query)
+	if !begin && !end {
+		return
+	}
+	c.mu.Lock()
+	c.rawTx = begin
+	c.mu.Unlock()
+}
+
+// txControl classifies the leading keyword of a statement.
+func txControl(q string) (begin, end bool) {
+	i, n := 0, len(q)
+	for i < n {
+		switch {
+		case q[i] == ' ' || q[i] == '\t' || q[i] == '\n' || q[i] == '\r':
+			i++
+		case strings.HasPrefix(q[i:], "--"):
+			for i < n && q[i] != '\n' {
+				i++
+			}
+		case strings.HasPrefix(q[i:], "/*"):
+			e := strings.Index(q[i+2:], "*/")
+			if e < 0 {
+				return false, false
+			}
+			i += e + 4
+		default:
+			goto word
+		}
+	}
+	return false, false
+word:
+	words := strings.Fields(strings.ToUpper(q[i:min(n, i+48)]))
+	if len(words) == 0 {
+		return false, false
+	}
+	w1 := strings.TrimRight(words[0], ";")
+	w2 := ""
+	if len(words) > 1 {
+		w2 = strings.TrimRight(words[1], ";")
+	}
+	switch w1 {
+	case "BEGIN":
+		return true, false
+	case "START":
+		return w2 == "TRANSACTION", false
+	case "COMMIT", "END", "ABORT":
+		return false, w2 != "PREPARED"
+	case "ROLLBACK":
+		return false, w2 != "TO" && w2 != "PREPARED" && w2 != "SAVEPOINT"
+	}
+	return false, false
 }
 
 func (c *conn) clearTx(id string) {
 	c.mu.Lock()
 	if c.txID == id {
 		c.txID = ""
+		c.serial = false
 	}
 	c.mu.Unlock()
 }
@@ -112,7 +181,7 @@ func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return tx, nil
 	}
 	id := "tx_" + core.NewSpanID()
-	c.setTx(id)
+	c.setTx(id, driver.IsolationLevel(opts.Isolation) == driver.IsolationLevel(sql.LevelSerializable))
 	safe(func() {
 		_, sp := core.Begin(ctx, core.KindDBTxBegin, "BEGIN")
 		sp.SetTx(id)

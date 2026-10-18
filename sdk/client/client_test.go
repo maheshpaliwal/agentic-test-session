@@ -94,3 +94,83 @@ func TestTransportAndAbort(t *testing.T) {
 		t.Fatal("attach to missing should fail")
 	}
 }
+
+func TestStartSendsBindingsAndConflict(t *testing.T) {
+	var got struct {
+		Bindings []client.Binding `json:"bindings"`
+	}
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 2 {
+			w.WriteHeader(409)
+			w.Write([]byte(`{"error":"binding header:x-user-id already held by ts_1","session_id":"ts_1"}`))
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		json.NewEncoder(w).Encode(map[string]any{"id": "ts_1", "state": "ACTIVE", "bindings": got.Bindings})
+	}))
+	defer srv.Close()
+	o := client.Options{BaseURL: srv.URL, Bindings: []client.Binding{client.BindHeader("x-user-id", "u1"), client.BindJWT("sub", "u1")}}
+	s, err := client.Start(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Bindings) != 2 || got.Bindings[1].Source != "jwt_claim" || len(s.Info().Bindings) != 2 || s.Info().Bindings[0].Value != "u1" {
+		t.Fatalf("%+v %+v", got, s.Info())
+	}
+	if _, err := client.Start(context.Background(), o); !errors.Is(err, client.ErrConflict) || !strings.Contains(err.Error(), "ts_1") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestParseBinding(t *testing.T) {
+	b, err := client.ParseBinding("jwt:sub=u=1")
+	if err != nil || b != (client.Binding{Source: "jwt_claim", Name: "sub", Value: "u=1"}) {
+		t.Fatal(b, err)
+	}
+	for _, bad := range []string{"", "header", "header:x", "bogus:a=b", "header:=v", "header:a="} {
+		if _, err := client.ParseBinding(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
+
+func TestRenameAndAutoName(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	base := setup(t)
+	o := client.Options{BaseURL: base, QuiesceSeconds: 1, PollInterval: 5 * time.Millisecond,
+		Bindings: []client.Binding{client.BindHeader("X-WMS-UID", "act_bind_9")}}
+	s, err := client.Start(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := s.Info(); !i.NameAuto || i.Name != "x-wms-uid=act_bind_9" {
+		t.Fatalf("%+v", i)
+	}
+	info, err := s.Rename(ctx, "run {bind}  ")
+	if err != nil || info.Name != "run act_bind_9" || info.NameAuto || s.Info().Name != info.Name {
+		t.Fatalf("%+v %v", info, err)
+	}
+	if _, err := s.Rename(ctx, "   "); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("want 400, got %v", err)
+	}
+	if _, err := s.StopAndWait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// rename a SEALED session
+	if info, err := s.Rename(ctx, "sealed label"); err != nil || info.State != "SEALED" || info.Name != "sealed label" {
+		t.Fatalf("%+v %v", info, err)
+	}
+	ghost, _ := client.Attach(ctx, client.Options{BaseURL: base}, s.ID)
+	ghost.ID = "ts_missing"
+	if _, err := ghost.Rename(ctx, "x"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("want 404, got %v", err)
+	}
+	// no bindings: initiated_by + time
+	s2, err := client.Start(ctx, client.Options{BaseURL: base, InitiatedBy: "tester"})
+	if err != nil || !s2.Info().NameAuto || !strings.HasPrefix(s2.Info().Name, "tester ") {
+		t.Fatalf("%+v %v", s2.Info(), err)
+	}
+}

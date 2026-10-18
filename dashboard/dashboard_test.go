@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -192,7 +194,7 @@ func TestDemoEndpointShapes(t *testing.T) {
 	var sessions []Session
 	_, b := get(t, s.URL, "/cp/v1/sessions")
 	decode(t, b, &sessions)
-	if len(sessions) != 3 {
+	if len(sessions) != 5 {
 		t.Fatalf("sessions: %d", len(sessions))
 	}
 	states := map[string]bool{}
@@ -214,7 +216,7 @@ func TestDemoEndpointShapes(t *testing.T) {
 	var col []map[string]any
 	_, b = get(t, s.URL, "/col/v1/sessions")
 	decode(t, b, &col)
-	if len(col) != 3 || col[0]["event_count"] == nil {
+	if len(col) != 5 || col[0]["event_count"] == nil {
 		t.Fatalf("collector list: %v", col)
 	}
 
@@ -494,5 +496,274 @@ func TestPrefixSessionsAreConsistent(t *testing.T) {
 		if len(all) != len(evs) {
 			t.Fatalf("%s: tree drops events", s.ID)
 		}
+	}
+}
+
+func TestProxySendsUpstreamHostNoOriginAndJSONContentType(t *testing.T) {
+	type seen struct {
+		host string
+		hdr  http.Header
+	}
+	ch := make(chan seen, 4)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch <- seen{r.Host, r.Header.Clone()}
+		io.WriteString(w, `{}`)
+	}))
+	defer up.Close()
+	h, err := New(Config{ControlPlaneURL: up.URL, CollectorURL: up.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := httptest.NewServer(h)
+	defer d.Close()
+	upHost := strings.TrimPrefix(up.URL, "http://")
+
+	do := func(method, path, ct, origin string) seen {
+		req, _ := http.NewRequest(method, d.URL+path, nil)
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return <-ch
+	}
+	// empty-body POST without a content type, same-origin Origin sent by the browser
+	s := do("POST", "/api/cp/v1/sessions/ts_x/stop", "", d.URL)
+	if s.host != upHost {
+		t.Errorf("Host = %q, want upstream %q", s.host, upHost)
+	}
+	if s.hdr.Get("Origin") != "" || s.hdr.Get("Referer") != "" {
+		t.Errorf("Origin/Referer forwarded: %v", s.hdr)
+	}
+	if got := s.hdr.Get("Content-Type"); got != "application/json" {
+		t.Errorf("POST Content-Type = %q", got)
+	}
+	// a wrong content type is normalised too
+	if s = do("POST", "/api/col/v1/x", "text/plain", ""); s.hdr.Get("Content-Type") != "application/json" {
+		t.Errorf("POST text/plain not normalised: %q", s.hdr.Get("Content-Type"))
+	}
+	// GET must not gain a content type
+	if s = do("GET", "/api/col/v1/sessions", "", ""); s.hdr.Get("Content-Type") != "" || s.host != upHost {
+		t.Errorf("GET: host=%q ct=%q", s.host, s.hdr.Get("Content-Type"))
+	}
+}
+
+func TestDemoEntityPKIsCanonicalJSONString(t *testing.T) {
+	s := demoServer(t, time.Now)
+	defer s.Close()
+	_, b := get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities")
+	var ents []struct {
+		Store, Entity, PK string
+	}
+	if err := json.Unmarshal(b, &ents); err != nil {
+		var w struct {
+			Entities []struct{ Store, Entity, PK string }
+		}
+		decode(t, b, &w)
+		ents = w.Entities
+	}
+	if len(ents) == 0 {
+		t.Fatal("no entities")
+	}
+	for _, e := range ents {
+		if !strings.HasPrefix(e.PK, "{") {
+			t.Fatalf("pk %q is not canonical JSON", e.PK)
+		}
+		resp, hb := get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities/"+e.Store+"/"+e.Entity+"/"+url.PathEscape(e.PK))
+		if resp.StatusCode != 200 || len(hb) < 3 || string(hb) == "[]" {
+			t.Fatalf("history for %s: %d %s", e.PK, resp.StatusCode, hb)
+		}
+	}
+}
+
+func TestJSHelpers(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	if out, err := exec.Command(node, "jstest/util_test.js").CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if out, err := exec.Command(node, "--check", "web/app.js").CombinedOutput(); err != nil {
+		t.Fatalf("app.js syntax: %v\n%s", err, out)
+	}
+}
+
+func TestDemoBindings(t *testing.T) {
+	cur := time.Now()
+	s := demoServer(t, func() time.Time { return cur })
+	post := func(path, body string) (*http.Response, []byte) {
+		r, err := http.Post(s.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		return r, b
+	}
+	// the seeded bound demo session is listed with its bindings and in /v1/active
+	var act struct {
+		Bindings []map[string]string `json:"bindings"`
+	}
+	_, b := get(t, s.URL, "/cp/v1/active")
+	decode(t, b, &act)
+	if len(act.Bindings) != 2 || act.Bindings[0]["session_id"] != "ts_demo0004" {
+		t.Fatalf("active bindings: %+v", act)
+	}
+	in := `{"name":"b","mode":"header","bindings":[{"source":"header","name":"X-User-Id","value":"u1"}]}`
+	r, b := post("/cp/v1/sessions", in)
+	var ns Session
+	decode(t, b, &ns)
+	if r.StatusCode != 201 || len(ns.Bindings) != 1 || ns.Bindings[0].Value != "u1" {
+		t.Fatalf("start: %d %s", r.StatusCode, b)
+	}
+	// same (source,name,value) with different header case => 409 naming the holder
+	r, b = post("/cp/v1/sessions", `{"bindings":[{"source":"header","name":"x-user-id","value":"u1"}]}`)
+	if r.StatusCode != 409 || !strings.Contains(string(b), ns.ID) {
+		t.Fatalf("dup: %d %s", r.StatusCode, b)
+	}
+	for _, bad := range []string{
+		`{"bindings":[{"source":"nope","name":"a","value":"b"}]}`,
+		`{"bindings":[{"source":"header","name":"","value":"b"}]}`,
+		`{"mode":"exclusive","bindings":[{"source":"header","name":"a","value":"b"}]}`,
+	} {
+		if r, _ := post("/cp/v1/sessions", bad); r.StatusCode != 400 {
+			t.Fatalf("%s: %d", bad, r.StatusCode)
+		}
+	}
+	// after stop the binding is released
+	post("/cp/v1/sessions/"+ns.ID+"/stop", "")
+	if r, _ := post("/cp/v1/sessions", in); r.StatusCode != 201 {
+		t.Fatalf("rebind after stop: %d", r.StatusCode)
+	}
+}
+
+func TestActivityDemoInvariants(t *testing.T) {
+	evs := resolveTx(activityEvents("ts_x", time.Now()))
+	spans := map[string]core.Event{}
+	for i, e := range evs {
+		if e.Seq != uint64(i+1) || (i > 0 && e.EndHLC < evs[i-1].EndHLC) {
+			t.Fatalf("seq %d not gapless/completion ordered", e.Seq)
+		}
+		spans[e.SpanID] = e
+	}
+	apiRoots, workers, orphans := 0, 0, 0
+	for _, e := range evs {
+		_, parentOK := spans[e.ParentID]
+		switch {
+		case e.Kind == core.KindAPIIn && !parentOK:
+			apiRoots++
+		case e.Kind == core.KindWorkerStart:
+			workers++
+			if _, ok := spans[e.LinkIDs[0]]; !ok {
+				t.Errorf("worker link %v missing", e.LinkIDs)
+			}
+		case !parentOK:
+			orphans++
+		}
+	}
+	if apiRoots != 3 || workers != 1 || orphans != 1 {
+		t.Fatalf("api triggers %d, workers %d, orphan roots %d", apiRoots, workers, orphans)
+	}
+	// the trigger completes after its children: the point of the grouped view
+	if spans["sp_c_api"].Seq <= spans["sp_c_ins"].Seq {
+		t.Error("api.in should complete after its db children")
+	}
+	rolled := 0
+	for _, e := range evs {
+		for _, m := range e.Mutations {
+			if m.Effective != nil && !*m.Effective {
+				rolled++
+			}
+		}
+	}
+	if rolled != 1 {
+		t.Errorf("rolled back mutations: %d", rolled)
+	}
+	var all []*Node
+	flatten(BuildTrace(evs), &all)
+	if len(all) != len(evs) {
+		t.Fatalf("tree has %d of %d", len(all), len(evs))
+	}
+}
+
+func TestProxyPatchOnlyRenamesSession(t *testing.T) {
+	var got []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path+" "+r.Header.Get("Content-Type")+" origin="+r.Header.Get("Origin"))
+		io.WriteString(w, `{}`)
+	}))
+	defer up.Close()
+	h, _ := New(Config{ControlPlaneURL: up.URL, CollectorURL: up.URL})
+	d := httptest.NewServer(h)
+	defer d.Close()
+	patch := func(path, origin string) int {
+		req, _ := http.NewRequest("PATCH", d.URL+path, strings.NewReader(`{"name":"x"}`))
+		req.Header.Set("Content-Type", "text/plain")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	if c := patch("/api/cp/v1/sessions/ts_1", d.URL); c != 200 || len(got) != 1 || got[0] != "PATCH /v1/sessions/ts_1 application/json origin=" {
+		t.Fatalf("rename: %d %v", c, got)
+	}
+	for _, bad := range []string{"/api/cp/v1/sessions", "/api/cp/v1/sessions/", "/api/cp/v1/sessions/a/stop", "/api/cp/v1/internal/x", "/api/cp/v1/kill",
+		"/api/cp/v1/sessions/..", "/api/col/v1/sessions/ts_1"} {
+		if c := patch(bad, ""); c != 405 {
+			t.Errorf("PATCH %s = %d, want 405", bad, c)
+		}
+	}
+	if c := patch("/api/cp/v1/sessions/ts_1", "http://evil.example"); c != 403 {
+		t.Errorf("cross-origin PATCH = %d", c)
+	}
+	if len(got) != 1 {
+		t.Errorf("unexpected upstream calls: %v", got)
+	}
+}
+
+func TestDemoRename(t *testing.T) {
+	s := demoServer(t, time.Now)
+	defer s.Close()
+	patch := func(id, body string) (int, Session) {
+		req, _ := http.NewRequest("PATCH", s.URL+"/cp/v1/sessions/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		var out Session
+		_ = json.NewDecoder(r.Body).Decode(&out)
+		return r.StatusCode, out
+	}
+	c, got := patch("ts_demo0002", `{"name":"  my live run "}`)
+	if c != 200 || got.Name != "my live run" || got.NameAuto {
+		t.Fatalf("rename: %d %+v", c, got)
+	}
+	for _, bad := range []string{`{"name":""}`, `{"name":"   "}`, `{"name":"` + strings.Repeat("x", 121) + `"}`, `nope`} {
+		if c, _ := patch("ts_demo0001", bad); c != 400 {
+			t.Errorf("%q: %d", bad, c)
+		}
+	}
+	if c, _ := patch("nope", `{"name":"a"}`); c != 404 {
+		t.Errorf("unknown id: %d", c)
+	}
+	_, b := get(t, s.URL, "/cp/v1/sessions/ts_demo0002")
+	var one Session
+	decode(t, b, &one)
+	if one.Name != "my live run" {
+		t.Errorf("not persisted: %q", one.Name)
 	}
 }

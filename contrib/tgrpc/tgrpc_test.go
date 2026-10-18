@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"tsession/core"
@@ -239,4 +240,26 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timeout")
+}
+
+func TestMessagesRedactedAndStreamCap(t *testing.T) {
+	st, err := structpb.NewStruct(map[string]any{"user": "ann", "password": "pw-grpc-1",
+		"nested": map[string]any{"api_key": "key-grpc-2", "big": float64(9007199254740993)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(toJSON(st))
+	if strings.Contains(got, "pw-grpc-1") || strings.Contains(got, "key-grpc-2") || !strings.Contains(got, "ann") {
+		t.Fatalf("%s", got)
+	}
+	if got := string(toJSON(map[string]any{"Authorization": "Bearer abc", "n": 1})); strings.Contains(got, "abc") {
+		t.Fatal(got)
+	}
+	var l msgLog
+	for i := 0; i < maxStreamMsgs+25; i++ {
+		l.add(wrapperspb.String("m"))
+	}
+	if len(l.msgs) != maxStreamMsgs || !l.more {
+		t.Fatalf("cap not applied: %d", len(l.msgs))
+	}
 }

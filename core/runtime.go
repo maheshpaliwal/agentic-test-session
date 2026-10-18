@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,9 @@ type Config struct {
 	Instance       string
 	Enabled        bool
 	MaxInlineBytes int // payload cap; default 8192
+	// BindPriority is the ordered binding fallback chain (TSESSION_BIND_PRIORITY).
+	// Process-wide; every service in one environment must use the same list.
+	BindPriority []BindingKey
 }
 
 var cfg atomic.Pointer[Config]
@@ -26,11 +30,17 @@ func Configure(c Config) {
 	if c.MaxInlineBytes <= 0 {
 		c.MaxInlineBytes = 8192
 	}
-	if c.Instance == "" {
-		h, _ := os.Hostname()
-		c.Instance = fmt.Sprintf("%s-%d-%s", h, os.Getpid(), randHex(3))
+	// Instance is always made unique per process start: the collector dedupes on
+	// (Instance, LocalSeq) and LocalSeq restarts at 1, so a fixed Instance shared
+	// by restarts/replicas would silently drop events. A user-supplied name is
+	// kept as a prefix; "-<pid>-<6 hex>" is always appended.
+	base := c.Instance
+	if base == "" {
+		base, _ = os.Hostname()
 	}
+	c.Instance = fmt.Sprintf("%s-%d-%s", base, os.Getpid(), randHex(3))
 	cfg.Store(&c)
+	SetBindPriority(c.BindPriority)
 }
 
 func GetConfig() Config { return *cfg.Load() }
@@ -118,14 +128,27 @@ func HLCNow() uint64 {
 	return hlcLast
 }
 
+// MaxHLCSkew is how far (in HLC units, physical ms<<16) a remote timestamp may
+// be ahead of local physical time before it is ignored. Without the clamp a
+// single bogus header could push every later local timestamp far into the future.
+const MaxHLCSkew uint64 = (10 * 60 * 1000) << 16
+
 // HLCObserve merges a remote timestamp and returns the new local value.
+// Remote values more than MaxHLCSkew ahead of local physical time are ignored.
 func HLCObserve(remote uint64) uint64 {
 	hlcMu.Lock()
 	defer hlcMu.Unlock()
+	p := physical()
+	if remote > p+MaxHLCSkew {
+		remote = 0
+	}
 	m := max(hlcLast, remote)
-	if p := physical(); p > m {
+	switch {
+	case p > m:
 		hlcLast = p
-	} else {
+	case m == math.MaxUint64:
+		hlcLast = m // saturate; never wrap
+	default:
 		hlcLast = m + 1
 	}
 	return hlcLast

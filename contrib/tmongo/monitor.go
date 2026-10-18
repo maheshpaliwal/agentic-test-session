@@ -47,6 +47,34 @@ type inflight struct {
 	ent  string
 	body doc
 	txID string
+
+	// deferred commitTransaction span (begun on completion)
+	ctx   context.Context
+	label string
+	db    string
+}
+
+// endCommit emits the db.tx.commit (or, on failure, db.tx.rollback with
+// commit_failed=true, matching tsql) event for a finished commitTransaction.
+func (in *inflight) endCommit(err error, durUS int64) {
+	kind := core.KindDBTxCommit
+	if err != nil {
+		kind = core.KindDBTxRollbck
+	}
+	_, sp := core.Begin(in.ctx, kind, in.label)
+	if sp == nil {
+		return
+	}
+	sp.SetAttr("db", in.db)
+	sp.SetAttr("duration_us", strconv.FormatInt(durUS, 10))
+	if in.txID != "" {
+		sp.SetTx(in.txID)
+	}
+	if err != nil {
+		sp.SetAttr("commit_failed", "true")
+		sp.SetErr(err)
+	}
+	sp.End()
 }
 
 // monitors holds every monitor built here; it is the idempotency marker for Apply.
@@ -119,7 +147,7 @@ func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
 	if bson.Unmarshal(e.Command, &d) != nil || len(d) == 0 {
 		return
 	}
-	body := plain(d).(doc)
+	body := redactDoc(plain(d)).(doc)
 	ent := entityOf(name, d[0], body)
 	kind := core.KindDBRead
 	switch {
@@ -133,6 +161,15 @@ func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
 	label := e.CommandName + " " + e.DatabaseName
 	if ent != "" {
 		label += "." + ent
+	}
+	if name == "committransaction" {
+		// The span kind depends on the outcome (a failed commit is a rollback,
+		// as in tsql), so the span is begun when the reply arrives.
+		if _, probe := core.Begin(ctx, kind, label); probe == nil {
+			return
+		}
+		t.pending.Store(e.RequestID, &inflight{ctx: ctx, label: label, db: e.DatabaseName, cmd: name, body: body, txID: txIDOf(body)})
+		return
 	}
 	_, span := core.Begin(ctx, kind, label)
 	if span == nil {
@@ -160,12 +197,16 @@ func (t *tracer) succeeded(_ context.Context, e *event.CommandSucceededEvent) {
 		return
 	}
 	in := v.(*inflight)
+	if in.cmd == "committransaction" {
+		in.endCommit(nil, e.Duration.Microseconds())
+		return
+	}
 	defer in.span.End()
 	var rd bson.D
 	if bson.Unmarshal(e.Reply, &rd) != nil {
 		return
 	}
-	reply := plain(rd).(doc)
+	reply := redactDoc(plain(rd)).(doc)
 	in.span.SetResp(summarize(reply))
 	in.span.SetAttr("duration_us", strconv.FormatInt(e.Duration.Microseconds(), 10))
 	if we := asArr(reply["writeErrors"]); len(we) > 0 {
@@ -187,6 +228,10 @@ func (t *tracer) failed(_ context.Context, e *event.CommandFailedEvent) {
 		return
 	}
 	in := v.(*inflight)
+	if in.cmd == "committransaction" {
+		in.endCommit(e.Failure, e.Duration.Microseconds())
+		return
+	}
 	in.span.SetErr(e.Failure)
 	in.span.End()
 }

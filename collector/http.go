@@ -6,14 +6,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"tsession/collector/store"
 	"tsession/core"
 )
 
-// Handler returns the collector HTTP API (ingest, read and internal endpoints).
+// Handler returns the collector HTTP API (ingest, read and internal
+// endpoints) behind core.LoopbackGuard (Host/Origin/Content-Type checks).
+// /v1/internal/* additionally requires a loopback peer or one inside
+// Config.InternalAllow.
 func (c *Collector) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/ingest", c.handleIngest)
@@ -26,7 +32,48 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", c.handleDrain)
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
-	return mux
+	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/internal/") && !c.internalPeerOK(r) {
+			writeErr(w, http.StatusForbidden, errors.New("internal endpoint: peer not allowed"))
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	guarded := core.LoopbackGuard(h, core.GuardConfig{
+		AllowedHosts:     c.cfg.AllowedHosts,
+		AllowedOrigins:   c.cfg.AllowedOrigins,
+		BodyContentTypes: []string{"application/x-ndjson", "application/json"},
+	})
+	// /healthz is exempt from the Host guard (GET only; reveals nothing) so
+	// container probes using service names work.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		guarded.ServeHTTP(w, r)
+	})
+}
+
+func (c *Collector) internalPeerOK(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, n := range c.internal {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -39,37 +86,70 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
 
+// readLine reads one NDJSON line of at most max bytes. An over-long line is
+// consumed to its end and reported with over=true (its bytes are discarded),
+// so one huge event never costs the rest of the batch.
+func readLine(br *bufio.Reader, max int) (line []byte, over bool, err error) {
+	var acc []byte
+	for {
+		chunk, e := br.ReadSlice('\n')
+		if !over {
+			if len(acc)+len(chunk) > max+1 { // +1 for the newline
+				over, acc = true, nil
+			} else if e == nil && acc == nil {
+				return chunk, false, nil // common case: whole line, no copy
+			} else {
+				acc = append(acc, chunk...)
+			}
+		}
+		if e == bufio.ErrBufferFull {
+			continue
+		}
+		return acc, over, e
+	}
+}
+
 func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, c.cfg.MaxBodyBytes)
-	sc := bufio.NewScanner(r.Body)
-	sc.Buffer(make([]byte, 0, min(64<<10, c.cfg.MaxLineBytes)), c.cfg.MaxLineBytes)
+	br := bufio.NewReaderSize(r.Body, 64<<10)
 	var evs []core.Event
-	bad := 0
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var e core.Event
-		if err := json.Unmarshal(line, &e); err != nil {
-			bad++
-			continue
-		}
-		evs = append(evs, e)
-	}
-	if err := sc.Err(); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) || errors.Is(err, bufio.ErrTooLong) {
-			writeErr(w, http.StatusRequestEntityTooLarge, errors.New("payload too large"))
+	var res IngestResult
+	for {
+		raw, over, err := readLine(br, c.cfg.MaxLineBytes)
+		if err != nil && err != io.EOF {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				writeErr(w, http.StatusRequestEntityTooLarge, errors.New("payload too large"))
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeErr(w, http.StatusBadRequest, err)
-		return
+		if over {
+			res.reject("oversize_line", 1)
+		} else if line := bytes.TrimSpace(raw); len(line) > 0 {
+			var e core.Event
+			if jerr := json.Unmarshal(store.StripNUL(line), &e); jerr != nil {
+				res.reject("invalid_json", 1)
+			} else {
+				evs = append(evs, e)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
 	}
-	res, err := c.Ingest(r.Context(), r.Header.Get("X-TSession-Instance"), evs)
-	res.Rejected += bad
+	ir, err := c.Ingest(r.Context(), r.Header.Get("X-TSession-Instance"), evs)
+	res.Accepted, res.Duplicates = ir.Accepted, ir.Duplicates
+	for k, n := range ir.RejectedReasons {
+		res.reject(k, n)
+	}
 	if err != nil {
 		c.log.Error("ingest", "err", err)
+		if errors.Is(err, errBackpressure) {
+			writeErr(w, http.StatusServiceUnavailable, errors.New("session buffer full, retry later"))
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, errors.New("storage error"))
 		return
 	}
@@ -88,13 +168,14 @@ func (c *Collector) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, l)
 }
 
-// view loads a session's events with tx outcomes and orphan flags applied.
+// view returns a session's events with tx outcomes and orphan flags applied
+// (cached until a new Seq arrives or the session is sealed).
 func (c *Collector) view(ctx context.Context, id string) ([]core.Event, error) {
-	evs, err := c.st.Events(ctx, id, 0, 0)
+	v, err := c.viewOf(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return c.resolveView(ctx, id, evs, nil)
+	return v.evs, nil
 }
 
 func (c *Collector) resolveView(ctx context.Context, id string, evs []core.Event, outcomes map[string]bool) ([]core.Event, error) {
@@ -145,40 +226,40 @@ func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 func (c *Collector) handleTrace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	evs, err := c.view(r.Context(), id)
+	v, err := c.viewOf(r.Context(), id)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, BuildTrace(id, evs))
+	writeJSON(w, 200, v.getTrace(id))
 }
 
 func (c *Collector) handleEntities(w http.ResponseWriter, r *http.Request) {
-	evs, err := c.view(r.Context(), r.PathValue("id"))
+	v, err := c.viewOf(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, ListEntities(evs))
+	writeJSON(w, 200, v.getEntities())
 }
 
 func (c *Collector) handleHistory(w http.ResponseWriter, r *http.Request) {
-	evs, err := c.view(r.Context(), r.PathValue("id"))
+	v, err := c.viewOf(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, History(evs, r.PathValue("store"), r.PathValue("entity"), r.PathValue("pk")))
+	writeJSON(w, 200, History(v.evs, r.PathValue("store"), r.PathValue("entity"), r.PathValue("pk")))
 }
 
 func (c *Collector) handleSummary(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	evs, err := c.view(r.Context(), id)
+	v, err := c.viewOf(r.Context(), id)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	s, err := c.summary(r.Context(), id, evs)
+	s, err := c.summary(r.Context(), id, v.getSummary(id))
 	if err != nil {
 		writeErr(w, 500, err)
 		return

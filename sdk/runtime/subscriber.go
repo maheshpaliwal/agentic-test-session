@@ -9,18 +9,23 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"tsession/core"
 )
 
 type activeSet struct {
 	Active    []string `json:"active"`
 	Exclusive string   `json:"exclusive"`
 	Kill      bool     `json:"kill"`
+	// Bindings is optional: older control planes omit it.
+	Bindings []core.Binding `json:"bindings"`
 }
 
 type snapshot struct {
 	active    map[string]struct{}
 	exclusive string
 	kill      bool
+	bindings  core.BindingSet
 }
 
 // Subscriber tracks the control plane's active set and implements
@@ -74,6 +79,40 @@ func (s *Subscriber) Exclusive() (string, bool) {
 	return sn.exclusive, true
 }
 
+// MatchAttrs implements core.Binder. It extracts only the attribute keys that
+// active bindings use (none when there are none) and never matches while killed.
+func (s *Subscriber) MatchAttrs(a core.Attributes) (string, bool) {
+	id, _, ok := s.MatchAttrsKey(a)
+	return id, ok
+}
+
+// MatchAttrsKey implements core.KeyBinder.
+func (s *Subscriber) MatchAttrsKey(a core.Attributes) (string, core.BindingKey, bool) {
+	sn := s.snap.Load()
+	if sn.kill || sn.bindings.Empty() {
+		return "", core.BindingKey{}, false
+	}
+	return sn.bindings.Match(a)
+}
+
+// MatchAttrsDetail implements core.DetailBinder (priority, fallback, ambiguity).
+func (s *Subscriber) MatchAttrsDetail(a core.Attributes) core.BindingMatch {
+	sn := s.snap.Load()
+	if sn.kill || sn.bindings.Empty() {
+		return core.BindingMatch{}
+	}
+	return sn.bindings.MatchDetail(a)
+}
+
+// BindingKeys lists the attribute keys currently needed (empty when killed).
+func (s *Subscriber) BindingKeys() []core.BindingKey {
+	sn := s.snap.Load()
+	if sn.kill {
+		return nil
+	}
+	return sn.bindings.Keys()
+}
+
 // Ready is true once any state has been received from the control plane.
 func (s *Subscriber) Ready() bool { return s.ready.Load() }
 
@@ -84,7 +123,7 @@ func (s *Subscriber) Close() {
 }
 
 func (s *Subscriber) apply(a activeSet) {
-	sn := &snapshot{active: make(map[string]struct{}, len(a.Active)), exclusive: a.Exclusive, kill: a.Kill}
+	sn := &snapshot{active: make(map[string]struct{}, len(a.Active)), exclusive: a.Exclusive, kill: a.Kill, bindings: core.NewBindingSet(a.Bindings)}
 	for _, id := range a.Active {
 		sn.active[id] = struct{}{}
 	}

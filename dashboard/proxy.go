@@ -53,7 +53,12 @@ func newProxy(raw, prefix string) (http.Handler, error) {
 			out.Path = strings.TrimRight(t.Path, "/") + up
 			out.RawPath = base + ep
 			out.RawQuery = pr.In.URL.RawQuery
-			pr.Out.Host = t.Host
+			pr.Out.Host = t.Host // upstream Host/Origin guards expect the upstream's own host
+			pr.Out.Header.Del("Origin")
+			if pr.In.Method == http.MethodPost || pr.In.Method == http.MethodPatch {
+				// Upstream guards require a JSON content type even on empty-body POSTs.
+				pr.Out.Header.Set("Content-Type", "application/json")
+			}
 			for _, h := range stripRequest {
 				pr.Out.Header.Del(h)
 			}
@@ -80,6 +85,12 @@ func newProxy(raw, prefix string) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodPost:
+		case http.MethodPatch:
+			// rename only: exactly /v1/sessions/{id} on the control plane
+			if !renamePath(strings.TrimPrefix(r.URL.Path, prefix)) || prefix != "/api/cp" {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -102,4 +113,14 @@ func newProxy(raw, prefix string) (http.Handler, error) {
 		}
 		rp.ServeHTTP(w, r)
 	}), nil
+}
+
+// renamePath reports whether p is exactly /v1/sessions/{id} (one non-empty, non-dot segment).
+func renamePath(p string) bool {
+	const pre = "/v1/sessions/"
+	if !strings.HasPrefix(p, pre) {
+		return false
+	}
+	id := p[len(pre):]
+	return id != "" && id != "." && id != ".." && !strings.Contains(id, "/")
 }

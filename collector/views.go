@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 
 	"tsession/core"
 )
@@ -187,9 +188,12 @@ type Summary struct {
 	DurationNs    int64                     `json:"duration_ns"`
 	Sealed        bool                      `json:"sealed"`
 	Incomplete    bool                      `json:"incomplete"`
+	// Quarantined counts poison events that were isolated and dropped.
+	Quarantined int `json:"quarantined"`
 }
 
-func (c *Collector) summary(ctx context.Context, id string, evs []core.Event) (Summary, error) {
+// buildSummary computes the event-derived part of the summary.
+func buildSummary(id string, evs []core.Event) Summary {
 	s := Summary{SessionID: id, EventCount: len(evs), ByKind: map[string]int{}, ByService: map[string]int{},
 		Mutations: map[string]map[string]int{}, Failures: []Failure{}, PendingIDs: []string{}, Flags: map[string]int{}}
 	var minS, maxE int64
@@ -219,6 +223,13 @@ func (c *Collector) summary(ctx context.Context, id string, evs []core.Event) (S
 	if maxE > minS && minS > 0 {
 		s.DurationNs = maxE - minS
 	}
+	return s
+}
+
+// summary combines the cached event-derived summary with live state
+// (seal info, ledger, drop and quarantine counters).
+func (c *Collector) summary(ctx context.Context, id string, base Summary) (Summary, error) {
+	s := base // maps are shared read-only
 	si, err := c.st.GetSeal(ctx, id)
 	if err != nil {
 		return s, err
@@ -236,5 +247,122 @@ func (c *Collector) summary(ctx context.Context, id string, evs []core.Event) (S
 		s.PendingIDs = nonNil(st.Open)
 	}
 	s.PendingAsync = len(s.PendingIDs)
+	q := st.Quarantined
+	if si != nil && si.Quarantined > q {
+		q = si.Quarantined
+	}
+	if q > 0 {
+		s.Quarantined = q
+		s.Incomplete = true
+		fl := make(map[string]int, len(base.Flags)+1)
+		for k, v := range base.Flags {
+			fl[k] = v
+		}
+		fl["quarantined"] = q
+		s.Flags = fl
+	}
 	return s, nil
+}
+
+// maxViews bounds the per-session view cache.
+const maxViews = 16
+
+// viewEntry caches the resolved events of one session and the documents
+// derived from them, valid while the session's head Seq and seal are unchanged.
+type viewEntry struct {
+	head     uint64
+	sealedNs int64
+	evs      []core.Event
+	used     uint64
+
+	mu    sync.Mutex
+	trace *Trace
+	ents  []Entity
+	sum   *Summary
+}
+
+func (v *viewEntry) getTrace(id string) Trace {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.trace == nil {
+		t := BuildTrace(id, v.evs)
+		v.trace = &t
+	}
+	return *v.trace
+}
+
+func (v *viewEntry) getEntities() []Entity {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.ents == nil {
+		v.ents = ListEntities(v.evs)
+	}
+	return v.ents
+}
+
+func (v *viewEntry) getSummary(id string) Summary {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.sum == nil {
+		s := buildSummary(id, v.evs)
+		v.sum = &s
+	}
+	return *v.sum
+}
+
+// viewOf returns the session's resolved events, recomputing only when a new
+// Seq was stored or the seal changed since the cached copy. Reads never touch
+// the sequencer.
+func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
+	head, err := c.st.Head(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	si, err := c.st.GetSeal(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var sealedNs int64
+	if si != nil {
+		sealedNs = si.SealedAt.UnixNano() | 1
+	}
+	c.vmu.Lock()
+	if e := c.views[id]; e != nil && e.head == head && e.sealedNs == sealedNs {
+		c.vtick++
+		e.used = c.vtick
+		c.vmu.Unlock()
+		return e, nil
+	}
+	c.vmu.Unlock()
+
+	evs, err := c.st.Events(ctx, id, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	var orph map[string]bool
+	if si != nil {
+		orph = setOf(si.Orphaned)
+	}
+	e := &viewEntry{head: head, sealedNs: sealedNs, evs: resolve(evs, nil, si != nil, orph)}
+	if n := len(e.evs); n > 0 {
+		e.head = e.evs[n-1].Seq // never label the entry newer than its content
+	} else {
+		e.head = 0
+	}
+	c.vmu.Lock()
+	c.vtick++
+	e.used = c.vtick
+	c.views[id] = e
+	for len(c.views) > maxViews {
+		var oldID string
+		var oldUsed uint64 = ^uint64(0)
+		for k, v := range c.views {
+			if v.used < oldUsed {
+				oldID, oldUsed = k, v.used
+			}
+		}
+		delete(c.views, oldID)
+	}
+	c.vmu.Unlock()
+	return e, nil
 }

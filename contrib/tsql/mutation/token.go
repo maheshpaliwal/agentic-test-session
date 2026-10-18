@@ -74,7 +74,8 @@ func tokenize(s string, d Dialect) (toks []token, named bool) {
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
 			i++
-		case c == '-' && i+1 < n && s[i+1] == '-', c == '#' && d == MySQL:
+		case c == '-' && i+1 < n && s[i+1] == '-' && (d == Postgres || i+2 >= n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\n' || s[i+2] == '\r'),
+			c == '#' && d == MySQL:
 			for i < n && s[i] != '\n' {
 				i++
 			}

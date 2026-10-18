@@ -8,6 +8,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"tsession/core"
+	"tsession/internal/redisx"
 )
 
 func setup(t *testing.T, opts ...Option) (redis.UniversalClient, *core.MemRecorder, context.Context) {
@@ -128,7 +129,7 @@ func TestErrorAndAuthRedaction(t *testing.T) {
 	if ev[1].Err == "" || len(ev[1].Mutations) != 0 {
 		t.Fatalf("%+v", ev[1])
 	}
-	got := reqArgs([]any{"AUTH", "user", "hunter2"})
+	got := (&hook{Redactor: redisx.Redactor{Capture: true}}).MaskArgs("AUTH", []any{"AUTH", "user", "hunter2"}, nil)
 	if got[2] != "[REDACTED]" {
 		t.Fatal(got)
 	}

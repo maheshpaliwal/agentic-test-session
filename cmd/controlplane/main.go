@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +30,9 @@ func main() {
 	collector := flag.String("collector-url", env("TSESSION_COLLECTOR_URL", "http://127.0.0.1:7071"), "collector base URL")
 	storeFile := flag.String("store-file", env("TSESSION_CP_STORE", ""), "optional JSON file for session persistence")
 	ttl := flag.Int("default-ttl", envInt("TSESSION_CP_DEFAULT_TTL", 3600), "default session TTL (seconds)")
+	hosts := flag.String("allowed-hosts", env("TSESSION_CP_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (e.g. controlplane:7070); default loopback only")
+	origins := flag.String("allowed-origins", env("TSESSION_CP_ALLOWED_ORIGINS", ""), "comma-separated browser Origins allowed to call the API (default none)")
+	retention := flag.Duration("retention", envDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -50,6 +54,10 @@ func main() {
 		Collector:  &controlplane.HTTPCollector{BaseURL: *collector, Client: &http.Client{Timeout: 30 * time.Second}},
 		Logger:     log,
 		DefaultTTL: *ttl,
+		Retention:  *retention,
+
+		AllowedHosts:   splitCSV(*hosts),
+		AllowedOrigins: splitCSV(*origins),
 	})
 	defer m.Close()
 
@@ -77,4 +85,21 @@ func envInt(k string, d int) int {
 		return n
 	}
 	return d
+}
+
+func envDur(k string, d time.Duration) time.Duration {
+	if v, err := time.ParseDuration(os.Getenv(k)); err == nil && v > 0 {
+		return v
+	}
+	return d
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

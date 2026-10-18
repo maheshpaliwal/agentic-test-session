@@ -22,7 +22,8 @@ import (
 
 const DefaultURL = "http://127.0.0.1:7070"
 
-// ErrConflict is returned by Start when an exclusive session is already running.
+// ErrConflict is returned by Start on HTTP 409: an exclusive session is already
+// running, or a binding is held by another active session (error text carries the conflicting id).
 var ErrConflict = errors.New("tsession: exclusive session already running")
 
 // Options configure Start. Zero values use control-plane defaults.
@@ -34,14 +35,55 @@ type Options struct {
 	QuiesceSeconds  int
 	MaxDrainSeconds int
 	InitiatedBy     string // default "client"
-	HTTPClient      *http.Client
-	PollInterval    time.Duration // Wait polling; default 200ms
+	// Bindings attribute requests carrying matching attributes to this session
+	// (no x-tsession-id needed). Not allowed with Mode "exclusive". jwt_claim
+	// bindings read an UNVERIFIED JWT payload: traffic can be spoofed; test
+	// environments only.
+	Bindings     []Binding
+	HTTPClient   *http.Client
+	PollInterval time.Duration // Wait polling; default 200ms
+}
+
+// Binding is {source, name, value}; source is header|jwt_claim|cookie|query.
+type Binding struct {
+	Source string `json:"source"`
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+}
+
+// Bind builds a Binding.
+func Bind(source, name, value string) Binding { return Binding{source, name, value} }
+
+// BindHeader, BindJWT, BindCookie and BindQuery are shorthands for Bind.
+func BindHeader(name, value string) Binding { return Bind("header", name, value) }
+func BindJWT(claim, value string) Binding   { return Bind("jwt_claim", claim, value) }
+func BindCookie(name, value string) Binding { return Bind("cookie", name, value) }
+func BindQuery(name, value string) Binding  { return Bind("query", name, value) }
+
+// ParseBinding parses "header:x-user-id=u_1", "jwt:sub=u_1" (also jwt_claim),
+// "cookie:sid=x" or "query:uid=1".
+func ParseBinding(s string) (Binding, error) {
+	src, rest, ok := strings.Cut(s, ":")
+	name, val, ok2 := strings.Cut(rest, "=")
+	if src == "jwt" {
+		src = "jwt_claim"
+	}
+	switch src {
+	case "header", "jwt_claim", "cookie", "query":
+	default:
+		ok = false
+	}
+	if !ok || !ok2 || name == "" || val == "" {
+		return Binding{}, fmt.Errorf("tsession: invalid binding %q (want source:name=value; source header|jwt|cookie|query)", s)
+	}
+	return Binding{src, name, val}, nil
 }
 
 // Info is the control plane's view of a session.
 type Info struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
+	NameAuto        bool      `json:"name_auto"`
 	Mode            string    `json:"mode"`
 	State           string    `json:"state"`
 	InitiatedBy     string    `json:"initiated_by"`
@@ -54,6 +96,7 @@ type Info struct {
 	Incomplete      bool      `json:"incomplete"`
 	DroppedEvents   int64     `json:"dropped_events"`
 	BundleURI       string    `json:"bundle_uri"`
+	Bindings        []Binding `json:"bindings,omitempty"`
 }
 
 // Done reports whether the session reached a terminal state.
@@ -105,6 +148,9 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 		"quiesce_seconds": o.QuiesceSeconds, "max_drain_seconds": o.MaxDrainSeconds,
 		"initiated_by": o.InitiatedBy,
 	}
+	if len(o.Bindings) > 0 {
+		body["bindings"] = o.Bindings
+	}
 	s := newSession(o, Info{})
 	var info Info
 	if err := s.do(ctx, http.MethodPost, "/v1/sessions", body, &info); err != nil {
@@ -144,6 +190,18 @@ func (s *Session) Get(ctx context.Context) (Info, error) {
 func (s *Session) Stop(ctx context.Context) (Info, error) {
 	var info Info
 	if err := s.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(s.ID)+"/stop", nil, &info); err != nil {
+		return Info{}, err
+	}
+	s.set(info)
+	return info, nil
+}
+
+// Rename relabels the session (allowed in any state, including SEALED). The
+// name may contain templates ({bind}, {bind.<n>}, {initiated_by}, {time},
+// {date}); the server expands and sanitises it.
+func (s *Session) Rename(ctx context.Context, name string) (Info, error) {
+	var info Info
+	if err := s.do(ctx, http.MethodPatch, "/v1/sessions/"+url.PathEscape(s.ID), map[string]string{"name": name}, &info); err != nil {
 		return Info{}, err
 	}
 	s.set(info)
@@ -251,12 +309,21 @@ func (s *Session) do(ctx context.Context, method, path string, in, out any) erro
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		var e struct {
-			Error string `json:"error"`
+			Error              string   `json:"error"`
+			ConflictingSession string   `json:"conflicting_session"`
+			SessionID          string   `json:"session_id"`
+			Binding            *Binding `json:"binding"`
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = json.Unmarshal(b, &e)
 		if e.Error == "" {
 			e.Error = strings.TrimSpace(string(b))
+		}
+		if id := firstNonEmpty(e.ConflictingSession, e.SessionID); id != "" {
+			e.Error += " (held by session " + id + ")"
+		}
+		if e.Binding != nil {
+			e.Error += " binding " + e.Binding.Source + ":" + e.Binding.Name
 		}
 		if resp.StatusCode == http.StatusConflict && method == http.MethodPost && path == "/v1/sessions" {
 			return fmt.Errorf("%w: %s", ErrConflict, e.Error)
@@ -278,4 +345,11 @@ func List(ctx context.Context, o Options, state string) ([]Info, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

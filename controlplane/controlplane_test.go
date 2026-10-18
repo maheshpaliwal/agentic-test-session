@@ -183,7 +183,12 @@ func TestExclusiveConflict(t *testing.T) {
 	h := m.Handler()
 	post := func(path, body string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(body)))
+		r := httptest.NewRequest("POST", path, strings.NewReader(body))
+		r.Host = "127.0.0.1:7070"
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		h.ServeHTTP(w, r)
 		return w
 	}
 	w := post("/v1/sessions", `{"mode":"exclusive","name":"one"}`)
@@ -224,6 +229,9 @@ func TestTTLExpiry(t *testing.T) {
 	go m.Run(ctx)
 	s, _ := m.Start(StartRequest{TTLSeconds: 3}) // 30ms
 	got := waitState(t, m, s.ID, StateExpired)
+	if f.sealed.Load() != 1 || got.Reason != "ttl" || got.SealError != "" || got.Incomplete {
+		t.Fatalf("ttl must seal cleanly: %+v sealed=%d", got, f.sealed.Load())
+	}
 	if got.EndedAt.IsZero() || len(m.Active().Active) != 0 {
 		t.Fatalf("%+v", got)
 	}
@@ -373,5 +381,74 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 	fs3, _ := NewFileStore(path)
 	if got, _ := fs3.Get(s.ID); got.State != StateSealed {
 		t.Fatalf("persisted %+v", got)
+	}
+}
+
+func TestTTLGoesThroughDraining(t *testing.T) {
+	f := newFakeCollector(t)
+	f.set(1, time.Now(), 0) // pending forever -> stays DRAINING until max_drain
+	m := newMgr(t, f, func(c *Config) { c.SweepInterval = 5 * time.Millisecond })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	s, _ := m.Start(StartRequest{TTLSeconds: 2, QuiesceSeconds: 1, MaxDrainSeconds: 20}) // drain up to 200ms
+	d := waitState(t, m, s.ID, StateDraining)
+	if d.Reason != "ttl" || len(m.Active().Active) != 1 {
+		t.Fatalf("draining: %+v", d)
+	}
+	got := waitState(t, m, s.ID, StateExpired)
+	if !got.Incomplete || f.sealed.Load() != 1 {
+		t.Fatalf("drain timeout should be incomplete: %+v", got)
+	}
+}
+
+func TestTTLSealFailureMarksSealedIncomplete(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/seal") {
+			calls.Add(1)
+			http.Error(w, "boom", 500)
+			return
+		}
+		json.NewEncoder(w).Encode(DrainStatus{})
+	}))
+	defer srv.Close()
+	m := NewManager(Config{
+		Collector: &HTTPCollector{BaseURL: srv.URL}, PollInterval: 5 * time.Millisecond,
+		SweepInterval: 5 * time.Millisecond, TimeUnit: 10 * time.Millisecond,
+		SealRetryBudget: 300 * time.Millisecond,
+	})
+	defer m.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	s, _ := m.Start(StartRequest{TTLSeconds: 2, QuiesceSeconds: 1})
+	got := waitState(t, m, s.ID, StateSealed)
+	if !got.Incomplete || got.SealError == "" || got.Reason != "ttl" || calls.Load() < 3 {
+		t.Fatalf("got %+v calls=%d", got, calls.Load())
+	}
+}
+
+func TestSealRetrySucceedsAfterTransientFailure(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/seal") {
+			if calls.Add(1) < 3 {
+				http.Error(w, "boom", 500)
+				return
+			}
+			json.NewEncoder(w).Encode(SealResult{BundleURI: "b"})
+			return
+		}
+		json.NewEncoder(w).Encode(DrainStatus{})
+	}))
+	defer srv.Close()
+	m := NewManager(Config{Collector: &HTTPCollector{BaseURL: srv.URL}, PollInterval: 5 * time.Millisecond, TimeUnit: 10 * time.Millisecond})
+	defer m.Close()
+	s, _ := m.Start(StartRequest{QuiesceSeconds: 1})
+	m.Stop(s.ID)
+	got := waitState(t, m, s.ID, StateSealed)
+	if got.Incomplete || got.SealError != "" || got.BundleURI != "b" {
+		t.Fatalf("%+v", got)
 	}
 }

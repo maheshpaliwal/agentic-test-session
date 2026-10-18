@@ -127,7 +127,7 @@ func TestExporterBatchingAndRetry(t *testing.T) {
 	if len(evs) != 25 || posts != 3 {
 		t.Fatalf("events=%d posts=%d", len(evs), posts)
 	}
-	if fc.inst != "inst-1" {
+	if !strings.HasPrefix(fc.inst, "inst-1-") || fc.inst != core.GetConfig().Instance {
 		t.Fatalf("instance header %q", fc.inst)
 	}
 }
@@ -310,7 +310,7 @@ func TestEndToEnd(t *testing.T) {
 		if e.Name != "probe" {
 			got = append(got, e.Name)
 		}
-		if e.Service != "orders" || e.Instance != "i-1" {
+		if e.Service != "orders" || !strings.HasPrefix(e.Instance, "i-1-") {
 			t.Fatalf("bad identity %+v", e)
 		}
 		if e.Name == "INSERT" && (!e.Req.Redacted || strings.Contains(string(e.Req.Inline), `"p"`)) {
@@ -379,5 +379,82 @@ func TestTransportInjectsAndIsIdempotent(t *testing.T) {
 	Stop()
 	if http.DefaultTransport != orig {
 		t.Fatal("transport not restored")
+	}
+}
+
+type testAttrs map[string]string
+
+func (a testAttrs) Get(s, n string) string { return a[s+":"+n] }
+
+func TestSubscriberBindings(t *testing.T) {
+	cp := newFakeCP(`{"active":["ts_1"],"exclusive":""}`) // older CP: no bindings field
+	srv := httptest.NewServer(cp.mux())
+	defer srv.Close()
+	s := NewSubscriber(srv.URL)
+	defer s.Close()
+	eventually(t, "initial", func() bool { return s.IsActive("ts_1") })
+	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); ok || len(s.BindingKeys()) != 0 {
+		t.Fatal("no bindings field must mean no matches / no keys")
+	}
+	cp.set(`{"active":["ts_1","ts_2"],"kill":false,"bindings":[{"session_id":"ts_1","source":"header","name":"X-User-Id","value":"u1"},{"session_id":"ts_2","source":"jwt_claim","name":"sub","value":"u2"}]}`)
+	eventually(t, "bindings", func() bool { return len(s.BindingKeys()) == 2 })
+	if id, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); !ok || id != "ts_1" {
+		t.Fatal(id, ok)
+	}
+	if id, k, ok := s.MatchAttrsKey(testAttrs{"jwt_claim:sub": "u2"}); !ok || id != "ts_2" || k.String() != "jwt_claim:sub" {
+		t.Fatal(id, k, ok)
+	}
+	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "other"}); ok {
+		t.Fatal("unknown value matched")
+	}
+	cp.set(`{"active":["ts_1","ts_2"],"kill":true,"bindings":[{"session_id":"ts_1","source":"header","name":"x-user-id","value":"u1"}]}`)
+	eventually(t, "kill", func() bool { return !s.IsActive("ts_1") })
+	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); ok || len(s.BindingKeys()) != 0 {
+		t.Fatal("kill switch must disable bindings")
+	}
+	cp.set(`{"active":["ts_2"],"kill":false,"bindings":[{"session_id":"ts_2","source":"jwt_claim","name":"sub","value":"u2"}]}`)
+	eventually(t, "stopped", func() bool { return !s.IsActive("ts_1") && len(s.BindingKeys()) == 1 })
+	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); ok {
+		t.Fatal("stopped session's binding must not match")
+	}
+}
+
+func TestSubscriberBindingsViaPoll(t *testing.T) {
+	m := http.NewServeMux()
+	m.HandleFunc("/v1/active", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"active":["ts_p"],"bindings":[{"session_id":"ts_p","source":"query","name":"uid","value":"7"}]}`)
+	})
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+	s := NewSubscriber(srv.URL)
+	defer s.Close()
+	eventually(t, "poll", func() bool { id, ok := s.MatchAttrs(testAttrs{"query:uid": "7"}); return ok && id == "ts_p" })
+}
+
+func TestSubscriberPriorityAmbiguityStats(t *testing.T) {
+	cp := newFakeCP(`{"active":["ts_1","ts_2"],"bindings":[{"session_id":"ts_1","source":"header","name":"x-wms-uid","value":"1"},{"session_id":"ts_2","source":"header","name":"name","value":"bob"}]}`)
+	srv := httptest.NewServer(cp.mux())
+	defer srv.Close()
+	s := NewSubscriber(srv.URL)
+	defer s.Close()
+	eventually(t, "bindings", func() bool { return len(s.BindingKeys()) == 2 })
+	both := testAttrs{"header:x-wms-uid": "1", "header:name": "bob"}
+	before := GetStats().BindingAmbiguous
+	if m := s.MatchAttrsDetail(both); m.OK || !m.Ambiguous {
+		t.Fatalf("expected ambiguous: %+v", m)
+	}
+	if GetStats().BindingAmbiguous != before+1 {
+		t.Fatal("stats counter")
+	}
+	core.SetBindPriority(core.ParseBindPriority("header:x-wms-uid,header:name"))
+	defer core.SetBindPriority(nil)
+	if m := s.MatchAttrsDetail(both); !m.OK || m.SessionID != "ts_1" || m.Fallback {
+		t.Fatalf("%+v", m)
+	}
+	if m := s.MatchAttrsDetail(testAttrs{"header:x-wms-uid": "9", "header:name": "bob"}); m.OK || m.Ambiguous {
+		t.Fatalf("unbound priority key must not fall through: %+v", m)
+	}
+	if m := s.MatchAttrsDetail(testAttrs{"header:name": "bob"}); !m.OK || m.SessionID != "ts_2" || !m.Fallback {
+		t.Fatalf("%+v", m)
 	}
 }

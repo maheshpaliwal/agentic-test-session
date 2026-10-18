@@ -3,6 +3,7 @@ package tmongo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -159,5 +160,64 @@ func TestApplyChainAndIdempotent(t *testing.T) {
 	o2 := options.Client()
 	if Apply(o2); o2.Monitor != nil {
 		t.Fatal("disabled Apply must not install a monitor")
+	}
+}
+
+func commitCmd(t *testing.T) bson.D {
+	lsid := bson.D{{Key: "id", Value: bson.Binary{Subtype: 4, Data: []byte{0xab, 0xcd}}}}
+	return bson.D{{Key: "commitTransaction", Value: 1}, {Key: "lsid", Value: lsid},
+		{Key: "txnNumber", Value: int64(3)}, {Key: "autocommit", Value: false}}
+}
+
+func TestCommitSuccessAndFailure(t *testing.T) {
+	m, rec, ctx := setup(t)
+	run(t, m, ctx, "commitTransaction", "admin", commitCmd(t), bson.D{{Key: "ok", Value: 1.0}})
+	id := reqID.Add(1)
+	m.Started(ctx, &event.CommandStartedEvent{CommandName: "commitTransaction", DatabaseName: "admin", RequestID: id, Command: mustRaw(t, commitCmd(t))})
+	m.Failed(ctx, &event.CommandFailedEvent{CommandFinishedEvent: event.CommandFinishedEvent{RequestID: id}, Failure: errors.New("commit boom")})
+	ev := rec.Events()
+	if len(ev) != 2 {
+		t.Fatalf("%+v", ev)
+	}
+	if ev[0].Kind != core.KindDBTxCommit || ev[0].Err != "" || ev[0].Attrs["commit_failed"] != "" || ev[0].TxID != "abcd-3" {
+		t.Fatalf("%+v", ev[0])
+	}
+	if ev[1].Kind != core.KindDBTxRollbck || ev[1].Attrs["commit_failed"] != "true" || ev[1].Err != "commit boom" || ev[1].TxID != "abcd-3" {
+		t.Fatalf("%+v", ev[1])
+	}
+}
+
+func TestDocumentsAndPipelinesRedacted(t *testing.T) {
+	m, rec, ctx := setup(t)
+	run(t, m, ctx, "insert", "app", bson.D{{Key: "insert", Value: "users"},
+		{Key: "documents", Value: bson.A{bson.D{{Key: "_id", Value: 1}, {Key: "name", Value: "ann"}, {Key: "password", Value: "pw-ins-1"},
+			{Key: "profile", Value: bson.D{{Key: "api_key", Value: "key-ins-2"}}}}}}}, bson.D{{Key: "ok", Value: 1.0}, {Key: "n", Value: int32(1)}})
+	run(t, m, ctx, "update", "app", bson.D{{Key: "update", Value: "users"}, {Key: "updates", Value: bson.A{bson.D{
+		{Key: "q", Value: bson.D{{Key: "_id", Value: 1}, {Key: "token", Value: "tok-q-3"}}},
+		{Key: "u", Value: bson.D{{Key: "$set", Value: bson.D{{Key: "password", Value: "pw-upd-4"}}}}}}}}},
+		bson.D{{Key: "ok", Value: 1.0}, {Key: "n", Value: int32(1)}})
+	run(t, m, ctx, "aggregate", "app", bson.D{{Key: "aggregate", Value: "users"}, {Key: "pipeline", Value: bson.A{
+		bson.D{{Key: "$match", Value: bson.D{{Key: "secret", Value: "sec-agg-5"}}}},
+		bson.D{{Key: "$match", Value: bson.D{{Key: "$expr", Value: bson.D{{Key: "$eq", Value: bson.A{"$user.password", "pw-expr-6"}}}}}}},
+	}}}, bson.D{{Key: "ok", Value: 1.0}, {Key: "cursor", Value: bson.D{{Key: "id", Value: int64(0)},
+		{Key: "firstBatch", Value: bson.A{bson.D{{Key: "_id", Value: 1}, {Key: "password", Value: "pw-reply-7"}, {Key: "name", Value: "ann"}}}}}}})
+	var all strings.Builder
+	for _, e := range rec.Events() {
+		all.WriteString(string(e.Req.Inline) + string(e.Resp.Inline))
+		for _, mu := range e.Mutations {
+			all.WriteString(string(mu.After.Inline) + string(mu.Before.Inline) + fmt.Sprint(mu.PK))
+		}
+		for _, r := range e.Reads {
+			all.WriteString(string(r.Args.Inline) + string(r.Sample.Inline))
+		}
+	}
+	txt := all.String()
+	for _, bad := range []string{"pw-ins-1", "key-ins-2", "tok-q-3", "pw-upd-4", "sec-agg-5", "pw-expr-6", "pw-reply-7"} {
+		if strings.Contains(txt, bad) {
+			t.Errorf("leaked %q in %s", bad, txt)
+		}
+	}
+	if !strings.Contains(txt, "ann") {
+		t.Error("over-redacted")
 	}
 }

@@ -29,7 +29,7 @@ func defaultConfig() *config {
 		sampleRows: 5,
 		maxArgs:    64,
 		maxArgLen:  256,
-		captureTO:  5 * time.Second,
+		captureTO:  500 * time.Millisecond,
 	}
 }
 
@@ -42,6 +42,14 @@ func WithStore(store string) Option { return func(c *config) { c.store = store }
 
 // WithImages toggles before/after image capture (extra same-connection
 // SELECTs around UPDATE/DELETE and PK re-reads). Default true.
+//
+// Caveat: the pre-image SELECT is a plain unlocked read issued before the
+// application's statement. Outside a transaction (or under READ COMMITTED) a
+// concurrent writer can change the rows between the pre-image, the statement
+// and the re-read, so before/after can show another writer's change or miss
+// rows; images are best-effort evidence, not an atomic snapshot. Inside a
+// Postgres transaction the capture runs in a SAVEPOINT so a failing capture
+// cannot abort the application's transaction; it is skipped under SERIALIZABLE.
 func WithImages(on bool) Option { return func(c *config) { c.images = on } }
 
 // WithCaptureAfterImage lets the layer append "RETURNING *" to Postgres
@@ -98,6 +106,20 @@ func WithSampleRows(n int) Option {
 	return func(c *config) {
 		if n >= 0 {
 			c.sampleRows = n
+		}
+	}
+}
+
+// WithCaptureTimeout bounds each capture query (pre-image and re-read);
+// default 500ms. It never exceeds the caller context's deadline. On timeout
+// the image is dropped and the event is flagged "image_timeout". Inside a
+// Postgres transaction the limit is also enforced server-side with a
+// transaction-local statement_timeout, so no client-side cancel (which can
+// drop the connection) is normally needed.
+func WithCaptureTimeout(d time.Duration) Option {
+	return func(c *config) {
+		if d > 0 {
+			c.captureTO = d
 		}
 	}
 }

@@ -1,0 +1,15 @@
+# build output
+/cmd/tracectl/tracectl
+/bin/
+*.test
+*.out
+
+# local config and secrets (docker/.env.example is the template)
+docker/.env
+.env
+*.pem
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/

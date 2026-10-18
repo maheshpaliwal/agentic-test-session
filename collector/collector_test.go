@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"tsession/collector/store"
 	"tsession/core"
@@ -127,7 +128,7 @@ func TestDuplicateIngestIgnored(t *testing.T) {
 		t.Fatalf("stored %d", n)
 	}
 	// dedupe survives a sequencer restart (state reloaded from the store)
-	c.seq.Close()
+	c.seq.evictAll()
 	if r := post(t, srv.URL, e); r.Duplicates != 1 {
 		t.Fatalf("after restart: %+v", r)
 	}
@@ -367,35 +368,50 @@ func TestSealBundleHash(t *testing.T) {
 
 func TestIngestLimitsAndValidation(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Window, cfg.MaxBodyBytes, cfg.MaxLineBytes = 0, 2048, 512
+	cfg.Window, cfg.MaxBodyBytes, cfg.MaxLineBytes = 0, 4096, 512
 	c := New(store.NewMem(), cfg)
 	defer c.Close()
 	srv := httptest.NewServer(c.Handler())
 	defer srv.Close()
+	postRaw := func(body string) (int, IngestResult) {
+		resp, err := http.Post(srv.URL+"/v1/ingest", "application/x-ndjson", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var r IngestResult
+		_ = json.NewDecoder(resp.Body).Decode(&r)
+		return resp.StatusCode, r
+	}
+	line := func(e core.Event) string { b, _ := json.Marshal(e); return string(b) + "\n" }
 
+	// an oversize line is rejected on its own; neighbours are processed, 200.
 	big := ev("x", core.KindAPIIn, 1, 1)
 	big.Name = strings.Repeat("a", 1000)
-	b, _ := json.Marshal(big)
-	resp, _ := http.Post(srv.URL+"/v1/ingest", "", bytes.NewReader(append(b, '\n')))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("long line: %d", resp.StatusCode)
+	code, r := postRaw(line(ev("a", core.KindAPIIn, 1, 1)) + line(big) + line(ev("b", core.KindAPIIn, 2, 2)))
+	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_line"] != 1 {
+		t.Fatalf("oversize: %d %+v", code, r)
 	}
-	resp, _ = http.Post(srv.URL+"/v1/ingest", "", strings.NewReader(strings.Repeat("{}\n", 2000)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("big body: %d", resp.StatusCode)
+	// oversize last line without trailing newline
+	code, r = postRaw(line(ev("c", core.KindAPIIn, 3, 3)) + strings.Repeat("z", 2000))
+	if code != 200 || r.Accepted != 1 || r.RejectedReasons["oversize_line"] != 1 {
+		t.Fatalf("oversize tail: %d %+v", code, r)
+	}
+	// whole body limit still 413
+	if code, _ = postRaw(strings.Repeat("{}\n", 4000)); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("big body: %d", code)
 	}
 	bad := ev("y", core.KindAPIIn, 1, 1)
 	bad.SessionID = "../etc"
-	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(bad)
-	buf.WriteString("not json\n")
-	resp, _ = http.Post(srv.URL+"/v1/ingest", "", &buf)
-	var r IngestResult
-	_ = json.NewDecoder(resp.Body).Decode(&r)
-	resp.Body.Close()
-	if r.Accepted != 0 || r.Rejected != 2 {
-		t.Fatalf("%+v", r)
+	code, r = postRaw(line(bad) + "not json\n")
+	if code != 200 || r.Accepted != 0 || r.Rejected != 2 || r.RejectedReasons["invalid_session_id"] != 1 || r.RejectedReasons["invalid_json"] != 1 {
+		t.Fatalf("%d %+v", code, r)
+	}
+}
+
+func TestDefaults(t *testing.T) {
+	d := DefaultConfig()
+	if d.Window != 500*time.Millisecond || d.MaxLineBytes != 4<<20 || d.IdleEvict != 5*time.Minute {
+		t.Fatalf("%+v", d)
 	}
 }

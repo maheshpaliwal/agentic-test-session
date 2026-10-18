@@ -1,6 +1,7 @@
 package tgrpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,9 @@ import (
 	"tsession/core"
 )
 
+// Request/response metadata (authorization, cookie, x-api-key, ...) is never
+// recorded, only the trace context is read from / written to it.
+
 // maxStreamMsgs bounds how many stream messages are kept per direction.
 const maxStreamMsgs = 50
 
@@ -33,18 +37,40 @@ func (c mdCarrier) Get(key string) string {
 
 func (c mdCarrier) Set(key, val string) { c.md.Set(strings.ToLower(key), val) }
 
-// toJSON renders a message as JSON: protojson for protobuf, encoding/json otherwise.
+// toJSON renders a message as JSON (protojson for protobuf, encoding/json
+// otherwise) with sensitive field names masked at every depth via
+// core.RedactAny. Redaction happens here, on the full message, in addition to
+// the structural pass core.Payload applies later. Non-JSON output is scrubbed
+// with core.RedactText.
 func toJSON(m any) json.RawMessage {
+	var raw []byte
 	if pm, ok := m.(proto.Message); ok {
 		if b, err := protojson.Marshal(pm); err == nil {
-			return b
+			raw = b
 		}
 	}
-	if b, err := json.Marshal(m); err == nil {
+	if raw == nil {
+		if b, err := json.Marshal(m); err == nil {
+			raw = b
+		}
+	}
+	if raw == nil {
+		b, _ := json.Marshal("<unmarshalable>")
 		return b
 	}
-	b, _ := json.Marshal("<unmarshalable>")
-	return b
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // keep int64 precision
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		b, _ := json.Marshal(core.RedactText(string(raw)))
+		return b
+	}
+	out, err := json.Marshal(core.RedactAny(v))
+	if err != nil {
+		b, _ := json.Marshal("<unmarshalable>")
+		return b
+	}
+	return out
 }
 
 func finish(span *core.Span, req, resp any, err error) {

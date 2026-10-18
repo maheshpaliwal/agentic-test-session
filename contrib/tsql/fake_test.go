@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"tsession/contrib/tsql"
 	"tsession/core"
@@ -40,6 +42,28 @@ type fakeDB struct {
 	skipCtx bool // ExecerContext/QueryerContext answer ErrSkip
 	commits int
 	rbacks  int
+
+	// abortModel mimics Postgres: after an error every statement fails with
+	// "current transaction is aborted" until ROLLBACK TO SAVEPOINT; COMMIT of
+	// an aborted tx fails.
+	abortModel bool
+	aborted    bool
+	// slow makes matching queries block (honouring ctx) for the returned duration.
+	slow func(q string) time.Duration
+}
+
+func (f *fakeDB) wait(ctx context.Context, q string) error {
+	if f.slow == nil {
+		return nil
+	}
+	if d := f.slow(q); d > 0 {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func (f *fakeDB) record(c call) {
@@ -48,17 +72,48 @@ func (f *fakeDB) record(c call) {
 	f.mu.Unlock()
 }
 
-func (f *fakeDB) Calls() []call {
+// RawCalls returns every statement including the capture fence
+// (SAVEPOINT / BEGIN READ ONLY / timeout bookkeeping).
+func (f *fakeDB) RawCalls() []call {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]call(nil), f.calls...)
 }
 
+// Calls returns the statements without the capture fence.
+func (f *fakeDB) Calls() []call {
+	var out []call
+	for _, c := range f.RawCalls() {
+		switch {
+		case c.SQL == "BEGIN READ ONLY", c.SQL == "ROLLBACK", strings.Contains(c.SQL, "SAVEPOINT ts_capture"),
+			strings.Contains(c.SQL, "set_config('statement_timeout'"):
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func (f *fakeDB) answer(q string, args []driver.Value) result {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.abortModel {
+		if strings.HasPrefix(q, "ROLLBACK TO") {
+			f.aborted = false
+			return result{}
+		}
+		if f.aborted {
+			return result{err: errors.New("current transaction is aborted, commands ignored until end of transaction block")}
+		}
+	}
 	if f.handler == nil {
 		return result{}
 	}
-	return f.handler(q, args)
+	r := f.handler(q, args)
+	if f.abortModel && r.err != nil {
+		f.aborted = true
+	}
+	return r
 }
 
 func (f *fakeDB) Open(string) (driver.Conn, error) {
@@ -84,9 +139,12 @@ func (c *fakeConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error)
 	return fakeTx{c.db}, nil
 }
 
-func (c *fakeConn) ExecContext(_ context.Context, q string, a []driver.NamedValue) (driver.Result, error) {
+func (c *fakeConn) ExecContext(ctx context.Context, q string, a []driver.NamedValue) (driver.Result, error) {
 	if c.db.skipCtx {
 		return nil, driver.ErrSkip
+	}
+	if err := c.db.wait(ctx, q); err != nil {
+		return nil, err
 	}
 	vals := values(a)
 	c.db.record(call{q, vals, "exec"})
@@ -94,9 +152,12 @@ func (c *fakeConn) ExecContext(_ context.Context, q string, a []driver.NamedValu
 	return fakeResult{r}, r.err
 }
 
-func (c *fakeConn) QueryContext(_ context.Context, q string, a []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) QueryContext(ctx context.Context, q string, a []driver.NamedValue) (driver.Rows, error) {
 	if c.db.skipCtx {
 		return nil, driver.ErrSkip
+	}
+	if err := c.db.wait(ctx, q); err != nil {
+		return nil, err
 	}
 	vals := values(a)
 	c.db.record(call{q, vals, "query"})
@@ -109,7 +170,15 @@ func (c *fakeConn) QueryContext(_ context.Context, q string, a []driver.NamedVal
 
 type fakeTx struct{ db *fakeDB }
 
-func (t fakeTx) Commit() error   { t.db.mu.Lock(); t.db.commits++; t.db.mu.Unlock(); return nil }
+func (t fakeTx) Commit() error {
+	t.db.mu.Lock()
+	defer t.db.mu.Unlock()
+	if t.db.aborted {
+		return errors.New("commit of aborted transaction")
+	}
+	t.db.commits++
+	return nil
+}
 func (t fakeTx) Rollback() error { t.db.mu.Lock(); t.db.rbacks++; t.db.mu.Unlock(); return nil }
 
 type fakeStmt struct {
@@ -219,4 +288,8 @@ func sqls(cs []call) string {
 		b.WriteString(c.SQL + "\n")
 	}
 	return b.String()
+}
+
+func contextWithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, d)
 }

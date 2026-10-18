@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -98,4 +99,99 @@ func TestAMQPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertLinked(t, rec)
+}
+
+func TestKafkaNoSessionSingleBatch(t *testing.T) {
+	rec, _ := setup(t, true)
+	calls := 0
+	w := kw{func(m ...kafka.Message) { calls++; _ = m }}
+	if err := ProduceMessages(context.Background(), w, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"}); err != nil || calls != 1 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+	if len(rec.Events()) != 0 {
+		t.Fatal("no session must be untraced")
+	}
+}
+
+type kw struct{ f func(...kafka.Message) }
+
+func (k kw) WriteMessages(_ context.Context, m ...kafka.Message) error { k.f(m...); return nil }
+
+func TestKafkaPerMessageSpansOption(t *testing.T) {
+	rec, ctx := setup(t, true)
+	calls := 0
+	w := kw{func(...kafka.Message) { calls++ }}
+	_ = ProduceMessages(ctx, w, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"})
+	if calls != 2 || len(byKind(rec.Events(), core.KindQueuePub)) != 2 {
+		t.Fatalf("per-message: calls=%d", calls)
+	}
+	calls = 0
+	off := false
+	var got []kafka.Message
+	w2 := kw{func(m ...kafka.Message) { calls++; got = m }}
+	_ = ProduceMessagesOpts(ctx, w2, KafkaOptions{PerMessageSpans: &off}, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"})
+	if calls != 1 || len(got) != 2 || len(got[0].Headers) == 0 || len(got[1].Headers) == 0 {
+		t.Fatalf("batch mode: calls=%d got=%+v", calls, got)
+	}
+}
+
+func fill(n int) map[string]types.MessageAttributeValue {
+	m := map[string]types.MessageAttributeValue{}
+	for i := 0; i < n; i++ {
+		m["a"+string(rune('a'+i))] = types.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String("v")}
+	}
+	return m
+}
+
+func sqsRound(t *testing.T, existing int, opts SQSOptions) (*core.MemRecorder, *sqs.SendMessageInput, int) {
+	rec, ctx := setup(t, true)
+	c := &fakeSQS{}
+	in := &sqs.SendMessageInput{QueueUrl: aws.String("q"), MessageBody: aws.String(`{"password":"hunter2"}`), MessageAttributes: fill(existing)}
+	if _, err := SendMessageOpts(ctx, c, opts, in); err != nil {
+		t.Fatal(err)
+	}
+	sent := c.sent[0]
+	if len(sent.MessageAttributes) > 10 {
+		t.Fatalf("attr limit exceeded: %d", len(sent.MessageAttributes))
+	}
+	msg := types.Message{MessageId: aws.String("m"), Body: in.MessageBody, MessageAttributes: sent.MessageAttributes}
+	_ = ConsumeSQSMessageOpts(context.Background(), "q", msg, 0, opts, func(context.Context) error { return nil })
+	return rec, sent, len(sent.MessageAttributes)
+}
+
+func TestSQSAttrLimit(t *testing.T) {
+	rec, _, n := sqsRound(t, 7, SQSOptions{})
+	if n != 10 {
+		t.Fatalf("7+3 attrs = %d", n)
+	}
+	assertLinked(t, rec)
+
+	rec, sent, n := sqsRound(t, 9, SQSOptions{})
+	if n != 10 || sent.MessageAttributes["ts"].StringValue == nil {
+		t.Fatalf("expected compact ts attr, n=%d", n)
+	}
+	assertLinked(t, rec)
+
+	sc := &MemSideChannel{}
+	rec, _, n = sqsRound(t, 10, SQSOptions{SideChannel: sc})
+	if n != 10 || sc.Len() != 1 {
+		t.Fatalf("side channel: n=%d len=%d", n, sc.Len())
+	}
+	assertLinked(t, rec)
+
+	rec, _, n = sqsRound(t, 10, SQSOptions{})
+	if n != 10 {
+		t.Fatalf("n=%d", n)
+	}
+	if p := byKind(rec.Events(), core.KindQueuePub); len(p) != 1 || !contains(p[0].Flags, FlagAttrLimit) {
+		t.Fatalf("flag missing: %+v", p)
+	}
+	if len(byKind(rec.Events(), core.KindWorkerStart)) != 0 {
+		t.Fatal("skipped propagation must leave consumer untraced")
+	}
+	for _, e := range byKind(rec.Events(), core.KindQueuePub) {
+		if strings.Contains(string(e.Req.Inline), "hunter2") {
+			t.Fatal("sqs body secret leaked")
+		}
+	}
 }

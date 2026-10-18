@@ -56,11 +56,39 @@ func writeBundle(dir, id string, evs []core.Event, si store.SealInfo) (string, e
 	if err := os.MkdirAll(abs, 0o750); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(abs, "events.ndjson"), buf.Bytes(), 0o640); err != nil {
+	if err := writeAtomic(filepath.Join(abs, "events.ndjson"), buf.Bytes()); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(abs, "manifest.json"), append(mb, '\n'), 0o640); err != nil {
+	if err := writeAtomic(filepath.Join(abs, "manifest.json"), append(mb, '\n')); err != nil {
 		return "", err
 	}
 	return "file://" + filepath.ToSlash(abs), nil
+}
+
+// writeAtomic writes via a temp file + rename so a reader (or a second
+// collector sealing the same session) never sees a partial file.
+func writeAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(tmp) //nolint:errcheck
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Chmod(tmp, 0o640); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return err
+	}
+	return nil
 }

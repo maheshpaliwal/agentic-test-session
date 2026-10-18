@@ -1,0 +1,129 @@
+# Run from repo root:  docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+# Every published port is bound to 127.0.0.1. Services bind to their container-network IP
+# (see entrypoint.sh) so they are reachable by other containers only, never on host interfaces.
+name: tsession
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pgadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?copy docker/.env.example to docker/.env}
+      TSESSION_DB_PASSWORD: ${TSESSION_DB_PASSWORD:?set in docker/.env}
+    volumes:
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-tsession.sh:ro
+      - pgdata:/var/lib/postgresql/data
+    ports: ["127.0.0.1:55434:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tsession -d tsession -h $(hostname -i) || pg_isready -U pgadmin -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set in docker/.env}"]
+    ports: ["127.0.0.1:56380:6379"]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  collector:
+    build: {context: .., dockerfile: docker/Dockerfile.collector}
+    environment:
+      TSESSION_COLLECTOR_STORE: pg
+      TSESSION_COLLECTOR_PG_DSN: postgres://tsession:${TSESSION_DB_PASSWORD}@postgres:5432/tsession?sslmode=disable
+      TSESSION_COLLECTOR_BUNDLE_DIR: /data/bundles
+      # Guards stay on: only these Host values (compose service name) and, for /v1/internal/*, peers in the
+      # compose network's own subnet (control plane). Browser Origins stay denied (default none).
+      TSESSION_COLLECTOR_ALLOWED_HOSTS: collector,collector:7071
+      TSESSION_COLLECTOR_INTERNAL_ALLOW: ${TSESSION_NET_SUBNET:-172.29.213.0/24}
+    volumes: [bundles:/data/bundles]
+    ports: ["127.0.0.1:7071:7071"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --header='Host: 127.0.0.1' http://$$(hostname -i):7071/healthz >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  controlplane:
+    build: {context: .., dockerfile: docker/Dockerfile.controlplane}
+    environment:
+      TSESSION_COLLECTOR_URL: http://collector:7071
+      # Host values accepted besides loopback: SDK/tracectl/dashboard reach it as controlplane[:7070].
+      TSESSION_CP_ALLOWED_HOSTS: controlplane,controlplane:7070
+    ports: ["127.0.0.1:7070:7070"]
+    depends_on:
+      collector: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$$(hostname -i):7070/healthz >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  dashboard:
+    build: {context: .., dockerfile: docker/Dockerfile.dashboard}
+    environment:
+      TSESSION_CONTROLPLANE_URL: http://controlplane:7070
+      TSESSION_COLLECTOR_URL: http://collector:7071
+    ports: ["127.0.0.1:7072:7072"]
+    depends_on:
+      controlplane: {condition: service_healthy}
+      collector: {condition: service_healthy}
+    healthcheck:
+      # Host header must be loopback: the dashboard's host allow-list is intentionally left strict.
+      test: ["CMD-SHELL", "wget -qO- --header='Host: 127.0.0.1' http://$$(hostname -i):7072/healthz >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  exampleapp:
+    profiles: ["app"]
+    build: {context: .., dockerfile: docker/Dockerfile.exampleapp}
+    environment:
+      TSESSION_ENABLED: "true"
+      TSESSION_SERVICE: exampleapp
+      TSESSION_CONTROLPLANE_URL: http://controlplane:7070
+      TSESSION_COLLECTOR_URL: http://collector:7071
+      TSESSION_BIN: exampleapp
+      # The example app uses its OWN database objects (default db `postgres`, tables created by the app),
+      # never the collector's `tsession` database. It cannot authenticate to Redis (go-redis Options has
+      # only Addr), so it gets a private, unpublished, network-internal Redis instead of the password-protected one.
+      EXAMPLEAPP_PG_DSN: postgres://pgadmin:${POSTGRES_PASSWORD}@postgres:5432/postgres?sslmode=disable
+      EXAMPLEAPP_REDIS_ADDR: redis-app:6379
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      controlplane: {condition: service_healthy}
+      collector: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      redis-app: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$$(hostname -i):8080/ping >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis-app:
+    profiles: ["app"]
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${TSESSION_NET_SUBNET:-172.29.213.0/24}
+
+volumes:
+  pgdata:
+  bundles:

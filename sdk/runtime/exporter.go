@@ -16,7 +16,7 @@ import (
 type ExporterConfig struct {
 	CollectorURL  string
 	BatchSize     int           // events per POST (default 256)
-	FlushInterval time.Duration // default 200ms
+	FlushInterval time.Duration // default 100ms
 	MaxRetries    int           // extra attempts per batch (default 2)
 	RetryBackoff  time.Duration // first backoff, doubles (default 100ms)
 	MaxCooldown   time.Duration // pause after a failed batch, capped (default 5s)
@@ -45,7 +45,7 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		cfg.BatchSize = 256
 	}
 	if cfg.FlushInterval <= 0 {
-		cfg.FlushInterval = 200 * time.Millisecond
+		cfg.FlushInterval = 100 * time.Millisecond
 	}
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 0
@@ -111,8 +111,8 @@ func (e *Exporter) drain() {
 		if len(batch) == 0 {
 			return
 		}
-		if !e.send(batch) {
-			e.rec.AddDrops(batch)
+		if failed := e.send(batch); len(failed) > 0 {
+			e.rec.AddDrops(failed)
 			e.failures++
 			cd := e.cfg.FlushInterval << min(e.failures, 6)
 			e.nextTry = time.Now().Add(min(cd, e.cfg.MaxCooldown))
@@ -123,7 +123,49 @@ func (e *Exporter) drain() {
 	}
 }
 
-func (e *Exporter) send(batch []core.Event) bool {
+type postResult int
+
+const (
+	postOK postResult = iota
+	postTooLarge
+	postFailed
+)
+
+// send ships batch and returns the events that were lost (to be counted as
+// drops). A 413 bisects the batch so one oversize event only drops itself.
+func (e *Exporter) send(batch []core.Event) []core.Event {
+	switch e.post(batch) {
+	case postOK:
+		return nil
+	case postTooLarge:
+		if len(batch) == 1 {
+			stub := oversizeStub(batch[0])
+			if e.post([]core.Event{stub}) == postOK {
+				return nil
+			}
+			return batch
+		}
+		mid := len(batch) / 2
+		return append(e.send(batch[:mid]), e.send(batch[mid:])...)
+	default:
+		return batch
+	}
+}
+
+// oversizeStub replaces an event the collector refuses as too large with a
+// minimal one that keeps its identity (so ordering/idempotency still hold).
+func oversizeStub(ev core.Event) core.Event {
+	return core.Event{
+		SessionID: ev.SessionID, TraceID: ev.TraceID, SpanID: ev.SpanID, ParentID: ev.ParentID,
+		Service: ev.Service, Instance: ev.Instance, Kind: ev.Kind, Name: ev.Name,
+		HLC: ev.HLC, EndHLC: ev.EndHLC, LocalSeq: ev.LocalSeq,
+		StartNs: ev.StartNs, EndNs: ev.EndNs, TxID: ev.TxID, Attempt: ev.Attempt,
+		Err:   "event exceeded collector size limit; payload dropped",
+		Flags: []string{"oversize_dropped"},
+	}
+}
+
+func (e *Exporter) post(batch []core.Event) postResult {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	for i := range batch {
@@ -137,13 +179,13 @@ func (e *Exporter) send(batch []core.Event) bool {
 			select {
 			case <-time.After(backoff):
 			case <-e.stop:
-				return false
+				return postFailed
 			}
 			backoff *= 2
 		}
 		req, err := http.NewRequest(http.MethodPost, e.cfg.CollectorURL+"/v1/ingest", bytes.NewReader(body))
 		if err != nil {
-			return false
+			return postFailed
 		}
 		req.Header.Set("Content-Type", "application/x-ndjson")
 		req.Header.Set("X-TSession-Instance", inst)
@@ -151,16 +193,31 @@ func (e *Exporter) send(batch []core.Event) bool {
 		if err != nil {
 			continue
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()
 		switch {
 		case resp.StatusCode/100 == 2:
-			return true
+			var ir struct {
+				Rejected int `json:"rejected"`
+			}
+			if json.Unmarshal(rb, &ir) == nil && ir.Rejected > 0 {
+				// Not counted for batches made only of sdk.dropped events, or a
+				// collector that rejects them would feed itself forever.
+				for i := range batch {
+					if batch[i].Kind != core.KindSDKDropped {
+						e.rec.AddDropCount(batch[i].SessionID, uint64(ir.Rejected))
+						break
+					}
+				}
+			}
+			return postOK
+		case resp.StatusCode == http.StatusRequestEntityTooLarge:
+			return postTooLarge
 		case resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusTooManyRequests:
-			return false // permanent; retrying will not help
+			return postFailed // permanent; retrying will not help
 		}
 	}
-	return false
+	return postFailed
 }
 
 // Flush asks the exporter to drain now and waits up to timeout.

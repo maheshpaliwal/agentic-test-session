@@ -3,6 +3,7 @@ package tqueue
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +112,12 @@ func TestRetryThenDLQ(t *testing.T) {
 			t.Fatalf("attempt %d bad: %+v %+v", i+1, st[i], en[i])
 		}
 		seen[st[i].SpanID] = true
+	}
+	for i, e := range en {
+		want := i < 2
+		if (e.Attrs["retry_pending"] == "true") != want {
+			t.Fatalf("attempt %d retry_pending=%q want %v", i+1, e.Attrs["retry_pending"], want)
+		}
 	}
 	if r, d := byKind(evs, core.KindWorkerRetry), byKind(evs, core.KindWorkerDLQ); len(r) != 2 || len(d) != 1 || d[0].Attempt != 3 {
 		t.Fatalf("retry/dlq = %d/%d", len(r), len(d))
@@ -278,5 +285,122 @@ func TestPublishSendErrorRecorded(t *testing.T) {
 	}
 	if p := byKind(rec.Events(), core.KindQueuePub); len(p) != 1 || p[0].Err != "down" {
 		t.Fatal("send error not on span")
+	}
+}
+
+func TestSuccessAndUnknownPolicyCloseEachAttempt(t *testing.T) {
+	rec, ctx := setup(t, true)
+	c := core.MapCarrier{}
+	_ = Publish(ctx, Message{Queue: "q", JobName: "j"}, c, func(context.Context) error { return nil })
+	boom := errors.New("boom")
+	_ = Consume(context.Background(), c, Delivery{Queue: "q", JobName: "j", Attempt: 1}, func(context.Context) error { return boom })
+	_ = Consume(context.Background(), c, Delivery{Queue: "q", JobName: "j", Attempt: 2, MaxAttempts: 3}, func(context.Context) error { return nil })
+	for _, e := range byKind(rec.Events(), core.KindWorkerEnd) {
+		if e.Attrs["retry_pending"] != "" {
+			t.Fatalf("unexpected retry_pending: %+v", e)
+		}
+	}
+	if n := len(byKind(rec.Events(), core.KindWorkerRetry)) + len(byKind(rec.Events(), core.KindWorkerDLQ)); n != 0 {
+		t.Fatalf("retry/dlq = %d", n)
+	}
+}
+
+func TestRetryExpectedCallback(t *testing.T) {
+	rec, ctx := setup(t, true)
+	c := core.MapCarrier{}
+	_ = Publish(ctx, Message{Queue: "q", JobName: "j"}, c, func(context.Context) error { return nil })
+	boom := errors.New("boom")
+	re := func(a int, err error) bool { return a < 2 && err == boom }
+	for a := 1; a <= 2; a++ {
+		_ = Consume(context.Background(), c, Delivery{Queue: "q", JobName: "j", Attempt: a, RetryExpected: re},
+			func(context.Context) error { return boom })
+	}
+	en := byKind(rec.Events(), core.KindWorkerEnd)
+	if en[0].Attrs["retry_pending"] != "true" || en[1].Attrs["retry_pending"] != "" {
+		t.Fatalf("retry_pending wrong: %v %v", en[0].Attrs, en[1].Attrs)
+	}
+	if len(byKind(rec.Events(), core.KindWorkerRetry)) != 1 {
+		t.Fatal("want one worker.retry")
+	}
+}
+
+func TestFanOutRetryOutOfOrder(t *testing.T) {
+	rec, ctx := setup(t, true)
+	c1, c2 := core.MapCarrier{}, core.MapCarrier{}
+	_ = Publish(ctx, Message{Queue: "a", JobName: "a"}, c1, func(context.Context) error { return nil })
+	_ = Publish(ctx, Message{Queue: "b", JobName: "b"}, c2, func(context.Context) error { return nil })
+	boom := errors.New("boom")
+	// b's worker runs first (out of order) and fails with a retry pending, a succeeds, then b's retry succeeds.
+	_ = Consume(context.Background(), c2, Delivery{Queue: "b", JobName: "b", Attempt: 1, MaxAttempts: 2}, func(context.Context) error { return boom })
+	_ = Consume(context.Background(), c1, Delivery{Queue: "a", JobName: "a", Attempt: 1, MaxAttempts: 2}, func(context.Context) error { return nil })
+	_ = Consume(context.Background(), c2, Delivery{Queue: "b", JobName: "b", Attempt: 2, MaxAttempts: 2}, func(context.Context) error { return nil })
+	pubs := byKind(rec.Events(), core.KindQueuePub)
+	closing := map[string]int{}
+	for _, e := range byKind(rec.Events(), core.KindWorkerEnd) {
+		if e.Attrs["retry_pending"] != "true" {
+			for _, l := range e.LinkIDs {
+				closing[l]++
+			}
+		}
+	}
+	for _, p := range pubs {
+		if closing[p.SpanID] != 1 {
+			t.Fatalf("publish %s closed %d times, want exactly 1", p.Name, closing[p.SpanID])
+		}
+	}
+}
+
+func TestBodyRedaction(t *testing.T) {
+	rec, ctx := setup(t, true)
+	core.Redactor = func(b []byte) ([]byte, bool) { return b, false } // key-based redaction must not depend on it
+	c := core.MapCarrier{}
+	_ = Publish(ctx, Message{Queue: "q", Params: bodyParams([]byte(`{"user":"u","password":"hunter2"}`))}, c, func(context.Context) error { return nil })
+	_ = Publish(ctx, Message{Queue: "q2", Params: bodyParams([]byte(`password=hunter2&a=1`))}, core.MapCarrier{}, func(context.Context) error { return nil })
+	for _, e := range byKind(rec.Events(), core.KindQueuePub) {
+		if strings.Contains(string(e.Req.Inline), "hunter2") {
+			t.Fatalf("secret leaked: %s", e.Req.Inline)
+		}
+	}
+}
+
+type slowSide struct{ block chan struct{} }
+
+func (s slowSide) Put(ctx context.Context, _ string, _ map[string]string, _ time.Duration) error {
+	<-s.block
+	return nil
+}
+func (s slowSide) Get(context.Context, string) (map[string]string, error) { return nil, ErrNotFound }
+
+func TestPublishViaTimeoutDoesNotBlock(t *testing.T) {
+	rec, ctx := setup(t, true)
+	sc := slowSide{block: make(chan struct{})}
+	defer close(sc.block)
+	sent := false
+	start := time.Now()
+	err := PublishVia(ctx, sc, "m1", Message{Queue: "q", JobName: "j"}, func(context.Context) error { sent = true; return nil }, WithSideTimeout(30*time.Millisecond))
+	if err != nil || !sent || time.Since(start) > 2*time.Second {
+		t.Fatalf("send blocked/failed: %v %v %v", err, sent, time.Since(start))
+	}
+	if p := byKind(rec.Events(), core.KindQueuePub); len(p) != 1 || !contains(p[0].Flags, FlagSideChannel) {
+		t.Fatalf("flag missing: %+v", p)
+	}
+}
+
+func TestMemSideChannelSweepAndCap(t *testing.T) {
+	now := time.Now()
+	sc := &MemSideChannel{Now: func() time.Time { return now }, MaxEntries: 3}
+	bg := context.Background()
+	_ = sc.Put(bg, "a", map[string]string{"x": "1"}, time.Second)
+	_ = sc.Put(bg, "b", map[string]string{"x": "1"}, time.Second)
+	now = now.Add(5 * time.Second)
+	_ = sc.Put(bg, "c", map[string]string{"x": "1"}, time.Hour)
+	if sc.Len() != 1 {
+		t.Fatalf("expired not swept on Put: len=%d", sc.Len())
+	}
+	for _, k := range []string{"d", "e", "f", "g"} {
+		_ = sc.Put(bg, k, map[string]string{"x": "1"}, time.Hour)
+	}
+	if sc.Len() > 3 {
+		t.Fatalf("cap exceeded: %d", sc.Len())
 	}
 }

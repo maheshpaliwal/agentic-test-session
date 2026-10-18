@@ -65,6 +65,13 @@ func (r *Recorder) AddDrops(evs []core.Event) {
 	}
 }
 
+// AddDropCount adds n dropped events (e.g. rejected by the collector) to a session.
+func (r *Recorder) AddDropCount(sessionID string, n uint64) {
+	r.mu.Lock()
+	r.drops[sessionID] += n
+	r.mu.Unlock()
+}
+
 // Len is the number of buffered events.
 func (r *Recorder) Len() int { r.mu.Lock(); defer r.mu.Unlock(); return r.n }
 

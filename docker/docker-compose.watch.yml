@@ -1,0 +1,12 @@
+# Override for the `tracectl watch-docker` demo:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.watch.yml --env-file docker/.env --profile watch up -d
+# Containers carrying label tsession.id=<name> get a session started when they start
+# and stopped when they die (see docker/demo-watch.md).
+services:
+  watched-job:
+    profiles: ["watch"]
+    image: alpine:3.21
+    labels:
+      tsession.id: watch-demo
+    command: ["sh", "-c", "echo working; sleep 8; echo done"]
+    restart: "no"

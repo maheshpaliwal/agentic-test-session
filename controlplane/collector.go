@@ -13,8 +13,11 @@ import (
 
 // DrainStatus mirrors the collector's drain-status response.
 type DrainStatus struct {
-	Pending         int   `json:"pending"`
+	Pending int `json:"pending"`
+	// LastEventUnixNs and ReceivedUnixNs are collector-side values. The control
+	// plane never compares them with its own clock; it only detects change.
 	LastEventUnixNs int64 `json:"last_event_unix_ns"`
+	ReceivedUnixNs  int64 `json:"received_unix_ns,omitempty"`
 	EventCount      int64 `json:"event_count"`
 	DroppedEvents   int64 `json:"dropped_events"`
 }

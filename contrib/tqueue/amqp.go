@@ -39,7 +39,7 @@ func PublishAMQP(ctx context.Context, ch AMQPChannel, exchange, key string, mand
 	}
 	msg.Headers = h
 	q := exchange + "/" + key
-	info := Message{System: "amqp", Queue: q, JobName: key, Params: msg.Body}
+	info := Message{System: "amqp", Queue: q, JobName: key, Params: bodyParams(msg.Body)}
 	return Publish(ctx, info, amqpCarrier(h), func(c context.Context) error {
 		return ch.PublishWithContext(c, exchange, key, mandatory, immediate, msg)
 	})
@@ -63,7 +63,7 @@ func ConsumeDelivery(ctx context.Context, queue string, dl amqp.Delivery, maxAtt
 	for k, v := range dl.Headers {
 		h[strings.ToLower(k)] = v
 	}
-	d := Delivery{System: "amqp", Queue: queue, JobName: dl.RoutingKey, Params: dl.Body, Attempt: attempt,
+	d := Delivery{System: "amqp", Queue: queue, JobName: dl.RoutingKey, Params: bodyParams(dl.Body), Attempt: attempt,
 		MessageID: firstNonEmpty(dl.MessageId, fmt.Sprint(dl.DeliveryTag)), MaxAttempts: maxAttempts}
 	return Consume(ctx, h, d, handler)
 }

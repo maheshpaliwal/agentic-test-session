@@ -31,19 +31,42 @@ func exercise(t *testing.T, s Store) {
 	if o, _ := s.TxOutcomes(ctx, sid); !o["t1"] {
 		t.Fatalf("outcomes %v", o)
 	}
+	if h, err := s.Head(ctx, sid); err != nil || h != 2 {
+		t.Fatalf("head %d %v", h, err)
+	}
+	if h, err := s.Head(ctx, sid+"_none"); err != nil || h != 0 {
+		t.Fatalf("head of unknown %d %v", h, err)
+	}
+	// failed commits (Err / commit_failed) and rollbacks are not effective
+	bad := mk(3, core.KindDBTxCommit, "t2")
+	bad.Err = "commit failed"
+	cf := mk(4, core.KindDBTxCommit, "t3")
+	cf.Attrs = map[string]string{"commit_failed": "true"}
+	rb := mk(5, core.KindDBTxRollbck, "t4")
+	rb.Attrs = map[string]string{"commit_failed": "true"}
+	// a NUL escape in a body/column must not break the backend
+	nul := mk(6, core.KindDBRead, "")
+	nul.Name = "a\x00b"
+	nul.Req = core.PayloadRef{Inline: []byte(`{"k":"v\u0000w"}`)}
+	if err := s.AppendEvents(ctx, sid, []core.Event{bad, cf, rb, nul}); err != nil {
+		t.Fatal(err)
+	}
+	if o, _ := s.TxOutcomes(ctx, sid); !o["t1"] || o["t2"] || o["t3"] || o["t4"] || len(o) != 4 {
+		t.Fatalf("outcomes %v", o)
+	}
 	if si, _ := s.GetSeal(ctx, sid); si != nil {
 		t.Fatal("unexpected seal")
 	}
-	if err := s.PutSeal(ctx, sid, SealInfo{Orphaned: []string{"x"}, BundleURI: "u", SealedAt: time.Now()}); err != nil {
+	if err := s.PutSeal(ctx, sid, SealInfo{Orphaned: []string{"x"}, BundleURI: "u", SealedAt: time.Now(), Quarantined: 3}); err != nil {
 		t.Fatal(err)
 	}
-	if si, _ := s.GetSeal(ctx, sid); si == nil || si.BundleURI != "u" || len(si.Orphaned) != 1 {
+	if si, _ := s.GetSeal(ctx, sid); si == nil || si.BundleURI != "u" || len(si.Orphaned) != 1 || si.Quarantined != 3 {
 		t.Fatalf("seal %+v", si)
 	}
 	l, _ := s.ListSessions(ctx)
 	found := false
 	for _, x := range l {
-		if x.ID == sid && x.EventCount == 2 && x.Sealed {
+		if x.ID == sid && x.EventCount == 6 && x.Sealed {
 			found = true
 		}
 	}

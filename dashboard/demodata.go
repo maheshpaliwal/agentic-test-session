@@ -222,6 +222,88 @@ func demoEvents(sid string, base time.Time) []core.Event {
 	return evs
 }
 
+// activityEvents builds the "multi-trigger" demo session: three separate API
+// triggers (create, advance, complete) plus one async worker and an orphan
+// cron-like root span that overlaps the second call in time. Completion order
+// (Seq) interleaves them, which is what the trigger-grouped timeline untangles.
+func activityEvents(sid string, base time.Time) []core.Event {
+	b := &builder{sid: sid, base: base, local: map[string]uint64{}}
+	const api, wk, cron = "activity-api", "activity-worker", "activity-cron"
+	act := m{"id": "act_1", "owner": "usr_synth_042", "status": "created", "title": "Spring cleanup"}
+	upd := func(from, to string) core.Mutation {
+		return core.Mutation{Store: "postgres", Entity: "activities", PK: m{"id": "act_1"}, Op: "update", Source: "sdk",
+			Before: pj(m{"id": "act_1", "status": from}), After: pj(m{"id": "act_1", "status": to}),
+			Diff: []core.FieldChange{{Field: "status", Old: from, New: to}}}
+	}
+
+	// 1. create
+	b.add("c_api", "tr_act1", api, core.KindAPIIn, "POST /api/activities", "", 0, 95, chain(
+		req(m{"method": "POST", "path": "/api/activities", "body": m{"title": "Spring cleanup", "owner": "usr_synth_042"}}),
+		resp(m{"status": 201, "body": m{"id": "act_1", "status": "created"}}), attrs("http.status", "201")))
+	b.add("c_cache", "tr_act1", api, core.KindCacheRead, "GET owner:usr_synth_042:quota", "c_api", 3, 5, chain(resp(m{"hit": true, "value": 7})))
+	b.add("c_txb", "tr_act1", api, core.KindDBTxBegin, "BEGIN", "c_api", 8, 9, tx("tx_a1"))
+	b.add("c_ins", "tr_act1", api, core.KindDBWrite, "INSERT INTO activities (id, owner, status, title) VALUES ($1,$2,$3,$4)", "c_api", 10, 18, chain(
+		tx("tx_a1"), mut(core.Mutation{Store: "postgres", Entity: "activities", PK: m{"id": "act_1"}, Op: "insert", Source: "sdk", After: pj(act),
+			Diff: []core.FieldChange{{Field: "status", New: "created"}, {Field: "title", New: "Spring cleanup"}}})))
+	b.add("c_aud", "tr_act1", api, core.KindDBWrite, "INSERT INTO activity_audit (activity_id, action) VALUES ($1,$2)", "c_api", 18, 24, chain(
+		tx("tx_a1"), mut(core.Mutation{Store: "postgres", Entity: "activity_audit", PK: m{"activity_id": "act_1", "action": "create"}, Op: "insert", Source: "sdk",
+			After: pj(m{"activity_id": "act_1", "action": "create"}), Diff: []core.FieldChange{{Field: "action", New: "create"}}})))
+	b.add("c_txc", "tr_act1", api, core.KindDBTxCommit, "COMMIT", "c_api", 25, 28, tx("tx_a1"))
+	b.add("c_pub", "tr_act1", api, core.KindQueuePub, "activity.index", "c_api", 60, 64, chain(
+		req(m{"activity_id": "act_1"}), resp(m{"message_id": "msg_synth_a1"}), attrs("queue", "activity.index", "broker", "sqs")))
+	// async worker started by the publish above, long after the API call returned
+	b.add("w_start", "tr_act1", wk, core.KindWorkerStart, "activity.index", "", 400, 470, chain(link("c_pub"), attempt(1)))
+	b.add("w_read", "tr_act1", wk, core.KindDBRead, "SELECT * FROM activities WHERE id = $1", "w_start", 405, 415, nil)
+	b.add("w_up", "tr_act1", wk, core.KindDBWrite, "INSERT INTO activity_search (id, doc) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET doc = $2", "w_start", 420, 440, chain(
+		mut(core.Mutation{Store: "postgres", Entity: "activity_search", PK: m{"id": "act_1"}, Op: "upsert", Source: "sdk",
+			After: pj(m{"id": "act_1", "doc": "spring cleanup"}), Diff: []core.FieldChange{{Field: "doc", New: "spring cleanup"}}})))
+	b.add("w_end", "tr_act1", wk, core.KindWorkerEnd, "activity.index", "w_start", 465, 468, chain(link("c_pub"), attempt(1), resp(m{"result": "indexed"})))
+
+	// 2. advance
+	b.add("a_api", "tr_act2", api, core.KindAPIIn, "POST /api/activities/act_1/advance", "", 1200, 1320, chain(
+		resp(m{"status": 200, "body": m{"id": "act_1", "status": "in_progress"}}), attrs("http.status", "200")))
+	b.add("a_rd", "tr_act2", api, core.KindDBRead, "SELECT id, status FROM activities WHERE id = $1", "a_api", 1204, 1210, nil)
+	b.add("a_wr", "tr_act2", api, core.KindDBWrite, "UPDATE activities SET status = $1 WHERE id = $2", "a_api", 1212, 1222, chain(mut(upd("created", "in_progress"))))
+	b.add("a_out", "tr_act2", api, core.KindAPIOut, "POST https://notify.example.invalid/v1/push", "a_api", 1225, 1300, chain(
+		req(m{"to": "usr_synth_042", "template": "activity_started"}), resp(m{"status": 202}), attrs("http.status", "202")))
+	b.add("a_cache", "tr_act2", api, core.KindCacheWrite, "DEL activity:act_1", "a_api", 1305, 1310, chain(
+		mut(core.Mutation{Store: "redis", Entity: "activity:*", PK: m{"key": "activity:act_1"}, Op: "delete", Source: "sdk", Before: pj(act), Diff: []core.FieldChange{{Field: "status", Old: "created"}}})))
+	// background cleanup with no API ancestor, overlapping the call above
+	b.add("cron", "tr_cron", cron, core.KindDBWrite, "DELETE FROM activity_drafts WHERE expires_at < now()", "", 1250, 1290, chain(
+		mut(core.Mutation{Store: "postgres", Entity: "activity_drafts", PK: m{"id": "draft_7"}, Op: "delete", Source: "sdk", Before: pj(m{"id": "draft_7"}), Diff: []core.FieldChange{{Field: "id", Old: "draft_7"}}})))
+	b.add("cron_c", "tr_cron", cron, core.KindCacheWrite, "DEL drafts:index", "cron", 1292, 1296, chain(
+		mut(core.Mutation{Store: "redis", Entity: "drafts:*", PK: m{"key": "drafts:index"}, Op: "delete", Source: "sdk", Before: pj(m{"n": 3}), Diff: []core.FieldChange{{Field: "n", Old: 3}}})))
+
+	// 3. complete (fails; transaction rolled back)
+	b.add("k_api", "tr_act3", api, core.KindAPIIn, "POST /api/activities/act_1/complete", "", 2400, 2500, chain(
+		resp(m{"status": 500, "body": m{"error": "internal"}}), attrs("http.status", "500"), errs("500 Internal Server Error: points ledger rejected the update")))
+	b.add("k_rd", "tr_act3", api, core.KindDBRead, "SELECT id, status FROM activities WHERE id = $1", "k_api", 2404, 2410, nil)
+	b.add("k_txb", "tr_act3", api, core.KindDBTxBegin, "BEGIN", "k_api", 2415, 2416, tx("tx_a3"))
+	b.add("k_wr", "tr_act3", api, core.KindDBWrite, "UPDATE activities SET status = $1 WHERE id = $2", "k_api", 2418, 2428, chain(tx("tx_a3"), mut(upd("in_progress", "completed"))))
+	b.add("k_led", "tr_act3", api, core.KindDBWrite, "INSERT INTO points_ledger (owner, delta) VALUES ($1,$2)", "k_api", 2430, 2440, chain(
+		tx("tx_a3"), errs(`ERROR: duplicate key value violates unique constraint "points_ledger_pkey" (SQLSTATE 23505)`)))
+	b.add("k_txr", "tr_act3", api, core.KindDBTxRollbck, "ROLLBACK", "k_api", 2445, 2450, tx("tx_a3"))
+	return finalizeDemo(b)
+}
+
+func finalizeDemo(b *builder) []core.Event {
+	evs := b.evs
+	sort.SliceStable(evs, func(i, j int) bool {
+		a, c := evs[i], evs[j]
+		if a.EndHLC != c.EndHLC {
+			return a.EndHLC < c.EndHLC
+		}
+		if a.Service != c.Service {
+			return a.Service < c.Service
+		}
+		return a.LocalSeq < c.LocalSeq
+	})
+	for i := range evs {
+		evs[i].Seq = uint64(i + 1)
+	}
+	return evs
+}
+
 // resolveTx returns a deep-enough copy of evs with Mutation.Effective set from
 // commit/rollback events (no TxID => effective; unresolved tx => nil).
 func resolveTx(evs []core.Event) []core.Event {
@@ -323,6 +405,15 @@ func pkString(pk map[string]any) string {
 	return s
 }
 
+// pkJSON is the canonical pk form used by the collector (sorted-key JSON).
+func pkJSON(pk map[string]any) string {
+	if len(pk) == 0 {
+		return "{}"
+	}
+	b, _ := json.Marshal(pk)
+	return string(b)
+}
+
 // EntityRef identifies a mutated entity instance.
 type EntityRef struct {
 	Store         string `json:"store"`
@@ -351,7 +442,7 @@ func entityList(evs []core.Event) []EntityRef {
 	var order [][3]string
 	for _, e := range evs {
 		for _, mu := range e.Mutations {
-			k := [3]string{mu.Store, mu.Entity, pkString(mu.PK)}
+			k := [3]string{mu.Store, mu.Entity, pkJSON(mu.PK)}
 			if idx[k] == nil {
 				idx[k] = &EntityRef{Store: k[0], Entity: k[1], PK: k[2]}
 				order = append(order, k)
@@ -370,7 +461,7 @@ func entityHistory(evs []core.Event, store, entity, pk string) []EntityMutation 
 	out := []EntityMutation{}
 	for _, e := range evs {
 		for _, mu := range e.Mutations {
-			if mu.Store == store && mu.Entity == entity && pkString(mu.PK) == pk {
+			if mu.Store == store && mu.Entity == entity && (pkJSON(mu.PK) == pk || pkString(mu.PK) == pk) {
 				out = append(out, EntityMutation{Seq: e.Seq, SpanID: e.SpanID, Service: e.Service, TimeNs: e.EndNs,
 					TxID: e.TxID, Mutation: mu, Op: mu.Op, Effect: mu.Effective, Before: mu.Before, After: mu.After, Diff: mu.Diff})
 			}

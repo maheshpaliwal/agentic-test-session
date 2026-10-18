@@ -16,6 +16,8 @@ type rows struct {
 	cap     int
 	drain   bool // consume the remainder on Close (write ... RETURNING)
 	data    []map[string]any
+	raws    []map[string]driver.Value // PK values parallel to data
+	pkCols  []string
 	count   int
 	eof     bool
 	err     error
@@ -50,6 +52,7 @@ func (r *rows) note(dest []driver.Value) {
 			r.cols = r.inner.Columns()
 		}
 		r.data = append(r.data, rowMap(r.cols, dest))
+		r.raws = append(r.raws, rawPK(r.cols, dest, r.pkCols))
 	}
 }
 

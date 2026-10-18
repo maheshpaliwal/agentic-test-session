@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+# Build context: repo root (needs go.work + every module's go.mod).
+#   docker build -f docker/Dockerfile.tracectl .
+FROM golang:1.26-alpine AS build
+ENV CGO_ENABLED=0 GOFLAGS=-trimpath
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go build -ldflags='-s -w' -o /out/tracectl ./cmd/tracectl
+
+FROM alpine:3.21
+RUN addgroup -S -g 10001 ts && adduser -S -u 10001 -G ts ts && mkdir -p /data/bundles && chown -R ts:ts /data
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --from=build /out/tracectl /usr/local/bin/tracectl
+USER ts
+WORKDIR /data
+ENV TSESSION_BIN=tracectl
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

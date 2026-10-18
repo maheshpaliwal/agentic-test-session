@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"tsession/core"
 )
 
 // Handler returns the REST + SSE API.
@@ -15,6 +17,7 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sessions", m.hStart)
 	mux.HandleFunc("GET /v1/sessions", m.hList)
 	mux.HandleFunc("GET /v1/sessions/{id}", m.hGet)
+	mux.HandleFunc("PATCH /v1/sessions/{id}", m.hRename)
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", m.transition(m.Stop))
 	mux.HandleFunc("POST /v1/sessions/{id}/abort", m.transition(m.Abort))
 	mux.HandleFunc("GET /v1/active", func(w http.ResponseWriter, r *http.Request) {
@@ -22,7 +25,19 @@ func (m *Manager) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/active/stream", m.hStream)
 	mux.HandleFunc("POST /v1/kill", m.hKill)
-	return mux
+	guarded := core.LoopbackGuard(mux, core.GuardConfig{
+		AllowedHosts:   m.cfg.AllowedHosts,
+		AllowedOrigins: m.cfg.AllowedOrigins,
+	})
+	// /healthz is static and unauthenticated by design (container healthchecks
+	// use the pod IP as Host); it exposes nothing and is outside the guard.
+	root := http.NewServeMux()
+	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "ok\n")
+	})
+	root.Handle("/", guarded)
+	return root
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -32,6 +47,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func writeErr(w http.ResponseWriter, err error) {
+	var bc *BindingConflictError
+	if errors.As(err, &bc) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "binding_conflict", "conflicting_session": bc.Session, "binding": bc.Binding,
+		})
+		return
+	}
 	code := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, ErrNotFound):
@@ -67,6 +89,22 @@ func (m *Manager) hGet(w http.ResponseWriter, r *http.Request) {
 	s, ok := m.Get(r.PathValue("id"))
 	if !ok {
 		writeErr(w, ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+func (m *Manager) hRename(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name *string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil || body.Name == nil {
+		writeErr(w, fmt.Errorf("%w: body must be {\"name\":\"...\"}", ErrInvalid))
+		return
+	}
+	s, err := m.Rename(r.PathValue("id"), *body.Name)
+	if err != nil {
+		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s)

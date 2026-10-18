@@ -262,7 +262,7 @@ func TestAppErrorPropagatesAndNoMutation(t *testing.T) {
 func TestInsertAfterFromArgsAndMySQLReread(t *testing.T) {
 	rec, ctx := setup(t)
 	f := &fakeDB{handler: func(q string, a []driver.Value) result {
-		if strings.HasPrefix(q, "SELECT * FROM") {
+		if strings.Contains(q, "* FROM") {
 			return result{cols: orderCols, rows: [][]driver.Value{orderRow(42, "new")}}
 		}
 		return result{affected: 1, lastID: 42}
@@ -272,7 +272,7 @@ func TestInsertAfterFromArgsAndMySQLReread(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := f.Calls()
-	if len(calls) != 2 || calls[1].SQL != "SELECT * FROM orders WHERE `id` IN (?)" || calls[1].Args[0] != int64(42) {
+	if len(calls) != 2 || calls[1].SQL != "SELECT /*+ MAX_EXECUTION_TIME(500) */ * FROM orders WHERE `id` IN (?)" || calls[1].Args[0] != int64(42) {
 		t.Fatalf("calls:\n%s", sqls(calls))
 	}
 	m := byKind(rec.Events(), core.KindDBWrite)[0].Mutations[0]

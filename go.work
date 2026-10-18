@@ -9,4 +9,8 @@ use (
 	./contrib/tqueue
 	./contrib/tredis
 	./contrib/tsql
+	./integration
 )
+
+use ./contrib/tredisv8
+use ./contrib/tkafkaconfluent
