@@ -19,8 +19,8 @@ func TestNoopWhenDisabled(t *testing.T) {
 }
 
 func TestBindPriorityEnvParse(t *testing.T) {
-	got := core.ParseBindPriority("header:X-WMS-Uid,jwt:sub,bad")
-	if len(got) != 2 || got[0].String() != "header:x-wms-uid" || got[1].String() != "jwt_claim:sub" {
+	got := core.ParseBindPriority("header:X-User-Id,jwt:sub,bad")
+	if len(got) != 2 || got[0].String() != "header:x-user-id" || got[1].String() != "jwt_claim:sub" {
 		t.Fatalf("%v", got)
 	}
 }

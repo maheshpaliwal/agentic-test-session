@@ -330,7 +330,7 @@ func TestCLIRenameAndAutoName(t *testing.T) {
 	}
 	// template via --name
 	out.Reset()
-	if code := run([]string{"--cp", srv.URL, "start", "--name", "activity {bind.x-wms-uid}", "--bind", "header:X-WMS-UID=act_bind_9"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"name": "activity act_bind_9"`) {
+	if code := run([]string{"--cp", srv.URL, "start", "--name", "activity {bind.x-user-id}", "--bind", "header:X-USER-ID=act_bind_9"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"name": "activity act_bind_9"`) {
 		t.Fatalf("%d %s %s", code, out.String(), errb.String())
 	}
 	if code := run([]string{"--cp", srv.URL, "rename", "ghost", "x"}, &out, &errb); code == 0 {

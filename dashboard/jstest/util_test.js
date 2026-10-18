@@ -225,7 +225,7 @@ assert.strictEqual(U.entryText(en), 'entry: POST /api/bad-stock/v1/drop-zone (+3
 assert.strictEqual(U.entryText({ title: 'GET /a', more: 1 }), 'entry: GET /a (+1 more trigger)');
 assert.strictEqual(U.entryText({ title: 'GET /a', more: 0 }), 'entry: GET /a');
 assert.strictEqual(U.entryText(null), '');
-assert.strictEqual(U.bindingText({ source: 'header', name: 'x-wms-uid', value: 'act_bind_9' }), 'x-wms-uid: act_bind_9');
+assert.strictEqual(U.bindingText({ source: 'header', name: 'x-user-id', value: 'act_bind_9' }), 'x-user-id: act_bind_9');
 const hay = U.sessionHay({ id: 'ts_1', name: 'N', bindings: [{ source: 'jwt_claim', name: 'sub', value: 'u_123' }] }, en);
 assert.ok(hay.indexOf('u_123') >= 0 && hay.indexOf('drop-zone') >= 0 && hay.indexOf('jwt_claim') >= 0);
 

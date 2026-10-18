@@ -14,7 +14,7 @@ import (
 var t0 = time.Date(2026, 10, 11, 14, 32, 7, 0, time.UTC)
 
 func TestAutoNameShapes(t *testing.T) {
-	h := Binding{BindHeader, "x-wms-uid", "act_bind_9"}
+	h := Binding{BindHeader, "x-user-id", "act_bind_9"}
 	j := Binding{BindJWTClaim, "sub", "u_123"}
 	c := Binding{BindCookie, "sid", "abc"}
 	q := Binding{BindQuery, "uid", "7"}
@@ -23,13 +23,13 @@ func TestAutoNameShapes(t *testing.T) {
 		want string
 	}{
 		{nil, "dashboard 14:32:07"},
-		{[]Binding{h}, "x-wms-uid=act_bind_9"},
+		{[]Binding{h}, "x-user-id=act_bind_9"},
 		{[]Binding{j}, "jwt:sub=u_123"},
 		{[]Binding{c}, "cookie:sid=abc"},
 		{[]Binding{q}, "query:uid=7"},
-		{[]Binding{h, j}, "x-wms-uid=act_bind_9 + jwt:sub=u_123"},
-		{[]Binding{h, j, c}, "x-wms-uid=act_bind_9 + jwt:sub=u_123 +1"},
-		{[]Binding{h, j, c, q}, "x-wms-uid=act_bind_9 + jwt:sub=u_123 +2"},
+		{[]Binding{h, j}, "x-user-id=act_bind_9 + jwt:sub=u_123"},
+		{[]Binding{h, j, c}, "x-user-id=act_bind_9 + jwt:sub=u_123 +1"},
+		{[]Binding{h, j, c, q}, "x-user-id=act_bind_9 + jwt:sub=u_123 +2"},
 	}
 	for _, tc := range cases {
 		got, auto := resolveName("", tc.bs, "dashboard", t0)
@@ -46,11 +46,11 @@ func TestAutoNameShapes(t *testing.T) {
 func TestStartAutoNameAndJWTAliasFlow(t *testing.T) {
 	m := newMgr(t, newFakeCollector(t), nil)
 	s, err := m.Start(StartRequest{InitiatedBy: "dashboard", Bindings: []Binding{
-		{BindHeader, "X-WMS-UID", "act_bind_9"}, {BindJWTClaim, "sub", "u_1"}, {BindCookie, "sid", "z"}}})
+		{BindHeader, "X-USER-ID", "act_bind_9"}, {BindJWTClaim, "sub", "u_1"}, {BindCookie, "sid", "z"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.NameAuto || s.Name != "x-wms-uid=act_bind_9 + jwt:sub=u_1 +1" {
+	if !s.NameAuto || s.Name != "x-user-id=act_bind_9 + jwt:sub=u_1 +1" {
 		t.Fatalf("%+v", s)
 	}
 	s2, _ := m.Start(StartRequest{Name: "mine"})
@@ -64,10 +64,10 @@ func TestStartAutoNameAndJWTAliasFlow(t *testing.T) {
 }
 
 func TestTemplates(t *testing.T) {
-	bs := []Binding{{BindHeader, "x-wms-uid", "act_bind_9"}, {BindJWTClaim, "sub", "u_1"}, {BindCookie, "sid", "ck"}}
+	bs := []Binding{{BindHeader, "x-user-id", "act_bind_9"}, {BindJWTClaim, "sub", "u_1"}, {BindCookie, "sid", "ck"}}
 	cases := map[string]string{
 		"activity {bind}":              "activity act_bind_9",
-		"{bind.X-WMS-UID}":             "act_bind_9",
+		"{bind.X-USER-ID}":             "act_bind_9",
 		"{bind.sub}":                   "u_1",
 		"{bind.jwt:sub}":               "u_1",
 		"{bind.sid}":                   "ck",
@@ -97,7 +97,7 @@ func TestTemplates(t *testing.T) {
 	}
 	// through Start
 	m := newMgr(t, newFakeCollector(t), nil)
-	s, err := m.Start(StartRequest{Name: "activity {bind}", Bindings: []Binding{{BindHeader, "x-wms-uid", "act_bind_9"}}})
+	s, err := m.Start(StartRequest{Name: "activity {bind}", Bindings: []Binding{{BindHeader, "x-user-id", "act_bind_9"}}})
 	if err != nil || s.Name != "activity act_bind_9" || s.NameAuto {
 		t.Fatalf("%+v %v", s, err)
 	}

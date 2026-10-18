@@ -2,7 +2,7 @@
 # Throwaway Postgres (127.0.0.1:55432) + Redis (127.0.0.1:56379) for the e2e tests.
 #   it.sh start | stop | test | all
 set -euo pipefail
-IT_DIR="${IT_DIR:-/private/tmp/claude-502/-Users-maheshpaliwal-personal/775de3d4-786d-4cb0-82c4-8d2f64ad6a19/scratchpad/it}"
+IT_DIR="${IT_DIR:-${TMPDIR:-/tmp}/tsession-it}"
 PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@14/bin}"
 REDIS_BIN="${REDIS_BIN:-/opt/homebrew/bin/redis-server}"
 PG_PORT=55432; REDIS_PORT=56379

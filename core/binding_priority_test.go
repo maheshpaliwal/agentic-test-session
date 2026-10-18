@@ -15,7 +15,7 @@ func prioSessions() StaticSessions {
 	return StaticSessions{
 		Active: map[string]bool{"sU": true, "sN": true, "sX": true},
 		Bindings: []Binding{
-			{"sU", "header", "x-wms-uid", "100"},
+			{"sU", "header", "x-user-id", "100"},
 			{"sN", "header", "name", "alice"},
 			{"sX", "cookie", "sid", "c9"},
 		},
@@ -38,8 +38,8 @@ func ingress(t *testing.T, rec *MemRecorder, m map[string]string, car MapCarrier
 }
 
 func TestParseBindPriority(t *testing.T) {
-	got := ParseBindPriority(" header:X-WMS-Uid, jwt:sub,bogus:x,header:,nocolon,cookie:Sid,header:x-wms-uid,query:q ")
-	want := []string{"header:x-wms-uid", "jwt_claim:sub", "cookie:Sid", "query:q"}
+	got := ParseBindPriority(" header:X-User-Id, jwt:sub,bogus:x,header:,nocolon,cookie:Sid,header:x-user-id,query:q ")
+	want := []string{"header:x-user-id", "jwt_claim:sub", "cookie:Sid", "query:q"}
 	if len(got) != len(want) {
 		t.Fatalf("%v", got)
 	}
@@ -55,35 +55,35 @@ func TestParseBindPriority(t *testing.T) {
 
 func TestPriorityPresentBound(t *testing.T) {
 	rec := setIngress(t, prioSessions())
-	withPriority(t, "header:x-wms-uid,header:name")
+	withPriority(t, "header:x-user-id,header:name")
 	setSessions := prioSessions()
 	SetSessions(setSessions)
-	ev := ingress(t, rec, map[string]string{"header:x-wms-uid": "100", "header:name": "alice"}, MapCarrier{})
-	if ev == nil || ev.SessionID != "sU" || ev.Attrs["bound_by"] != "header:x-wms-uid" || ev.Attrs["bound_fallback"] != "" {
+	ev := ingress(t, rec, map[string]string{"header:x-user-id": "100", "header:name": "alice"}, MapCarrier{})
+	if ev == nil || ev.SessionID != "sU" || ev.Attrs["bound_by"] != "header:x-user-id" || ev.Attrs["bound_fallback"] != "" {
 		t.Fatalf("%+v", ev)
 	}
 }
 
 func TestPriorityPresentUnboundNoFallThrough(t *testing.T) {
 	rec := setIngress(t, prioSessions())
-	withPriority(t, "header:x-wms-uid,header:name")
+	withPriority(t, "header:x-user-id,header:name")
 	SetSessions(prioSessions())
 	// uid present but unbound; name would match alice's session: must be untraced.
-	if ev := ingress(t, rec, map[string]string{"header:x-wms-uid": "999", "header:name": "alice"}, MapCarrier{}); ev != nil {
+	if ev := ingress(t, rec, map[string]string{"header:x-user-id": "999", "header:name": "alice"}, MapCarrier{}); ev != nil {
 		t.Fatalf("fell through: %+v", ev)
 	}
 	// also beats exclusive mode
 	s := prioSessions()
 	s.ExclusiveID = "sX"
 	SetSessions(s)
-	if ev := ingress(t, rec, map[string]string{"header:x-wms-uid": "999"}, MapCarrier{}); ev != nil {
+	if ev := ingress(t, rec, map[string]string{"header:x-user-id": "999"}, MapCarrier{}); ev != nil {
 		t.Fatalf("exclusive overrode: %+v", ev)
 	}
 }
 
 func TestPriorityAbsentFallsBack(t *testing.T) {
 	rec := setIngress(t, prioSessions())
-	withPriority(t, "header:x-wms-uid,header:name")
+	withPriority(t, "header:x-user-id,header:name")
 	SetSessions(prioSessions())
 	ev := ingress(t, rec, map[string]string{"header:name": "alice"}, MapCarrier{})
 	if ev == nil || ev.SessionID != "sN" || ev.Attrs["bound_by"] != "header:name" || ev.Attrs["bound_fallback"] != "true" {
@@ -105,7 +105,7 @@ func TestPriorityAbsentFallsBack(t *testing.T) {
 func TestPriorityUnsetKeepsOR(t *testing.T) {
 	rec := setIngress(t, prioSessions())
 	// uid unbound value + name bound: OR => matches via name (old behaviour)
-	ev := ingress(t, rec, map[string]string{"header:x-wms-uid": "999", "header:name": "alice"}, MapCarrier{})
+	ev := ingress(t, rec, map[string]string{"header:x-user-id": "999", "header:name": "alice"}, MapCarrier{})
 	if ev == nil || ev.SessionID != "sN" || ev.Attrs["bound_fallback"] != "" {
 		t.Fatalf("%+v", ev)
 	}
@@ -114,7 +114,7 @@ func TestPriorityUnsetKeepsOR(t *testing.T) {
 func TestAmbiguousUntraced(t *testing.T) {
 	rec := setIngress(t, prioSessions())
 	before := BindingAmbiguous()
-	m := map[string]string{"header:x-wms-uid": "100", "header:name": "alice"} // two sessions
+	m := map[string]string{"header:x-user-id": "100", "header:name": "alice"} // two sessions
 	if ev := ingress(t, rec, m, MapCarrier{}); ev != nil {
 		t.Fatalf("ambiguous traced: %+v", ev)
 	}
@@ -125,16 +125,16 @@ func TestAmbiguousUntraced(t *testing.T) {
 	s := prioSessions()
 	s.Bindings = append(s.Bindings, Binding{"sU", "header", "name", "alice2"})
 	SetSessions(s)
-	if ev := ingress(t, rec, map[string]string{"header:x-wms-uid": "100", "header:name": "alice2"}, MapCarrier{}); ev == nil || ev.SessionID != "sU" {
+	if ev := ingress(t, rec, map[string]string{"header:x-user-id": "100", "header:name": "alice2"}, MapCarrier{}); ev == nil || ev.SessionID != "sU" {
 		t.Fatalf("%+v", ev)
 	}
 }
 
 func TestHeaderSessionBeatsPriorityAndAmbiguity(t *testing.T) {
 	rec := setIngress(t, prioSessions())
-	withPriority(t, "header:x-wms-uid,header:name")
+	withPriority(t, "header:x-user-id,header:name")
 	SetSessions(prioSessions())
-	m := map[string]string{"header:x-wms-uid": "999", "header:name": "alice"}
+	m := map[string]string{"header:x-user-id": "999", "header:name": "alice"}
 	ev := ingress(t, rec, m, MapCarrier{KeySession: "sX"})
 	if ev == nil || ev.SessionID != "sX" || ev.Attrs["bound_by"] != "" {
 		t.Fatalf("%+v", ev)
@@ -143,9 +143,9 @@ func TestHeaderSessionBeatsPriorityAndAmbiguity(t *testing.T) {
 
 func TestPriorityNoBindingsNoExtraction(t *testing.T) {
 	setIngress(t, StaticSessions{Active: map[string]bool{"s": true}})
-	withPriority(t, "header:x-wms-uid,header:name")
+	withPriority(t, "header:x-user-id,header:name")
 	SetSessions(StaticSessions{Active: map[string]bool{"s": true}})
-	a := &mapAttrs{m: map[string]string{"header:x-wms-uid": "1"}}
+	a := &mapAttrs{m: map[string]string{"header:x-user-id": "1"}}
 	ctx, c := t.Context(), MapCarrier{}
 	if n := testing.AllocsPerRun(200, func() { BeginIngressAttrs(ctx, KindAPIIn, "a", c, a) }); n != 0 {
 		t.Fatalf("allocs %v", n)
@@ -156,11 +156,11 @@ func TestPriorityNoBindingsNoExtraction(t *testing.T) {
 }
 
 func TestPriorityMask(t *testing.T) {
-	withPriority(t, "header:x-wms-uid,query:uid")
+	withPriority(t, "header:x-user-id,query:uid")
 	SetSessions(StaticSessions{Active: map[string]bool{"s": true}}) // no active bindings
-	h := http.Header{"X-Wms-Uid": {"100"}, "Other": {"ok"}}
+	h := http.Header{"X-User-Id": {"100"}, "Other": {"ok"}}
 	out := RedactHeadersBound(h)
-	if out["X-Wms-Uid"][0] != RedactedValue || out["Other"][0] != "ok" {
+	if out["X-User-Id"][0] != RedactedValue || out["Other"][0] != "ok" {
 		t.Fatalf("%v", out)
 	}
 	if q := MaskBoundQuery("uid=100&a=b"); q == "uid=100&a=b" || q[len(q)-3:] != "a=b" {

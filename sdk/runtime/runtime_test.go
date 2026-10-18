@@ -432,13 +432,13 @@ func TestSubscriberBindingsViaPoll(t *testing.T) {
 }
 
 func TestSubscriberPriorityAmbiguityStats(t *testing.T) {
-	cp := newFakeCP(`{"active":["ts_1","ts_2"],"bindings":[{"session_id":"ts_1","source":"header","name":"x-wms-uid","value":"1"},{"session_id":"ts_2","source":"header","name":"name","value":"bob"}]}`)
+	cp := newFakeCP(`{"active":["ts_1","ts_2"],"bindings":[{"session_id":"ts_1","source":"header","name":"x-user-id","value":"1"},{"session_id":"ts_2","source":"header","name":"name","value":"bob"}]}`)
 	srv := httptest.NewServer(cp.mux())
 	defer srv.Close()
 	s := NewSubscriber(srv.URL)
 	defer s.Close()
 	eventually(t, "bindings", func() bool { return len(s.BindingKeys()) == 2 })
-	both := testAttrs{"header:x-wms-uid": "1", "header:name": "bob"}
+	both := testAttrs{"header:x-user-id": "1", "header:name": "bob"}
 	before := GetStats().BindingAmbiguous
 	if m := s.MatchAttrsDetail(both); m.OK || !m.Ambiguous {
 		t.Fatalf("expected ambiguous: %+v", m)
@@ -446,12 +446,12 @@ func TestSubscriberPriorityAmbiguityStats(t *testing.T) {
 	if GetStats().BindingAmbiguous != before+1 {
 		t.Fatal("stats counter")
 	}
-	core.SetBindPriority(core.ParseBindPriority("header:x-wms-uid,header:name"))
+	core.SetBindPriority(core.ParseBindPriority("header:x-user-id,header:name"))
 	defer core.SetBindPriority(nil)
 	if m := s.MatchAttrsDetail(both); !m.OK || m.SessionID != "ts_1" || m.Fallback {
 		t.Fatalf("%+v", m)
 	}
-	if m := s.MatchAttrsDetail(testAttrs{"header:x-wms-uid": "9", "header:name": "bob"}); m.OK || m.Ambiguous {
+	if m := s.MatchAttrsDetail(testAttrs{"header:x-user-id": "9", "header:name": "bob"}); m.OK || m.Ambiguous {
 		t.Fatalf("unbound priority key must not fall through: %+v", m)
 	}
 	if m := s.MatchAttrsDetail(testAttrs{"header:name": "bob"}); !m.OK || m.SessionID != "ts_2" || !m.Fallback {

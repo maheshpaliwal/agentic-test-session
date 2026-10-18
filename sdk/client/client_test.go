@@ -141,12 +141,12 @@ func TestRenameAndAutoName(t *testing.T) {
 	defer cancel()
 	base := setup(t)
 	o := client.Options{BaseURL: base, QuiesceSeconds: 1, PollInterval: 5 * time.Millisecond,
-		Bindings: []client.Binding{client.BindHeader("X-WMS-UID", "act_bind_9")}}
+		Bindings: []client.Binding{client.BindHeader("X-USER-ID", "act_bind_9")}}
 	s, err := client.Start(ctx, o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if i := s.Info(); !i.NameAuto || i.Name != "x-wms-uid=act_bind_9" {
+	if i := s.Info(); !i.NameAuto || i.Name != "x-user-id=act_bind_9" {
 		t.Fatalf("%+v", i)
 	}
 	info, err := s.Rename(ctx, "run {bind}  ")

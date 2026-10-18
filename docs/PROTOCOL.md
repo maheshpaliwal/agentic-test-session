@@ -38,7 +38,7 @@ The same retry/`seal_error` rule applies to a normal stop.
 
 ### Session names
 - Session JSON has `name_auto` (bool, always present): true when the server generated the name.
-- Empty `name` on start -> auto name from bindings: `<name>=<value>` of the first binding (`x-wms-uid=act_bind_9`; non-headers are
+- Empty `name` on start -> auto name from bindings: `<name>=<value>` of the first binding (`x-user-id=act_bind_9`; non-headers are
   prefixed `jwt:sub=`, `cookie:sid=`, `query:uid=`); up to 2 joined with ` + ` then ` +N` for the rest; no bindings ->
   `<initiated_by> HH:MM:SS` (UTC), e.g. `dashboard 14:32:07`.
 - Templates in a supplied name (start and rename), single pass: `{bind}` (first binding value), `{bind.<name>}` (case-insensitive

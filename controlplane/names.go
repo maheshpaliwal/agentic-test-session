@@ -52,7 +52,7 @@ func SanitizeName(s string) string {
 var placeholderRE = regexp.MustCompile(`\{([^{}]*)\}`)
 
 // bindingDisplayName is the label used for a binding in auto names:
-// "x-wms-uid" for headers, "jwt:sub", "cookie:sid", "query:uid" otherwise.
+// "x-user-id" for headers, "jwt:sub", "cookie:sid", "query:uid" otherwise.
 func bindingDisplayName(b Binding) string {
 	switch b.Source {
 	case BindHeader:

@@ -298,10 +298,10 @@ func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 
 func TestBindPriorityHTTP(t *testing.T) {
 	rec := setup(t, bound(
-		core.Binding{SessionID: "sU", Source: "header", Name: "x-wms-uid", Value: "u_prio_100"},
+		core.Binding{SessionID: "sU", Source: "header", Name: "x-user-id", Value: "u_prio_100"},
 		core.Binding{SessionID: "sN", Source: "header", Name: "name", Value: "alice"},
 	))
-	core.Configure(core.Config{Service: "svc", Enabled: true, BindPriority: core.ParseBindPriority("header:x-wms-uid,header:name")})
+	core.Configure(core.Config{Service: "svc", Enabled: true, BindPriority: core.ParseBindPriority("header:x-user-id,header:name")})
 	t.Cleanup(func() { core.Configure(core.Config{}) })
 	h := Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	do := func(kv ...string) {
@@ -311,8 +311,8 @@ func TestBindPriorityHTTP(t *testing.T) {
 		}
 		h.ServeHTTP(httptest.NewRecorder(), r)
 	}
-	do("X-Wms-Uid", "u_prio_100", "Name", "alice") // decided by uid
-	do("X-Wms-Uid", "u_prio_999", "Name", "alice") // unbound uid: untraced
+	do("X-User-Id", "u_prio_100", "Name", "alice") // decided by uid
+	do("X-User-Id", "u_prio_999", "Name", "alice") // unbound uid: untraced
 	do("Name", "alice")                            // fallback to name
 	evs := rec.Events()
 	var in []core.Event
@@ -321,7 +321,7 @@ func TestBindPriorityHTTP(t *testing.T) {
 			in = append(in, e)
 		}
 	}
-	if len(in) != 2 || in[0].SessionID != "sU" || in[0].Attrs["bound_by"] != "header:x-wms-uid" ||
+	if len(in) != 2 || in[0].SessionID != "sU" || in[0].Attrs["bound_by"] != "header:x-user-id" ||
 		in[1].SessionID != "sN" || in[1].Attrs["bound_fallback"] != "true" {
 		t.Fatalf("%+v", in)
 	}

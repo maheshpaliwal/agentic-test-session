@@ -27,7 +27,7 @@ A session may carry `bindings`: a list of `{source, name, value}`.
 
 ## Priority and fallback
 Optional local config `BindPriority []core.BindingKey` (`runtime.Config.BindPriority`), env
-`TSESSION_BIND_PRIORITY`: comma-separated `source:name`, e.g. `header:x-wms-uid,header:name`. `jwt` is accepted as
+`TSESSION_BIND_PRIORITY`: comma-separated `source:name`, e.g. `header:x-user-id,header:name`. `jwt` is accepted as
 an alias of `jwt_claim`; header names are lower-cased; invalid or duplicate entries are ignored (one log line).
 
 With a list set, for each request:
@@ -49,9 +49,9 @@ The list is **local process config, not distributed by the control plane**. All 
 the same `TSESSION_BIND_PRIORITY`: the entry hop decides attribution, and differing lists would let two services
 attribute the same request differently (or one trace one and the other drop it). Treat it like other env config.
 
-WMS example: `TSESSION_BIND_PRIORITY=header:x-wms-uid,header:name`. Note the WMS service rewrites `name` from
-`X-WMS-Uid` only AFTER the outer handler runs, so at the tracing hop `name` is only useful when the client itself
-sends it; `x-wms-uid` is the reliable key.
+Example: `TSESSION_BIND_PRIORITY=header:x-user-id,header:name`. Note a backend may rewrite `name` from
+`X-User-Id` only AFTER the outer handler runs, so at the tracing hop `name` is only useful when the client itself
+sends it; `x-user-id` is the reliable key.
 
 ## Ambiguity
 In the OR path, if a request matches bindings of two DIFFERENT sessions the SDK does not pick one: the request is

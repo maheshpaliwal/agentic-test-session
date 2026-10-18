@@ -48,11 +48,11 @@ func runSuite(t *testing.T, kind string) {
 	col := colAPI{in.colSrv.URL}
 
 	var (
-		s1                                  = in.start(t, "header")
-		okOrder, failID                     int64
-		evs                                 []core.Event
-		pubIDs                              = map[string]string{} // job -> publish span id
-		authSecret, pwSecret                = "Bearer synthetic-token-abc123", "hunter2-synthetic"
+		s1                   = in.start(t, "header")
+		okOrder, failID      int64
+		evs                  []core.Event
+		pubIDs               = map[string]string{} // job -> publish span id
+		authSecret, pwSecret = "Bearer synthetic-token-abc123", "hunter2-synthetic"
 	)
 	waitActive(t, s1.ID)
 
@@ -461,7 +461,7 @@ func runSuite(t *testing.T, kind string) {
 		in.seal(t, b)
 		ea, eb := col.events(t, a.ID), col.events(t, b.ID)
 		for name, c := range map[string]struct {
-			mine, other []core.Event
+			mine, other  []core.Event
 			own, foreign string
 		}{"A": {ea, eb, "cust-AAA", "cust-BBB"}, "B": {eb, ea, "cust-BBB", "cust-AAA"}} {
 			if len(c.mine) == 0 {
