@@ -164,7 +164,7 @@ func (s *Span) End() {
 	s.ev.LocalSeq = nextLocalSeq()
 	ev := s.ev
 	s.mu.Unlock()
-	defer func() { _ = recover() }() // never let recording break the host app
+	defer Recover() // never let recording break the host app
 	record(ev)
 }
 

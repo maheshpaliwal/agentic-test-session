@@ -354,6 +354,6 @@ func (t *txWrap) end(kind core.Kind, name string, err error, commitFailed bool) 
 
 // safe runs f, swallowing panics: tracing must never break the host app.
 func safe(f func()) {
-	defer func() { _ = recover() }()
+	defer core.Recover()
 	f()
 }

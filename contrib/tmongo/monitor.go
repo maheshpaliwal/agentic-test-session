@@ -138,7 +138,7 @@ func chain(a, b *event.CommandMonitor) *event.CommandMonitor {
 }
 
 func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
-	defer func() { _ = recover() }()
+	defer core.Recover()
 	name := strings.ToLower(e.CommandName)
 	if t.ignore[name] {
 		return
@@ -191,7 +191,7 @@ func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
 }
 
 func (t *tracer) succeeded(_ context.Context, e *event.CommandSucceededEvent) {
-	defer func() { _ = recover() }()
+	defer core.Recover()
 	v, ok := t.pending.LoadAndDelete(e.RequestID)
 	if !ok {
 		return
@@ -222,7 +222,7 @@ func (t *tracer) succeeded(_ context.Context, e *event.CommandSucceededEvent) {
 }
 
 func (t *tracer) failed(_ context.Context, e *event.CommandFailedEvent) {
-	defer func() { _ = recover() }()
+	defer core.Recover()
 	v, ok := t.pending.LoadAndDelete(e.RequestID)
 	if !ok {
 		return

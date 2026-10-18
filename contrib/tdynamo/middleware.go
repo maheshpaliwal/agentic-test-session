@@ -86,7 +86,7 @@ func (t *tracer) handle(ctx context.Context, in middleware.InitializeInput, next
 		op       string
 	)
 	func() {
-		defer func() { _ = recover() }() // tracing must never break the call
+		defer core.Recover() // tracing must never break the call
 		op, injected, in.Parameters, span = t.begin(ctx, in.Parameters)
 	}()
 	out, md, err := next.HandleInitialize(ctx, in)
@@ -95,14 +95,14 @@ func (t *tracer) handle(ctx context.Context, in middleware.InitializeInput, next
 	// attributes are kept for the trace.
 	var ret map[string]types.AttributeValue
 	func() {
-		defer func() { _ = recover() }()
+		defer core.Recover()
 		ret = takeAttributes(out.Result, injected)
 	}()
 	if span == nil && !isSchemaOp(op) {
 		return out, md, err
 	}
 	func() {
-		defer func() { _ = recover() }()
+		defer core.Recover()
 		defer span.End()
 		if err != nil {
 			span.SetErr(err)

@@ -12,6 +12,7 @@ needs throwaway Postgres and Redis (`integration/scripts/it.sh`).
 - Wire changes are additive and documented in `docs/PROTOCOL.md`.
 - Servers bind loopback by default; do not add defaults that listen on all interfaces.
 - Keep Redis-client-independent logic in `internal/redisx`, not duplicated across `tredis` and `tredisv8`.
+- Binaries share plumbing from `internal/svc` (env defaults, CSV lists, graceful `Serve`); wrappers guard recording code with `defer core.Recover()`.
 - Use synthetic data in tests and examples: no real credentials, hostnames, customer data or employer-specific names.
 
 ## Pull requests
