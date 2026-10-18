@@ -1,11 +1,11 @@
-module tsession/contrib/tredis
+module github.com/maheshpaliwal/agentic-test-session/contrib/tredis
 
 go 1.25
 
 require (
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/redis/go-redis/v9 v9.14.1
-	tsession v0.0.0
+	github.com/maheshpaliwal/agentic-test-session v0.0.0
 )
 
 require (

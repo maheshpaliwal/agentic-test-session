@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // tracedHandler is the idempotency marker for server-side wrapping.

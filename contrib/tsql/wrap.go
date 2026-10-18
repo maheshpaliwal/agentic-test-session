@@ -6,7 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Open is a drop-in replacement for sql.Open. If the SDK is disabled it is

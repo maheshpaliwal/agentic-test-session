@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func get(t *testing.T, base, path string) (*http.Response, []byte) {

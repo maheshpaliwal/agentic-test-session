@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Transport is a minimal core-aware http.RoundTripper: it records an api.out

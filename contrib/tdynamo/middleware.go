@@ -10,7 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go/middleware"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const (

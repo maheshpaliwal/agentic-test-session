@@ -120,8 +120,8 @@ Instrument a service:
 
 ```go
 import (
-    "tsession/sdk/autoinit"
-    "tsession/thttp"
+    "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"
+    "github.com/maheshpaliwal/agentic-test-session/thttp"
 )
 
 // autoinit wires the runtime from TSESSION_* environment variables.
@@ -154,9 +154,8 @@ additive and documented in `docs/PROTOCOL.md`.
   best-effort. Treat captured payloads as sensitive and keep the stack on trusted networks.
 - **Ordering is an approximation at the edges.** Events arriving after their reorder window closed get the next
   `Seq`; use `ParentID`/`LinkIDs` for structure.
-- **Bare root module path (`tsession`).** `go mod tidy` fails inside dependent modules and the modules cannot be
-  consumed outside this workspace until the root is renamed to a dotted path. Workaround and the permanent fix
-  are in [`docs/MODULES.md`](docs/MODULES.md).
+- **No tagged releases yet.** Intra-repo requires are `v0.0.0` and resolve through `go.work`, so the modules are
+  not yet `go get`-able. Tagging plan and the `go mod tidy` workaround are in [`docs/MODULES.md`](docs/MODULES.md).
 - **Blob storage is a stub** in v1: large payloads are truncated inline.
 - **Single collector writer per session** is assumed; the Postgres store recovers from a second writer via
   `ErrSeqConflict` catch-up but this is not a multi-writer design.

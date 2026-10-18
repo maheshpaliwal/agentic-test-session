@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func eventually(t *testing.T, what string, f func() bool) {

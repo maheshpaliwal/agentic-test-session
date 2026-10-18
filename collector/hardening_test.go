@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"tsession/collector/store"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // spyStore wraps a Store with fault injection and call counters.

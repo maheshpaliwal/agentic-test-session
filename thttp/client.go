@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"sync"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // tracedTransport is the idempotency marker for client-side wrapping.

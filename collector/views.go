@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Node is one span in the trace tree.

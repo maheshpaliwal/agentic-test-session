@@ -8,7 +8,7 @@ import (
 	"errors"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // ErrSeqConflict is returned when appended events do not continue the

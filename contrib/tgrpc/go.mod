@@ -1,11 +1,11 @@
-module tsession/contrib/tgrpc
+module github.com/maheshpaliwal/agentic-test-session/contrib/tgrpc
 
 go 1.25
 
 require (
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
-	tsession v0.0.0
+	github.com/maheshpaliwal/agentic-test-session v0.0.0
 )
 
 require (

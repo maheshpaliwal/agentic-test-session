@@ -12,8 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"tsession/collector/store"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func pgCollector(t *testing.T, schema string) (*Collector, *httptest.Server, *store.PG) {

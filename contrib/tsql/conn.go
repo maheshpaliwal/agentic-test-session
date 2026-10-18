@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // conn wraps a driver.Conn. database/sql serializes use of a driver conn, so

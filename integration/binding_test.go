@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"tsession/collector/store"
-	"tsession/core"
-	"tsession/dashboard"
-	"tsession/sdk/client"
-	"tsession/sdk/runtime"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/dashboard"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/runtime"
 )
 
 const (

@@ -20,10 +20,10 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 
-	"tsession/contrib/tqueue"
-	"tsession/contrib/tredis"
-	"tsession/contrib/tsql"
-	"tsession/thttp"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tqueue"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tredis"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql"
+	"github.com/maheshpaliwal/agentic-test-session/thttp"
 )
 
 const (

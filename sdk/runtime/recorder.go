@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Recorder is a bounded ring buffer implementing core.Recorder. Record never

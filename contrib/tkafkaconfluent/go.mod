@@ -1,4 +1,4 @@
-module tsession/contrib/tkafkaconfluent
+module github.com/maheshpaliwal/agentic-test-session/contrib/tkafkaconfluent
 
 go 1.25
 
@@ -8,6 +8,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
-	tsession v0.0.0
-	tsession/contrib/tqueue v0.0.0
+	github.com/maheshpaliwal/agentic-test-session v0.0.0
+	github.com/maheshpaliwal/agentic-test-session/contrib/tqueue v0.0.0
 )

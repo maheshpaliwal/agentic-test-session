@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Session mirrors the control-plane session JSON (docs/PROTOCOL.md).

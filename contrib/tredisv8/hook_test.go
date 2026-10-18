@@ -7,8 +7,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-redis/redis/v8"
 
-	"tsession/core"
-	"tsession/internal/redisx"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/redisx"
 )
 
 func setup(t *testing.T, opts ...Option) (*redis.Client, *core.MemRecorder, context.Context) {

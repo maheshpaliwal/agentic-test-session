@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"tsession/controlplane"
+	"github.com/maheshpaliwal/agentic-test-session/controlplane"
 )
 
 func env(k, d string) string {

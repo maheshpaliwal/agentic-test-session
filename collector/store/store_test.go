@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func exercise(t *testing.T, s Store) {

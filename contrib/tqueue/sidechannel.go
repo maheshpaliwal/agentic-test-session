@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // DefaultTTL is how long side-channel carriers live.

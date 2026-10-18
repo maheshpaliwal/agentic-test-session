@@ -9,8 +9,8 @@ import (
 	"os"
 	"strings"
 
-	"tsession/core"
-	"tsession/sdk/runtime"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/runtime"
 )
 
 func init() {

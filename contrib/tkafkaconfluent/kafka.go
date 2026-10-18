@@ -9,8 +9,8 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 
-	"tsession/contrib/tqueue"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tqueue"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const (

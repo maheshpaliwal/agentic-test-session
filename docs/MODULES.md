@@ -4,36 +4,20 @@ Modules are tied together by `go.work`; no `replace tsession => ../..` lines are
 (they were removed from `contrib/*`). `go build/vet/test` work from any module dir while
 the workspace is active.
 
-## Known limitation: bare root module path
-The root module is named `tsession` (no dot in the first path element). Go rejects such
-paths outside the standard library for anything that must resolve a module from the
-network, so inside a module that depends on it **`go mod tidy` fails** with
-`malformed module path "tsession": missing dot in first path element` (workspace mode
-does not run tidy). Consequences: go.mod/go.sum of `collector` and `contrib/*` cannot be
-re-tidied as-is, and the modules cannot be consumed from outside this workspace.
+## Module paths
+The root module is `github.com/maheshpaliwal/agentic-test-session`; every other module lives under it
+(`github.com/maheshpaliwal/agentic-test-session/collector`, `github.com/maheshpaliwal/agentic-test-session/contrib/tsql`, ...). Modules are tied together by `go.work` for local development.
 
-Workaround used to tidy (temporary replace, then strip it):
+Until the first tagged release, the intra-repo `require ... v0.0.0` lines resolve only through the workspace,
+so `go mod tidy` inside a dependent module cannot fetch the root module. To tidy one:
 
     cd contrib/tredis   # or any module
-    printf '\nreplace tsession => ../..\n' >> go.mod   # collector: => ..
+    printf '\nreplace github.com/maheshpaliwal/agentic-test-session => ../..\n' >> go.mod   # collector: => ..
     GOWORK=off GOFLAGS=-mod=mod go mod tidy
-    sed -i '' '/^replace tsession/d' go.mod            # GNU sed: drop the ''
+    perl -ni -e 'print unless /^replace github\.com/maheshpaliwal/agentic\-test\-session =>/' go.mod
 
-Recommended permanent fix (NOT applied): rename the root module to a dotted path, e.g.
-`tsession.local/tsession` (the `.local` path is never fetched; with a `replace` or go.work it
-resolves locally and `go mod tidy` works). Verified on a scratch copy (build, vet, tests, and
-tidy-with-replace all pass). BSD `sed` has no non-greedy/anchored multi-form support that is
-reliable here, so the exact command uses perl (preinstalled on macOS/Linux):
-
-    # 1) imports in Go files (only import-shaped lines, never string literals like "tsession")
-    find . -type f -name '*.go' -print0 | xargs -0 perl -pi -e \
-      's{^(\s*(?:[\w.]+\s+)?)"tsession(/[^"]*)?"\s*$}{$1"tsession.local/tsession$2"\n}'
-    # 2) module + require lines in every go.mod
-    find . -type f -name go.mod -print0 | xargs -0 perl -pi -e \
-      's{^module tsession(/|$)}{module tsession.local/tsession$1}; s{^(\s*(?:require )?)tsession v0\.0\.0}{$1tsession.local/tsession v0.0.0}'
-
-Then grep Dockerfiles/Makefile/docs for the old `tsession/` module paths, and run
-`go build ./... && go vet ./... && go test ./...` in every module.
+Release plan: tag the root (`v0.1.0`) and each submodule with its path prefix (`collector/v0.1.0`,
+`contrib/tsql/v0.1.0`), then replace the `v0.0.0` requires with those versions.
 
 ## go directives
 All modules use `go 1.25`, except `contrib/tmongo` (`go 1.25.0`, forced by mongo-driver v2.9.x)
@@ -49,4 +33,4 @@ those tests (see the header of `integration_test.go`).
 `internal/redisx` (root module) holds the Redis-client-independent half of `contrib/tredis` (go-redis v9) and
 `contrib/tredisv8` (go-redis v8): command classification, argument rendering and the `Redactor`. Each contrib
 module keeps only its client-version-specific hook adapter. Go's `internal` rule is path based, so both contrib
-modules (`tsession/contrib/...`) may import it; nothing outside `tsession/...` can.
+modules (`github.com/maheshpaliwal/agentic-test-session/contrib/...`) may import it; nothing outside this repo's module paths can.

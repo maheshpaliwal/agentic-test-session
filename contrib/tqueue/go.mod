@@ -1,4 +1,4 @@
-module tsession/contrib/tqueue
+module github.com/maheshpaliwal/agentic-test-session/contrib/tqueue
 
 go 1.25
 
@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.4
 	github.com/rabbitmq/amqp091-go v1.15.0
 	github.com/segmentio/kafka-go v0.4.51
-	tsession v0.0.0
+	github.com/maheshpaliwal/agentic-test-session v0.0.0
 )
 
 require (

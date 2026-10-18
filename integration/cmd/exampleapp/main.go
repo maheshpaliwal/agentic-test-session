@@ -11,9 +11,9 @@ import (
 	"os/signal"
 	"time"
 
-	_ "tsession/sdk/autoinit"
+	_ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"
 
-	"tsession/integration/app"
+	"github.com/maheshpaliwal/agentic-test-session/integration/app"
 )
 
 func env(k, d string) string {

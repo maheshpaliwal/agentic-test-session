@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func tok(payload string) string {

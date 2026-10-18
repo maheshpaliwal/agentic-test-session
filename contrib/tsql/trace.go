@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
-	"tsession/contrib/tsql/mutation"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql/mutation"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 var parseCache = struct {

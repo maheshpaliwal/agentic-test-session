@@ -3,7 +3,7 @@ package tmongo
 import (
 	"strings"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const store = "mongo"

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"tsession/dashboard"
+	"github.com/maheshpaliwal/agentic-test-session/dashboard"
 )
 
 func env(k, def string) string {

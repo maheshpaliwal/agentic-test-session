@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 type activeSet struct {

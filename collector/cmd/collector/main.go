@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"tsession/collector"
-	"tsession/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/collector"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 )
 
 func env(k, def string) string {

@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"tsession/collector/store"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Handler returns the collector HTTP API (ingest, read and internal

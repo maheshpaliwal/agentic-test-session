@@ -1,4 +1,4 @@
-module tsession/contrib/tdynamo
+module github.com/maheshpaliwal/agentic-test-session/contrib/tdynamo
 
 go 1.25
 
@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.70.3
 	github.com/aws/smithy-go v1.28.5
-	tsession v0.0.0
+	github.com/maheshpaliwal/agentic-test-session v0.0.0
 )
 
 require (

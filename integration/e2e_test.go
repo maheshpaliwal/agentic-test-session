@@ -12,10 +12,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"tsession/collector"
-	"tsession/collector/store"
-	"tsession/core"
-	"tsession/dashboard"
+	"github.com/maheshpaliwal/agentic-test-session/collector"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/dashboard"
 )
 
 func TestE2E_MemStore(t *testing.T) { runSuite(t, "mem") }

@@ -5,8 +5,8 @@ Ports: control plane `7070`, collector `7071`, dashboard `7072`. Wire format is 
 (NDJSON for batches, SSE for the active-set stream). No protobuf/codegen in v1.
 
 ## Modules (go.work)
-`tsession` (core, thttp, sdk/*, controlplane, dashboard, cmd/*; stdlib only) ·
-`tsession/collector` (pgx allowed) · `tsession/contrib/{tsql,tredis,tmongo,tdynamo,tgrpc,tqueue}`
+root module (core, thttp, sdk/*, controlplane, dashboard, cmd/*; stdlib only) ·
+`collector` (pgx allowed) · `contrib/{tsql,tredis,tmongo,tdynamo,tgrpc,tqueue}`
 (each may pull its own third-party libs). Only touch your own module's go.mod.
 
 ## Session model (control plane owns the FSM)
@@ -139,7 +139,7 @@ call tree (api -> db/cache/queue -> worker), entity mutation history with before
 
 ## SDK runtime (in every service)
 Env: `TSESSION_ENABLED=true`, `TSESSION_SERVICE`, `TSESSION_CONTROLPLANE_URL` (default http://127.0.0.1:7070),
-`TSESSION_COLLECTOR_URL` (default http://127.0.0.1:7071). `import _ "tsession/sdk/autoinit"` is a no-op unless
+`TSESSION_COLLECTOR_URL` (default http://127.0.0.1:7071). `import _ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"` is a no-op unless
 enabled. Exporter: bounded ring, batched NDJSON POST to collector, non-blocking; on overflow drop and emit
 `sdk.dropped` event with `Attrs["count"]`. Active-set subscriber implements `core.SessionSet`.
 

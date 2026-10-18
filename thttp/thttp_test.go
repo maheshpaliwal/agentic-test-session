@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func setup(t *testing.T, s core.StaticSessions) *core.MemRecorder {

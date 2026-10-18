@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func TestQueryTokenRedactedInReq(t *testing.T) {

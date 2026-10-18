@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"tsession/controlplane"
-	"tsession/core"
-	"tsession/sdk/client"
+	"github.com/maheshpaliwal/agentic-test-session/controlplane"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 func setup(t *testing.T) string {

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Config configures Start. Zero values get defaults.

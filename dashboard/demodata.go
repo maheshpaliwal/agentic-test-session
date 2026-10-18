@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // All demo data is synthetic. Hostnames use the reserved .invalid TLD.

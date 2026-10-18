@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"tsession/collector/store"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const sid = "ts_test1"

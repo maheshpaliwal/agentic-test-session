@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"tsession/collector/store"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 type evKey struct {

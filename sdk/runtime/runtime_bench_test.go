@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func benchEvent() core.Event {

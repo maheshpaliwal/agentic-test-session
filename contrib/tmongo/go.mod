@@ -1,8 +1,8 @@
-module tsession/contrib/tmongo
+module github.com/maheshpaliwal/agentic-test-session/contrib/tmongo
 
 go 1.25.0
 
-require tsession v0.0.0
+require github.com/maheshpaliwal/agentic-test-session v0.0.0
 
 require (
 	github.com/klauspost/compress v1.19.2 // indirect

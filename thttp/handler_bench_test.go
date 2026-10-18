@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 type benchNopRec struct{}

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func TestExporterBisectsOn413(t *testing.T) {

@@ -16,8 +16,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"tsession/contrib/tsql"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func runLifecycle(t *testing.T, driverName, dsn, ddl, insert, update, del string) {

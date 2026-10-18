@@ -8,7 +8,7 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 type fakeProducer struct {

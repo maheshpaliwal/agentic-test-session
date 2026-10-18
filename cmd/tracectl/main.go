@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"tsession/sdk/client"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 const usage = `usage: tracectl [--cp URL] <command> [flags]

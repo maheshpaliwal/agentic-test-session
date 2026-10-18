@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"tsession/controlplane"
-	"tsession/sdk/client"
+	"github.com/maheshpaliwal/agentic-test-session/controlplane"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 const cannedEvents = `{"status":"start","id":"c1aaaaaaaaaaaa","from":"img","Type":"container","Action":"start","Actor":{"ID":"c1aaaaaaaaaaaa","Attributes":{"image":"img","name":"web","tsession.id":"checkout-flow"}},"scope":"local","time":1700000000}

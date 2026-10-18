@@ -4,8 +4,8 @@ import (
 	"database/sql/driver"
 	"strings"
 
-	"tsession/contrib/tsql/mutation"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql/mutation"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func anySensitive(idents []string) bool {

@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const maxCellLen = 1024

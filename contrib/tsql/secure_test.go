@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"tsession/contrib/tsql"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func eventJSON(t *testing.T, e core.Event) string {

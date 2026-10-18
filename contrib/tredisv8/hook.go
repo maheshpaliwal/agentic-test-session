@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
-	"tsession/core"
-	"tsession/internal/redisx"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/redisx"
 )
 
 // Option configures the hook.

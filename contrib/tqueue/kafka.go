@@ -7,7 +7,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // kafkaCarrier maps the carrier onto kafka message headers.

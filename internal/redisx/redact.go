@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const masked = core.RedactedValue

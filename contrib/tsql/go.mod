@@ -1,8 +1,8 @@
-module tsession/contrib/tsql
+module github.com/maheshpaliwal/agentic-test-session/contrib/tsql
 
 go 1.25
 
-require tsession v0.0.0
+require github.com/maheshpaliwal/agentic-test-session v0.0.0
 
 // Test-only: used by the `integration`-tagged tests; not imported by the library.
 require (

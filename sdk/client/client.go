@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 const DefaultURL = "http://127.0.0.1:7070"

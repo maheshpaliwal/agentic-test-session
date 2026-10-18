@@ -3,7 +3,7 @@ package tmongo
 import (
 	"strings"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // redactDoc masks sensitive field names at every depth (core.RedactAny) and

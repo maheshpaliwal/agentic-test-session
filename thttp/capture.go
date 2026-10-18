@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // message is the payload recorded for a request or response.

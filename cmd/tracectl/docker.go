@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/sdk/client"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 // LabelKey marks containers that should be traced; its value is the session name.

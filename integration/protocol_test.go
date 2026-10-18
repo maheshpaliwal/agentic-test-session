@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"tsession/collector"
-	"tsession/collector/store"
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/collector"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // TestProtocol_FailedCommitAndRetryPending posts synthetic events to a real

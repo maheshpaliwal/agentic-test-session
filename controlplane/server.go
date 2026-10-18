@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Handler returns the REST + SSE API.

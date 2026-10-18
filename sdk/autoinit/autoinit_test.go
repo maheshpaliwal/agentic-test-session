@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 func TestNoopWhenDisabled(t *testing.T) {

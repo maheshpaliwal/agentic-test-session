@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Mem is the in-memory Store (default; used in tests).

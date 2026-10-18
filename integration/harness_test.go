@@ -17,13 +17,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
-	"tsession/collector"
-	"tsession/collector/store"
-	"tsession/controlplane"
-	"tsession/core"
-	"tsession/integration/app"
-	"tsession/sdk/client"
-	"tsession/sdk/runtime"
+	"github.com/maheshpaliwal/agentic-test-session/collector"
+	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"github.com/maheshpaliwal/agentic-test-session/controlplane"
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/integration/app"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/runtime"
 )
 
 func itEnv(t *testing.T) (pgDSN, redisAddr string) {

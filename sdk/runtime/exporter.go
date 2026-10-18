@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // ExporterConfig tunes batching and retry. Zero values get defaults.

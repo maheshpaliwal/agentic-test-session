@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"tsession/core"
+	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
 // Message describes a job being published.
