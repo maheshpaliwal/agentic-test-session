@@ -178,14 +178,14 @@ func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, pa
 		t.learnKey(table, v.Key)
 	case *dynamodb.QueryInput:
 		op, table = "Query", str(v.TableName)
-		kc := resolveExpr(str(v.KeyConditionExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues)
-		fe := resolveExpr(str(v.FilterExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues)
+		r := resolveExprs(v.ExpressionAttributeNames, v.ExpressionAttributeValues, v.KeyConditionExpression, v.FilterExpression)
+		kc, fe := r[0], r[1]
 		req["key_condition"], req["filter"] = kc.Inline, fe.Inline
 		req["values"] = nonEmpty(mergeVals(kc.Values, fe.Values))
 		req["index"] = str(v.IndexName)
 	case *dynamodb.ScanInput:
 		op, table = "Scan", str(v.TableName)
-		fe := resolveExpr(str(v.FilterExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues)
+		fe := resolveExprs(v.ExpressionAttributeNames, v.ExpressionAttributeValues, v.FilterExpression)[0]
 		req["filter"], req["values"] = fe.Inline, nonEmpty(fe.Values)
 		req["index"] = str(v.IndexName)
 	case *dynamodb.BatchGetItemInput:
@@ -213,7 +213,7 @@ func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, pa
 	case *dynamodb.PutItemInput:
 		kind, op, table = core.KindDBWrite, "PutItem", str(v.TableName)
 		req["item"] = redItem(v.Item)
-		if c := resolveExpr(str(v.ConditionExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues); c.Inline != "" {
+		if c := resolveExprs(v.ExpressionAttributeNames, v.ExpressionAttributeValues, v.ConditionExpression)[0]; c.Inline != "" {
 			req["condition"], req["values"] = c.Inline, nonEmpty(c.Values)
 		}
 		if v.ReturnValues == "" {
@@ -224,7 +224,7 @@ func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, pa
 		kind, op, table = core.KindDBWrite, "DeleteItem", str(v.TableName)
 		req["key"] = redItem(v.Key)
 		t.learnKey(table, v.Key)
-		if c := resolveExpr(str(v.ConditionExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues); c.Inline != "" {
+		if c := resolveExprs(v.ExpressionAttributeNames, v.ExpressionAttributeValues, v.ConditionExpression)[0]; c.Inline != "" {
 			req["condition"], req["values"] = c.Inline, nonEmpty(c.Values)
 		}
 		if v.ReturnValues == "" {
@@ -233,8 +233,8 @@ func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, pa
 		}
 	case *dynamodb.UpdateItemInput:
 		kind, op, table = core.KindDBWrite, "UpdateItem", str(v.TableName)
-		ue := resolveExpr(str(v.UpdateExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues)
-		ce := resolveExpr(str(v.ConditionExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues)
+		r := resolveExprs(v.ExpressionAttributeNames, v.ExpressionAttributeValues, v.UpdateExpression, v.ConditionExpression)
+		ue, ce := r[0], r[1]
 		req["key"], req["update"] = redItem(v.Key), ue.Inline
 		req["condition"] = ce.Inline
 		req["values"] = nonEmpty(mergeVals(ue.Values, ce.Values))
@@ -427,7 +427,8 @@ func (t *tracer) finish(span *core.Span, in any, result any, ret map[string]type
 		if injected || v.ReturnValues == types.ReturnValueAllOld {
 			old = ret
 		}
-		if !(injected && emptyItem(old)) { // injected + nothing returned = nothing deleted
+		// ALL_OLD (ours or the caller's) returning nothing = nothing was deleted.
+		if allOld := injected || v.ReturnValues == types.ReturnValueAllOld; !(allOld && emptyItem(old)) {
 			mut(tbl, "delete", plainKey(v.Key), nilIfEmpty(old), nil)
 		}
 	case *dynamodb.UpdateItemInput:
@@ -447,7 +448,7 @@ func (t *tracer) finish(span *core.Span, in any, result any, ret map[string]type
 		if after != nil {
 			m.After = core.Payload(redItem(after))
 		} else if v.UpdateExpression != nil { // only the pre-image is known; keep the intent
-			ue := resolveExpr(str(v.UpdateExpression), v.ExpressionAttributeNames, v.ExpressionAttributeValues)
+			ue := resolveExprs(v.ExpressionAttributeNames, v.ExpressionAttributeValues, v.UpdateExpression, v.ConditionExpression)[0]
 			m.After = core.Payload(map[string]any{"update_expression": ue.Expr, "values": ue.Values})
 		}
 		span.AddMutation(m)
@@ -476,7 +477,8 @@ func (t *tracer) finish(span *core.Span, in any, result any, ret map[string]type
 				mut(tbl, "put", t.pk(tbl, it.Put.Item), nil, it.Put.Item)
 			case it.Update != nil:
 				tbl := str(it.Update.TableName)
-				ue := resolveExpr(str(it.Update.UpdateExpression), it.Update.ExpressionAttributeNames, it.Update.ExpressionAttributeValues)
+				ue := resolveExprs(it.Update.ExpressionAttributeNames, it.Update.ExpressionAttributeValues,
+					it.Update.UpdateExpression, it.Update.ConditionExpression)[0]
 				m := core.Mutation{Store: store, Entity: tbl, PK: plainKey(it.Update.Key), Op: "update", Source: "sdk",
 					After: core.Payload(map[string]any{"update_expression": ue.Expr, "values": ue.Values})}
 				span.AddMutation(m)
