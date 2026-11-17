@@ -13,6 +13,12 @@
 // ALL_NEW for UpdateItem unless WithUpdateReturn says otherwise), records the
 // returned item, and strips it from the response so the caller observes no
 // difference. A caller-supplied ReturnValues is respected and never altered.
+// A DeleteItem whose ALL_OLD (injected or the caller's) returns no item
+// deleted nothing and yields no mutation.
+//
+// Expressions are recorded with "#n" names resolved and ":v" values inlined.
+// A value is masked when it shares a comparison, assignment, function call or
+// IN / BETWEEN list with a sensitive attribute anywhere in the request.
 //
 // Primary keys come from the Key of Get/Update/Delete. PutItem carries only
 // Item, so its key attribute names are learned from earlier keyed calls or

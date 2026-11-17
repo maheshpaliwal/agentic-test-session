@@ -36,7 +36,8 @@ var commands = map[string]Spec{
 	"keys": r(0, 0, 0), "scan": r(0, 0, 0), "dbsize": r(0, 0, 0),
 	"del": wN, "unlink": wN, "expire": w1, "pexpire": w1, "expireat": w1, "pexpireat": w1,
 	"persist": w1, "rename": w(1, 2, 1), "renamenx": w(1, 2, 1), "copy": w(1, 2, 1),
-	"move": w1, "restore": w1, "sort": w1,
+	"move": w1, "restore": w1,
+	"sort":    w1, // a write only with STORE, see Classify
 	"flushdb": w(0, 0, 0), "flushall": w(0, 0, 0),
 	// hashes
 	"hget": r1, "hgetall": r1, "hmget": r1, "hkeys": r1, "hvals": r1, "hlen": r1, "hexists": r1,
@@ -47,7 +48,9 @@ var commands = map[string]Spec{
 	"lrange": r1, "llen": r1, "lindex": r1, "lpos": r1,
 	"lpush": w1, "rpush": w1, "lpushx": w1, "rpushx": w1, "lpop": w1, "rpop": w1, "lset": w1,
 	"lrem": w1, "ltrim": w1, "linsert": w1, "lmove": w(1, 2, 1), "rpoplpush": w(1, 2, 1),
-	"blpop": w(1, -2, 1), "brpop": w(1, -2, 1), "lmpop": w(2, 2, 1),
+	"blmove": w(1, 2, 1), "brpoplpush": w(1, 2, 1),
+	"blpop": w(1, -2, 1), "brpop": w(1, -2, 1),
+	"lmpop": w(0, 0, 0), "blmpop": w(0, 0, 0), // keys via numkeys, see KeysOf
 	// sets
 	"smembers": r1, "sismember": r1, "smismember": r1, "scard": r1, "srandmember": r1,
 	"sscan": r1, "sinter": rN, "sunion": rN, "sdiff": rN,
@@ -60,6 +63,8 @@ var commands = map[string]Spec{
 	"zadd": w1, "zrem": w1, "zincrby": w1, "zremrangebyscore": w1, "zremrangebyrank": w1,
 	"zremrangebylex": w1, "zpopmin": w1, "zpopmax": w1, "zrangestore": w(1, 2, 1),
 	"bzpopmin": w(1, -2, 1), "bzpopmax": w(1, -2, 1),
+	"zmpop": w(0, 0, 0), "bzmpop": w(0, 0, 0), // keys via numkeys, see KeysOf
+	"zunionstore": w(0, 0, 0), "zinterstore": w(0, 0, 0), "zdiffstore": w(0, 0, 0),
 	// streams
 	"xrange": r1, "xrevrange": r1, "xlen": r1, "xinfo": r(2, 2, 1), "xpending": r1,
 	"xread": r(0, 0, 0), "xreadgroup": r(0, 0, 0),
@@ -67,7 +72,7 @@ var commands = map[string]Spec{
 	"xgroup": w(2, 2, 1),
 	// geo / hll
 	"geopos": r1, "geodist": r1, "geohash": r1, "geosearch": r1, "pfcount": rN,
-	"geoadd": w1, "pfadd": w1, "pfmerge": wN,
+	"geoadd": w1, "pfadd": w1, "pfmerge": wN, "geosearchstore": w(1, 2, 1),
 	// pub/sub: the channel stands in for the key
 	"publish": w1, "spublish": w1,
 	// scripting: keys are located via numkeys, see KeysOf
@@ -86,9 +91,45 @@ func Lookup(name string) (Spec, bool) {
 	return s, ok
 }
 
+// Classify is Lookup refined by the arguments: SORT only writes when it has a
+// STORE destination.
+func Classify(name string, args []any) Spec {
+	s, _ := Lookup(name)
+	if strings.EqualFold(name, "sort") {
+		if storeIndex(args) < 0 {
+			return r1
+		}
+		return w(1, -1, 1)
+	}
+	return s
+}
+
+// storeIndex returns the index of the destination key of SORT ... STORE dest,
+// or -1.
+func storeIndex(args []any) int {
+	for i := 2; i+1 < len(args); i++ {
+		if strings.EqualFold(Str(args[i]), "store") {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// numKeys locates the keys of commands that carry an explicit key count: the
+// count is args[at] and the keys follow it. dest marks a destination key at
+// args[1], ahead of the count.
+var numKeys = map[string]struct {
+	at   int
+	dest bool
+}{
+	"lmpop": {at: 1}, "zmpop": {at: 1}, "blmpop": {at: 2}, "bzmpop": {at: 2},
+	"zunionstore": {at: 2, dest: true}, "zinterstore": {at: 2, dest: true}, "zdiffstore": {at: 2, dest: true},
+}
+
 // KeysOf returns the indices into args that hold keys.
 func KeysOf(name string, s Spec, args []any) []int {
-	switch strings.ToLower(name) {
+	lname := strings.ToLower(name)
+	switch lname {
 	case "eval", "evalsha", "eval_ro", "evalsha_ro", "fcall", "fcall_ro":
 		if len(args) < 3 {
 			return nil
@@ -99,8 +140,31 @@ func KeysOf(name string, s Spec, args []any) []int {
 			idx = append(idx, 3+i)
 		}
 		return idx
-	case "lmpop", "zmpop", "object", "xinfo", "xgroup":
-		// numkeys / subcommand forms: only the simple cases are handled.
+	case "sort":
+		if len(args) < 2 {
+			return nil
+		}
+		idx := []int{1}
+		if d := storeIndex(args); d >= 0 {
+			idx = append(idx, d)
+		}
+		return idx
+	case "object", "xinfo", "xgroup":
+		// subcommand forms: only the simple cases are handled.
+	}
+	if nk, ok := numKeys[lname]; ok {
+		if nk.at >= len(args) {
+			return nil
+		}
+		var idx []int
+		if nk.dest {
+			idx = append(idx, 1)
+		}
+		n := atoi(args[nk.at])
+		for i := nk.at + 1; i <= nk.at+n && i < len(args); i++ {
+			idx = append(idx, i)
+		}
+		return idx
 	}
 	if s.First <= 0 {
 		return nil
@@ -120,6 +184,74 @@ func KeysOf(name string, s Spec, args []any) []int {
 	return idx
 }
 
+// destKey gives, for commands that read several keys but write one, the
+// position of the written key within the command's key list (-1 = last).
+var destKey = map[string]int{
+	"sinterstore": 0, "sunionstore": 0, "sdiffstore": 0, "pfmerge": 0, "bitop": 0,
+	"zrangestore": 0, "zunionstore": 0, "zinterstore": 0, "zdiffstore": 0,
+	"geosearchstore": 0, "copy": 1, "sort": -1,
+}
+
+// popCmds pop from the first non-empty key of a list; the reply names it.
+var popCmds = map[string]bool{
+	"blpop": true, "brpop": true, "bzpopmin": true, "bzpopmax": true,
+	"lmpop": true, "blmpop": true, "zmpop": true, "bzmpop": true,
+}
+
+// IsPop reports whether the named command pops from one of several keys and
+// names that key in its reply.
+func IsPop(name string) bool { return popCmds[strings.ToLower(name)] }
+
+// WrittenKeys returns the subset of keys (indices into args, as returned by
+// KeysOf) that a write command mutates: only the destination of the *STORE
+// family, PFMERGE, BITOP and COPY, and only the popped key of a multi-key pop
+// when popped (the key named by the reply) is known. popped == "" means
+// unknown, and every candidate key is returned.
+func WrittenKeys(name string, args []any, keys []int, popped string) []int {
+	lname := strings.ToLower(name)
+	if d, ok := destKey[lname]; ok {
+		if d < 0 {
+			d = len(keys) - 1
+		}
+		if d < 0 || d >= len(keys) {
+			return nil
+		}
+		return keys[d : d+1]
+	}
+	if popped != "" && popCmds[lname] {
+		for j, i := range keys {
+			if i < len(args) && Str(args[i]) == popped {
+				return keys[j : j+1]
+			}
+		}
+	}
+	return keys
+}
+
+// noopOnZero lists writes whose integer/boolean reply is the number of keys or
+// members actually changed, so 0 / false means nothing happened.
+var noopOnZero = map[string]bool{
+	"set": true, "setnx": true, "msetnx": true, "renamenx": true,
+	"del": true, "unlink": true, "hdel": true, "srem": true, "zrem": true,
+	"expire": true, "pexpire": true, "expireat": true, "pexpireat": true, "persist": true,
+}
+
+// NoOp reports whether the reply of a successful write shows that it changed
+// nothing: SET NX|XX / SETNX / MSETNX / RENAMENX whose condition failed, or
+// DEL, UNLINK, HDEL, SREM, ZREM, EXPIRE*, PERSIST that affected 0 keys or
+// members. Such commands yield no mutation.
+func NoOp(name string, reply any) bool {
+	if !noopOnZero[strings.ToLower(name)] {
+		return false
+	}
+	switch t := reply.(type) {
+	case int64:
+		return t == 0
+	case bool:
+		return !t
+	}
+	return false
+}
 func atoi(v any) int {
 	n := 0
 	for _, c := range Str(v) {

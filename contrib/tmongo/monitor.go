@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/event"
@@ -36,12 +38,67 @@ var strip = map[string]bool{"lsid": true, "$clusterTime": true, "$db": true, "tx
 	"readConcern": true, "writeConcern": true, "maxTimeMS": true, "apiVersion": true,
 	"apiStrict": true, "apiDeprecationErrors": true}
 
+// Bounds on the in-flight table, so that commands whose completion event
+// never arrives cannot accumulate.
+const (
+	defaultMaxPending = 4096             // commands tracked at once
+	defaultPendingAge = 10 * time.Minute // unanswered for this long = abandoned
+	sweepInterval     = time.Second
+)
+
 type tracer struct {
 	ignore  map[string]bool
 	pending sync.Map // RequestID -> *inflight
+
+	npending   atomic.Int64
+	lastSweep  atomic.Int64 // unix nanoseconds
+	maxPending int
+	pendingAge time.Duration
+}
+
+// track registers a started command. When the table is full, entries older
+// than pendingAge are abandoned; if it is still full the new command is not
+// tracked.
+func (t *tracer) track(id int64, in *inflight) {
+	in.at = time.Now()
+	if t.npending.Load() >= int64(t.maxPending) {
+		t.sweep(in.at)
+	}
+	if t.npending.Load() >= int64(t.maxPending) {
+		in.abandon()
+		return
+	}
+	if _, replaced := t.pending.Swap(id, in); !replaced {
+		t.npending.Add(1)
+	}
+}
+
+// take removes and returns the in-flight command for a completion event.
+func (t *tracer) take(id int64) *inflight {
+	v, ok := t.pending.LoadAndDelete(id)
+	if !ok {
+		return nil
+	}
+	t.npending.Add(-1)
+	return v.(*inflight)
+}
+
+func (t *tracer) sweep(now time.Time) {
+	last := t.lastSweep.Load()
+	if now.UnixNano()-last < int64(sweepInterval) || !t.lastSweep.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	t.pending.Range(func(k, v any) bool {
+		if in := v.(*inflight); now.Sub(in.at) > t.pendingAge && t.pending.CompareAndDelete(k, v) {
+			t.npending.Add(-1)
+			in.abandon()
+		}
+		return true
+	})
 }
 
 type inflight struct {
+	at   time.Time // when the command started
 	span *core.Span
 	cmd  string
 	ent  string
@@ -77,12 +134,21 @@ func (in *inflight) endCommit(err error, durUS int64) {
 	sp.End()
 }
 
+// abandon ends the span of a command whose reply will not be correlated,
+// flagged "unfinished" (no reply, no mutations).
+func (in *inflight) abandon() {
+	if in.span != nil {
+		in.span.AddFlag("unfinished")
+		in.span.End()
+	}
+}
+
 // monitors holds every monitor built here; it is the idempotency marker for Apply.
 var monitors sync.Map // *event.CommandMonitor -> struct{}
 
 // Monitor returns a command monitor that records spans into the active session.
 func Monitor(opts ...Option) *event.CommandMonitor {
-	t := &tracer{ignore: map[string]bool{}}
+	t := &tracer{ignore: map[string]bool{}, maxPending: defaultMaxPending, pendingAge: defaultPendingAge}
 	for _, n := range noisy {
 		t.ignore[n] = true
 	}
@@ -143,6 +209,11 @@ func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
 	if t.ignore[name] {
 		return
 	}
+	// Decode nothing for commands outside a session: an un-ended probe span is
+	// never recorded.
+	if _, probe := core.Begin(ctx, core.KindDBRead, e.CommandName); probe == nil {
+		return
+	}
 	var d bson.D
 	if bson.Unmarshal(e.Command, &d) != nil || len(d) == 0 {
 		return
@@ -165,10 +236,7 @@ func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
 	if name == "committransaction" {
 		// The span kind depends on the outcome (a failed commit is a rollback,
 		// as in tsql), so the span is begun when the reply arrives.
-		if _, probe := core.Begin(ctx, kind, label); probe == nil {
-			return
-		}
-		t.pending.Store(e.RequestID, &inflight{ctx: ctx, label: label, db: e.DatabaseName, cmd: name, body: body, txID: txIDOf(body)})
+		t.track(e.RequestID, &inflight{ctx: ctx, label: label, db: e.DatabaseName, cmd: name, body: body, txID: txIDOf(body)})
 		return
 	}
 	_, span := core.Begin(ctx, kind, label)
@@ -187,16 +255,15 @@ func (t *tracer) started(ctx context.Context, e *event.CommandStartedEvent) {
 	if in.txID != "" {
 		span.SetTx(in.txID)
 	}
-	t.pending.Store(e.RequestID, in)
+	t.track(e.RequestID, in)
 }
 
 func (t *tracer) succeeded(_ context.Context, e *event.CommandSucceededEvent) {
 	defer core.Recover()
-	v, ok := t.pending.LoadAndDelete(e.RequestID)
-	if !ok {
+	in := t.take(e.RequestID)
+	if in == nil {
 		return
 	}
-	in := v.(*inflight)
 	if in.cmd == "committransaction" {
 		in.endCommit(nil, e.Duration.Microseconds())
 		return
@@ -223,11 +290,10 @@ func (t *tracer) succeeded(_ context.Context, e *event.CommandSucceededEvent) {
 
 func (t *tracer) failed(_ context.Context, e *event.CommandFailedEvent) {
 	defer core.Recover()
-	v, ok := t.pending.LoadAndDelete(e.RequestID)
-	if !ok {
+	in := t.take(e.RequestID)
+	if in == nil {
 		return
 	}
-	in := v.(*inflight)
 	if in.cmd == "committransaction" {
 		in.endCommit(e.Failure, e.Duration.Microseconds())
 		return

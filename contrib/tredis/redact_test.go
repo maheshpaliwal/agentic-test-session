@@ -169,3 +169,50 @@ func TestRealRedis(t *testing.T) {
 		t.Errorf("real before/after: %s -> %s", m.Before.Inline, m.After.Inline)
 	}
 }
+
+func TestMemberArgsOfSensitiveKeysMasked(t *testing.T) {
+	c, rec, ctx := setup(t)
+	c.SIsMember(ctx, "secret:set", "member-sec-1")
+	c.ZScore(ctx, "user:1:password", "member-sec-2")
+	c.LPos(ctx, "auth:token:list", "member-sec-3", redis.LPosArgs{})
+	c.SMove(ctx, "secret:a", "secret:b", "member-sec-4")
+	c.SIsMember(ctx, "plain:set", "visible-member")
+	txt := allText(rec)
+	for _, bad := range []string{"member-sec-1", "member-sec-2", "member-sec-3", "member-sec-4"} {
+		if strings.Contains(txt, bad) {
+			t.Errorf("leaked %q in %s", bad, txt)
+		}
+	}
+	if !strings.Contains(txt, "visible-member") || !strings.Contains(txt, "secret:set") {
+		t.Errorf("over-redacted: %s", txt)
+	}
+}
+
+func TestValueCaptureOffCoversReadsAndUnknownCommands(t *testing.T) {
+	c, rec, ctx := setup(t, WithValueCapture(false))
+	c.SIsMember(ctx, "s", "member-val-1")
+	c.Do(ctx, "BF.ADD", "bf", "member-val-2")
+	c.ZRem(ctx, "z", "member-val-3")
+	txt := allText(rec)
+	for _, bad := range []string{"member-val-1", "member-val-2", "member-val-3"} {
+		if strings.Contains(txt, bad) {
+			t.Errorf("capture off but recorded %q in %s", bad, txt)
+		}
+	}
+	if !strings.Contains(txt, "SISMEMBER s") {
+		t.Errorf("keys must remain: %s", txt)
+	}
+}
+
+func TestArgsScrubbedInRequest(t *testing.T) {
+	c, rec, ctx := setup(t)
+	c.Do(ctx, "ECHO", "Bearer abcdefghijklmnop")
+	c.ZRem(ctx, "plain", `{"password":"member-sec-5"}`)
+	c.SIsMember(ctx, "plain:set", `{"token":"member-sec-6"}`)
+	txt := allText(rec)
+	for _, bad := range []string{"abcdefghijklmnop", "member-sec-5", "member-sec-6"} {
+		if strings.Contains(txt, bad) {
+			t.Errorf("leaked %q in %s", bad, txt)
+		}
+	}
+}

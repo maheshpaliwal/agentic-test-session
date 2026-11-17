@@ -1,6 +1,7 @@
 package tmongo
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -66,12 +67,40 @@ func hasOperator(d doc) bool {
 	return false
 }
 
-func failedIdx(reply doc) map[int64]bool {
-	out := map[int64]bool{}
+// writeErrorIdx returns the statement indexes listed in a reply's writeErrors.
+func writeErrorIdx(reply doc) []int64 {
+	var out []int64
 	for _, e := range asArr(reply["writeErrors"]) {
-		out[num(asDoc(e)["index"])] = true
+		out = append(out, num(asDoc(e)["index"]))
 	}
 	return out
+}
+
+// bulkErrorIdx returns the indexes of the failed operations of a bulkWrite
+// command: the {ok: 0, idx: n} entries of its reply cursor.
+func bulkErrorIdx(reply doc) []int64 {
+	var out []int64
+	for _, e := range batch(asDoc(reply["cursor"])) {
+		ed := asDoc(e)
+		if ok, has := ed["ok"]; has && !truthy(ok) {
+			out = append(out, num(ed["idx"]))
+		}
+	}
+	return out
+}
+
+// notApplied returns a predicate reporting whether statement i of a write
+// command was not applied: it failed, or the command is ordered (the default)
+// and an earlier statement failed, at which point the server stops.
+func notApplied(body doc, failed []int64) func(i int) bool {
+	if len(failed) == 0 {
+		return func(int) bool { return false }
+	}
+	ordered := body["ordered"] != false
+	first := slices.Min(failed)
+	return func(i int) bool {
+		return slices.Contains(failed, int64(i)) || ordered && int64(i) > first
+	}
 }
 
 func mutationsFor(in *inflight, reply doc) []core.Mutation {
@@ -79,11 +108,11 @@ func mutationsFor(in *inflight, reply doc) []core.Mutation {
 		return core.Mutation{Store: store, Entity: entity, PK: pk, Op: op, Source: "sdk"}
 	}
 	var out []core.Mutation
-	failed := failedIdx(reply)
+	skip := notApplied(in.body, writeErrorIdx(reply))
 	switch in.cmd {
 	case "insert":
 		for i, d := range asArr(in.body["documents"]) {
-			if failed[int64(i)] {
+			if skip(i) {
 				continue
 			}
 			m := mk(in.ent, "insert", nil)
@@ -105,7 +134,7 @@ func mutationsFor(in *inflight, reply doc) []core.Mutation {
 			upserted[num(ud["index"])] = ud["_id"]
 		}
 		for i, s := range asArr(in.body["updates"]) {
-			if failed[int64(i)] {
+			if skip(i) {
 				continue
 			}
 			sd := asDoc(s)
@@ -126,7 +155,7 @@ func mutationsFor(in *inflight, reply doc) []core.Mutation {
 			return nil
 		}
 		for i, s := range asArr(in.body["deletes"]) {
-			if failed[int64(i)] {
+			if skip(i) {
 				continue
 			}
 			sd := asDoc(s)
@@ -185,8 +214,12 @@ func bulk(in *inflight, reply doc, mk func(string, string, map[string]any) core.
 		s := str(asDoc(n)["ns"])
 		nss = append(nss, s[strings.Index(s, ".")+1:])
 	}
+	skip := notApplied(in.body, bulkErrorIdx(reply))
 	var out []core.Mutation
-	for _, o := range asArr(in.body["ops"]) {
+	for i, o := range asArr(in.body["ops"]) {
+		if skip(i) {
+			continue
+		}
 		od := asDoc(o)
 		var kind string
 		var idx int64
