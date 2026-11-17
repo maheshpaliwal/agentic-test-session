@@ -130,3 +130,26 @@ func TestTransportPropagationFilters(t *testing.T) {
 		t.Fatal("hostMatches")
 	}
 }
+
+// Close must not wait out a request that is stuck on an unresponsive
+// collector: the in-flight POST is abandoned when the flush budget is spent.
+func TestCloseAbandonsHungCollector(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	rec := NewRecorder(16)
+	x := NewExporter(rec, ExporterConfig{CollectorURL: srv.URL, HTTPTimeout: 30 * time.Second, FlushInterval: time.Hour})
+	rec.Record(core.Event{SessionID: "s", Kind: core.KindAPIIn})
+	start := time.Now()
+	x.Close(50 * time.Millisecond)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("Close took %v with a hung collector (HTTP timeout is 30s)", d)
+	}
+}

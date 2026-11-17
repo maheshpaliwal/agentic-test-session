@@ -79,7 +79,8 @@ func main() {
 	col := collector.New(st, cfg)
 	defer col.Close()
 
-	srv := &http.Server{Addr: *listen, Handler: col.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: *listen, Handler: col.Handler(),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
 	log.Info("collector listening", "addr", *listen, "store", *sf.kind, "window", *window, "retention", *retention)
 	if err := svc.Serve(ctx, srv, 5*time.Second, nil); err != nil {
 		log.Error("serve", "err", err)

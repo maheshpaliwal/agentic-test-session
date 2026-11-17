@@ -54,7 +54,8 @@ func main() {
 	defer stop()
 	go m.Run(ctx)
 
-	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// No WriteTimeout: /v1/active/stream is a long-lived SSE response.
+	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	log.Info("control plane listening", "addr", *addr, "collector", *collector)
 	if err := svc.Serve(ctx, srv, 5*time.Second, m.Close); err != nil { // Close ends SSE streams so Shutdown can finish
 		log.Error("serve", "err", err)
