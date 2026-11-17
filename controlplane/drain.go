@@ -96,7 +96,9 @@ func (m *Manager) drain(ctx context.Context, id string) {
 	}
 	if err != nil {
 		cur.SealError = err.Error()
+		m.tel.sealFailures.Inc()
 	}
+	m.tel.finished.With(string(cur.State)).Inc()
 	cur.Incomplete = timedOut || err != nil || res.Incomplete
 	cur.DroppedEvents = last.DroppedEvents
 	cur.BundleURI = res.BundleURI

@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -41,6 +42,8 @@ session results (collector):
   history <id|name> <store> <entity> <pk> [--json]
                                 every change to one entity, with diffs and tx outcome
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
+
+  version                       print the tracectl version
 
 --cp defaults to $TSESSION_CONTROLPLANE_URL or http://127.0.0.1:7070
 --collector defaults to $TSESSION_COLLECTOR_URL or http://127.0.0.1:7071`
@@ -78,6 +81,7 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"entities":     (*cli).entities,
 	"history":      (*cli).history,
 	"export":       (*cli).export,
+	"version":      (*cli).version,
 }
 
 func main() {
@@ -126,6 +130,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tracectl:", err)
 		return 1
 	}
+}
+
+func (c *cli) version(context.Context, []string) error {
+	v, g := svc.Version()
+	fmt.Fprintf(c.stdout, "tracectl %s (%s)\n", v, g)
+	return nil
 }
 
 // flags returns a FlagSet for one command that reports errors to stderr.

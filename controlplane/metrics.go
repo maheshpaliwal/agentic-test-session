@@ -1,0 +1,61 @@
+package controlplane
+
+import (
+	"github.com/maheshpaliwal/agentic-test-session/internal/metrics"
+	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
+)
+
+// telemetry is the control plane's own instrumentation, served at GET
+// /metrics. Every Manager has its own registry.
+type telemetry struct {
+	reg *metrics.Registry
+
+	started      *metrics.Counter
+	finished     *metrics.CounterVec // state: SEALED | EXPIRED | ABORTED
+	sealFailures *metrics.Counter
+	deleted      *metrics.Counter
+}
+
+func newTelemetry(m *Manager) *telemetry {
+	r := metrics.New()
+	version, goVersion := svc.Version()
+	r.BuildInfo("controlplane", version, goVersion)
+	r.GaugeVecFunc("tsession_controlplane_sessions", "Sessions that have not finished, by state.",
+		[]string{"state"}, func() []metrics.Sample {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			n := map[State]int{StateActive: 0, StateDraining: 0}
+			for _, s := range m.live {
+				n[s.State]++
+			}
+			out := make([]metrics.Sample, 0, len(n))
+			for st, c := range n {
+				out = append(out, metrics.Sample{Labels: []string{string(st)}, Value: float64(c)})
+			}
+			return out
+		})
+	r.GaugeFunc("tsession_controlplane_subscribers", "Open active-set streams (one per connected SDK).",
+		func() float64 {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return float64(len(m.subs))
+		})
+	r.GaugeFunc("tsession_controlplane_kill_switch", "1 while the global kill switch is on.",
+		func() float64 {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if m.kill {
+				return 1
+			}
+			return 0
+		})
+	return &telemetry{
+		reg:     r,
+		started: r.Counter("tsession_controlplane_sessions_started_total", "Sessions started."),
+		finished: r.CounterVec("tsession_controlplane_sessions_finished_total",
+			"Sessions that reached a terminal state, by state.", "state"),
+		sealFailures: r.Counter("tsession_controlplane_seal_failures_total",
+			"Sessions whose collector seal failed after all retries (recorded incomplete)."),
+		deleted: r.Counter("tsession_controlplane_sessions_deleted_total", "Sessions deleted through the API."),
+	}
+}

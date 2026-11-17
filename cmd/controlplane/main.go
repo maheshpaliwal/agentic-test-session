@@ -20,7 +20,9 @@ func main() {
 	hosts := flag.String("allowed-hosts", svc.Env("TSESSION_CP_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (e.g. controlplane:7070); default loopback only")
 	origins := flag.String("allowed-origins", svc.Env("TSESSION_CP_ALLOWED_ORIGINS", ""), "comma-separated browser Origins allowed to call the API (default none)")
 	retention := flag.Duration("retention", svc.EnvPositiveDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long")
+	showVersion := svc.VersionFlag("tsession-controlplane")
 	flag.Parse()
+	showVersion()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if svc.IsWildcardAddr(*addr) {

@@ -32,6 +32,7 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", c.handleDrain)
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
 	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", c.handleDelete)
+	mux.Handle("GET /metrics", c.tel.reg.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/internal/") && !c.internalPeerOK(r) {
@@ -139,6 +140,9 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	for reason, n := range res.RejectedReasons { // refused while decoding; Ingest counts its own
+		c.tel.rejected.With(reason).Add(n)
 	}
 	ir, err := c.Ingest(r.Context(), r.Header.Get("X-TSession-Instance"), evs)
 	res.Accepted, res.Duplicates = ir.Accepted, ir.Duplicates

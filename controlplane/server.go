@@ -26,6 +26,7 @@ func (m *Manager) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/active/stream", m.hStream)
 	mux.HandleFunc("POST /v1/kill", m.hKill)
+	mux.Handle("GET /metrics", m.tel.reg.Handler())
 	guarded := core.LoopbackGuard(mux, core.GuardConfig{
 		AllowedHosts:   m.cfg.AllowedHosts,
 		AllowedOrigins: m.cfg.AllowedOrigins,

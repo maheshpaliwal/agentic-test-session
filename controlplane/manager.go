@@ -42,6 +42,7 @@ type Config struct {
 type Manager struct {
 	cfg Config
 	log *slog.Logger
+	tel *telemetry
 
 	mu      sync.Mutex
 	kill    bool
@@ -107,6 +108,7 @@ func NewManager(cfg Config) *Manager {
 		live:    map[string]Session{},
 		rootCtx: ctx, stop: cancel,
 	}
+	m.tel = newTelemetry(m)
 	// Resume drains that were in flight when a persistent store was last written.
 	for _, s := range cfg.Store.List() {
 		m.indexLocked(s)
@@ -248,6 +250,7 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 	if err := m.putLocked(s); err != nil {
 		return Session{}, err
 	}
+	m.tel.started.Inc()
 	m.broadcastLocked()
 	return s, nil
 }
@@ -299,6 +302,7 @@ func (m *Manager) Abort(id string) (Session, error) {
 	if err := m.putLocked(s); err != nil {
 		return s, err
 	}
+	m.tel.finished.With(string(StateAborted)).Inc()
 	m.broadcastLocked()
 	return s, nil
 }
@@ -322,7 +326,11 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.cfg.Store.Delete(id)
+	if err := m.cfg.Store.Delete(id); err != nil {
+		return err
+	}
+	m.tel.deleted.Inc()
+	return nil
 }
 
 // Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through

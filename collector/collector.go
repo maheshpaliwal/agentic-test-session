@@ -69,6 +69,7 @@ type Collector struct {
 	cfg      Config
 	st       store.Store
 	seq      *Sequencer
+	tel      *telemetry
 	log      *slog.Logger
 	internal []*net.IPNet
 
@@ -109,8 +110,9 @@ func New(st store.Store, cfg Config) *Collector {
 		cfg.RetentionInterval = min(max(cfg.Retention/10, time.Second), 10*time.Minute)
 	}
 	c := &Collector{cfg: cfg, st: st, log: cfg.Logger, views: map[string]*viewEntry{},
-		stop: make(chan struct{}), retention: make(chan struct{})}
-	c.seq = newSequencer(st, cfg)
+		tel: newTelemetry(), stop: make(chan struct{}), retention: make(chan struct{})}
+	c.seq = newSequencer(st, cfg, c.tel)
+	c.tel.observe(c.seq)
 	if cfg.Retention > 0 {
 		go c.retentionLoop()
 	} else {
@@ -202,7 +204,25 @@ func (c *Collector) Ingest(ctx context.Context, instance string, evs []core.Even
 			firstErr = err
 		}
 	}
+	c.tel.ingested.With("accepted").Add(res.Accepted)
+	c.tel.ingested.With("duplicate").Add(res.Duplicates)
+	for reason, n := range res.RejectedReasons {
+		c.tel.rejected.With(reason).Add(n)
+	}
+	if firstErr != nil {
+		c.tel.ingestErrors.With(ingestErrorCause(firstErr)).Inc()
+	}
 	return res, firstErr
+}
+
+func ingestErrorCause(err error) string {
+	switch {
+	case errors.Is(err, errBackpressure):
+		return "backpressure"
+	case errors.Is(err, errSeqClosed):
+		return "shutdown"
+	}
+	return "storage"
 }
 
 // DrainStatus is the control plane's view of a draining session.
@@ -247,6 +267,10 @@ var errBadID = errors.New("invalid session id")
 // directory. It is idempotent; an unknown id is not an error. Events that
 // arrive for the id afterwards start a fresh session at Seq 1.
 func (c *Collector) Delete(ctx context.Context, id string) error {
+	return c.delete(ctx, id, "api")
+}
+
+func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	if !validID.MatchString(id) {
 		return errBadID
 	}
@@ -268,6 +292,7 @@ func (c *Collector) Delete(ctx context.Context, id string) error {
 			c.log.Warn("session deleted but its bundle could not be removed", "session", id, "err", err)
 		}
 	}
+	c.tel.deleted.With(cause).Inc()
 	return nil
 }
 
@@ -310,7 +335,7 @@ func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error
 	for _, s := range sessions {
 		expired, err := c.expired(ctx, s, cutoff)
 		if err == nil && expired {
-			if err = c.Delete(ctx, s.ID); err == nil {
+			if err = c.delete(ctx, s.ID, "retention"); err == nil {
 				n++
 			}
 		}
@@ -347,9 +372,18 @@ func (c *Collector) Seal(ctx context.Context, id string) (res SealResult, err er
 		return SealResult{}, errBadID
 	}
 	if !c.seq.with(id, true, true, func(a *sessionActor) { res, err = c.sealLocked(ctx, a) }) {
-		return SealResult{}, errSeqClosed
+		err = errSeqClosed
 	}
-	return
+	switch {
+	case err != nil:
+		c.tel.seals.With("error").Inc()
+		return SealResult{}, err
+	case res.Incomplete:
+		c.tel.seals.With("incomplete").Inc()
+	default:
+		c.tel.seals.With("complete").Inc()
+	}
+	return res, nil
 }
 
 func (c *Collector) sealLocked(ctx context.Context, a *sessionActor) (SealResult, error) {

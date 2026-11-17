@@ -20,6 +20,7 @@ type Sequencer struct {
 	// storeTimeout bounds each background store call made by an actor.
 	storeTimeout time.Duration
 	log          *slog.Logger
+	tel          *telemetry
 
 	mu     sync.Mutex
 	actors map[string]*sessionActor
@@ -33,9 +34,9 @@ type Sequencer struct {
 }
 
 // newSequencer expects cfg to have been normalised by New.
-func newSequencer(st store.Store, cfg Config) *Sequencer {
+func newSequencer(st store.Store, cfg Config, tel *telemetry) *Sequencer {
 	s := &Sequencer{st: st, window: cfg.Window, idle: cfg.IdleEvict, maxBuf: cfg.MaxBufferedEvents,
-		storeTimeout: cfg.StoreTimeout, log: cfg.Logger,
+		storeTimeout: cfg.StoreTimeout, log: cfg.Logger, tel: tel,
 		actors: map[string]*sessionActor{}, quar: map[string]int{},
 		stop: make(chan struct{}), jd: make(chan struct{})}
 	if s.idle > 0 {
@@ -126,6 +127,18 @@ func (s *Sequencer) addQuarantine(id string, n int) {
 	s.qmu.Lock()
 	s.quar[id] += n
 	s.qmu.Unlock()
+	s.tel.quarantined.Add(n)
+}
+
+// buffered is the number of events sitting in reorder windows.
+func (s *Sequencer) buffered() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, a := range s.actors {
+		n += a.bufLen.Load()
+	}
+	return n
 }
 
 func (s *Sequencer) forgetQuarantine(id string) {

@@ -25,7 +25,9 @@ func main() {
 	hosts := flag.String("allowed-hosts", os.Getenv("TSESSION_COLLECTOR_ALLOWED_HOSTS"), "comma-separated extra Host values accepted besides loopback (e.g. docker service names)")
 	origins := flag.String("allowed-origins", os.Getenv("TSESSION_COLLECTOR_ALLOWED_ORIGINS"), "comma-separated browser origins allowed to call the API")
 	internal := flag.String("internal-allow", os.Getenv("TSESSION_COLLECTOR_INTERNAL_ALLOW"), "comma-separated CIDRs/IPs besides loopback allowed to call /v1/internal/*")
+	showVersion := svc.VersionFlag("tsession-collector")
 	flag.Parse()
+	showVersion()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	// Deprecated names still apply (the flag wins over the new env var, the old

@@ -331,6 +331,9 @@ func (a *sessionActor) tryAppend(evs []core.Event) error {
 	ctx, cancel := a.opCtx()
 	defer cancel()
 	if err := a.st.AppendEvents(ctx, a.id, evs); err != nil {
+		if !errors.Is(err, store.ErrSeqConflict) { // a conflict is resolved by catching up
+			a.seqr.tel.appendFailures.Inc()
+		}
 		return err
 	}
 	a.next += uint64(len(evs))
