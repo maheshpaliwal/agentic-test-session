@@ -85,9 +85,9 @@ func newProxy(raw, prefix string) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodPost:
-		case http.MethodPatch:
-			// rename only: exactly /v1/sessions/{id} on the control plane
-			if !renamePath(strings.TrimPrefix(r.URL.Path, prefix)) || prefix != "/api/cp" {
+		case http.MethodPatch, http.MethodDelete:
+			// rename and delete only: exactly /v1/sessions/{id} on the control plane
+			if !sessionPath(strings.TrimPrefix(r.URL.Path, prefix)) || prefix != "/api/cp" {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
@@ -115,8 +115,8 @@ func newProxy(raw, prefix string) (http.Handler, error) {
 	}), nil
 }
 
-// renamePath reports whether p is exactly /v1/sessions/{id} (one non-empty, non-dot segment).
-func renamePath(p string) bool {
+// sessionPath reports whether p is exactly /v1/sessions/{id} (one non-empty, non-dot segment).
+func sessionPath(p string) bool {
 	const pre = "/v1/sessions/"
 	if !strings.HasPrefix(p, pre) {
 		return false

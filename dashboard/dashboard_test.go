@@ -95,9 +95,13 @@ func TestProxyRoutingAndHeaderStripping(t *testing.T) {
 	if resp, _ = http.DefaultClient.Do(req); resp.StatusCode != 403 {
 		t.Fatalf("cross-origin POST: %d", resp.StatusCode)
 	}
-	req, _ = http.NewRequest("DELETE", d.URL+"/api/cp/v1/sessions/x", nil)
-	if resp, _ = http.DefaultClient.Do(req); resp.StatusCode != 405 {
-		t.Fatalf("DELETE: %d", resp.StatusCode)
+	// DELETE is refused everywhere except a single session on the control plane
+	// (see TestProxyDeleteOnlyDeletesSession).
+	for _, p := range []string{"/api/cp/v1/sessions/x/stop", "/api/col/v1/sessions/x", "/api/cp/v1/active"} {
+		req, _ = http.NewRequest("DELETE", d.URL+p, nil)
+		if resp, _ = http.DefaultClient.Do(req); resp.StatusCode != 405 {
+			t.Fatalf("DELETE %s: %d", p, resp.StatusCode)
+		}
 	}
 	// bad Host (DNS rebinding)
 	req, _ = http.NewRequest("GET", d.URL+"/", nil)
@@ -765,5 +769,94 @@ func TestDemoRename(t *testing.T) {
 	decode(t, b, &one)
 	if one.Name != "my live run" {
 		t.Errorf("not persisted: %q", one.Name)
+	}
+}
+
+func TestProxyDeleteOnlyDeletesSession(t *testing.T) {
+	var got []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path+" origin="+r.Header.Get("Origin"))
+		io.WriteString(w, `{"deleted":true}`)
+	}))
+	defer up.Close()
+	h, _ := New(Config{ControlPlaneURL: up.URL, CollectorURL: up.URL})
+	d := httptest.NewServer(h)
+	defer d.Close()
+	del := func(path, origin string) int {
+		req, _ := http.NewRequest(http.MethodDelete, d.URL+path, nil)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	if c := del("/api/cp/v1/sessions/ts_1", d.URL); c != 200 || len(got) != 1 || got[0] != "DELETE /v1/sessions/ts_1 origin=" {
+		t.Fatalf("delete: %d %v", c, got)
+	}
+	// Nothing else is deletable through the dashboard: not the collector's
+	// data directly, not internal endpoints, not collections.
+	for _, bad := range []string{"/api/cp/v1/sessions", "/api/cp/v1/sessions/", "/api/cp/v1/sessions/a/stop", "/api/cp/v1/internal/sessions/x",
+		"/api/cp/v1/kill", "/api/cp/v1/sessions/..", "/api/col/v1/sessions/ts_1", "/api/col/v1/internal/sessions/ts_1"} {
+		if c := del(bad, ""); c != 405 {
+			t.Errorf("DELETE %s = %d, want 405", bad, c)
+		}
+	}
+	if c := del("/api/cp/v1/sessions/ts_1", "http://evil.example"); c != 403 {
+		t.Errorf("cross-origin DELETE = %d", c)
+	}
+	if len(got) != 1 {
+		t.Errorf("unexpected upstream calls: %v", got)
+	}
+}
+
+func TestDemoDelete(t *testing.T) {
+	s := demoServer(t, time.Now)
+	defer s.Close()
+	del := func(id string) int {
+		req, _ := http.NewRequest(http.MethodDelete, s.URL+"/cp/v1/sessions/"+id, nil)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	list := func() map[string]string {
+		r, err := http.Get(s.URL + "/cp/v1/sessions")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		var ss []Session
+		_ = json.NewDecoder(r.Body).Decode(&ss)
+		out := map[string]string{}
+		for _, x := range ss {
+			out[x.ID] = x.State
+		}
+		return out
+	}
+	before := list()
+	if before["ts_demo0001"] != "SEALED" || before["ts_demo0002"] != "ACTIVE" {
+		t.Fatalf("demo fixture changed: %v", before)
+	}
+	if c := del("ts_demo0002"); c != 409 {
+		t.Errorf("deleting a running session: %d, want 409", c)
+	}
+	if c := del("nope"); c != 404 {
+		t.Errorf("unknown id: %d", c)
+	}
+	if c := del("ts_demo0001"); c != 200 {
+		t.Fatalf("delete: %d", c)
+	}
+	after := list()
+	if _, still := after["ts_demo0001"]; still || len(after) != len(before)-1 {
+		t.Fatalf("after delete: %v", after)
+	}
+	if c := del("ts_demo0001"); c != 404 {
+		t.Errorf("second delete: %d", c)
 	}
 }

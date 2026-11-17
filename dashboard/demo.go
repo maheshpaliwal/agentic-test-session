@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -293,6 +294,24 @@ func (d *Demo) ControlPlane() http.Handler {
 		}
 		v, _ := d.view(s)
 		writeJSON(w, 200, v)
+	})
+	mux.HandleFunc("DELETE /v1/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		s := d.find(r.PathValue("id"))
+		if s == nil {
+			notFound(w)
+			return
+		}
+		v, _ := d.view(s)
+		switch v.State {
+		case "SEALED", "ABORTED", "EXPIRED":
+		default: // same rule as the control plane: only finished sessions
+			writeJSON(w, 409, m{"error": "invalid state transition: session is " + v.State + "; only finished sessions can be deleted"})
+			return
+		}
+		d.sess = slices.DeleteFunc(d.sess, func(x *demoSess) bool { return x == s })
+		writeJSON(w, 200, m{"deleted": true, "id": v.ID})
 	})
 	stop := func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
