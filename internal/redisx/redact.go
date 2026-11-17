@@ -100,8 +100,18 @@ var noValueCmds = map[string]bool{
 	"hpexpire": true, "hpersist": true, "getdel": true, "lmove": true, "rpoplpush": true,
 	"blpop": true, "brpop": true, "bzpopmin": true, "bzpopmax": true, "sort": true,
 	"bitop": true, "sinterstore": true, "sunionstore": true, "sdiffstore": true,
-	"pfmerge": true, "smove": true, "getex": true, "lmpop": true, "xgroup": true,
+	"pfmerge": true, "getex": true, "lmpop": true, "xgroup": true,
 	"zrangestore": true, "bitfield": true, "setbit": true, "hgetdel": true,
+	"blmove": true, "brpoplpush": true, "blmpop": true, "zmpop": true, "bzmpop": true,
+	"zunionstore": true, "zinterstore": true, "zdiffstore": true, "geosearchstore": true,
+}
+
+// memberReads are read commands whose arguments after the key are stored
+// values (members / elements), not options.
+var memberReads = map[string]bool{
+	"sismember": true, "smismember": true, "zscore": true, "zmscore": true, "zrank": true,
+	"zrevrank": true, "lpos": true, "zrangebylex": true, "zlexcount": true,
+	"geopos": true, "geodist": true, "geohash": true,
 }
 
 // MaskArgs returns the argument vector (index-aligned with args) with
@@ -199,6 +209,10 @@ func (h *Redactor) MaskArgs(name string, args []any, keys []int) []string {
 		case "eval", "evalsha", "eval_ro", "evalsha_ro", "fcall", "fcall_ro":
 			// no KEYS: ARGV still follows numkeys
 		default:
+			if _, known := Lookup(lname); !known {
+				// A command we cannot classify: any argument may be a value.
+				rng(1, n, false)
+			}
 			return out
 		}
 	}
@@ -270,10 +284,12 @@ func (h *Redactor) MaskArgs(name string, args []any, keys []int) []string {
 		case "json.arrappend", "json.arrinsert", "json.strappend", "json.numincrby":
 			rng(k+2, n, sens || pathSensitive(out, k+1))
 		default:
-			if (sens || drop) && !noValueCmds[lname] && h.IsWrite(lname) {
-				rng(k+1, n, true)
-				return out
+			// Everything after the last key is a value: masked when a key is
+			// sensitive, scrubbed otherwise.
+			if !noValueCmds[lname] && (h.IsWrite(lname) || memberReads[lname]) {
+				rng(keys[len(keys)-1]+1, n, anySens)
 			}
+			return out
 		}
 	}
 	return out

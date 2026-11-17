@@ -134,3 +134,26 @@ func TestErrorAndAuthRedaction(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// valueClient is a UniversalClient that cannot be a map key.
+type valueClient struct {
+	redis.UniversalClient
+	_ []int
+}
+
+func TestWrapNeverPanics(t *testing.T) {
+	c, rec, ctx := setup(t)
+	var typedNil *redis.Client
+	if got := Wrap(typedNil); got != redis.UniversalClient(typedNil) {
+		t.Fatal("typed-nil client must be returned as is")
+	}
+	v := valueClient{UniversalClient: c}
+	Wrap(v) // unhashable: must not panic
+	if Wrap(nil) != nil {
+		t.Fatal("nil in, nil out")
+	}
+	c.Set(ctx, "k", "v", 0)
+	if len(rec.Events()) != 1 {
+		t.Fatalf("events=%d", len(rec.Events()))
+	}
+}

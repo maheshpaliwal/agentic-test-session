@@ -87,3 +87,25 @@ func TestDisabledPassthrough(t *testing.T) {
 		t.Fatal("still disabled")
 	}
 }
+
+// valueClient is a Hookable that cannot be a map key.
+type valueClient struct {
+	*redis.Client
+	_ []int
+}
+
+func TestWrapNeverPanics(t *testing.T) {
+	rec, ctx := enable(t)
+	mr := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	var typedNil *redis.Client
+	if Wrap(typedNil) != nil {
+		t.Fatal("typed-nil client must be returned as is")
+	}
+	Wrap(valueClient{Client: c}) // unhashable: must not panic
+	Wrap(c)
+	c.Set(ctx, "k", "v", 0)
+	if len(rec.Events()) != 1 {
+		t.Fatalf("events=%d", len(rec.Events()))
+	}
+}
