@@ -1,7 +1,5 @@
 package mutation
 
-import ()
-
 type parser struct {
 	sql string
 	t   []token
@@ -50,6 +48,10 @@ func Parse(sql string, d Dialect) Info {
 	in.ArgCols = map[int][]string{}
 	seen := map[string]bool{}
 	for i, s := range segs {
+		if e := txEffect(s); e != TxNone {
+			in.Tx = e
+		}
+		in.Projections = append(in.Projections, projections(s)...)
 		r := p.mapCols(infos[i].Columns, s)
 		for a, cs := range r.args {
 			for _, c := range cs {
@@ -139,11 +141,17 @@ func (p *parser) with(t []token, i int) Info {
 		main = p.verb(t[i:])
 	}
 	if main.Kind.IsMutation() {
+		// The predicate may reference a CTE name, so it cannot be replayed
+		// without the WITH clause.
+		main.Complex = true
 		return main
 	}
 	if cte != nil {
 		cte.Complex = true
 		cte.WritesInCTE = true
+		// The statement's result set is the outer query's, not the CTE's
+		// RETURNING rows.
+		cte.HasReturning, cte.ReturningAll = false, false
 		return *cte
 	}
 	return main
