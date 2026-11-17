@@ -13,10 +13,12 @@ import (
 type tracedTransport struct{ rt http.RoundTripper }
 
 func (t tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	ctx, span := core.Begin(req.Context(), core.KindAPIOut, req.Method+" "+req.URL.Path)
+	// The name is set only once a span exists: untraced requests pay nothing.
+	ctx, span := core.Begin(req.Context(), core.KindAPIOut, "")
 	if span == nil {
 		return t.rt.RoundTrip(req)
 	}
+	span.SetName(req.Method + " " + req.URL.Path)
 
 	out := req.Clone(ctx)
 	core.Inject(ctx, core.HTTPHeaderCarrier(out.Header))

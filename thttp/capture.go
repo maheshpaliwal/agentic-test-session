@@ -6,6 +6,7 @@ package thttp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -121,9 +122,12 @@ func (l *limitBuf) size() int {
 	return l.total
 }
 
-// body renders the captured bytes: complete valid JSON stays JSON (redacted
-// structurally); anything else (truncated JSON, form bodies, text) becomes a
-// string redacted BEFORE it is capped by the payload layer.
+// body renders the captured bytes. Complete valid JSON stays JSON (redacted
+// structurally) whatever the declared type. Otherwise the content type decides:
+// form bodies are redacted by key, JSON and text types are scrubbed as free
+// text BEFORE the payload layer caps them, and anything with no redactor
+// (multipart, XML, other application types) is replaced by a
+// "<media/type, N bytes>" placeholder so it is never recorded verbatim.
 func (l *limitBuf) body(contentType string) any {
 	if l == nil || l.buf.Len() == 0 {
 		return nil
@@ -137,16 +141,58 @@ func (l *limitBuf) body(contentType string) any {
 		return json.RawMessage(out)
 	}
 	s := string(b)
-	if isForm(contentType, s) {
+	mt := effectiveType(contentType, b)
+	switch {
+	case mt == "application/x-www-form-urlencoded":
+		return core.RedactQuery(s)
+	case !redactable(mt):
+		return fmt.Sprintf("<%s, %d bytes>", mt, l.total)
+	case looksLikeForm(s):
 		return core.RedactQuery(s)
 	}
 	return core.RedactText(s)
 }
 
-func isForm(contentType, s string) bool {
-	if strings.HasPrefix(strings.ToLower(contentType), "application/x-www-form-urlencoded") {
-		return true
+// maxMediaType bounds the (client-controlled) media type echoed in placeholders.
+const maxMediaType = 64
+
+// mediaType returns the lower-cased type/subtype of a Content-Type value,
+// without parameters; "" when the header is absent.
+func mediaType(contentType string) string {
+	mt, _, _ := strings.Cut(contentType, ";")
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	if len(mt) > maxMediaType {
+		mt = mt[:maxMediaType]
 	}
+	return mt
+}
+
+// effectiveType is the media type used to pick a redactor: the declared one,
+// or a sniffed one when the header is absent. Markup that is declared or
+// sniffed as plain text is treated as XML, which has no redactor.
+func effectiveType(contentType string, b []byte) string {
+	mt := mediaType(contentType)
+	if mt == "" {
+		mt = mediaType(http.DetectContentType(b))
+	}
+	if mt == "text/plain" && bytes.HasPrefix(bytes.TrimSpace(b), []byte("<")) {
+		return "text/xml"
+	}
+	return mt
+}
+
+// redactable reports whether free-text scrubbing (core.RedactText) is a
+// meaningful redactor for the media type: JSON (truncated or invalid) and
+// plain-text types. XML and binary/structured application types are not.
+func redactable(mt string) bool {
+	if strings.Contains(mt, "xml") {
+		return false
+	}
+	return strings.HasPrefix(mt, "text/") || strings.Contains(mt, "json")
+}
+
+// looksLikeForm detects a form-encoded body sent under a text type.
+func looksLikeForm(s string) bool {
 	t := strings.TrimSpace(s)
 	return t != "" && t[0] != '{' && t[0] != '[' && t[0] != '<' && !strings.ContainsAny(t, " \n\t") &&
 		strings.Contains(t, "=") && strings.Contains(t, "&")
