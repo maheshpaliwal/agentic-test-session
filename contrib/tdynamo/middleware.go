@@ -164,7 +164,7 @@ func isSchemaOp(op string) bool { return op == "DescribeTable" || op == "CreateT
 // needed, and returns the (possibly replaced) parameters.
 func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, params any, span *core.Span) {
 	orig := p
-	var kind core.Kind = core.KindDBRead
+	kind := core.KindDBRead
 	var table string
 	req := map[string]any{}
 	switch v := p.(type) {
