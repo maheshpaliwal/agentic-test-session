@@ -81,7 +81,10 @@ type MemRecorder struct {
 	ev []Event
 }
 
+// Record implements Recorder.
 func (m *MemRecorder) Record(e Event) { m.mu.Lock(); m.ev = append(m.ev, e); m.mu.Unlock() }
+
+// Events returns a copy of everything recorded so far.
 func (m *MemRecorder) Events() []Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -96,7 +99,10 @@ type StaticSessions struct {
 	Bindings []Binding
 }
 
-func (s StaticSessions) IsActive(id string) bool   { return s.Active[id] }
+// IsActive implements SessionSet.
+func (s StaticSessions) IsActive(id string) bool { return s.Active[id] }
+
+// Exclusive implements SessionSet.
 func (s StaticSessions) Exclusive() (string, bool) { return s.ExclusiveID, s.ExclusiveID != "" }
 
 // BindingKeys lists the attribute keys the bindings need extracted.

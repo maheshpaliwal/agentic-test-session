@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// Config is the SDK's process-wide configuration (see Configure).
 type Config struct {
 	Service        string
 	Instance       string
@@ -43,8 +44,12 @@ func Configure(c Config) {
 	SetBindPriority(c.BindPriority)
 }
 
+// GetConfig returns the current configuration.
 func GetConfig() Config { return *cfg.Load() }
-func Enabled() bool     { return cfg.Load().Enabled }
+
+// Enabled reports whether the SDK is on. Wrappers check it first and return
+// the object they were given untouched when it is off.
+func Enabled() bool { return cfg.Load().Enabled }
 
 // Recorder receives finished events. Implementations must not block.
 type Recorder interface{ Record(Event) }
@@ -59,6 +64,8 @@ var rec atomic.Pointer[recBox]
 
 func init() { rec.Store(&recBox{noopRecorder{}}) }
 
+// SetRecorder installs the sink for finished events; nil restores the no-op
+// recorder.
 func SetRecorder(r Recorder) {
 	if r == nil {
 		r = noopRecorder{}
@@ -88,6 +95,8 @@ var sessions atomic.Pointer[setBox]
 
 func init() { sessions.Store(&setBox{noSessions{}}) }
 
+// SetSessions installs the source of truth for which sessions are active;
+// nil means no session is.
 func SetSessions(s SessionSet) {
 	if s == nil {
 		s = noSessions{}
@@ -105,8 +114,11 @@ func randHex(nBytes int) string {
 	return hex.EncodeToString(b)
 }
 
+// NewTraceID returns a random 32-hex-digit trace id (W3C trace-id size).
 func NewTraceID() string { return randHex(16) }
-func NewSpanID() string  { return randHex(8) }
+
+// NewSpanID returns a random 16-hex-digit span id (W3C parent-id size).
+func NewSpanID() string { return randHex(8) }
 
 var (
 	hlcMu   sync.Mutex

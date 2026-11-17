@@ -23,6 +23,7 @@ import (
 // Output is deterministic (map keys sorted).
 type ProtobufEncoder struct{}
 
+// ContentType implements BatchEncoder.
 func (ProtobufEncoder) ContentType() string { return "application/x-protobuf" }
 
 // scratch buffers are pooled so steady-state encoding costs one allocation
@@ -32,6 +33,7 @@ var scratchPool = sync.Pool{New: func() any { b := make([]byte, 0, 32<<10); retu
 // maxPooledScratch keeps one huge batch from pinning memory in the pool.
 const maxPooledScratch = 4 << 20
 
+// Encode implements BatchEncoder: batch as length-delimited Event messages.
 func (ProtobufEncoder) Encode(batch []core.Event) ([]byte, error) {
 	sp := scratchPool.Get().(*[]byte)
 	b := (*sp)[:0]

@@ -406,6 +406,7 @@ func (s *Store) getMeta(ctx context.Context, sid string) (meta, error) {
 		firstNs: getI(out.Item, aFirstNs), lastNs: getI(out.Item, aLastNs)}, nil
 }
 
+// AppendEvents implements store.Store.
 func (s *Store) AppendEvents(ctx context.Context, sid string, evs []core.Event) error {
 	if len(evs) == 0 {
 		return nil
@@ -542,6 +543,7 @@ type partial struct {
 	want  int // total items expected
 }
 
+// Events implements store.Store.
 func (s *Store) Events(ctx context.Context, sid string, from uint64, limit int) ([]core.Event, error) {
 	if err := checkSession(sid); err != nil {
 		return nil, err
@@ -622,6 +624,7 @@ func decodeEvent(parts [][]byte) (core.Event, error) {
 	return e, json.Unmarshal(raw, &e)
 }
 
+// Head implements store.Store.
 func (s *Store) Head(ctx context.Context, sid string) (uint64, error) {
 	if err := checkSession(sid); err != nil {
 		return 0, err
@@ -641,6 +644,7 @@ func (s *Store) Head(ctx context.Context, sid string) (uint64, error) {
 	return getU(out.Item, aHead), nil
 }
 
+// TxOutcomes implements store.Store.
 func (s *Store) TxOutcomes(ctx context.Context, sid string) (map[string]bool, error) {
 	if err := checkSession(sid); err != nil {
 		return nil, err
@@ -725,6 +729,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 	return out, nil
 }
 
+// GetSeal implements store.Store.
 func (s *Store) GetSeal(ctx context.Context, sid string) (*store.SealInfo, error) {
 	if err := checkSession(sid); err != nil {
 		return nil, err

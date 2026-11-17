@@ -121,7 +121,7 @@ func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
 		"  a   b\t\nc  ":         "a b c",
 		"a\x00b\x07c":            "abc",
-		"a‮b":                    "ab",
+		"a\u202eb":               "ab",
 		"\x1b[31mred":            "[31mred",
 		"bad\xffutf":             "badutf",
 		"":                       "",

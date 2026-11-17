@@ -37,7 +37,7 @@ type fakeCollector struct {
 
 func (f *fakeCollector) handler(w http.ResponseWriter, r *http.Request) {
 	if atomic.AddInt32(&f.failFor, -1) >= 0 {
-		http.Error(w, "busy", 503)
+		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
 	}
 	f.mu.Lock()

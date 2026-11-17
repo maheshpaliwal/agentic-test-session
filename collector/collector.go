@@ -240,6 +240,8 @@ type DrainStatus struct {
 	Quarantined int `json:"quarantined"`
 }
 
+// DrainStatus reports how much work is still outstanding for a session. It
+// never creates in-memory state: an unknown id yields a zero status.
 func (c *Collector) DrainStatus(ctx context.Context, id string) (DrainStatus, error) {
 	st, err := c.seq.Status(ctx, id)
 	if err != nil {

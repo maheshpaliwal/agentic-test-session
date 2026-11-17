@@ -17,10 +17,14 @@ type SpanContext struct {
 
 type ctxKey struct{}
 
+// ContextWith returns a copy of ctx carrying sc; spans begun from it become
+// children of sc.SpanID.
 func ContextWith(ctx context.Context, sc SpanContext) context.Context {
 	return context.WithValue(ctx, ctxKey{}, sc)
 }
 
+// FromContext returns the span context in ctx. ok is false when ctx carries
+// none (the request is not part of a session).
 func FromContext(ctx context.Context) (SpanContext, bool) {
 	sc, ok := ctx.Value(ctxKey{}).(SpanContext)
 	return sc, ok && sc.SessionID != ""
@@ -39,16 +43,24 @@ type Carrier interface {
 	Set(key, val string)
 }
 
+// MapCarrier is a Carrier backed by a map; keys are stored lowercase. Queue
+// wrappers use it for message headers and side-channel records.
 type MapCarrier map[string]string
 
+// Get implements Carrier.
 func (m MapCarrier) Get(k string) string { return m[strings.ToLower(k)] }
-func (m MapCarrier) Set(k, v string)     { m[strings.ToLower(k)] = v }
+
+// Set implements Carrier.
+func (m MapCarrier) Set(k, v string) { m[strings.ToLower(k)] = v }
 
 // HTTPHeaderCarrier adapts http.Header (also usable for gRPC metadata copies).
 type HTTPHeaderCarrier http.Header
 
+// Get implements Carrier.
 func (h HTTPHeaderCarrier) Get(k string) string { return http.Header(h).Get(k) }
-func (h HTTPHeaderCarrier) Set(k, v string)     { http.Header(h).Set(k, v) }
+
+// Set implements Carrier.
+func (h HTTPHeaderCarrier) Set(k, v string) { http.Header(h).Set(k, v) }
 
 // Inject writes the current span context (if any) into c.
 func Inject(ctx context.Context, c Carrier) {

@@ -33,7 +33,9 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
 	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", c.handleDelete)
 	mux.Handle("GET /metrics", c.tel.reg.Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/internal/") && !c.internalPeerOK(r) {
 			writeErr(w, http.StatusForbidden, errors.New("internal endpoint: peer not allowed"))
@@ -168,13 +170,13 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 func (c *Collector) handleSessions(w http.ResponseWriter, r *http.Request) {
 	l, err := c.st.ListSessions(r.Context())
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if l == nil {
 		l = []store.SessionInfo{}
 	}
-	writeJSON(w, 200, l)
+	writeJSON(w, http.StatusOK, l)
 }
 
 // resolvePage applies tx outcomes and orphan flags to one page of a session's
@@ -212,7 +214,7 @@ func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
 		evs, sealed, err = c.resolvePage(r.Context(), id, evs)
 	}
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	next := from
@@ -222,73 +224,73 @@ func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if evs == nil {
 		evs = []core.Event{}
 	}
-	writeJSON(w, 200, map[string]any{"events": evs, "next_seq": next, "sealed": sealed})
+	writeJSON(w, http.StatusOK, map[string]any{"events": evs, "next_seq": next, "sealed": sealed})
 }
 
 func (c *Collector) handleTrace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	v, err := c.viewOf(r.Context(), id)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, v.getTrace(id))
+	writeJSON(w, http.StatusOK, v.getTrace(id))
 }
 
 func (c *Collector) handleEntities(w http.ResponseWriter, r *http.Request) {
 	v, err := c.viewOf(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, v.getEntities())
+	writeJSON(w, http.StatusOK, v.getEntities())
 }
 
 func (c *Collector) handleHistory(w http.ResponseWriter, r *http.Request) {
 	v, err := c.viewOf(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, History(v.evs, r.PathValue("store"), r.PathValue("entity"), r.PathValue("pk")))
+	writeJSON(w, http.StatusOK, History(v.evs, r.PathValue("store"), r.PathValue("entity"), r.PathValue("pk")))
 }
 
 func (c *Collector) handleSummary(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	v, err := c.viewOf(r.Context(), id)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	s, err := c.summary(r.Context(), id, v.getSummary(id))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, s)
+	writeJSON(w, http.StatusOK, s)
 }
 
 func (c *Collector) handleDrain(w http.ResponseWriter, r *http.Request) {
 	ds, err := c.DrainStatus(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, ds)
+	writeJSON(w, http.StatusOK, ds)
 }
 
 func (c *Collector) handleSeal(w http.ResponseWriter, r *http.Request) {
 	res, err := c.Seal(r.Context(), r.PathValue("id"))
 	if errors.Is(err, errBadID) {
-		writeErr(w, 400, err)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if err != nil {
 		c.log.Error("seal", "err", err)
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, res)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (c *Collector) handleDelete(w http.ResponseWriter, r *http.Request) {

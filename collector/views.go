@@ -120,6 +120,8 @@ func pkMatches(pk map[string]any, want string) bool {
 	return false
 }
 
+// ListEntities returns every entity mutated in evs with its mutation count,
+// sorted by store, entity and primary key.
 func ListEntities(evs []core.Event) []Entity {
 	type k struct{ s, e, p string }
 	cnt := map[k]int{}
@@ -145,6 +147,8 @@ func ListEntities(evs []core.Event) []Entity {
 	return out
 }
 
+// History returns the mutations of one entity in evs order. pk is the
+// canonical JSON key or, for single-column keys, the bare value.
 func History(evs []core.Event, store, entity, pk string) EntityHistory {
 	h := EntityHistory{Store: store, Entity: entity, PK: pk, Mutations: []EntityMutation{}}
 	for i := range evs {
@@ -355,7 +359,7 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	c.views[id] = e
 	for len(c.views) > maxViews {
 		var oldID string
-		var oldUsed uint64 = ^uint64(0)
+		oldUsed := ^uint64(0)
 		for k, v := range c.views {
 			if v.used < oldUsed {
 				oldID, oldUsed = k, v.used

@@ -9,6 +9,8 @@ import "github.com/maheshpaliwal/agentic-test-session/core"
 // directly.
 type Encoder struct{}
 
+// ContentType returns the ingest media type, application/x-protobuf.
 func (Encoder) ContentType() string { return ContentType }
 
+// Encode frames batch as length-delimited Event messages.
 func (Encoder) Encode(batch []core.Event) ([]byte, error) { return Encode(batch) }

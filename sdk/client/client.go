@@ -63,11 +63,18 @@ type Binding struct {
 // Bind builds a Binding.
 func Bind(source, name, value string) Binding { return Binding{source, name, value} }
 
-// BindHeader, BindJWT, BindCookie and BindQuery are shorthands for Bind.
+// BindHeader binds requests carrying the header name: value.
 func BindHeader(name, value string) Binding { return Bind("header", name, value) }
-func BindJWT(claim, value string) Binding   { return Bind("jwt_claim", claim, value) }
+
+// BindJWT binds requests whose bearer token has the claim set to value. The
+// token is NOT verified: attribution only, never a security boundary.
+func BindJWT(claim, value string) Binding { return Bind("jwt_claim", claim, value) }
+
+// BindCookie binds requests carrying the cookie name=value.
 func BindCookie(name, value string) Binding { return Bind("cookie", name, value) }
-func BindQuery(name, value string) Binding  { return Bind("query", name, value) }
+
+// BindQuery binds requests with the query parameter name=value.
+func BindQuery(name, value string) Binding { return Bind("query", name, value) }
 
 // ParseBinding parses "header:x-user-id=u_1", "jwt:sub=u_1" (also jwt_claim),
 // "cookie:sid=x" or "query:uid=1".

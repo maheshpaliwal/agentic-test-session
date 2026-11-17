@@ -357,8 +357,10 @@ func TestContextAndClose(t *testing.T) {
 		if err := s.AppendEvents(context.Background(), "", run("", 1, 1)); err == nil {
 			t.Fatal("empty session id must fail")
 		}
-		if s.Close() != nil || s.Close() != nil {
-			t.Fatal("Close must be a no-op")
+		for range 2 { // repeatable
+			if err := s.Close(); err != nil {
+				t.Fatalf("Close must be a no-op: %v", err)
+			}
 		}
 	})
 }

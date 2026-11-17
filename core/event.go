@@ -4,8 +4,11 @@ package core
 
 import "encoding/json"
 
+// Kind classifies an Event: what sort of step it records.
 type Kind string
 
+// Event kinds. The collector and the dashboard give meaning to these exact
+// strings, so they are part of the wire format.
 const (
 	KindAPIIn       Kind = "api.in"
 	KindAPIOut      Kind = "api.out"
@@ -39,14 +42,20 @@ type PayloadRef struct {
 	Redacted  bool            `json:"redacted,omitempty"`
 }
 
+// IsZero reports whether the payload is absent (encoding/json's omitzero and
+// callers use it to skip empty payloads).
 func (p PayloadRef) IsZero() bool { return len(p.Inline) == 0 && p.BlobHash == "" }
 
+// FieldChange is one field of a Mutation's diff. Old is absent for an insert
+// and New for a delete.
 type FieldChange struct {
 	Field string `json:"field"`
 	Old   any    `json:"old,omitempty"`
 	New   any    `json:"new,omitempty"`
 }
 
+// ReadSummary describes what a read returned without storing every row: the
+// statement, the row count, the keys read and a small redacted sample.
 type ReadSummary struct {
 	Store     string     `json:"store"`
 	Entity    string     `json:"entity,omitempty"`
@@ -57,6 +66,9 @@ type ReadSummary struct {
 	Sample    PayloadRef `json:"sample,omitempty"`
 }
 
+// Mutation is one change to one entity (row, document, key). Effective is
+// resolved by the collector from the transaction outcome: nil while unknown,
+// false when the transaction rolled back.
 type Mutation struct {
 	Store     string         `json:"store"`  // postgres|mysql|mongo|dynamodb|redis
 	Entity    string         `json:"entity"` // table / collection / key pattern

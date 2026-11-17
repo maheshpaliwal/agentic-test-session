@@ -169,18 +169,6 @@ func (d *Demo) view(s *demoSess) (Session, []core.Event) {
 	return sess, resolveTx(evs)
 }
 
-// autoName mirrors the server's naming: first binding as name=value (jwt:claim=value), else "<initiator> HH:MM:SS".
-func autoName(bs []Binding, by string, now time.Time) string {
-	if len(bs) > 0 {
-		b := bs[0]
-		if b.Source == "jwt_claim" {
-			return "jwt:" + b.Name + "=" + b.Value
-		}
-		return b.Name + "=" + b.Value
-	}
-	return by + " " + now.Format("15:04:05")
-}
-
 func (d *Demo) find(id string) *demoSess {
 	for _, s := range d.sess {
 		if s.ID == id {
