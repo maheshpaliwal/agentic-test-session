@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -37,9 +38,10 @@ const (
 )
 
 // MemSideChannel is an in-memory SideChannel with TTL. Expired entries are
-// swept lazily on Put (at most once per second, or immediately when full) and
-// the size is capped at MaxEntries (default DefaultMemMaxEntries; the entries
-// closest to expiry are evicted first).
+// swept lazily on Put (at most once per second, or when full) and the size is
+// capped at MaxEntries (default DefaultMemMaxEntries). A Put into a full
+// channel evicts a batch (a tenth of the cap, closest to expiry first) rather
+// than one entry, so the map is scanned once per batch, not on every Put.
 type MemSideChannel struct {
 	Now        func() time.Time // optional clock override
 	MaxEntries int              // <=0 means DefaultMemMaxEntries
@@ -77,6 +79,41 @@ func (s *MemSideChannel) sweep(now time.Time) {
 	s.lastSweep = now
 }
 
+// memEvictFraction is the share of the cap (1/n) freed when a Put finds the
+// channel full.
+const memEvictFraction = 10
+
+// evict makes room in a full channel: expired entries go first; if that is
+// not enough, a batch of the entries closest to expiry (never-expiring ones
+// last) is dropped. Caller holds mu.
+func (s *MemSideChannel) evict(now time.Time) {
+	s.sweep(now)
+	n := len(s.m) - s.max() + 1 // at least one free slot
+	if n <= 0 {
+		return
+	}
+	n = max(n, s.max()/memEvictFraction)
+	type victim struct {
+		key string
+		exp time.Time
+	}
+	vs := make([]victim, 0, len(s.m))
+	for k, e := range s.m {
+		vs = append(vs, victim{k, e.exp})
+	}
+	sort.Slice(vs, func(i, j int) bool {
+		a, b := vs[i].exp, vs[j].exp
+		if a.IsZero() || b.IsZero() {
+			return !a.IsZero() && b.IsZero()
+		}
+		return a.Before(b)
+	})
+	for _, v := range vs[:min(n, len(vs))] {
+		delete(s.m, v.key)
+	}
+}
+
+// Put stores a copy of c under key for ttl (ttl <= 0: no expiry).
 func (s *MemSideChannel) Put(_ context.Context, key string, c map[string]string, ttl time.Duration) error {
 	cp := make(map[string]string, len(c))
 	for k, v := range c {
@@ -89,20 +126,11 @@ func (s *MemSideChannel) Put(_ context.Context, key string, c map[string]string,
 	}
 	now := s.now()
 	_, replacing := s.m[key]
-	if now.Sub(s.lastSweep) >= time.Second || (!replacing && len(s.m) >= s.max()) {
+	if now.Sub(s.lastSweep) >= time.Second {
 		s.sweep(now)
 	}
-	for !replacing && len(s.m) >= s.max() {
-		// still full: evict the entry that expires first (never-expiring last).
-		var vk string
-		var ve memEntry
-		first := true
-		for k, e := range s.m {
-			if first || (!e.exp.IsZero() && (ve.exp.IsZero() || e.exp.Before(ve.exp))) {
-				vk, ve, first = k, e, false
-			}
-		}
-		delete(s.m, vk)
+	if !replacing && len(s.m) >= s.max() {
+		s.evict(now)
 	}
 	var exp time.Time
 	if ttl > 0 {
@@ -112,12 +140,14 @@ func (s *MemSideChannel) Put(_ context.Context, key string, c map[string]string,
 	return nil
 }
 
+// Len returns the number of stored entries, including expired ones not yet swept.
 func (s *MemSideChannel) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.m)
 }
 
+// Get returns a copy of the carrier stored under key, or ErrNotFound.
 func (s *MemSideChannel) Get(_ context.Context, key string) (map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
