@@ -2,6 +2,8 @@ package tsql
 
 import (
 	"database/sql/driver"
+	"errors"
+	"regexp"
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql/mutation"
@@ -84,4 +86,103 @@ func argMask(in mutation.Info, args []driver.NamedValue) (mask []bool, conservat
 		return mask, true
 	}
 	return mask, false
+}
+
+// aliasMask finds the result columns that carry the value of a
+// sensitive-named column under another name ("password AS p", also through
+// subqueries). all is true when such a value ends up in an output column
+// whose name cannot be determined (an expression without alias).
+func aliasMask(in mutation.Info) (cols map[string]bool, all bool) {
+	for pass := 0; pass < 4; pass++ { // a few rounds resolve aliases of aliases
+		changed := false
+		for _, p := range in.Projections {
+			sens := false
+			for _, id := range p.Idents {
+				if cols[id] || core.IsSensitiveKey(id) {
+					sens = true
+					break
+				}
+			}
+			switch {
+			case !sens:
+			case p.Out == "":
+				return nil, true
+			case !cols[p.Out]:
+				if cols == nil {
+					cols = map[string]bool{}
+				}
+				cols[p.Out] = true
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return cols, false
+}
+
+// maskAliased masks, in place, the result-row values that field-name
+// redaction would miss because the statement renames a sensitive column.
+func (t *stmtTrace) maskAliased(rows []map[string]any) {
+	if len(rows) == 0 || len(t.info.Projections) == 0 {
+		return
+	}
+	cols, all := aliasMask(t.info)
+	if !all && len(cols) == 0 {
+		return
+	}
+	for _, row := range rows {
+		for k := range row {
+			if all || cols[strings.ToLower(k)] {
+				row[k] = core.RedactedValue
+			}
+		}
+	}
+	if all {
+		t.flag("rows_redacted_conservatively")
+	}
+}
+
+var (
+	reQuotedValue = regexp.MustCompile(`'(?:[^']|'')*'`)
+	reKeyDetail   = regexp.MustCompile(`=\([^)]*\)`) // Postgres "Key (col)=(value)"
+)
+
+// redactErr returns err with its text scrubbed for recording (the
+// application still receives the original error). Database errors quote row
+// values ("Duplicate entry 'x' for key ..."), so when maskQuoted is set every
+// quoted value is masked as well.
+func redactErr(err error, maskQuoted bool) error {
+	if err == nil {
+		return nil
+	}
+	s := core.RedactText(err.Error())
+	if maskQuoted {
+		s = reQuotedValue.ReplaceAllString(s, "'"+core.RedactedValue+"'")
+		s = reKeyDetail.ReplaceAllString(s, "=("+core.RedactedValue+")")
+	}
+	return errors.New(s)
+}
+
+// sensitive reports whether the statement involves data that must not be
+// recorded: a skipped table, a masked literal or argument, or any
+// sensitive-named identifier.
+func (t *stmtTrace) sensitive() bool {
+	if t.skip || t.sqlText != t.query {
+		return true
+	}
+	for _, m := range t.mask {
+		if m {
+			return true
+		}
+	}
+	return anySensitive(t.info.Idents)
+}
+
+// setErr records a statement error on the span, redacted.
+func (t *stmtTrace) setErr(err error) {
+	if err != nil {
+		t.span.SetErr(redactErr(err, t.sensitive()))
+	}
 }

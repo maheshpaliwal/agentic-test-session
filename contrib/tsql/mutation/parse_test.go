@@ -238,3 +238,74 @@ func TestEndAndMulti(t *testing.T) {
 		t.Fatal("expected Multi")
 	}
 }
+
+// A mutation under WITH may reference a CTE name in its predicate, so the
+// predicate must not be replayed as a bare image SELECT.
+func TestWithPrefixedMutationIsComplex(t *testing.T) {
+	for _, sql := range []string{
+		"WITH orders AS (SELECT 1 AS id) DELETE FROM items WHERE order_id IN (SELECT id FROM orders)",
+		"WITH x AS (SELECT id FROM y) UPDATE t SET a = 1 WHERE id IN (SELECT id FROM x)",
+	} {
+		in := Parse(sql, Postgres)
+		if !in.Kind.IsMutation() || !in.Complex {
+			t.Errorf("%q: kind=%v complex=%v", sql, in.Kind, in.Complex)
+		}
+		if q, _, reason := in.ImageSelect(10); reason == "" {
+			t.Errorf("%q: image select built: %s", sql, q)
+		}
+	}
+}
+
+// The rows of "WITH w AS (<write> RETURNING *) SELECT ..." are the outer
+// query's, never RETURNING images.
+func TestWriteCTEHasNoReturningRows(t *testing.T) {
+	in := Parse("WITH u AS (UPDATE t SET a=1 WHERE b=2 RETURNING *) SELECT count(*) FROM u", Postgres)
+	if in.Kind != Update || !in.WritesInCTE || in.HasReturning || in.ReturningAll {
+		t.Fatalf("%+v", in)
+	}
+}
+
+func TestTxControl(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want TxControl
+	}{
+		{"BEGIN", TxBegin},
+		{"/* c */ begin isolation level serializable;", TxBegin},
+		{"START TRANSACTION READ ONLY", TxBegin},
+		{"START SLAVE", TxNone},
+		{"COMMIT", TxCommit},
+		{"END;", TxCommit},
+		{"COMMIT WORK", TxCommit},
+		{"ROLLBACK", TxRollback},
+		{"ABORT", TxRollback},
+		{"ROLLBACK TRANSACTION", TxRollback},
+		{"COMMIT AND CHAIN", TxChain},
+		{"ROLLBACK WORK AND CHAIN", TxChain},
+		{"COMMIT AND NO CHAIN", TxCommit},
+		{"ROLLBACK TO SAVEPOINT s", TxNone},
+		{"ROLLBACK TO s", TxNone},
+		{"ROLLBACK WORK TO SAVEPOINT s", TxNone},
+		{"ROLLBACK TRANSACTION TO s", TxNone},
+		{"COMMIT PREPARED 'x'", TxNone},
+		{"ROLLBACK PREPARED 'x'", TxNone},
+		{"PREPARE TRANSACTION 'x'", TxDetach},
+		{"PREPARE p AS SELECT 1", TxNone},
+		{"SAVEPOINT s", TxNone},
+		{"SELECT 'BEGIN; COMMIT'", TxNone},
+		{"UPDATE t SET a = 1", TxNone},
+		{"BEGIN; INSERT INTO t (id) VALUES (1); COMMIT", TxCommit},
+		{"BEGIN; INSERT INTO t (id) VALUES (1)", TxBegin},
+		{"COMMIT; BEGIN", TxBegin},
+		{"BEGIN; SAVEPOINT s; ROLLBACK TO s; -- still open", TxBegin},
+	}
+	for _, c := range cases {
+		got := Parse(c.sql, Postgres).Tx
+		if got != c.want {
+			t.Errorf("%q: got %v want %v", c.sql, got, c.want)
+		}
+		if got.Opens() && got.Ends() {
+			t.Errorf("%q: both opens and ends", c.sql)
+		}
+	}
+}

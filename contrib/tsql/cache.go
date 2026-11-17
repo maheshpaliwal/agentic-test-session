@@ -16,7 +16,15 @@ type parseKey struct {
 	d   mutation.Dialect
 }
 
+// maxCachedSQL bounds the statement text kept as a cache key. Longer texts
+// (bulk inserts, inlined IN lists) are rarely repeated verbatim and would pin
+// megabytes of SQL and literal offsets.
+const maxCachedSQL = 4 << 10
+
 func parseCached(q string, d mutation.Dialect) mutation.Info {
+	if len(q) > maxCachedSQL {
+		return mutation.Parse(q, d)
+	}
 	k := parseKey{q, d}
 	parseCache.Lock()
 	in, ok := parseCache.m[k]

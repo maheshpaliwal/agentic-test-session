@@ -8,6 +8,27 @@ type colMap struct {
 	idents []string
 }
 
+// parenIndex returns, for every token of t, the index of the '(' that encloses
+// it (-1 at the top level of t). A ')' maps to its own matching '('. It is
+// built in one pass so operand attribution never rescans the statement.
+func parenIndex(t []token) []int {
+	open := make([]int, len(t))
+	var stack []int
+	for k, tk := range t {
+		open[k] = -1
+		if len(stack) > 0 {
+			open[k] = stack[len(stack)-1]
+		}
+		switch {
+		case tk.isPunct("("):
+			stack = append(stack, k)
+		case tk.isPunct(")") && len(stack) > 0:
+			stack = stack[:len(stack)-1]
+		}
+	}
+	return open
+}
+
 func appendUniq(s []string, v string) []string {
 	for _, x := range s {
 		if x == v {
@@ -32,6 +53,7 @@ func (p *parser) mapCols(insertCols []string, t []token) colMap {
 	litCols := map[int][]string{}
 	benign := map[int]bool{}
 	mapped := make([]bool, n)
+	open := parenIndex(t)
 
 	for _, tk := range t {
 		if tk.typ == tWord || tk.typ == tQuoted {
@@ -158,7 +180,7 @@ func (p *parser) mapCols(insertCols []string, t []token) colMap {
 		if !isArg && t[k].typ != tString && t[k].typ != tNumber {
 			continue
 		}
-		col, bn := contextCol(t, k)
+		col, bn := contextCol(t, open, k)
 		switch {
 		case bn:
 			benign[k] = true
@@ -203,7 +225,7 @@ func skipOpsBack(t []token, j int) (int, bool) {
 }
 
 // contextCol finds the column the operand at k is compared with / assigned to.
-func contextCol(t []token, k int) (col string, benign bool) {
+func contextCol(t []token, open []int, k int) (col string, benign bool) {
 	if k > 0 {
 		switch {
 		case t[k-1].isWord("LIMIT"), t[k-1].isWord("OFFSET"), t[k-1].isWord("FIRST"), t[k-1].isWord("NEXT"):
@@ -215,7 +237,7 @@ func contextCol(t []token, k int) (col string, benign bool) {
 		j--
 	}
 	if j2, ok := skipOpsBack(t, j); ok {
-		return colEndingAt(t, j2), false
+		return colEndingAt(t, open, j2), false
 	}
 	// col [NOT] BETWEEN a AND b
 	if j >= 0 && t[j].isWord("BETWEEN") {
@@ -223,32 +245,32 @@ func contextCol(t []token, k int) (col string, benign bool) {
 		if j >= 0 && t[j].isWord("NOT") {
 			j--
 		}
-		return colEndingAt(t, j), false
+		return colEndingAt(t, open, j), false
 	}
 	if j >= 2 && t[j].isWord("AND") && t[j-2].isWord("BETWEEN") {
 		b := j - 3
 		if b >= 0 && t[b].isWord("NOT") {
 			b--
 		}
-		return colEndingAt(t, b), false
+		return colEndingAt(t, open, b), false
 	}
 	// enclosing parenthesis: IN (..), = ANY(..), col = func($1)
-	if open := enclosingOpen(t, k); open > 0 {
-		pj := open - 1
+	if op := open[k]; op > 0 {
+		pj := op - 1
 		switch {
 		case t[pj].isWord("IN"):
 			pj--
 			if pj >= 0 && t[pj].isWord("NOT") {
 				pj--
 			}
-			return colEndingAt(t, pj), false
+			return colEndingAt(t, open, pj), false
 		case t[pj].isWord("ANY"), t[pj].isWord("ALL"), t[pj].isWord("SOME"):
 			if j2, ok := skipOpsBack(t, pj-1); ok {
-				return colEndingAt(t, j2), false
+				return colEndingAt(t, open, j2), false
 			}
 		case t[pj].typ == tWord && !notColumn[t[pj].val]:
 			if j2, ok := skipOpsBack(t, pj-1); ok {
-				return colEndingAt(t, j2), false
+				return colEndingAt(t, open, j2), false
 			}
 		}
 	}
@@ -271,33 +293,17 @@ func contextCol(t []token, k int) (col string, benign bool) {
 	return "", false
 }
 
-func enclosingOpen(t []token, k int) int {
-	want := t[k].depth - 1
-	for q := k - 1; q >= 0; q-- {
-		if t[q].isPunct("(") && t[q].depth == want {
-			return q
-		}
-	}
-	return -1
-}
-
 // colEndingAt names the column an expression ending at t[j] refers to:
 // ident, qualifier.ident, ident::cast or fn(ident).
-func colEndingAt(t []token, j int) string {
+func colEndingAt(t []token, open []int, j int) string {
 	if j < 0 || j >= len(t) {
 		return ""
 	}
 	if j >= 2 && t[j-1].isPunct("::") && t[j].isIdent() {
-		return colEndingAt(t, j-2)
+		return colEndingAt(t, open, j-2)
 	}
 	if t[j].isPunct(")") {
-		q := -1
-		for x := j - 1; x >= 0; x-- {
-			if t[x].isPunct("(") && t[x].depth == t[j].depth {
-				q = x
-				break
-			}
-		}
+		q := open[j]
 		if q < 0 {
 			return ""
 		}
@@ -306,7 +312,7 @@ func colEndingAt(t []token, j int) string {
 		for x := q + 1; x < j; x++ {
 			if t[x].isIdent() && !(t[x].typ == tWord && notColumn[t[x].val]) &&
 				!(x+1 < j && t[x+1].isPunct("(")) && !(x > 0 && t[x-1].isPunct("::")) &&
-				!(x > 0 && t[x-1].isPunct(".")) {
+				!(x+1 < j && t[x+1].isPunct(".")) { // a qualifier (u in u.col) is not the column
 				name = strings.ToLower(t[x].name(Postgres))
 				cnt++
 			}

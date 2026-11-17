@@ -75,7 +75,17 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		return
 	}
 	op := in.Kind.Op()
-	if t.skip || in.Kind == mutation.Truncate {
+	if in.Kind == mutation.Truncate {
+		for _, tb := range in.Tables { // TRUNCATE a, b empties every listed table
+			if tb != "" {
+				m := t.newMutation(op)
+				m.Entity = tb
+				t.span.AddMutation(m)
+			}
+		}
+		return
+	}
+	if t.skip {
 		t.span.AddMutation(t.newMutation(op))
 		return
 	}
@@ -109,7 +119,10 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 			m.After = core.Payload(core.RedactAny(ad))
 		}
 		if bd != nil || ad != nil {
-			m.Diff = diffMaps(bd, ad)
+			var hidden bool
+			if m.Diff, hidden = diffMaps(bd, ad); hidden {
+				t.flag("diff_truncated")
+			}
 		}
 		muts = append(muts, m)
 	}

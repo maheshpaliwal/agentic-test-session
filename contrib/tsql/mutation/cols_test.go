@@ -3,7 +3,10 @@ package mutation
 import (
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 func argCols(in Info) map[int]string {
@@ -169,5 +172,64 @@ func TestEdgeCases(t *testing.T) {
 	in = Parse("UPDATE t SET a = 'x;y' /* ; */ WHERE id = 1 -- ;\n", Postgres)
 	if in.Multi || !in.HasWhere {
 		t.Fatalf("%+v", in)
+	}
+}
+
+// A qualified column inside a function call must be attributed to the column,
+// not to its table alias.
+func TestQualifiedColumnInsideFunction(t *testing.T) {
+	q := "SELECT * FROM users u WHERE lower(u.password) = 'hunter2' AND lower(u.api_token) = $1 AND md5(s.u.secret) = $2"
+	in := Parse(q, Postgres)
+	if got, want := argCols(in), (map[int]string{0: "api_token", 1: "secret"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("args: got %v want %v", got, want)
+	}
+	for _, l := range in.Literals {
+		if q[l.Start:l.End] == "'hunter2'" && !reflect.DeepEqual(l.Cols, []string{"password"}) {
+			t.Fatalf("literal attributed to %v", l.Cols)
+		}
+	}
+}
+
+// Attribution must stay linear: a large IN list used to take ~10s.
+func TestLargeInListParsesFast(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("SELECT * FROM t WHERE id IN (")
+	for i := 1; i <= 60000; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		b.WriteString("$" + strconv.Itoa(i))
+	}
+	b.WriteString(") AND lower(name) = ANY(ARRAY['a','b'])")
+	start := time.Now()
+	in := Parse(b.String(), Postgres)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("parse took %v", d)
+	}
+	if len(in.ArgCols) != 60000 || in.ArgCols[59999][0] != "id" {
+		t.Fatalf("attribution lost: %d args", len(in.ArgCols))
+	}
+}
+
+func TestProjections(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want []Projection
+	}{
+		{"SELECT id, u.email, u.*, * FROM users u", nil},
+		{"SELECT id, password AS p FROM users", []Projection{{[]string{"password", "as", "p"}, "p"}}},
+		{"SELECT u.password p, lower(token) tk, count(*) FROM users u",
+			[]Projection{{[]string{"u", "password", "p"}, "p"}, {[]string{"lower", "token", "tk"}, "tk"}, {[]string{"count"}, ""}}},
+		{"SELECT password::text, CASE WHEN a THEN secret END FROM t",
+			[]Projection{{[]string{"password", "text"}, ""}, {[]string{"case", "when", "a", "then", "secret", "end"}, ""}}},
+		{"SELECT a IS DISTINCT FROM b AS x, token AS t2 FROM t",
+			[]Projection{{[]string{"a", "is", "distinct", "from", "b", "as", "x"}, "x"}, {[]string{"token", "as", "t2"}, "t2"}}},
+		{"SELECT * FROM (SELECT password AS p FROM users) s", []Projection{{[]string{"password", "as", "p"}, "p"}}},
+		{"INSERT INTO t (a) VALUES ($1) RETURNING id, api_key AS k", []Projection{{[]string{"api_key", "as", "k"}, "k"}}},
+	}
+	for _, c := range cases {
+		if got := Parse(c.sql, Postgres).Projections; !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s\n got %+v\nwant %+v", c.sql, got, c.want)
+		}
 	}
 }
