@@ -128,6 +128,19 @@ func (s *Sequencer) addQuarantine(id string, n int) {
 	s.qmu.Unlock()
 }
 
+func (s *Sequencer) forgetQuarantine(id string) {
+	s.qmu.Lock()
+	delete(s.quar, id)
+	s.qmu.Unlock()
+}
+
+// has reports whether the session currently has a live actor.
+func (s *Sequencer) has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actors[id] != nil
+}
+
 func (s *Sequencer) quarantined(id string) int {
 	s.qmu.Lock()
 	defer s.qmu.Unlock()

@@ -31,6 +31,7 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}/summary", c.handleSummary)
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", c.handleDrain)
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
+	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", c.handleDelete)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/internal/") && !c.internalPeerOK(r) {
@@ -284,4 +285,19 @@ func (c *Collector) handleSeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, res)
+}
+
+func (c *Collector) handleDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	switch err := c.Delete(r.Context(), id); {
+	case errors.Is(err, errBadID):
+		writeErr(w, http.StatusBadRequest, err)
+	case errors.Is(err, errSeqClosed):
+		writeErr(w, http.StatusServiceUnavailable, errors.New("collector is shutting down, retry later"))
+	case err != nil:
+		c.log.Error("delete session", "session", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "session_id": id})
+	}
 }

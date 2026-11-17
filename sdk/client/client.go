@@ -20,7 +20,12 @@ import (
 	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
-const DefaultURL = "http://127.0.0.1:7070"
+// DefaultURL and DefaultCollectorURL are the loopback addresses the control
+// plane and the collector listen on unless configured otherwise.
+const (
+	DefaultURL          = "http://127.0.0.1:7070"
+	DefaultCollectorURL = "http://127.0.0.1:7071"
+)
 
 // ErrConflict is returned by Start on HTTP 409: an exclusive session is already
 // running, or a binding is held by another active session (error text carries the conflicting id).
@@ -28,7 +33,11 @@ var ErrConflict = errors.New("tsession: exclusive session already running")
 
 // Options configure Start. Zero values use control-plane defaults.
 type Options struct {
-	BaseURL         string // default $TSESSION_CONTROLPLANE_URL or DefaultURL
+	BaseURL string // default $TSESSION_CONTROLPLANE_URL or DefaultURL
+	// CollectorURL is where the session's results are read from (Summary,
+	// Events, Entities, ...); default $TSESSION_COLLECTOR_URL or
+	// DefaultCollectorURL. Starting and stopping sessions does not use it.
+	CollectorURL    string
 	Name            string
 	Mode            string // "header" (default) or "exclusive"
 	TTLSeconds      int
@@ -96,7 +105,12 @@ type Info struct {
 	Incomplete      bool      `json:"incomplete"`
 	DroppedEvents   int64     `json:"dropped_events"`
 	BundleURI       string    `json:"bundle_uri"`
-	Bindings        []Binding `json:"bindings,omitempty"`
+	// Reason is "ttl" when the session was ended by its TTL.
+	Reason string `json:"reason,omitempty"`
+	// SealError is set when the collector could not seal the session; the
+	// session is then SEALED with Incomplete set.
+	SealError string    `json:"seal_error,omitempty"`
+	Bindings  []Binding `json:"bindings,omitempty"`
 }
 
 // Done reports whether the session reached a terminal state.
@@ -108,7 +122,8 @@ func (i Info) Done() bool {
 type Session struct {
 	ID string
 
-	base string
+	base string // control plane
+	col  string // collector
 	hc   *http.Client
 	poll time.Duration
 
@@ -116,14 +131,15 @@ type Session struct {
 	info Info
 }
 
-func baseURL(o string) string {
-	if o == "" {
-		o = os.Getenv("TSESSION_CONTROLPLANE_URL")
+// baseURL picks the explicit value, else the environment variable, else def.
+func baseURL(explicit, env, def string) string {
+	if explicit == "" {
+		explicit = os.Getenv(env)
 	}
-	if o == "" {
-		o = DefaultURL
+	if explicit == "" {
+		explicit = def
 	}
-	return strings.TrimRight(o, "/")
+	return strings.TrimRight(explicit, "/")
 }
 
 func newSession(o Options, info Info) *Session {
@@ -135,7 +151,12 @@ func newSession(o Options, info Info) *Session {
 	if poll <= 0 {
 		poll = 200 * time.Millisecond
 	}
-	return &Session{ID: info.ID, base: baseURL(o.BaseURL), hc: hc, poll: poll, info: info}
+	return &Session{
+		ID:   info.ID,
+		base: baseURL(o.BaseURL, "TSESSION_CONTROLPLANE_URL", DefaultURL),
+		col:  baseURL(o.CollectorURL, "TSESSION_COLLECTOR_URL", DefaultCollectorURL),
+		hc:   hc, poll: poll, info: info,
+	}
 }
 
 // Start creates and activates a session.
@@ -218,6 +239,12 @@ func (s *Session) Abort(ctx context.Context) (Info, error) {
 	return info, nil
 }
 
+// Delete removes the session and everything recorded for it (events, seal,
+// bundle). Only a finished session can be deleted: stop or abort it first.
+func (s *Session) Delete(ctx context.Context) error {
+	return s.do(ctx, http.MethodDelete, "/v1/sessions/"+url.PathEscape(s.ID), nil, nil)
+}
+
 // Wait blocks until the session is SEALED (or otherwise terminal) or ctx ends.
 // It returns an error if the terminal state is not SEALED.
 func (s *Session) Wait(ctx context.Context) (Info, error) {
@@ -286,7 +313,15 @@ func (s *Session) set(i Info) {
 	s.mu.Unlock()
 }
 
+// do calls the control plane.
 func (s *Session) do(ctx context.Context, method, path string, in, out any) error {
+	return s.call(ctx, s.base, method, path, in, out)
+}
+
+// call sends one JSON request to base+path and decodes the reply into out
+// (skipped when out is nil). Non-2xx replies become errors carrying the
+// server's message.
+func (s *Session) call(ctx context.Context, base, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -295,7 +330,7 @@ func (s *Session) do(ctx context.Context, method, path string, in, out any) erro
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, s.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
 	if err != nil {
 		return err
 	}
@@ -329,6 +364,10 @@ func (s *Session) do(ctx context.Context, method, path string, in, out any) erro
 			return fmt.Errorf("%w: %s", ErrConflict, e.Error)
 		}
 		return fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
+	}
+	if out == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

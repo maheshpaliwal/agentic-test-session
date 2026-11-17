@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,6 +32,13 @@ type Config struct {
 	// MaxBufferedEvents caps events buffered per session while the store is
 	// failing (ingest then answers 503).
 	MaxBufferedEvents int
+	// Retention deletes a session this long after it was sealed (0 keeps
+	// sessions forever). A session that was never sealed is deleted once its
+	// newest event is this old and its actor has been evicted for idleness.
+	Retention time.Duration
+	// RetentionInterval is how often the retention sweep runs; default
+	// Retention/10 clamped to [1s, 10m].
+	RetentionInterval time.Duration
 	// StoreTimeout bounds each store call the sequencer makes outside a
 	// request (window flushes, catch-up, poison-event probes); default 30s.
 	StoreTimeout time.Duration
@@ -66,6 +75,10 @@ type Collector struct {
 	vmu   sync.Mutex
 	views map[string]*viewEntry
 	vtick uint64
+
+	stopOnce  sync.Once
+	stop      chan struct{} // closed by Close
+	retention chan struct{} // closed when the retention loop has exited
 }
 
 // New builds a Collector over st.
@@ -92,8 +105,17 @@ func New(st store.Store, cfg Config) *Collector {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	c := &Collector{cfg: cfg, st: st, log: cfg.Logger, views: map[string]*viewEntry{}}
+	if cfg.Retention > 0 && cfg.RetentionInterval <= 0 {
+		cfg.RetentionInterval = min(max(cfg.Retention/10, time.Second), 10*time.Minute)
+	}
+	c := &Collector{cfg: cfg, st: st, log: cfg.Logger, views: map[string]*viewEntry{},
+		stop: make(chan struct{}), retention: make(chan struct{})}
 	c.seq = newSequencer(st, cfg)
+	if cfg.Retention > 0 {
+		go c.retentionLoop()
+	} else {
+		close(c.retention)
+	}
 	for _, s := range cfg.InternalAllow {
 		n, err := ParseCIDR(s)
 		if err != nil {
@@ -125,7 +147,11 @@ func ParseCIDR(s string) (*net.IPNet, error) {
 // Close stops the sequencer goroutines after flushing every session's reorder
 // window. Stop the HTTP server first: an ingest that races with Close fails
 // with a storage error (which the SDK retries).
-func (c *Collector) Close() { c.seq.Close() }
+func (c *Collector) Close() {
+	c.stopOnce.Do(func() { close(c.stop) })
+	<-c.retention
+	c.seq.Close()
+}
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$`)
 
@@ -215,6 +241,102 @@ type SealResult struct {
 }
 
 var errBadID = errors.New("invalid session id")
+
+// Delete removes everything the collector holds for a session: events still
+// in the reorder window, stored events, the seal, cached views and the bundle
+// directory. It is idempotent; an unknown id is not an error. Events that
+// arrive for the id afterwards start a fresh session at Seq 1.
+func (c *Collector) Delete(ctx context.Context, id string) error {
+	if !validID.MatchString(id) {
+		return errBadID
+	}
+	var err error
+	if !c.seq.with(id, true, false, func(a *sessionActor) { err = a.purge(ctx) }) {
+		return errSeqClosed
+	}
+	if err != nil {
+		return err
+	}
+	c.seq.forgetQuarantine(id)
+	c.vmu.Lock()
+	delete(c.views, id)
+	c.vmu.Unlock()
+	if c.cfg.BundleDir != "" {
+		// validID admits no path separators and no leading dot, so the join
+		// cannot leave BundleDir.
+		if err := os.RemoveAll(filepath.Join(c.cfg.BundleDir, id)); err != nil {
+			c.log.Warn("session deleted but its bundle could not be removed", "session", id, "err", err)
+		}
+	}
+	return nil
+}
+
+func (c *Collector) retentionLoop() {
+	defer close(c.retention)
+	t := time.NewTicker(c.cfg.RetentionInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case now := <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.StoreTimeout)
+			n, err := c.PurgeExpired(ctx, now)
+			cancel()
+			if err != nil {
+				c.log.Warn("retention sweep", "err", err)
+			}
+			if n > 0 {
+				c.log.Info("retention sweep deleted expired sessions", "sessions", n, "retention", c.cfg.Retention)
+			}
+		}
+	}
+}
+
+// PurgeExpired deletes the sessions whose retention has run out as of now and
+// returns how many were deleted. It is what the retention loop runs; with
+// Config.Retention unset it does nothing.
+func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
+	if c.cfg.Retention <= 0 {
+		return 0, nil
+	}
+	sessions, err := c.st.ListSessions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-c.cfg.Retention)
+	n := 0
+	var firstErr error
+	for _, s := range sessions {
+		expired, err := c.expired(ctx, s, cutoff)
+		if err == nil && expired {
+			if err = c.Delete(ctx, s.ID); err == nil {
+				n++
+			}
+		}
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("session %s: %w", s.ID, err)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return n, firstErr
+}
+
+func (c *Collector) expired(ctx context.Context, s store.SessionInfo, cutoff time.Time) (bool, error) {
+	if s.Sealed {
+		si, err := c.st.GetSeal(ctx, s.ID)
+		if err != nil || si == nil {
+			return false, err
+		}
+		return si.SealedAt.Before(cutoff), nil
+	}
+	// Never sealed (aborted, or abandoned by its control plane). LastNs is an
+	// SDK clock, so it only counts once the session has also been idle here
+	// long enough for its actor to be evicted.
+	return s.LastNs > 0 && time.Unix(0, s.LastNs).Before(cutoff) && !c.seq.has(s.ID), nil
+}
 
 // Seal flushes the reorder window, resolves transactions, marks orphaned
 // async work and writes the bundle. It is idempotent, and concurrent calls

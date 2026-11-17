@@ -383,6 +383,9 @@ func (a *sessionActor) catchUp(batch []core.Event) ([]core.Event, error) {
 	if err != nil {
 		return batch, err
 	}
+	if len(tail) == 0 {
+		return a.resync(ctx, batch)
+	}
 	stored := make(map[evKey]struct{}, len(tail))
 	for i := range tail {
 		stored[evKey{tail[i].Instance, tail[i].LocalSeq}] = struct{}{}
@@ -396,6 +399,47 @@ func (a *sessionActor) catchUp(batch []core.Event) ([]core.Event, error) {
 		}
 	}
 	return out, nil
+}
+
+// resync handles a conflict that no newer event explains: the store holds
+// less than this actor believes (the session was deleted or restored behind
+// its back). The in-memory state is rebuilt from the store and batch is
+// returned without the events the store already has.
+func (a *sessionActor) resync(ctx context.Context, batch []core.Event) ([]core.Event, error) {
+	head, err := a.st.Head(ctx, a.id)
+	if err != nil || head+1 == a.next {
+		return batch, err // in step after all; the caller retries or gives up
+	}
+	a.loaded = false
+	if err := a.load(ctx); err != nil {
+		return batch, err
+	}
+	out := batch[:0:0]
+	for i := range batch {
+		k := evKey{batch[i].Instance, batch[i].LocalSeq}
+		if _, dup := a.seen[k]; !dup {
+			a.seen[k] = struct{}{} // still buffered: keep rejecting replays
+			out = append(out, batch[i])
+		}
+	}
+	return out, nil
+}
+
+// purge deletes the session from the store and forgets everything the actor
+// holds for it. Running on the actor serialises it against appends.
+func (a *sessionActor) purge(ctx context.Context) error {
+	if err := a.st.DeleteSession(ctx, a.id); err != nil {
+		return err
+	}
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+	a.setBuf(nil)
+	a.loaded, a.failures, a.lastRecv = false, 0, 0
+	a.sealed.Store(false)
+	a.lastActive.Store(0) // nothing left to keep warm: evict at the next sweep
+	return nil
 }
 
 // isolate bisects a batch that keeps failing. A single event that still

@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -39,6 +40,7 @@ func NewFileStore(path string) (*FileStore, error) {
 	return fs, nil
 }
 
+// Put implements Store.
 func (f *FileStore) Put(s Session) error {
 	f.wmu.Lock()
 	defer f.wmu.Unlock()
@@ -88,6 +90,42 @@ func (f *FileStore) Evict(id string) {
 	_ = f.writeLocked()
 }
 
+// Delete implements Store: the session leaves the hot set, the JSON file and
+// the archive.
+func (f *FileStore) Delete(id string) error {
+	f.wmu.Lock()
+	defer f.wmu.Unlock()
+	if _, ok := f.MemStore.Get(id); ok {
+		f.MemStore.Evict(id)
+		if err := f.writeLocked(); err != nil {
+			return err
+		}
+	}
+	return f.dropArchivedLocked(id)
+}
+
+// dropArchivedLocked rewrites the archive without id's lines (an archived
+// session that was renamed has several). The file is replaced atomically.
+func (f *FileStore) dropArchivedLocked(id string) error {
+	var keep [][]byte
+	found := false
+	f.readArchive(func(s Session) bool {
+		if s.ID == id {
+			found = true
+			return true
+		}
+		if b, err := json.Marshal(s); err == nil {
+			keep = append(keep, b)
+		}
+		return true
+	})
+	if !found {
+		return nil
+	}
+	return writeFileAtomic(f.archivePath(), append(bytes.Join(keep, []byte{'\n'}), '\n'), len(keep) == 0)
+}
+
+// Get implements Store, falling back to the archive for evicted sessions.
 func (f *FileStore) Get(id string) (Session, bool) {
 	if s, ok := f.MemStore.Get(id); ok {
 		return s, true
@@ -103,6 +141,7 @@ func (f *FileStore) Get(id string) (Session, bool) {
 	return out, found
 }
 
+// List implements Store: sessions in memory plus the archived ones.
 func (f *FileStore) List() []Session {
 	out := f.MemStore.List()
 	inMem := make(map[string]struct{}, len(out))
@@ -135,17 +174,30 @@ func (f *FileStore) writeLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(f.path), ".sessions-*.tmp")
+	return writeFileAtomic(f.path, b, false)
+}
+
+// writeFileAtomic replaces path with data through a temp file and a rename,
+// so a crash never leaves a half-written file. With remove set the file is
+// deleted instead (nothing left to store).
+func writeFileAtomic(path string, data []byte, remove bool) error {
+	if remove {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".sessions-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
+	defer os.Remove(tmp.Name()) //nolint:errcheck // gone already after a successful rename
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), f.path)
+	return os.Rename(tmp.Name(), path)
 }

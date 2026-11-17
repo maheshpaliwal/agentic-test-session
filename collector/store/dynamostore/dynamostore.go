@@ -65,6 +65,7 @@ const (
 
 	chunkBytes   = 256 * 1024 // body bytes per item; keeps items well under 400KB
 	maxTxActions = 100        // DynamoDB limit per TransactWriteItems
+	maxBatchSize = 25         // DynamoDB limit per BatchWriteItem
 	txBudget     = 3_800_000  // headroom under the 4MB transaction size limit
 	itemOverhead = 512        // per-item allowance for keys, names and scalars
 	maxKeyBytes  = 2048       // partition key limit
@@ -120,6 +121,7 @@ type Config struct {
 type api interface {
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 	Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	Scan(context.Context, *dynamodb.ScanInput, ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	TransactWriteItems(context.Context, *dynamodb.TransactWriteItemsInput, ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)

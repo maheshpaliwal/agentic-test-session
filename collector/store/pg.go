@@ -321,7 +321,7 @@ func (p *PG) GetSeal(ctx context.Context, sid string) (*SealInfo, error) {
 	var sealed bool
 	err := p.pool.QueryRow(ctx, `SELECT sealed, incomplete, orphaned, bundle_uri, COALESCE(sealed_at, now()), quarantined
 		FROM sessions WHERE id=$1`, sid).Scan(&sealed, &si.Incomplete, &orph, &si.BundleURI, &si.SealedAt, &si.Quarantined)
-	if err == pgx.ErrNoRows || (err == nil && !sealed) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !sealed) {
 		return nil, nil
 	}
 	if err != nil {
@@ -343,4 +343,25 @@ func (p *PG) PutSeal(ctx context.Context, sid string, si SealInfo) error {
 	return err
 }
 
+// DeleteSession implements Store. The three tables are cleared in one
+// transaction, so a session is never left half deleted.
+func (p *PG) DeleteSession(ctx context.Context, sid string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	for _, q := range []string{
+		`DELETE FROM entity_mutations WHERE session_id=$1`,
+		`DELETE FROM session_events WHERE session_id=$1`,
+		`DELETE FROM sessions WHERE id=$1`,
+	} {
+		if _, err := tx.Exec(ctx, q, sid); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// Close implements Store.
 func (p *PG) Close() error { p.pool.Close(); return nil }

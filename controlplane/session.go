@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// State is a session's position in the lifecycle FSM.
 type State string
 
 const (
@@ -44,6 +45,8 @@ func canTransition(from, to State) bool {
 	return false
 }
 
+// Mode selects how requests join a session: by header/binding (ModeHeader)
+// or all traffic while the session runs (ModeExclusive).
 type Mode string
 
 const (
@@ -51,6 +54,8 @@ const (
 	ModeExclusive Mode = "exclusive"
 )
 
+// Session is the control plane's record of one session; it is also the wire
+// form returned by the API.
 type Session struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
@@ -86,11 +91,15 @@ type ActiveSet struct {
 	Bindings []ActiveBinding `json:"bindings,omitempty"`
 }
 
+// Errors returned by Manager; the HTTP layer maps them to status codes.
 var (
 	ErrNotFound = errors.New("session not found")
 	ErrConflict = errors.New("exclusive session already running")
 	ErrBadState = errors.New("invalid state transition")
 	ErrInvalid  = errors.New("invalid request")
+	// ErrCollector wraps a failed call to the collector made on behalf of an
+	// API request (HTTP 502).
+	ErrCollector = errors.New("collector request failed")
 )
 
 // Store persists sessions. Implementations must be goroutine-safe.
@@ -98,6 +107,9 @@ type Store interface {
 	Put(Session) error
 	Get(id string) (Session, bool)
 	List() []Session // ordered by CreatedAt ascending
+	// Delete forgets a session for good (archive included). Deleting an
+	// unknown id is not an error.
+	Delete(id string) error
 }
 
 // Evictor is an optional Store capability: drop a terminal session from the
@@ -113,12 +125,20 @@ type MemStore struct {
 	m  map[string]Session
 }
 
+// NewMemStore returns an empty MemStore.
 func NewMemStore() *MemStore { return &MemStore{m: map[string]Session{}} }
 
+// Put implements Store.
 func (s *MemStore) Put(x Session) error {
 	s.mu.Lock()
 	s.m[x.ID] = x
 	s.mu.Unlock()
+	return nil
+}
+
+// Delete implements Store.
+func (s *MemStore) Delete(id string) error {
+	s.Evict(id)
 	return nil
 }
 
@@ -129,6 +149,7 @@ func (s *MemStore) Evict(id string) {
 	s.mu.Unlock()
 }
 
+// Get implements Store.
 func (s *MemStore) Get(id string) (Session, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -136,6 +157,7 @@ func (s *MemStore) Get(id string) (Session, bool) {
 	return x, ok
 }
 
+// List implements Store.
 func (s *MemStore) List() []Session {
 	s.mu.RLock()
 	out := make([]Session, 0, len(s.m))

@@ -15,6 +15,7 @@ type Mem struct {
 	seal map[string]SealInfo
 }
 
+// NewMem returns an empty in-memory store.
 func NewMem() *Mem {
 	return &Mem{ev: map[string][]core.Event{}, seal: map[string]SealInfo{}}
 }
@@ -103,4 +104,14 @@ func (m *Mem) PutSeal(_ context.Context, sid string, si SealInfo) error {
 	return nil
 }
 
+// DeleteSession implements Store.
+func (m *Mem) DeleteSession(_ context.Context, sid string) error {
+	m.mu.Lock()
+	delete(m.ev, sid)
+	delete(m.seal, sid)
+	m.mu.Unlock()
+	return nil
+}
+
+// Close implements Store.
 func (m *Mem) Close() error { return nil }

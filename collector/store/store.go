@@ -50,6 +50,9 @@ type Store interface {
 	// GetSeal returns nil when the session is not sealed.
 	GetSeal(ctx context.Context, sessionID string) (*SealInfo, error)
 	PutSeal(ctx context.Context, sessionID string, si SealInfo) error
+	// DeleteSession removes a session's events and seal. Deleting a session
+	// that does not exist is not an error, so a failed delete can be retried.
+	DeleteSession(ctx context.Context, sessionID string) error
 	Close() error
 }
 

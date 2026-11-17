@@ -18,6 +18,7 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions", m.hList)
 	mux.HandleFunc("GET /v1/sessions/{id}", m.hGet)
 	mux.HandleFunc("PATCH /v1/sessions/{id}", m.hRename)
+	mux.HandleFunc("DELETE /v1/sessions/{id}", m.hDelete)
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", m.transition(m.Stop))
 	mux.HandleFunc("POST /v1/sessions/{id}/abort", m.transition(m.Abort))
 	mux.HandleFunc("GET /v1/active", func(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +63,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		code = http.StatusConflict
 	case errors.Is(err, ErrInvalid):
 		code = http.StatusBadRequest
+	case errors.Is(err, ErrCollector):
+		code = http.StatusBadGateway
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
@@ -108,6 +111,15 @@ func (m *Manager) hRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s)
+}
+
+func (m *Manager) hDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := m.Delete(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id})
 }
 
 func (m *Manager) transition(f func(string) (Session, error)) http.HandlerFunc {

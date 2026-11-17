@@ -383,6 +383,20 @@ func (s *Store) PutSeal(ctx context.Context, sid string, si store.SealInfo) erro
 	return err
 }
 
+// DeleteSession implements store.Store. Events go first and the seal last:
+// if the call fails half way the session is still listed (ListSessions is
+// driven by events) and the delete can simply be repeated.
+func (s *Store) DeleteSession(ctx context.Context, sid string) error {
+	ctx, cancel := s.ctx(ctx)
+	defer cancel()
+	if _, err := s.events.DeleteMany(ctx, bson.D{{Key: "session_id", Value: sid}}); err != nil {
+		return err
+	}
+	_, err := s.seals.DeleteOne(ctx, bson.D{{Key: "_id", Value: sid}})
+	return err
+}
+
+// Close implements store.Store.
 func (s *Store) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

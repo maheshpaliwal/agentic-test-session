@@ -58,6 +58,9 @@ type Manager struct {
 	wg      sync.WaitGroup
 }
 
+// NewManager builds a Manager and resumes the drains that were in flight
+// when a persistent Store was last written. Call Run for TTL expiry and Close
+// when done.
 func NewManager(cfg Config) *Manager {
 	if cfg.Store == nil {
 		cfg.Store = NewMemStore()
@@ -130,9 +133,7 @@ func (m *Manager) indexLocked(s Session) {
 		m.live[s.ID] = s
 		return
 	}
-	if _, was := m.live[s.ID]; was {
-		delete(m.live, s.ID)
-	}
+	delete(m.live, s.ID)
 	ended := s.EndedAt
 	if ended.IsZero() {
 		ended = s.CreatedAt
@@ -193,6 +194,9 @@ type StartRequest struct {
 	Bindings        []Binding `json:"bindings"`
 }
 
+// Start validates req and creates an ACTIVE session. It fails with
+// ErrInvalid, ErrConflict (an exclusive session is running) or a
+// *BindingConflictError.
 func (m *Manager) Start(req StartRequest) (Session, error) {
 	if req.Mode == "" {
 		req.Mode = ModeHeader
@@ -272,6 +276,8 @@ func (m *Manager) Stop(id string) (Session, error) {
 	return s, nil
 }
 
+// Abort ends a session immediately without draining or sealing it; an
+// in-flight drain is cancelled. Aborting an ABORTED session is a no-op.
 func (m *Manager) Abort(id string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -295,6 +301,28 @@ func (m *Manager) Abort(id string) (Session, error) {
 	}
 	m.broadcastLocked()
 	return s, nil
+}
+
+// Delete removes a finished session for good: the collector drops its events,
+// seal and bundle, then the control plane forgets it. Only terminal sessions
+// can be deleted (ErrBadState otherwise): stop or abort a running one first.
+// A collector failure leaves the session in place so the call can be retried.
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	s, ok := m.cfg.Store.Get(id)
+	if !ok {
+		return ErrNotFound
+	}
+	if !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+		return fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
+	}
+	if m.cfg.Collector != nil {
+		if err := m.cfg.Collector.Delete(ctx, id); err != nil {
+			return fmt.Errorf("%w: %v", ErrCollector, err)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.Store.Delete(id)
 }
 
 // Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through
@@ -323,6 +351,7 @@ func (m *Manager) Sweep(now time.Time) {
 	}
 }
 
+// Get returns the session with the given id.
 func (m *Manager) Get(id string) (Session, bool) { return m.cfg.Store.Get(id) }
 
 // List returns sessions, optionally filtered by state ("" = all).
@@ -340,6 +369,7 @@ func (m *Manager) List(state State) []Session {
 	return out
 }
 
+// SetKill flips the global kill switch: while set, SDKs record nothing.
 func (m *Manager) SetKill(v bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -347,6 +377,7 @@ func (m *Manager) SetKill(v bool) {
 	m.broadcastLocked()
 }
 
+// Active returns the current active set (what SDKs subscribe to).
 func (m *Manager) Active() ActiveSet {
 	m.mu.Lock()
 	defer m.mu.Unlock()

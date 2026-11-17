@@ -25,6 +25,10 @@ type fakeDB struct {
 	pageMax int // items per Query/Scan page
 	creates int
 	txCalls int
+	// unprocessed makes every other BatchWriteItem return its last n requests
+	// as UnprocessedItems (throttling).
+	unprocessed int
+	batchCalls  int
 }
 
 func newFakeDB() *fakeDB {
@@ -167,9 +171,10 @@ func (f *fakeDB) page(ctx context.Context, keep func(map[string]types.AttributeV
 
 func (f *fakeDB) Query(ctx context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	pk, lo, hi := getS(in.ExpressionAttributeValues, ":pk"), getS(in.ExpressionAttributeValues, ":lo"), getS(in.ExpressionAttributeValues, ":hi")
+	_, ranged := in.ExpressionAttributeValues[":lo"] // "#pk = :pk" alone matches the whole partition
 	keep := func(it map[string]types.AttributeValue) bool {
 		sk := getS(it, aSK)
-		return getS(it, aPK) == pk && sk >= lo && sk <= hi
+		return getS(it, aPK) == pk && (!ranged || (sk >= lo && sk <= hi))
 	}
 	var filter func(map[string]types.AttributeValue) bool
 	if in.FilterExpression != nil {
@@ -190,6 +195,38 @@ func (f *fakeDB) Scan(ctx context.Context, in *dynamodb.ScanInput, _ ...func(*dy
 		return nil, err
 	}
 	return &dynamodb.ScanOutput{Items: items, LastEvaluatedKey: last}, nil
+}
+
+// BatchWriteItem supports DeleteRequests only. Like the service it refuses
+// more than 25 requests, and with unprocessed set it hands part of every
+// batch back so the caller's retry loop is exercised.
+func (f *fakeDB) BatchWriteItem(ctx context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batchCalls++
+	out := &dynamodb.BatchWriteItemOutput{}
+	for table, reqs := range in.RequestItems {
+		if len(reqs) == 0 || len(reqs) > 25 {
+			return nil, fmt.Errorf("ValidationException: BatchWriteItem takes 1..25 requests, got %d", len(reqs))
+		}
+		for i, r := range reqs {
+			if r.DeleteRequest == nil {
+				return nil, errors.New("fake: only DeleteRequest is supported")
+			}
+			if f.unprocessed > 0 && i >= len(reqs)-f.unprocessed && f.batchCalls%2 == 1 {
+				if out.UnprocessedItems == nil {
+					out.UnprocessedItems = map[string][]types.WriteRequest{}
+				}
+				out.UnprocessedItems[table] = append(out.UnprocessedItems[table], r)
+				continue
+			}
+			delete(f.items, keyOf(r.DeleteRequest.Key))
+		}
+	}
+	return out, nil
 }
 
 func cancelled(codes ...string) error {
