@@ -44,8 +44,9 @@ func RedactAny(v any) any {
 }
 
 // RedactQuery masks the values of sensitive keys in a raw query string or
-// form-encoded body ("a=1&access_token=xyz"). Unparseable input is returned
-// with RedactText applied.
+// form-encoded body ("a=1&access_token=xyz"). Besides the configured keys it
+// masks the parameter names that carry secrets only in this position: key,
+// code, sig, pin and session.
 func RedactQuery(raw string) string {
 	if raw == "" || !strings.Contains(raw, "=") {
 		return raw
@@ -59,7 +60,7 @@ func RedactQuery(raw string) string {
 		if dk, err := url.QueryUnescape(k); err == nil {
 			k = dk
 		}
-		if sensitive(k) {
+		if sensitiveParam(k) {
 			parts[i] = p[:strings.Index(p, "=")+1] + url.QueryEscape(RedactedValue)
 		}
 	}
@@ -83,18 +84,32 @@ func RedactURL(u *url.URL) string {
 }
 
 var (
-	reJSONish = regexp.MustCompile(`(?i)("?([a-z0-9_.\-]+)"?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,&;}\]]+)`)
+	// reJSONish finds key=value / "key": "value" fragments. Quoted values may
+	// contain escaped quotes; keys may be nested form names (user[password]).
+	reJSONish = regexp.MustCompile(`(?i)("?([a-z0-9_.\-\[\]]+)"?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,&;}\]]+)`)
 	reBearer  = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[a-z0-9._~+/=\-]+`)
+	// reXMLText finds <tag ...>text</ with character data directly inside.
+	reXMLText = regexp.MustCompile(`(?i)(<([a-z0-9_.:\-]+)(?:\s[^<>]*)?>)([^<]+)(</)`)
 )
 
 // RedactText is a best-effort scrubber for free text that is not valid JSON:
-// truncated JSON, form bodies, "key=value"/"key: value" fragments and bearer
-// tokens. It cannot be exhaustive; callers should prefer structured redaction.
+// truncated JSON, form bodies, "key=value"/"key: value" fragments, XML
+// elements named like a sensitive key and bearer tokens. It cannot be
+// exhaustive; callers should prefer structured redaction.
 func RedactText(s string) string {
 	if s == "" {
 		return s
 	}
 	s = reBearer.ReplaceAllString(s, "$1 "+RedactedValue)
+	if strings.Contains(s, "</") {
+		s = reXMLText.ReplaceAllStringFunc(s, func(m string) string {
+			sub := reXMLText.FindStringSubmatch(m)
+			if len(sub) < 5 || !sensitive(sub[2]) {
+				return m
+			}
+			return sub[1] + RedactedValue + sub[4]
+		})
+	}
 	return reJSONish.ReplaceAllStringFunc(s, func(m string) string {
 		sub := reJSONish.FindStringSubmatch(m)
 		if len(sub) < 4 || !sensitive(sub[2]) {
