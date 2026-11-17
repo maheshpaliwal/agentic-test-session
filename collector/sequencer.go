@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +17,9 @@ type Sequencer struct {
 	window time.Duration
 	idle   time.Duration
 	maxBuf int
+	// storeTimeout bounds each background store call made by an actor.
+	storeTimeout time.Duration
+	log          *slog.Logger
 
 	mu     sync.Mutex
 	actors map[string]*sessionActor
@@ -28,14 +32,13 @@ type Sequencer struct {
 	jd   chan struct{}
 }
 
-func newSequencer(st store.Store, window, idle time.Duration, maxBuf int) *Sequencer {
-	if maxBuf <= 0 {
-		maxBuf = 100000
-	}
-	s := &Sequencer{st: st, window: window, idle: idle, maxBuf: maxBuf,
+// newSequencer expects cfg to have been normalised by New.
+func newSequencer(st store.Store, cfg Config) *Sequencer {
+	s := &Sequencer{st: st, window: cfg.Window, idle: cfg.IdleEvict, maxBuf: cfg.MaxBufferedEvents,
+		storeTimeout: cfg.StoreTimeout, log: cfg.Logger,
 		actors: map[string]*sessionActor{}, quar: map[string]int{},
 		stop: make(chan struct{}), jd: make(chan struct{})}
-	if idle > 0 {
+	if s.idle > 0 {
 		go s.janitor()
 	} else {
 		close(s.jd)
@@ -73,7 +76,7 @@ func (s *Sequencer) sweep(now time.Time) {
 		}
 		if now.Sub(time.Unix(0, a.lastActive.Load())) >= limit {
 			delete(s.actors, id)
-			close(a.ch)
+			a.stop()
 			gone = append(gone, a)
 		}
 	}
@@ -106,11 +109,11 @@ func (s *Sequencer) with(id string, create, touch bool, f func(*sessionActor)) b
 		a.lastActive.Store(time.Now().UnixNano())
 	}
 	s.mu.Unlock()
-	a.run(f)
+	ok := a.run(f)
 	s.mu.Lock()
 	a.inflight--
 	s.mu.Unlock()
-	return true
+	return ok
 }
 
 func (s *Sequencer) actorCount() int {
@@ -180,8 +183,9 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 	return t.status(), nil
 }
 
-// Close stops the janitor and every actor; buffered events are not flushed
-// (seal first if they matter).
+// Close stops the janitor and every actor. Each actor first flushes what is
+// still in its reorder window, so a graceful stop loses nothing the store
+// accepts.
 func (s *Sequencer) Close() {
 	s.mu.Lock()
 	already := s.closed
@@ -199,7 +203,7 @@ func (s *Sequencer) evictAll() {
 	s.mu.Lock()
 	gone := make([]*sessionActor, 0, len(s.actors))
 	for id, a := range s.actors {
-		close(a.ch)
+		a.stop()
 		gone = append(gone, a)
 		delete(s.actors, id)
 	}
@@ -212,7 +216,7 @@ func (s *Sequencer) evictAll() {
 // Flush forces the reorder window closed for an existing session and returns
 // its status afterwards.
 func (s *Sequencer) Flush(ctx context.Context, id string) (st Status, err error) {
-	s.with(id, true, true, func(a *sessionActor) {
+	ok := s.with(id, true, true, func(a *sessionActor) {
 		if err = a.load(ctx); err != nil {
 			return
 		}
@@ -221,5 +225,8 @@ func (s *Sequencer) Flush(ctx context.Context, id string) (st Status, err error)
 		}
 		st = a.status()
 	})
+	if !ok {
+		return Status{}, errSeqClosed
+	}
 	return
 }

@@ -146,8 +146,12 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		c.log.Error("ingest", "err", err)
-		if errors.Is(err, errBackpressure) {
+		switch {
+		case errors.Is(err, errBackpressure):
 			writeErr(w, http.StatusServiceUnavailable, errors.New("session buffer full, retry later"))
+			return
+		case errors.Is(err, errSeqClosed):
+			writeErr(w, http.StatusServiceUnavailable, errors.New("collector is shutting down, retry later"))
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, errors.New("storage error"))
@@ -168,31 +172,23 @@ func (c *Collector) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, l)
 }
 
-// view returns a session's events with tx outcomes and orphan flags applied
-// (cached until a new Seq arrives or the session is sealed).
-func (c *Collector) view(ctx context.Context, id string) ([]core.Event, error) {
-	v, err := c.viewOf(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return v.evs, nil
-}
-
-func (c *Collector) resolveView(ctx context.Context, id string, evs []core.Event, outcomes map[string]bool) ([]core.Event, error) {
+// resolvePage applies tx outcomes and orphan flags to one page of a session's
+// events and reports whether the session is sealed. Outcomes come from the
+// store because the deciding commit/rollback may lie outside the page.
+func (c *Collector) resolvePage(ctx context.Context, id string, evs []core.Event) (out []core.Event, sealed bool, err error) {
 	si, err := c.st.GetSeal(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if outcomes == nil {
-		if outcomes, err = c.st.TxOutcomes(ctx, id); err != nil {
-			return nil, err
-		}
+	outcomes, err := c.st.TxOutcomes(ctx, id)
+	if err != nil {
+		return nil, false, err
 	}
 	var orph map[string]bool
 	if si != nil {
 		orph = setOf(si.Orphaned)
 	}
-	return resolve(evs, outcomes, si != nil, orph), nil
+	return resolve(evs, outcomes, si != nil, orph), si != nil, nil
 }
 
 func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -206,8 +202,9 @@ func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = min(v, 10000)
 	}
 	evs, err := c.st.Events(r.Context(), id, from, limit)
+	sealed := false
 	if err == nil {
-		evs, err = c.resolveView(r.Context(), id, evs, nil)
+		evs, sealed, err = c.resolvePage(r.Context(), id, evs)
 	}
 	if err != nil {
 		writeErr(w, 500, err)
@@ -217,11 +214,10 @@ func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if n := len(evs); n > 0 {
 		next = evs[n-1].Seq + 1
 	}
-	si, _ := c.st.GetSeal(r.Context(), id)
 	if evs == nil {
 		evs = []core.Event{}
 	}
-	writeJSON(w, 200, map[string]any{"events": evs, "next_seq": next, "sealed": si != nil})
+	writeJSON(w, 200, map[string]any{"events": evs, "next_seq": next, "sealed": sealed})
 }
 
 func (c *Collector) handleTrace(w http.ResponseWriter, r *http.Request) {

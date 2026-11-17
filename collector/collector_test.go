@@ -253,11 +253,11 @@ func TestTxEffective(t *testing.T) {
 
 func mustView(t *testing.T, c *Collector) []core.Event {
 	t.Helper()
-	v, err := c.view(context.Background(), sid)
+	v, err := c.viewOf(context.Background(), sid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return v.evs
 }
 
 func TestTraceTreeWithLinkedWorker(t *testing.T) {

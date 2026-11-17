@@ -611,3 +611,17 @@ func TestSealedIdleActorEvicted(t *testing.T) {
 		t.Fatal("actor with buffered events was evicted")
 	}
 }
+
+// hangStore blocks AppendEvents until the context ends while hang is set.
+type hangStore struct {
+	store.Store
+	hang atomic.Bool
+}
+
+func (s *hangStore) AppendEvents(ctx context.Context, id string, evs []core.Event) error {
+	if s.hang.Load() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.Store.AppendEvents(ctx, id, evs)
+}

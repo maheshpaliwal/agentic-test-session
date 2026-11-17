@@ -30,6 +30,9 @@ type Config struct {
 	// MaxBufferedEvents caps events buffered per session while the store is
 	// failing (ingest then answers 503).
 	MaxBufferedEvents int
+	// StoreTimeout bounds each store call the sequencer makes outside a
+	// request (window flushes, catch-up, poison-event probes); default 30s.
+	StoreTimeout time.Duration
 	// AllowedHosts are extra Host header values accepted besides loopback
 	// (e.g. docker service names).
 	AllowedHosts []string
@@ -49,7 +52,7 @@ type Config struct {
 // later). Anything shorter regularly inverts parent/child Seq order.
 func DefaultConfig() Config {
 	return Config{Window: 500 * time.Millisecond, MaxBodyBytes: 32 << 20, MaxMessageBytes: 4 << 20,
-		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000}
+		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000, StoreTimeout: 30 * time.Second}
 }
 
 // Collector wires the store, sequencer and HTTP handlers together.
@@ -80,6 +83,9 @@ func New(st store.Store, cfg Config) *Collector {
 	if cfg.MaxBufferedEvents <= 0 {
 		cfg.MaxBufferedEvents = d.MaxBufferedEvents
 	}
+	if cfg.StoreTimeout <= 0 {
+		cfg.StoreTimeout = d.StoreTimeout
+	}
 	if cfg.Window < 0 {
 		cfg.Window = 0
 	}
@@ -87,7 +93,7 @@ func New(st store.Store, cfg Config) *Collector {
 		cfg.Logger = slog.Default()
 	}
 	c := &Collector{cfg: cfg, st: st, log: cfg.Logger, views: map[string]*viewEntry{}}
-	c.seq = newSequencer(st, cfg.Window, cfg.IdleEvict, cfg.MaxBufferedEvents)
+	c.seq = newSequencer(st, cfg)
 	for _, s := range cfg.InternalAllow {
 		n, err := ParseCIDR(s)
 		if err != nil {
@@ -116,8 +122,9 @@ func ParseCIDR(s string) (*net.IPNet, error) {
 	return n, err
 }
 
-// Close stops the sequencer goroutines (buffered events are not flushed;
-// seal first if they matter).
+// Close stops the sequencer goroutines after flushing every session's reorder
+// window. Stop the HTTP server first: an ingest that races with Close fails
+// with a storage error (which the SDK retries).
 func (c *Collector) Close() { c.seq.Close() }
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$`)
