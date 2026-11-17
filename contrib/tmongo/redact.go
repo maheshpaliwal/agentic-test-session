@@ -6,10 +6,11 @@ import (
 	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
-// redactDoc masks sensitive field names at every depth (core.RedactAny) and
-// additionally handles aggregation expression arrays such as
-// {"$eq": ["$password", "x"]}, where the sensitive name is a "$field" path
-// and the value sits next to it in the array.
+// redactDoc masks sensitive field names at every depth (core.RedactAny),
+// including dotted paths whose last segment is sensitive ({"card.cvv": ...}
+// in a filter or $set), and additionally handles aggregation expression
+// arrays such as {"$eq": ["$password", "x"]}, where the sensitive name is a
+// "$field" path and the value sits next to it in the array.
 func redactDoc(v any) any {
 	return exprArrays(core.RedactAny(v))
 }
@@ -18,7 +19,11 @@ func exprArrays(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, x := range t {
-			t[k] = exprArrays(x)
+			if sensitivePath(k) {
+				t[k] = core.RedactedValue
+			} else {
+				t[k] = exprArrays(x)
+			}
 		}
 	case []any:
 		sens := false
