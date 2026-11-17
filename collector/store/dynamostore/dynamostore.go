@@ -471,7 +471,7 @@ func (s *Store) appendChunk(ctx context.Context, sid string, m meta, evs []core.
 		Key:              map[string]types.AttributeValue{aPK: strAV(sid), aSK: strAV(metaSK)},
 		UpdateExpression: aws.String("SET #head = :h, #cnt = :c, #first = :f, #last = :l"),
 		ExpressionAttributeNames: map[string]string{
-			"#pk": aPK, "#head": aHead, "#cnt": aCount, "#first": aFirstNs, "#last": aLastNs,
+			"#head": aHead, "#cnt": aCount, "#first": aFirstNs, "#last": aLastNs,
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":h": u64AV(next.head), ":c": u64AV(next.count), ":f": numAV(next.firstNs), ":l": numAV(next.lastNs),
@@ -481,7 +481,10 @@ func (s *Store) appendChunk(ctx context.Context, sid string, m meta, evs []core.
 		upd.ConditionExpression = aws.String("#head = :exp")
 		upd.ExpressionAttributeValues[":exp"] = u64AV(m.head)
 	} else {
+		// DynamoDB rejects names no expression references, so #pk is declared
+		// only on the branch that uses it.
 		upd.ConditionExpression = aws.String("attribute_not_exists(#pk)")
+		upd.ExpressionAttributeNames["#pk"] = aPK
 	}
 	acts := []types.TransactWriteItem{{Update: upd}}
 	for _, e := range enc {

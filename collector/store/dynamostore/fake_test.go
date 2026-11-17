@@ -200,6 +200,18 @@ func cancelled(codes ...string) error {
 	return &types.TransactionCanceledException{CancellationReasons: rs}
 }
 
+// checkUnused mirrors DynamoDB, which rejects an ExpressionAttributeNames
+// entry that none of the request's expressions reference.
+func checkUnused(names map[string]string, exprs ...string) error {
+	all := strings.Join(exprs, " ")
+	for n := range names {
+		if !strings.Contains(all, n) {
+			return fmt.Errorf("ValidationException: ExpressionAttributeNames unused in expressions: keys: {%s}", n)
+		}
+	}
+	return nil
+}
+
 func (f *fakeDB) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -217,8 +229,15 @@ func (f *fakeDB) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWr
 			if itemSize(it) > 400*1024 {
 				return nil, errors.New("ValidationException: item size exceeds 400KB")
 			}
+			if err := checkUnused(a.Put.ExpressionAttributeNames, aws.ToString(a.Put.ConditionExpression)); err != nil {
+				return nil, err
+			}
 		case a.Update != nil:
 			it = a.Update.Key
+			if err := checkUnused(a.Update.ExpressionAttributeNames,
+				aws.ToString(a.Update.UpdateExpression), aws.ToString(a.Update.ConditionExpression)); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, errors.New("fake: unsupported action")
 		}
