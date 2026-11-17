@@ -20,10 +20,15 @@ import (
 )
 
 // Request/response metadata (authorization, cookie, x-api-key, ...) is never
-// recorded, only the trace context is read from / written to it.
+// recorded: only the trace context is read from / written to it, and incoming
+// metadata is consulted for attribute bindings (docs/BINDING.md).
 
-// maxStreamMsgs bounds how many stream messages are kept per direction.
+// maxStreamMsgs bounds how many stream messages are kept per direction. The
+// bytes kept per direction are bounded too, by Config.MaxInlineBytes.
 const maxStreamMsgs = 50
+
+// flagTruncated marks a stream span whose message log was capped.
+const flagTruncated = "truncated"
 
 // mdCarrier adapts gRPC metadata to core.Carrier.
 type mdCarrier struct{ md metadata.MD }
@@ -36,6 +41,30 @@ func (c mdCarrier) Get(key string) string {
 }
 
 func (c mdCarrier) Set(key, val string) { c.md.Set(strings.ToLower(key), val) }
+
+// mdAttrs adapts incoming metadata to core.Attributes for session bindings:
+// header bindings match metadata keys, jwt_claim reads the (UNVERIFIED) bearer
+// token in the authorization metadata. Cookie and query sources do not exist
+// in gRPC and never match. Lookups are lazy: nothing is read unless an active
+// binding asks for the key.
+type mdAttrs struct{ md metadata.MD }
+
+func (a mdAttrs) Get(source, name string) string {
+	switch source {
+	case core.SourceHeader:
+		return mdCarrier(a).Get(name)
+	case core.SourceJWTClaim:
+		return core.JWTClaimFromAuthorization(mdCarrier(a).Get("authorization"), name)
+	}
+	return ""
+}
+
+// beginIngress starts the api.in span for an incoming call. The incoming
+// metadata is only read, so it is used as is, without a copy.
+func beginIngress(ctx context.Context, method string) (context.Context, *core.Span) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	return core.BeginIngressAttrs(ctx, core.KindAPIIn, method, mdCarrier{md}, mdAttrs{md})
+}
 
 // toJSON renders a message as JSON (protojson for protobuf, encoding/json
 // otherwise) with sensitive field names masked at every depth via
@@ -86,21 +115,62 @@ func finish(span *core.Span, req, resp any, err error) {
 	span.End()
 }
 
-// msgLog collects a capped sequence of stream messages.
+// finishStream is finish for a streaming call: req and resp are the message
+// logs of the two directions, and a capped log flags the span truncated.
+func finishStream(span *core.Span, req, resp *msgLog, err error) {
+	if req.truncated() || resp.truncated() {
+		span.AddFlag(flagTruncated)
+	}
+	finish(span, req.payload(), resp.payload(), err)
+}
+
+// msgLog collects a sequence of stream messages, capped both in count
+// (maxStreamMsgs) and in retained bytes (Config.MaxInlineBytes), so a long or
+// heavy stream cannot pin memory until it ends. more reports that something
+// was dropped or cut.
 type msgLog struct {
-	mu   sync.Mutex
-	msgs []json.RawMessage
-	more bool
+	mu    sync.Mutex
+	msgs  []json.RawMessage
+	bytes int
+	more  bool
 }
 
 func (l *msgLog) add(m any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.msgs) >= maxStreamMsgs {
-		l.more = true
+	room := core.GetConfig().MaxInlineBytes - l.bytes
+	if len(l.msgs) >= maxStreamMsgs || room <= 0 {
+		l.more = true // dropped without marshalling
 		return
 	}
-	l.msgs = append(l.msgs, toJSON(m))
+	js := toJSON(m)
+	if len(js) > room {
+		js = headString(js, room)
+		l.more = true
+	}
+	l.bytes += len(js)
+	l.msgs = append(l.msgs, js)
+}
+
+// headString returns the head of js (an already redacted message) as a JSON
+// string of at most max bytes, or the empty JSON string when max is too small
+// to hold anything. Quoting and escaping grow the text, so the cut is
+// shortened until the encoded form fits.
+func headString(js []byte, max int) []byte {
+	for n := max; n > 0; {
+		out, _ := json.Marshal(strings.ToValidUTF8(string(js[:n]), ""))
+		if len(out) <= max {
+			return out
+		}
+		n -= len(out) - max
+	}
+	return []byte(`""`)
+}
+
+func (l *msgLog) truncated() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.more
 }
 
 func (l *msgLog) payload() any {
@@ -120,8 +190,7 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		}
 	}
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
-		md, _ := metadata.FromIncomingContext(ctx)
-		ctx, span := core.BeginIngress(ctx, core.KindAPIIn, info.FullMethod, mdCarrier{md.Copy()})
+		ctx, span := beginIngress(ctx, info.FullMethod)
 		if span == nil {
 			return h(ctx, req)
 		}
@@ -176,8 +245,7 @@ func StreamServerInterceptor() grpc.StreamServerInterceptor {
 		}
 	}
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, h grpc.StreamHandler) error {
-		md, _ := metadata.FromIncomingContext(ss.Context())
-		ctx, span := core.BeginIngress(ss.Context(), core.KindAPIIn, info.FullMethod, mdCarrier{md.Copy()})
+		ctx, span := beginIngress(ss.Context(), info.FullMethod)
 		if span == nil {
 			return h(srv, ss)
 		}
@@ -185,10 +253,10 @@ func StreamServerInterceptor() grpc.StreamServerInterceptor {
 		var err error
 		defer func() {
 			if r := recover(); r != nil {
-				finish(span, w.in.payload(), w.out.payload(), status.Errorf(codes.Internal, "panic: %v", r))
+				finishStream(span, &w.in, &w.out, status.Errorf(codes.Internal, "panic: %v", r))
 				panic(r)
 			}
-			finish(span, w.in.payload(), w.out.payload(), err)
+			finishStream(span, &w.in, &w.out, err)
 		}()
 		err = h(srv, w)
 		return err
@@ -230,45 +298,93 @@ func UnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	}
 }
 
+// clientStream logs the messages of a client-side stream and ends the span
+// with the RPC's final status, which gRPC reports through grpc.OnFinish.
 type clientStream struct {
 	grpc.ClientStream
 	span    *core.Span
 	in, out msgLog
 	once    sync.Once
+
+	mu      sync.Mutex
+	recving int   // RecvMsg calls in flight
+	done    bool  // the RPC has completed
+	err     error // its final status (nil for OK)
 }
 
-func (s *clientStream) end(err error) {
+// end records the span, once, with the final status.
+func (s *clientStream) end() {
 	s.once.Do(func() {
+		s.mu.Lock()
+		err := s.err
+		s.mu.Unlock()
 		if errors.Is(err, io.EOF) {
 			err = nil
 		}
 		// out holds what we sent (Req); in holds what we received (Resp).
-		finish(s.span, s.out.payload(), s.in.payload(), err)
+		finishStream(s.span, &s.out, &s.in, err)
 	})
 }
 
+// onFinish is the grpc.OnFinish callback: gRPC calls it exactly once with the
+// RPC's status when the call completes (final RecvMsg, error, cancellation).
+// gRPC may call it from inside the RecvMsg that delivers the last message
+// (the single response of a client-streaming call); the span is then ended by
+// that RecvMsg, after the message has been logged.
+func (s *clientStream) onFinish(err error) {
+	s.mu.Lock()
+	s.done, s.err = true, err
+	recving := s.recving > 0
+	s.mu.Unlock()
+	if !recving {
+		s.end()
+	}
+}
+
+// fail ends the span for a stream that could not be created.
+func (s *clientStream) fail(err error) {
+	s.mu.Lock()
+	if !s.done {
+		s.done, s.err = true, err
+	}
+	s.mu.Unlock()
+	s.end()
+}
+
+// SendMsg logs a sent message. A send error does not end the span: gRPC
+// reports io.EOF here when the stream is already broken, and the real status
+// only arrives through RecvMsg / OnFinish.
 func (s *clientStream) SendMsg(m any) error {
 	err := s.ClientStream.SendMsg(m)
-	if err != nil {
-		s.end(err)
-		return err
+	if err == nil {
+		s.out.add(m)
 	}
-	s.out.add(m)
-	return nil
+	return err
 }
 
 func (s *clientStream) RecvMsg(m any) error {
+	s.mu.Lock()
+	s.recving++
+	s.mu.Unlock()
+
 	err := s.ClientStream.RecvMsg(m)
-	if err != nil {
-		s.end(err)
-		return err
+	if err == nil {
+		s.in.add(m)
 	}
-	s.in.add(m)
-	return nil
+
+	s.mu.Lock()
+	s.recving--
+	done := s.done && s.recving == 0
+	s.mu.Unlock()
+	if done {
+		s.end()
+	}
+	return err
 }
 
 // StreamClientInterceptor records one api.out span per streaming call. The
-// span ends when the stream finishes (EOF, error or context cancellation).
+// span ends when the RPC completes (final message, error or context
+// cancellation) and carries its final status.
 func StreamClientInterceptor() grpc.StreamClientInterceptor {
 	if !core.Enabled() {
 		return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, str grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
@@ -281,16 +397,15 @@ func StreamClientInterceptor() grpc.StreamClientInterceptor {
 			return str(ctx, desc, cc, method, opts...)
 		}
 		span.SetAttr("target", cc.Target())
+		w := &clientStream{span: span}
+		// Full slice expression: never append into the caller's backing array.
+		opts = append(opts[:len(opts):len(opts)], grpc.OnFinish(w.onFinish))
 		cs, err := str(outgoing(ctx), desc, cc, method, opts...)
 		if err != nil {
-			finish(span, nil, nil, err)
+			w.fail(err)
 			return nil, err
 		}
-		w := &clientStream{ClientStream: cs, span: span}
-		go func() {
-			<-cs.Context().Done()
-			w.end(nil)
-		}()
+		w.ClientStream = cs
 		return w, nil
 	}
 }
