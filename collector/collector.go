@@ -283,6 +283,7 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	if err != nil {
 		return err
 	}
+	c.seq.drop(id)
 	c.seq.forgetQuarantine(id)
 	c.vmu.Lock()
 	delete(c.views, id)

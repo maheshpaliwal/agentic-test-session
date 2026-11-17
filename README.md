@@ -106,7 +106,8 @@ treat it as unproven until you run its live tests (`TSESSION_TEST_DYNAMO_ENDPOIN
 Sessions are kept until you remove them:
 
 - `--retention 168h` (`TSESSION_COLLECTOR_RETENTION`) makes the collector delete a session that long after it was
-  sealed, bundle directory included. The default `0` keeps everything. A session that was never sealed (aborted or
+  sealed, bundle directory included. The default `0` keeps everything. Each sweep lists the stored sessions, which
+  on DynamoDB is a table scan. A session that was never sealed (aborted or
   abandoned) goes once its newest event is that old and it has been idle long enough to leave memory.
 - `tracectl delete <id|name>` (or `DELETE /v1/sessions/{id}` on the control plane) removes one finished session
   from the control plane and the collector.

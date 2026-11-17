@@ -117,6 +117,22 @@ func (s *Sequencer) with(id string, create, touch bool, f func(*sessionActor)) b
 	return ok
 }
 
+// drop stops and forgets a session's actor right away when nothing is using
+// it. Deleting a session must not leave a goroutine behind until (or, with
+// eviction disabled, forever instead of) the next idle sweep.
+func (s *Sequencer) drop(id string) {
+	s.mu.Lock()
+	a := s.actors[id]
+	if a == nil || a.inflight > 0 || a.bufLen.Load() > 0 {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.actors, id)
+	a.stop()
+	s.mu.Unlock()
+	<-a.done
+}
+
 func (s *Sequencer) actorCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

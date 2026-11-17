@@ -441,7 +441,6 @@ func (a *sessionActor) purge(ctx context.Context) error {
 	a.setBuf(nil)
 	a.loaded, a.failures, a.lastRecv = false, 0, 0
 	a.sealed.Store(false)
-	a.lastActive.Store(0) // nothing left to keep warm: evict at the next sweep
 	return nil
 }
 

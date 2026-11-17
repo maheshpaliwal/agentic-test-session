@@ -11,6 +11,7 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- The dashboard can delete finished sessions (two-click Delete in the session list).
 - **Metrics.** `GET /metrics` (Prometheus text format) on the collector and the control plane; `-version` on every
   binary.
 - `tsql.UnwrapConn` / `tsql.UnwrapDriver`; `WithImageDeadline` in `tredis` / `tredisv8`; gRPC ingress now honours

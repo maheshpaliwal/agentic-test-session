@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -68,6 +69,38 @@ func TestDeleteSession(t *testing.T) {
 	}
 	if got := events(t, c); len(got) != 1 || got[0].Seq != 1 {
 		t.Fatalf("after re-ingest: %+v", got)
+	}
+}
+
+// Deleting must not leave the session's actor (a goroutine) behind, even
+// with idle eviction switched off.
+func TestDeleteReleasesActor(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Window = 0
+	cfg.IdleEvict = -1
+	c := New(store.NewMem(), cfg)
+	defer c.Close()
+	ctx := context.Background()
+	for i := range 50 {
+		e := ev("a", core.KindAPIIn, 1, 1)
+		e.SessionID = fmt.Sprintf("s%d", i)
+		if _, err := c.Ingest(ctx, "", []core.Event{e}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := c.seq.actorCount(); n != 50 {
+		t.Fatalf("actors before delete: %d", n)
+	}
+	for i := range 50 {
+		if err := c.Delete(ctx, fmt.Sprintf("s%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.Delete(ctx, "never_seen"); err != nil { // must not leave an actor either
+		t.Fatal(err)
+	}
+	if n := c.seq.actorCount(); n != 0 {
+		t.Fatalf("%d actors left after deleting every session", n)
 	}
 }
 
