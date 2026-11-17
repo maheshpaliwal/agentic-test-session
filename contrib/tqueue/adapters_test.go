@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -122,8 +123,8 @@ func TestKafkaPerMessageSpansOption(t *testing.T) {
 	calls := 0
 	w := kw{func(...kafka.Message) { calls++ }}
 	_ = ProduceMessages(ctx, w, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"})
-	if calls != 2 || len(byKind(rec.Events(), core.KindQueuePub)) != 2 {
-		t.Fatalf("per-message: calls=%d", calls)
+	if calls != 1 || len(byKind(rec.Events(), core.KindQueuePub)) != 2 {
+		t.Fatalf("per-message spans must not split the batch: calls=%d", calls)
 	}
 	calls = 0
 	off := false
@@ -167,8 +168,8 @@ func TestSQSAttrLimit(t *testing.T) {
 	assertLinked(t, rec)
 
 	rec, sent, n := sqsRound(t, 9, SQSOptions{})
-	if n != 10 || sent.MessageAttributes["ts"].StringValue == nil {
-		t.Fatalf("expected compact ts attr, n=%d", n)
+	if n != 10 || sent.MessageAttributes[ctxAttr].StringValue == nil {
+		t.Fatalf("expected compact %s attr, n=%d", ctxAttr, n)
 	}
 	assertLinked(t, rec)
 
@@ -193,5 +194,213 @@ func TestSQSAttrLimit(t *testing.T) {
 		if strings.Contains(string(e.Req.Inline), "hunter2") {
 			t.Fatal("sqs body secret leaked")
 		}
+	}
+}
+
+func strAttr(v string) types.MessageAttributeValue {
+	return types.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String(v)}
+}
+
+// The compact carrier must not take over an attribute the application owns:
+// neither the old "ts" name nor, if the application happens to use it, the
+// namespaced one.
+func TestSQSCompactCarrierNeverOverwritesAppAttr(t *testing.T) {
+	for _, name := range []string{"ts", ctxAttr} {
+		t.Run(name, func(t *testing.T) {
+			rec, ctx := setup(t, true)
+			c := &fakeSQS{}
+			attrs := fill(8)
+			attrs[name] = strAttr("1700000000")
+			in := &sqs.SendMessageInput{QueueUrl: aws.String("q"), MessageBody: aws.String(`{}`), MessageAttributes: attrs}
+			if _, err := SendMessage(ctx, c, in); err != nil {
+				t.Fatal(err)
+			}
+			sent := c.sent[0].MessageAttributes
+			if got := aws.ToString(sent[name].StringValue); got != "1700000000" {
+				t.Fatalf("application attribute %q overwritten with %q", name, got)
+			}
+			if len(sent) > maxSQSAttrs {
+				t.Fatalf("%d attributes sent", len(sent))
+			}
+			pub := byKind(rec.Events(), core.KindQueuePub)
+			if len(pub) != 1 {
+				t.Fatalf("publish spans: %d", len(pub))
+			}
+			// "ts" leaves one slot for the namespaced carrier; a taken
+			// namespaced name is treated as no room.
+			if skipped := contains(pub[0].Flags, FlagAttrLimit); skipped != (name == ctxAttr) {
+				t.Fatalf("flags = %v", pub[0].Flags)
+			}
+		})
+	}
+}
+
+// Messages from producers that still write the compact carrier as "ts" keep
+// their trace; an application "ts" attribute is ignored.
+func TestSQSConsumeAcceptsLegacyCompactAttr(t *testing.T) {
+	rec, _ := setup(t, true)
+	trace, span := core.NewTraceID(), core.NewSpanID()
+	legacy := encodeTS(core.MapCarrier{core.KeySession: "s1", core.KeyTraceparent: "00-" + trace + "-" + span + "-01"})
+	msg := types.Message{MessageId: aws.String("m1"), Body: aws.String(`{}`),
+		MessageAttributes: map[string]types.MessageAttributeValue{legacyCtxAttr: strAttr(legacy)}}
+	if err := ConsumeSQSMessage(context.Background(), "q", msg, 0, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	st := byKind(rec.Events(), core.KindWorkerStart)
+	if len(st) != 1 || st[0].TraceID != trace || !contains(st[0].LinkIDs, span) {
+		t.Fatalf("legacy carrier not honoured: %+v", st)
+	}
+
+	msg.MessageAttributes = map[string]types.MessageAttributeValue{legacyCtxAttr: strAttr("1700000000")}
+	if err := ConsumeSQSMessage(context.Background(), "q", msg, 0, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(byKind(rec.Events(), core.KindWorkerStart)); n != 1 {
+		t.Fatalf("application ts attribute started a worker span (%d)", n)
+	}
+}
+
+func TestSQSReceiveRequestsBothCompactAttrs(t *testing.T) {
+	setup(t, true)
+	var got *sqs.ReceiveMessageInput
+	c := recvSQS{func(in *sqs.ReceiveMessageInput) { got = in }}
+	in := &sqs.ReceiveMessageInput{QueueUrl: aws.String("q"), MessageAttributeNames: []string{"app"}}
+	if _, err := ReceiveMessage(context.Background(), c, in); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"app", ctxAttr, legacyCtxAttr, core.KeySession} {
+		if !contains(got.MessageAttributeNames, want) {
+			t.Fatalf("%q not requested: %v", want, got.MessageAttributeNames)
+		}
+	}
+	if len(in.MessageAttributeNames) != 1 {
+		t.Fatal("input mutated")
+	}
+}
+
+type recvSQS struct {
+	f func(*sqs.ReceiveMessageInput)
+}
+
+func (recvSQS) SendMessage(context.Context, *sqs.SendMessageInput, ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
+	return &sqs.SendMessageOutput{}, nil
+}
+
+func (r recvSQS) ReceiveMessage(_ context.Context, in *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	r.f(in)
+	return &sqs.ReceiveMessageOutput{}, nil
+}
+
+// batchWriter records every WriteMessages call and returns err.
+type batchWriter struct {
+	calls [][]kafka.Message
+	err   error
+}
+
+func (b *batchWriter) WriteMessages(_ context.Context, m ...kafka.Message) error {
+	b.calls = append(b.calls, m)
+	return b.err
+}
+
+func header(m kafka.Message, key string) string { return kafkaCarrier{&m.Headers}.Get(key) }
+
+// Per-message spans must not change how the application batches: one
+// WriteMessages call, each message carrying its own publish span.
+func TestKafkaPerMessageSpansSingleWrite(t *testing.T) {
+	rec, ctx := setup(t, true)
+	w := &batchWriter{}
+	in := []kafka.Message{
+		{Topic: "a", Value: []byte(`{"n":1}`), Headers: []kafka.Header{{Key: "app", Value: []byte("1")}}},
+		{Topic: "a", Value: []byte(`{"n":2}`)},
+		{Topic: "b", Value: []byte(`{"n":3}`)},
+	}
+	if err := ProduceMessages(ctx, w, in...); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.calls) != 1 || len(w.calls[0]) != len(in) {
+		t.Fatalf("want one WriteMessages call with the whole batch, got %d calls", len(w.calls))
+	}
+	if len(in[0].Headers) != 1 || len(in[1].Headers) != 0 {
+		t.Fatal("caller's messages mutated")
+	}
+	pubs := byKind(rec.Events(), core.KindQueuePub)
+	if len(pubs) != len(in) {
+		t.Fatalf("publish spans: %d", len(pubs))
+	}
+	for i, m := range w.calls[0] {
+		if m.Topic != in[i].Topic || string(m.Value) != string(in[i].Value) {
+			t.Fatalf("message %d reordered or altered", i)
+		}
+		// Each message carries the context of its own span, in order.
+		tp := header(m, core.KeyTraceparent)
+		if header(m, core.KeySession) != "s1" || !strings.Contains(tp, pubs[i].SpanID) {
+			t.Fatalf("message %d: traceparent %q does not name span %s", i, tp, pubs[i].SpanID)
+		}
+		if pubs[i].Name != m.Topic || pubs[i].Attrs["queue"] != m.Topic || pubs[i].Attrs["system"] != "kafka" {
+			t.Fatalf("span %d: %+v", i, pubs[i])
+		}
+		if !strings.Contains(string(pubs[i].Req.Inline), `"n":`+string(rune('1'+i))) {
+			t.Fatalf("span %d req = %s", i, pubs[i].Req.Inline)
+		}
+	}
+	if header(w.calls[0][0], "app") != "1" {
+		t.Fatal("application header dropped")
+	}
+
+	// Every message links to exactly one worker.
+	for _, m := range w.calls[0] {
+		if err := ConsumeMessage(context.Background(), m, func(context.Context) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, st := range byKind(rec.Events(), core.KindWorkerStart) {
+		if !contains(st.LinkIDs, pubs[i].SpanID) {
+			t.Fatalf("worker %d not linked to its publish span", i)
+		}
+	}
+}
+
+func TestKafkaPerMessageSpansErrors(t *testing.T) {
+	rec, ctx := setup(t, true)
+	boom := errors.New("broker down")
+	w := &batchWriter{err: boom}
+	if err := ProduceMessages(ctx, w, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"}); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, p := range byKind(rec.Events(), core.KindQueuePub) {
+		if p.Err != "broker down" {
+			t.Fatalf("batch error not on span: %q", p.Err)
+		}
+	}
+
+	// kafka.WriteErrors attributes the failure to the message it belongs to.
+	rec, ctx = setup(t, true)
+	w = &batchWriter{err: kafka.WriteErrors{nil, boom}}
+	if err := ProduceMessages(ctx, w, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"}); err == nil {
+		t.Fatal("error swallowed")
+	}
+	pubs := byKind(rec.Events(), core.KindQueuePub)
+	if len(pubs) != 2 || pubs[0].Err != "" || pubs[1].Err != "broker down" {
+		t.Fatalf("per-message errors: %+v", pubs)
+	}
+}
+
+type panicWriter struct{}
+
+func (panicWriter) WriteMessages(context.Context, ...kafka.Message) error { panic("boom") }
+
+func TestKafkaPerMessageSpansEndOnPanic(t *testing.T) {
+	rec, ctx := setup(t, true)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("panic swallowed")
+			}
+		}()
+		_ = ProduceMessages(ctx, panicWriter{}, kafka.Message{Topic: "a"}, kafka.Message{Topic: "a"})
+	}()
+	pubs := byKind(rec.Events(), core.KindQueuePub)
+	if len(pubs) != 2 || !strings.Contains(pubs[0].Err, "panic: boom") || !strings.Contains(pubs[1].Err, "panic: boom") {
+		t.Fatalf("spans not ended on panic: %+v", pubs)
 	}
 }

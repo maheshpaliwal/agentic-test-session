@@ -2,6 +2,8 @@ package tqueue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -40,11 +42,11 @@ type KafkaWriter interface {
 
 // KafkaOptions tunes ProduceMessagesOpts.
 type KafkaOptions struct {
-	// PerMessageSpans: one queue.publish span (and one WriteMessages call) per
-	// message so every message links to exactly one worker. nil means the
-	// default: true when ctx carries an active session. When false, the batch
-	// is written in a single call under one publish span that all messages
-	// share (the first consumer's worker.end closes its pending entry).
+	// PerMessageSpans: one queue.publish span per message so every message
+	// links to exactly one worker. nil means the default: true when ctx
+	// carries an active session. When false, one publish span is shared by all
+	// messages (the first consumer's worker.end closes its pending entry).
+	// Either way the batch is written with a single WriteMessages call.
 	PerMessageSpans *bool
 }
 
@@ -61,9 +63,10 @@ func sessionActive(ctx context.Context) bool {
 }
 
 // ProduceMessages writes messages with trace headers. With an active session
-// in ctx each message gets its own queue.publish span and WriteMessages call;
-// otherwise (tracing off / no session) the original batch is written once,
-// untouched.
+// in ctx each message gets its own queue.publish span, and the batch (copies
+// carrying the headers) is written with one WriteMessages call, exactly as the
+// caller batched it; otherwise (tracing off / no session) the original batch
+// is written once, untouched.
 func ProduceMessages(ctx context.Context, w KafkaWriter, msgs ...kafka.Message) error {
 	return ProduceMessagesOpts(ctx, w, KafkaOptions{}, msgs...)
 }
@@ -76,17 +79,60 @@ func ProduceMessagesOpts(ctx context.Context, w KafkaWriter, opts KafkaOptions, 
 	if opts.PerMessageSpans != nil && !*opts.PerMessageSpans {
 		return produceBatch(ctx, w, msgs)
 	}
-	for _, m := range msgs {
+	return produceEach(ctx, w, msgs)
+}
+
+// produceEach writes the batch in one WriteMessages call under one
+// queue.publish span per message. Splitting the batch into one call per
+// message would change the application's batching: a synchronous kafka.Writer
+// blocks each call until its batch flushes.
+func produceEach(ctx context.Context, w KafkaWriter, msgs []kafka.Message) (err error) {
+	cp := make([]kafka.Message, len(msgs))
+	spans := make([]*core.Span, len(msgs)) // nil where a message is not traced
+	wctx, marked := ctx, false
+	for i, m := range msgs {
 		m.Headers = append([]kafka.Header(nil), m.Headers...)
-		info := Message{System: "kafka", Queue: m.Topic, JobName: m.Topic, Params: bodyParams(m.Value)}
-		err := Publish(ctx, info, kafkaCarrier{&m.Headers}, func(c context.Context) error {
-			return w.WriteMessages(c, m)
-		})
-		if err != nil {
-			return err
+		cp[i] = m
+		mk := pubMarker{"kafka", m.Topic, m.Topic}
+		if v, ok := ctx.Value(pubKey{}).(pubMarker); ok && v == mk {
+			continue // already wrapped by an enclosing publish
+		}
+		sctx, span := core.Begin(ctx, core.KindQueuePub, m.Topic)
+		if span == nil {
+			continue
+		}
+		span.SetReq(bodyParams(m.Value))
+		setAttrs(span, "kafka", m.Topic, nil)
+		core.Inject(sctx, kafkaCarrier{&cp[i].Headers})
+		spans[i] = span
+		if !marked { // nested publishes of the same topic are not recorded twice
+			wctx, marked = context.WithValue(ctx, pubKey{}, mk), true
 		}
 	}
-	return nil
+	defer func() {
+		r := recover()
+		if r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+		// kafka.WriteErrors reports the outcome per message; anything else
+		// applies to the whole batch.
+		var each kafka.WriteErrors
+		if !errors.As(err, &each) || len(each) != len(spans) {
+			each = nil
+		}
+		for i, span := range spans {
+			if each != nil {
+				span.SetErr(each[i])
+			} else {
+				span.SetErr(err)
+			}
+			span.End()
+		}
+		if r != nil {
+			panic(r)
+		}
+	}()
+	return w.WriteMessages(wctx, cp...)
 }
 
 func produceBatch(ctx context.Context, w KafkaWriter, msgs []kafka.Message) error {
