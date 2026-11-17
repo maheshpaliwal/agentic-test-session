@@ -124,3 +124,34 @@ func (c *wrapConnector) Close() error {
 	}
 	return nil
 }
+
+// UnwrapConn returns the driver connection underneath a tsql connection, for
+// code that needs the concrete driver type, typically inside sql.Conn.Raw:
+//
+//	conn.Raw(func(dc any) error {
+//		pc := tsql.UnwrapConn(dc).(*stdlib.Conn)
+//		...
+//	})
+//
+// A value that is not a tsql connection (SDK disabled) is returned as is; nil
+// is returned when dc is not a driver.Conn at all. Statements run directly on
+// the unwrapped connection are not traced.
+func UnwrapConn(dc any) driver.Conn {
+	switch c := dc.(type) {
+	case *conn:
+		return c.inner
+	case driver.Conn:
+		return c
+	}
+	return nil
+}
+
+// UnwrapDriver returns the driver underneath a tsql driver (as returned by
+// sql.DB.Driver for a tsql.Open / tsql.OpenDB handle); any other driver is
+// returned as is.
+func UnwrapDriver(d driver.Driver) driver.Driver {
+	if w, ok := d.(*wrapDriver); ok {
+		return w.inner
+	}
+	return d
+}

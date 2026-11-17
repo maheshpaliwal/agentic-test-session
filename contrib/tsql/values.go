@@ -13,6 +13,9 @@ import (
 
 const maxCellLen = 1024
 
+// truncMark ends every value capStr shortened.
+const truncMark = "...[truncated]"
+
 // toValue converts a driver value into something JSON-friendly. It copies
 // byte slices because drivers reuse buffers.
 func toValue(v any, max int) any {
@@ -41,7 +44,7 @@ func capStr(s string, max int) string {
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}
-		return s[:cut] + "...[truncated]"
+		return s[:cut] + truncMark
 	}
 	return s
 }
@@ -122,8 +125,10 @@ func pkString(pk map[string]any, cols []string) string {
 	return strings.Join(parts, ",")
 }
 
-// diffMaps lists changed fields. A nil side means insert/delete.
-func diffMaps(before, after map[string]any) []core.FieldChange {
+// diffMaps lists changed fields. A nil side means insert/delete. truncated
+// reports that a field compared equal only on its captured prefix (both
+// values were cut at maxCellLen), so a change beyond it may be missing.
+func diffMaps(before, after map[string]any) (out []core.FieldChange, truncated bool) {
 	seen := map[string]struct{}{}
 	var keys []string
 	for k := range before {
@@ -136,11 +141,13 @@ func diffMaps(before, after map[string]any) []core.FieldChange {
 		}
 	}
 	sort.Strings(keys)
-	var out []core.FieldChange
 	for _, k := range keys {
 		o, oOK := before[k]
 		n, nOK := after[k]
 		if before != nil && after != nil && oOK && nOK && fmt.Sprint(o) == fmt.Sprint(n) {
+			if s, ok := o.(string); ok && strings.HasSuffix(s, truncMark) {
+				truncated = true
+			}
 			continue
 		}
 		fc := core.FieldChange{Field: k}
@@ -152,7 +159,7 @@ func diffMaps(before, after map[string]any) []core.FieldChange {
 		}
 		out = append(out, fc)
 	}
-	return out
+	return out, truncated
 }
 
 // img is a captured row: display values plus the faithful driver values of its

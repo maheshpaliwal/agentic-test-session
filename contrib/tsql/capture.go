@@ -17,6 +17,15 @@ const (
 	capFailed
 	capTimeout
 	capSerializable
+	capDeadline
+)
+
+// A capture may spend at most 1/captureShare of the time the caller's
+// deadline leaves, so the application's own statement keeps most of it; with
+// less than minCaptureBudget available the capture is skipped.
+const (
+	captureShare     = 4
+	minCaptureBudget = 10 * time.Millisecond
 )
 
 // serverGrace is how long the client waits beyond the server-side
@@ -32,7 +41,8 @@ const serverGrace = 200 * time.Millisecond
 //     a transaction-local statement_timeout that is restored afterwards;
 //   - inside a SERIALIZABLE transaction nothing runs (extra reads could cause
 //     serialization failures);
-//   - the time spent never exceeds the capture timeout or the caller's deadline.
+//   - the time spent never exceeds the capture timeout, nor more than a
+//     fraction (captureShare) of what the caller's deadline leaves.
 func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Value, limit int, pkCols []string) (out []img, st capStatus) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -46,19 +56,17 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 	if ctx.Err() != nil {
 		return nil, capFailed
 	}
-	eff := c.cfg.captureTO
+	eff, grace := c.cfg.captureTO, serverGrace
 	if dl, ok := ctx.Deadline(); ok {
-		rem := time.Until(dl)
-		if rem <= 0 {
-			return nil, capTimeout
+		budget := time.Until(dl) / captureShare
+		if budget < minCaptureBudget {
+			return nil, capDeadline
 		}
-		if rem < eff {
-			eff = rem
-		}
+		eff, grace = min(eff, budget), min(grace, budget)
 	}
 	total := eff
 	if pg || c.cfg.store == "mysql" {
-		total += serverGrace // the server enforces the limit; the client cancel is only a backstop
+		total += grace // the server enforces the limit; the client cancel is only a backstop
 	}
 	cctx, cancel := context.WithTimeout(ctx, total)
 	defer cancel()
