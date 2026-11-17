@@ -81,7 +81,7 @@ Screenshots from `go run ./cmd/dashboard -demo` (synthetic data).
 
 ## Storage backends
 
-The collector persists sequenced events behind one small interface (`collector/store.Store`, 9 methods), so you
+The collector persists sequenced events behind one small interface (`collector/store.Store`, 10 methods), so you
 choose the backend with `--store` (or `TSESSION_COLLECTOR_STORE`). Every backend runs the same conformance suite
 (`collector/store/storetest`).
 
@@ -100,6 +100,57 @@ Verification status: `mem` and the `mongo` backend have been run against a real 
 `TSESSION_TEST_PG_DSN` is set. The `dynamodb` backend is tested against an in-process fake that enforces
 DynamoDB's item and transaction limits, but **has not yet been run against a real DynamoDB or the emulator**;
 treat it as unproven until you run its live tests (`TSESSION_TEST_DYNAMO_ENDPOINT`).
+
+### Retention and deletion
+
+Sessions are kept until you remove them:
+
+- `--retention 168h` (`TSESSION_COLLECTOR_RETENTION`) makes the collector delete a session that long after it was
+  sealed, bundle directory included. The default `0` keeps everything. A session that was never sealed (aborted or
+  abandoned) goes once its newest event is that old and it has been idle long enough to leave memory.
+- `tracectl delete <id|name>` (or `DELETE /v1/sessions/{id}` on the control plane) removes one finished session
+  from the control plane and the collector.
+
+## Reading results
+
+The dashboard is one way to look at a session; the CLI and the Go client read the same collector API.
+
+```bash
+tracectl stop my-run --wait
+tracectl summary my-run                      # counts by kind/service, mutations, failures, flags
+tracectl events my-run --kind 'db.*' --errors
+tracectl entities my-run                     # rows / documents / keys the session changed
+tracectl history my-run postgres orders 42   # every change to one row, with diffs and tx outcome
+tracectl export my-run -o run.ndjson         # all events
+
+# CI gate: exit 3 if the session recorded failed events or is incomplete
+tracectl summary my-run --fail-on-error --fail-on-incomplete
+```
+
+From a Go test:
+
+```go
+sess, _ := client.Start(ctx, client.Options{Name: "checkout"})
+// ... drive the system with sess.Header() or sess.Transport(nil) ...
+if _, err := sess.StopAndWait(ctx); err != nil { t.Fatal(err) }
+
+sum, _ := sess.Summary(ctx)
+if len(sum.Failures) > 0 { t.Fatalf("failures: %+v", sum.Failures) }
+h, _ := sess.History(ctx, "postgres", "orders", "42")
+// h.Mutations[i].Op, .Diff, .Effective (false when the transaction rolled back)
+```
+
+`client.Options.CollectorURL` (default `$TSESSION_COLLECTOR_URL` or `http://127.0.0.1:7071`) selects the collector.
+
+## Operating the services
+
+- **Metrics**: the collector and the control plane serve Prometheus text format at `GET /metrics` (ingested and
+  rejected events, seals, quarantined events, store failures, buffered events, sessions by state, ...). It sits
+  behind the same Host/Origin guard as the rest of the API, so a scraper in another container needs its Host value
+  in `--allowed-hosts`.
+- **Shutdown**: on SIGINT/SIGTERM the collector stops accepting requests, then writes every session's reorder
+  window to the store before exiting.
+- **Version**: every binary accepts `-version` (`tracectl version`).
 
 ## Protobuf ingest
 
@@ -122,6 +173,8 @@ dashboard/       Go proxy + embedded web UI, demo data
 cmd/             controlplane, dashboard, tracectl
 contrib/         tsql tredis tredisv8 tmongo tdynamo tgrpc tqueue tkafkaconfluent       (one module each)
 internal/redisx  Redis logic shared by tredis and tredisv8
+internal/metrics dependency-free Prometheus text-format registry
+internal/svc     process plumbing shared by the binaries (env defaults, graceful serve, version)
 proto/           protobuf schema, generated code, codec + SDK encoder   (own module)
 integration/     end-to-end harness against real Postgres/Redis
 docker/          Dockerfiles, compose stack, env template
@@ -170,7 +223,9 @@ Then start a session (`POST /v1/sessions`, `tracectl`, or the dashboard) and sen
 ```bash
 make build     # every module in the workspace
 make vet
+make lint      # staticcheck on every module (installs it on first use)
 make unit      # unit tests for every module except integration
+make race      # the same under the race detector
 make it        # integration suite (needs throwaway Postgres/Redis, see integration/scripts/it.sh)
 make test      # unit + integration
 ```

@@ -13,7 +13,7 @@ jobs:
         with:
           go-version-file: go.work
           cache: false
+      - run: make fmt-check
       - run: make vet
-      - run: make unit
-      - name: gofmt
-        run: test -z "$(gofmt -l .)"
+      - run: make lint
+      - run: make race

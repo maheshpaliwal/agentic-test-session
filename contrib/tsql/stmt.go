@@ -36,6 +36,7 @@ func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 // ColumnConverter forwards to the wrapped statement so its argument coercion
 // is preserved; otherwise the standard converter applies, as it would unwrapped.
 func (s *stmt) ColumnConverter(idx int) driver.ValueConverter {
+	//lint:ignore SA1019 forwarded on purpose: older drivers only implement ColumnConverter
 	if cc, ok := s.inner.(driver.ColumnConverter); ok {
 		return cc.ColumnConverter(idx)
 	}

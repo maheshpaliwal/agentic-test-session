@@ -35,8 +35,9 @@ func WithRedactKeys(globs ...string) Option {
 	return func(h *hook) { h.Keys = append(h.Keys, globs...) }
 }
 
-// WithValueCapture(false) drops all values (arguments, replies, images) from
-// recorded events; keys, command names and counts are still recorded.
+// WithValueCapture controls whether values are recorded. With false, all
+// values (arguments, replies, images) are dropped from recorded events; keys,
+// command names and counts are still recorded.
 func WithValueCapture(on bool) Option { return func(h *hook) { h.Capture = on } }
 
 // WithIgnoreKeys replaces the default ignore list ("ts:ctx:*", the SDK's own

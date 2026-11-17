@@ -33,6 +33,11 @@ The same retry/`seal_error` rule applies to a normal stop.
   400 empty name after sanitising; sets `name_auto=false`; same loopback guard, needs `Content-Type: application/json`)
 - `POST /v1/sessions/{id}/stop` -> DRAINING; CP then polls collector drain-status and calls collector seal
 - `POST /v1/sessions/{id}/abort`
+- `DELETE /v1/sessions/{id}` -> `{"deleted":true,"id":"..."}`; finished sessions only (`409` while CREATED/ACTIVE/
+  DRAINING, `404` unknown). The collector is asked first to drop the session's events, seal and bundle; if that
+  fails the answer is `502` and the session stays, so the call can be repeated.
+- `GET /metrics` Prometheus text format (sessions by state, started/finished/deleted totals, seal failures,
+  subscribers, kill switch, `tsession_build_info`)
 - `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false}` (active = ACTIVE+DRAINING)
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
 - `POST /v1/kill` {"kill":true|false} global kill switch (included in active-set)
@@ -85,6 +90,13 @@ The same retry/`seal_error` rule applies to a normal stop.
 - Internal (control plane -> collector):
   - `GET /v1/internal/sessions/{id}/drain-status` -> `{"pending":n,"last_event_unix_ns":n,"event_count":n,"dropped_events":n}`
   - `POST /v1/internal/sessions/{id}/seal` -> flushes window, resolves tx `effective`, marks orphans, writes bundle -> `{"incomplete":bool,"orphaned":[spanIDs],"bundle_uri":""}`
+  - `DELETE /v1/internal/sessions/{id}` -> `{"deleted":true,"session_id":"..."}`; drops buffered and stored events,
+    the seal, cached views and the bundle directory. Idempotent (unknown id is `200`). Events arriving for the id
+    afterwards start a new session at Seq 1.
+- `GET /metrics` Prometheus text format (`tsession_collector_*`, `tsession_build_info`).
+- Retention: `--retention D` / `TSESSION_COLLECTOR_RETENTION` (default `0` = keep forever) deletes a session `D`
+  after its seal. A never-sealed session is deleted once its newest event is older than `D` and its in-memory actor
+  has been evicted (see `--idle-evict`).
 - Pending-async ledger: a `queue.publish` event opens an entry keyed by its `SpanID`;
   a `worker.end` event whose `LinkIDs` contains that id closes it. Seal marks unclosed entries orphaned.
 - Tx resolution: `db.write` events carry `TxID`; `db.tx.commit`/`db.tx.rollback` with the same TxID set
@@ -159,6 +171,11 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
 - **Drain-status**: `last_event_unix_ns` (and the explicit alias `received_unix_ns`) is the collector's *receive*
   time of the latest ingest request for the session, updated on arrival (before the window flushes), independent
   of SDK clocks. `pending` = events buffered in the reorder window + open async entries.
+- **Shutdown**: `Close` flushes every session's reorder window before stopping; an ingest or seal that races with
+  it gets `503`. Stop the HTTP server first (the binary does).
+- **Slow store**: each store call made outside a request (window flush, catch-up, poison probe) is bounded by 30s.
+  A timed-out append is retried and is never treated as a poison event. An actor whose session disappeared from the
+  store (deleted by another process) rebuilds its state from the store instead of failing on Seq conflicts.
 - **Seal** is serialised on the session (concurrent calls write the bundle once; files are written via temp+rename)
   and idempotent.
 - **Access control**: the whole API is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
@@ -197,6 +214,16 @@ Implements `docs/BINDING.md` (control plane half).
   `tsession.bind=header:x-user-id=u_1,jwt:sub=u_1` (comma-separated; containers share a session only if
   `tsession.id` and `tsession.bind` both match).
 
+### Redaction
+Payloads are redacted in the SDK, before they leave the process. A field, column, header or parameter name is
+sensitive when (case-insensitive) it equals a configured key ignoring `-`, `_` and spaces, ends with a configured key
+of five or more characters, or contains the words of a configured key as whole words (split on punctuation and
+camelCase): `user[password]`, `password_confirmation`, `currentPasswordValue`, `card.cvv`, `X-Auth-Key` are masked;
+`classname`, `tokenizer`, `max_tokens` are not. Whole-word matching is generous on purpose (`token_count` is masked);
+adjust the list with `core.SetRedactKeys`. Defaults: see `core.DefaultRedactKeys`. In query strings and form bodies
+`key`, `code`, `sig`, `pin` and `session` are masked as well. `x-tsession-id` is never masked.
+HTTP bodies that have no structural redactor (multipart, XML, binary types) are recorded as `<media/type, N bytes>`.
+
 ### SDK runtime hardening notes
 - `Instance` is always made unique per process start: a user-supplied `TSESSION_INSTANCE` is kept as a prefix and `-<pid>-<6 hex>` is appended (collector dedupes on `(Instance, LocalSeq)`).
 - Default exporter flush interval is 100ms (collector reorder window default: 500ms). A 413 from `/v1/ingest` bisects the batch; a single oversize event is replaced by a stub (ids/kind/name kept, `Flags=["oversize_dropped"]`). `rejected` in the ingest response is added to the `sdk.dropped` counters.
@@ -209,7 +236,8 @@ Mirror the wrapped library's signature; one-line adoption; if `!core.Enabled()` 
 object unchanged; idempotent (wrapping twice is a no-op); never panic/block the host; use only
 `core.Begin / BeginIngress / Inject / Span` (nil-safe) — never edit `core/` (report needed changes instead).
 Mutations: set `core.Mutation` (Store/Entity/PK/Op/Before/After/Diff, Source="sdk"); reads via `core.ReadSummary`.
-Queue carriers: Kafka headers, SQS message attributes, AMQP headers; opaque-payload queues use a
+Queue carriers: Kafka headers, SQS message attributes (with fewer than three free attribute slots the carrier is one
+compact `x-tsession-ctx` attribute; consumers still read the older name `ts`), AMQP headers; opaque-payload queues use a
 side-channel key `ts:ctx:{msgID}` (TTL) holding the injected carrier map. Producer span = `queue.publish`
 (Req = full job params); consumer = `worker.start` (BeginIngress adds the link) ... `worker.end`.
 

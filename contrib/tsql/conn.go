@@ -136,6 +136,7 @@ func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		if opts.ReadOnly {
 			return nil, errors.New("sql: driver does not support read-only transactions")
 		}
+		//lint:ignore SA1019 legacy fallback for drivers without ConnBeginTx
 		tx, err = c.inner.Begin() //nolint:staticcheck // legacy fallback
 		if err == nil {
 			select {
@@ -257,6 +258,7 @@ func stmtExec(ctx context.Context, st driver.Stmt, args []driver.NamedValue) (dr
 		return nil, ctx.Err()
 	default:
 	}
+	//lint:ignore SA1019 legacy fallback for drivers without StmtExecContext
 	return st.Exec(dargs) //nolint:staticcheck // legacy fallback
 }
 
@@ -273,6 +275,7 @@ func stmtQuery(ctx context.Context, st driver.Stmt, args []driver.NamedValue) (d
 		return nil, ctx.Err()
 	default:
 	}
+	//lint:ignore SA1019 legacy fallback for drivers without StmtQueryContext
 	return st.Query(dargs) //nolint:staticcheck // legacy fallback
 }
 

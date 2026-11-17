@@ -7,11 +7,20 @@ MODDIRS = $(shell go list -m -f '{{.Dir}}')
 # Integration needs throwaway Postgres/Redis on 127.0.0.1:55432/56379 (scripts/it.sh); it runs separately.
 UNITDIRS = $(filter-out %/integration,$(MODDIRS))
 
-.PHONY: build test unit it vet up down demo env
+# staticcheck runs through `go run` so everyone (and CI) uses the same version.
+STATICCHECK ?= go run honnef.co/go/tools/cmd/staticcheck@v0.8.2
+
+.PHONY: build test unit race it vet lint fmt-check up down demo env
 build:
 	@set -e; for d in $(MODDIRS); do echo "== build $$d"; (cd $$d && go build ./...); done
 unit:
 	@fail=0; for d in $(UNITDIRS); do echo "== test $$d"; (cd $$d && go test ./...) || fail=1; done; exit $$fail
+race:
+	@fail=0; for d in $(UNITDIRS); do echo "== test -race $$d"; (cd $$d && go test -race ./...) || fail=1; done; exit $$fail
+lint:
+	@fail=0; for d in $(MODDIRS); do echo "== staticcheck $$d"; (cd $$d && $(STATICCHECK) ./...) || fail=1; done; exit $$fail
+fmt-check:
+	@out=$$(gofmt -l . | grep -v '\.pb\.go$$'); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 it:
 	cd integration && ./scripts/it.sh all
 test:
