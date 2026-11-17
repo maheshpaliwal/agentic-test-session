@@ -2,6 +2,7 @@ package thttp
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -35,13 +36,24 @@ func HandlerFunc(f http.HandlerFunc) http.Handler { return Handler(f) }
 // WrapMux wraps a ServeMux; the span name uses the matched route pattern.
 func WrapMux(m *http.ServeMux) http.Handler { return Handler(m) }
 
+// servedKey marks a request context that already has an api.in span, so a
+// traced handler nested under another (a wrapped sub-mux mounted on a wrapped
+// root mux) passes through instead of recording the request a second time.
+type servedKey struct{}
+
 func serve(h http.Handler, w http.ResponseWriter, r *http.Request) {
-	name := r.Method + " " + r.URL.Path
-	ctx, span := core.BeginIngressAttrs(r.Context(), core.KindAPIIn, name, core.HTTPHeaderCarrier(r.Header), reqAttrs{r})
+	if r.Context().Value(servedKey{}) != nil {
+		h.ServeHTTP(w, r)
+		return
+	}
+	// The name is set only once a span exists: untraced requests pay nothing.
+	ctx, span := core.BeginIngressAttrs(r.Context(), core.KindAPIIn, "", core.HTTPHeaderCarrier(r.Header), reqAttrs{r})
 	if span == nil {
 		h.ServeHTTP(w, r)
 		return
 	}
+	span.SetName(r.Method + " " + r.URL.Path)
+	ctx = context.WithValue(ctx, servedKey{}, true)
 
 	reqCap := newLimitBuf()
 	r2 := r.WithContext(ctx)
@@ -104,8 +116,9 @@ func serve(h http.Handler, w http.ResponseWriter, r *http.Request) {
 }
 
 // recWriter records status and a capped copy of the response body. It always
-// exposes Flusher/Hijacker/Pusher/ReaderFrom, degrading gracefully when the
-// underlying writer lacks them; Unwrap supports http.ResponseController.
+// exposes Flusher/Hijacker/Pusher/ReaderFrom, reaching the underlying
+// implementation through Unwrap chains and degrading gracefully when there is
+// none; Unwrap supports http.ResponseController.
 type recWriter struct {
 	http.ResponseWriter
 	status int
@@ -144,31 +157,38 @@ func (w *recWriter) Flush() {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	// ResponseController also reaches a Flusher behind Unwrap-only wrappers;
+	// a writer that cannot flush is a no-op, as before.
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
 	w.maybeStream()
 }
 
 func (w *recWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
-		c, rw, err := hj.Hijack()
-		if err == nil {
-			if w.status == 0 {
-				w.status = http.StatusSwitchingProtocols
-			}
-			if w.onStream != nil {
-				w.onStream()
-			}
+	// ResponseController also reaches a Hijacker behind Unwrap-only wrappers;
+	// without one the error wraps http.ErrNotSupported.
+	c, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err == nil {
+		if w.status == 0 {
+			w.status = http.StatusSwitchingProtocols
 		}
-		return c, rw, err
+		if w.onStream != nil {
+			w.onStream()
+		}
 	}
-	return nil, nil, http.ErrNotSupported
+	return c, rw, err
 }
 
 func (w *recWriter) Push(target string, opts *http.PushOptions) error {
-	if p, ok := w.ResponseWriter.(http.Pusher); ok {
-		return p.Push(target, opts)
+	// ResponseController has no Push, so walk the Unwrap chain by hand.
+	for rw := w.ResponseWriter; rw != nil; {
+		if p, ok := rw.(http.Pusher); ok {
+			return p.Push(target, opts)
+		}
+		u, ok := rw.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		rw = u.Unwrap()
 	}
 	return http.ErrNotSupported
 }
