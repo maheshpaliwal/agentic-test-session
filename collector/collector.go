@@ -3,6 +3,7 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -94,9 +95,7 @@ func New(st store.Store, cfg Config) *Collector {
 	if cfg.MaxMessageBytes <= 0 {
 		cfg.MaxMessageBytes = d.MaxMessageBytes
 	}
-	if cfg.IdleEvict == 0 {
-		cfg.IdleEvict = d.IdleEvict
-	}
+	cfg.IdleEvict = cmp.Or(cfg.IdleEvict, d.IdleEvict)
 	if cfg.MaxBufferedEvents <= 0 {
 		cfg.MaxBufferedEvents = d.MaxBufferedEvents
 	}
@@ -188,9 +187,7 @@ func (c *Collector) Ingest(ctx context.Context, instance string, evs []core.Even
 			res.reject("invalid_session_id", 1)
 			continue
 		}
-		if e.Instance == "" {
-			e.Instance = instance
-		}
+		e.Instance = cmp.Or(e.Instance, instance)
 		by[e.SessionID] = append(by[e.SessionID], e)
 	}
 	var firstErr error

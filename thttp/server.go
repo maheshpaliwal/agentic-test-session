@@ -2,6 +2,7 @@ package thttp
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -81,9 +82,7 @@ func serve(h http.Handler, w http.ResponseWriter, r *http.Request) {
 				BodySize: reqCap.size(),
 			})
 			status := rw.status
-			if status == 0 {
-				status = http.StatusOK
-			}
+			status = cmp.Or(status, http.StatusOK)
 			if rec != nil {
 				status = http.StatusInternalServerError
 				span.SetErr(fmt.Errorf("panic: %v", rec))
@@ -144,9 +143,7 @@ func (w *recWriter) WriteHeader(code int) {
 }
 
 func (w *recWriter) Write(p []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
+	w.status = cmp.Or(w.status, http.StatusOK)
 	n, err := w.ResponseWriter.Write(p)
 	w.cap.add(p[:n])
 	w.maybeStream()
@@ -154,9 +151,7 @@ func (w *recWriter) Write(p []byte) (int, error) {
 }
 
 func (w *recWriter) Flush() {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
+	w.status = cmp.Or(w.status, http.StatusOK)
 	// ResponseController also reaches a Flusher behind Unwrap-only wrappers;
 	// a writer that cannot flush is a no-op, as before.
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
@@ -168,9 +163,7 @@ func (w *recWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	// without one the error wraps http.ErrNotSupported.
 	c, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
 	if err == nil {
-		if w.status == 0 {
-			w.status = http.StatusSwitchingProtocols
-		}
+		w.status = cmp.Or(w.status, http.StatusSwitchingProtocols)
 		if w.onStream != nil {
 			w.onStream()
 		}

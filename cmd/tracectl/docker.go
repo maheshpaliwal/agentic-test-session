@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -65,9 +66,7 @@ func ParseDockerEvent(line string) (ev DockerEvent, ok bool, err error) {
 		return ev, false, nil
 	}
 	action := raw.Action
-	if action == "" {
-		action = raw.Status
-	}
+	action = cmp.Or(action, raw.Status)
 	if action != "start" && action != "die" {
 		return ev, false, nil
 	}
@@ -76,9 +75,7 @@ func ParseDockerEvent(line string) (ev DockerEvent, ok bool, err error) {
 		return ev, false, nil
 	}
 	id := raw.Actor.ID
-	if id == "" {
-		id = raw.ID
-	}
+	id = cmp.Or(id, raw.ID)
 	return DockerEvent{Action: action, ContainerID: id, Name: name, Bind: raw.Actor.Attributes[BindLabelKey], SessName: raw.Actor.Attributes[NameLabelKey]}, true, nil
 }
 

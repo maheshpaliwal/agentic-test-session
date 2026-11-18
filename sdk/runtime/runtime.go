@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
 	"sync"
@@ -69,12 +70,8 @@ func Start(cfg Config) error {
 	if cur != nil {
 		return ErrStarted
 	}
-	if cfg.ControlPlaneURL == "" {
-		cfg.ControlPlaneURL = "http://127.0.0.1:7070"
-	}
-	if cfg.CollectorURL == "" {
-		cfg.CollectorURL = "http://127.0.0.1:7071"
-	}
+	cfg.ControlPlaneURL = cmp.Or(cfg.ControlPlaneURL, "http://127.0.0.1:7070")
+	cfg.CollectorURL = cmp.Or(cfg.CollectorURL, "http://127.0.0.1:7071")
 	cfg.Exporter.CollectorURL = cfg.CollectorURL
 	if cfg.Encoder != nil {
 		cfg.Exporter.Encoder = cfg.Encoder

@@ -144,9 +144,7 @@ func baseURL(explicit, env, def string) string {
 	if explicit == "" {
 		explicit = os.Getenv(env)
 	}
-	if explicit == "" {
-		explicit = def
-	}
+	explicit = cmp.Or(explicit, def)
 	return strings.TrimRight(explicit, "/")
 }
 
@@ -169,9 +167,7 @@ func newSession(o Options, info Info) *Session {
 
 // Start creates and activates a session.
 func Start(ctx context.Context, o Options) (*Session, error) {
-	if o.InitiatedBy == "" {
-		o.InitiatedBy = "client"
-	}
+	o.InitiatedBy = cmp.Or(o.InitiatedBy, "client")
 	body := map[string]any{
 		"name": o.Name, "mode": o.Mode, "ttl_seconds": o.TTLSeconds,
 		"quiesce_seconds": o.QuiesceSeconds, "max_drain_seconds": o.MaxDrainSeconds,

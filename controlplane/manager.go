@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -202,9 +203,7 @@ type StartRequest struct {
 // ErrInvalid, ErrConflict (an exclusive session is running) or a
 // *BindingConflictError.
 func (m *Manager) Start(req StartRequest) (Session, error) {
-	if req.Mode == "" {
-		req.Mode = ModeHeader
-	}
+	req.Mode = cmp.Or(req.Mode, ModeHeader)
 	if req.Mode != ModeHeader && req.Mode != ModeExclusive {
 		return Session{}, ErrInvalid
 	}
@@ -226,9 +225,7 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 		}
 		return v
 	}
-	if req.InitiatedBy == "" {
-		req.InitiatedBy = "api"
-	}
+	req.InitiatedBy = cmp.Or(req.InitiatedBy, "api")
 	now := time.Now().UTC()
 	name, auto := resolveName(req.Name, bindings, req.InitiatedBy, now)
 	s := Session{

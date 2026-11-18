@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,9 +91,7 @@ func OpenPG(ctx context.Context, dsn string) (*PG, error) {
 // auto-migrates.
 func OpenPGConfig(ctx context.Context, cfg PGConfig) (*PG, error) {
 	schema := cfg.Schema
-	if schema == "" {
-		schema = DefaultPGSchema
-	}
+	schema = cmp.Or(schema, DefaultPGSchema)
 	if err := ValidateSchemaName(schema); err != nil {
 		return nil, err
 	}

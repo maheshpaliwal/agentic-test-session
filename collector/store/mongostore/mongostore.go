@@ -1,6 +1,7 @@
 package mongostore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,15 +40,9 @@ type Config struct {
 }
 
 func (c *Config) defaults() {
-	if c.Database == "" {
-		c.Database = "tsession"
-	}
-	if c.EventsCollection == "" {
-		c.EventsCollection = "events"
-	}
-	if c.SealsCollection == "" {
-		c.SealsCollection = "seals"
-	}
+	c.Database = cmp.Or(c.Database, "tsession")
+	c.EventsCollection = cmp.Or(c.EventsCollection, "events")
+	c.SealsCollection = cmp.Or(c.SealsCollection, "seals")
 	if c.ConnectTimeout <= 0 {
 		c.ConnectTimeout = 10 * time.Second
 	}

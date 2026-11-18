@@ -34,6 +34,7 @@ package dynamostore
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -160,9 +161,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 }
 
 func newStore(ctx context.Context, db api, cfg Config) (*Store, error) {
-	if cfg.TableName == "" {
-		cfg.TableName = DefaultTable
-	}
+	cfg.TableName = cmp.Or(cfg.TableName, DefaultTable)
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultTimeout
 	}
