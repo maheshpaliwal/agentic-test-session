@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"strings"
 	"sync"
 
+	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql/mutation"
 	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
@@ -45,61 +45,33 @@ func (c *conn) txState() (open, serializable bool) {
 	return c.txID != "" || c.rawTx, c.serial
 }
 
-// trackTxControl notices plain BEGIN/COMMIT/ROLLBACK statements so capture
-// never opens its own transaction inside one the app started by hand.
-func (c *conn) trackTxControl(query string) {
-	begin, end := txControl(query)
-	if !begin && !end {
+// trackTx notices hand-written BEGIN/COMMIT/ROLLBACK statements (anywhere in
+// a multi-statement text) so capture never opens its own transaction inside
+// one the app started by hand.
+func (c *conn) trackTx(tc mutation.TxControl) {
+	if tc == mutation.TxNone {
 		return
 	}
 	c.mu.Lock()
-	c.rawTx = begin
+	c.rawTx = tc.Opens()
 	c.mu.Unlock()
 }
 
-// txControl classifies the leading keyword of a statement.
-func txControl(q string) (begin, end bool) {
-	i, n := 0, len(q)
-	for i < n {
-		switch {
-		case q[i] == ' ' || q[i] == '\t' || q[i] == '\n' || q[i] == '\r':
-			i++
-		case strings.HasPrefix(q[i:], "--"):
-			for i < n && q[i] != '\n' {
-				i++
-			}
-		case strings.HasPrefix(q[i:], "/*"):
-			e := strings.Index(q[i+2:], "*/")
-			if e < 0 {
-				return false, false
-			}
-			i += e + 4
-		default:
-			goto word
+func (c *conn) dialect() mutation.Dialect {
+	if c.cfg.store == "mysql" {
+		return mutation.MySQL
+	}
+	return mutation.Postgres
+}
+
+// parse classifies query; ok is false when the parser panicked.
+func (c *conn) parse(query string) (info mutation.Info, ok bool) {
+	defer func() {
+		if recover() != nil {
+			info, ok = mutation.Info{}, false
 		}
-	}
-	return false, false
-word:
-	words := strings.Fields(strings.ToUpper(q[i:min(n, i+48)]))
-	if len(words) == 0 {
-		return false, false
-	}
-	w1 := strings.TrimRight(words[0], ";")
-	w2 := ""
-	if len(words) > 1 {
-		w2 = strings.TrimRight(words[1], ";")
-	}
-	switch w1 {
-	case "BEGIN":
-		return true, false
-	case "START":
-		return w2 == "TRANSACTION", false
-	case "COMMIT", "END", "ABORT":
-		return false, w2 != "PREPARED"
-	case "ROLLBACK":
-		return false, w2 != "TO" && w2 != "PREPARED" && w2 != "SAVEPOINT"
-	}
-	return false, false
+	}()
+	return parseCached(query, c.dialect()), true
 }
 
 func (c *conn) clearTx(id string) {
@@ -164,6 +136,7 @@ func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		if opts.ReadOnly {
 			return nil, errors.New("sql: driver does not support read-only transactions")
 		}
+		//lint:ignore SA1019 legacy fallback for drivers without ConnBeginTx
 		tx, err = c.inner.Begin() //nolint:staticcheck // legacy fallback
 		if err == nil {
 			select {
@@ -285,6 +258,7 @@ func stmtExec(ctx context.Context, st driver.Stmt, args []driver.NamedValue) (dr
 		return nil, ctx.Err()
 	default:
 	}
+	//lint:ignore SA1019 legacy fallback for drivers without StmtExecContext
 	return st.Exec(dargs) //nolint:staticcheck // legacy fallback
 }
 
@@ -301,6 +275,7 @@ func stmtQuery(ctx context.Context, st driver.Stmt, args []driver.NamedValue) (d
 		return nil, ctx.Err()
 	default:
 	}
+	//lint:ignore SA1019 legacy fallback for drivers without StmtQueryContext
 	return st.Query(dargs) //nolint:staticcheck // legacy fallback
 }
 
@@ -347,7 +322,7 @@ func (t *txWrap) end(kind core.Kind, name string, err error, commitFailed bool) 
 		if commitFailed {
 			sp.SetAttr("commit_failed", "true")
 		}
-		sp.SetErr(err)
+		sp.SetErr(redactErr(err, false))
 		sp.End()
 	})
 }

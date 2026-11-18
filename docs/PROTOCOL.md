@@ -2,8 +2,8 @@
 
 All servers bind **127.0.0.1** by default (never 0.0.0.0 unless explicitly configured).
 Ports: control plane `7070`, collector `7071`, dashboard `7072`. Wire format is JSON over HTTP
-(NDJSON for batches, SSE for the active-set stream). JSON stays the default everywhere; protobuf is an opt-in
-alternative for `POST /v1/ingest` only (see "Protobuf ingest"), kept out of the stdlib-only root module.
+(SSE for the active-set stream), except `POST /v1/ingest`, which is protobuf only (see "Protobuf ingest"; NDJSON
+ingest was removed). The SDK ships a hand-written encoder so the root module stays stdlib-only.
 
 ## Modules (go.work)
 root module (core, thttp, sdk/*, controlplane, dashboard, cmd/*; stdlib only) ·
@@ -33,6 +33,11 @@ The same retry/`seal_error` rule applies to a normal stop.
   400 empty name after sanitising; sets `name_auto=false`; same loopback guard, needs `Content-Type: application/json`)
 - `POST /v1/sessions/{id}/stop` -> DRAINING; CP then polls collector drain-status and calls collector seal
 - `POST /v1/sessions/{id}/abort`
+- `DELETE /v1/sessions/{id}` -> `{"deleted":true,"id":"..."}`; finished sessions only (`409` while CREATED/ACTIVE/
+  DRAINING, `404` unknown). The collector is asked first to drop the session's events, seal and bundle; if that
+  fails the answer is `502` and the session stays, so the call can be repeated.
+- `GET /metrics` Prometheus text format (sessions by state, started/finished/deleted totals, seal failures,
+  subscribers, kill switch, `tsession_build_info`)
 - `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false}` (active = ACTIVE+DRAINING)
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
 - `POST /v1/kill` {"kill":true|false} global kill switch (included in active-set)
@@ -64,9 +69,10 @@ The same retry/`seal_error` rule applies to a normal stop.
   are archived to `<file>.archive` and stay readable via GET.
 
 ## Collector (`:7071`)
-- `POST /v1/ingest` NDJSON of `core.Event` (`Content-Type: application/x-ndjson`, the default) or framed protobuf
-  (`application/x-protobuf`, see "Protobuf ingest") (header `X-TSession-Instance`). Idempotent on
-  `(session_id, instance, local_seq)`. Returns `{"accepted":n,"duplicates":m}`. Events for sessions the
+- `POST /v1/ingest` framed protobuf `Event` messages (`Content-Type: application/x-protobuf`, required; anything
+  else, including a missing type or NDJSON, gets `415` naming it; see "Protobuf ingest") (header
+  `X-TSession-Instance`). Idempotent on `(session_id, instance, local_seq)`. Returns
+  `{"accepted":n,"duplicates":m,"rejected":r,"rejected_reasons":{...}}`. Events for sessions the
   collector doesn't know are accepted (CP/collector may race) but still stored.
 - Ordering: collector keeps a short reorder window (default 500ms) per session and assigns `Seq`
   (1..N, gapless, single writer per session) ordered by `(EndHLC, Service, LocalSeq)`.
@@ -84,6 +90,13 @@ The same retry/`seal_error` rule applies to a normal stop.
 - Internal (control plane -> collector):
   - `GET /v1/internal/sessions/{id}/drain-status` -> `{"pending":n,"last_event_unix_ns":n,"event_count":n,"dropped_events":n}`
   - `POST /v1/internal/sessions/{id}/seal` -> flushes window, resolves tx `effective`, marks orphans, writes bundle -> `{"incomplete":bool,"orphaned":[spanIDs],"bundle_uri":""}`
+  - `DELETE /v1/internal/sessions/{id}` -> `{"deleted":true,"session_id":"..."}`; drops buffered and stored events,
+    the seal, cached views and the bundle directory. Idempotent (unknown id is `200`). Events arriving for the id
+    afterwards start a new session at Seq 1.
+- `GET /metrics` Prometheus text format (`tsession_collector_*`, `tsession_build_info`).
+- Retention: `--retention D` / `TSESSION_COLLECTOR_RETENTION` (default `0` = keep forever) deletes a session `D`
+  after its seal. A never-sealed session is deleted once its newest event is older than `D` and its in-memory actor
+  has been evicted (see `--idle-evict`).
 - Pending-async ledger: a `queue.publish` event opens an entry keyed by its `SpanID`;
   a `worker.end` event whose `LinkIDs` contains that id closes it. Seal marks unclosed entries orphaned.
 - Tx resolution: `db.write` events carry `TxID`; `db.tx.commit`/`db.tx.rollback` with the same TxID set
@@ -94,9 +107,8 @@ The same retry/`seal_error` rule applies to a normal stop.
   schema from the design doc; large payloads stay inline-truncated in v1 (blob store is a stub, fs impl optional).
 
 ### Protobuf ingest
-Opt-in, selected by `Content-Type: application/x-protobuf` (parameters ignored). Any other accepted type is read as
-NDJSON exactly as before, and both formats feed the same ingest path, so idempotency on
-`(session_id, instance, local_seq)` holds across formats (an event sent as NDJSON and again as protobuf is a duplicate).
+Mandatory: `POST /v1/ingest` requires `Content-Type: application/x-protobuf` (parameters ignored); any other or missing
+type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was removed (breaking change, pre-release).
 - Schema: `proto/tsession/v1/event.proto` (package `tsession.v1`), a field-for-field mirror of `core.Event`
   (`Event`, `PayloadRef`, `Mutation`, `ReadSummary`, `FieldChange`). Field numbers are stable, never reuse them.
   `PayloadRef.inline` is JSON bytes and must be valid JSON; `any` values (mutation `pk`, `FieldChange.old/new`) are
@@ -105,15 +117,23 @@ NDJSON exactly as before, and both formats feed the same ingest path, so idempot
   regenerate with `make proto` (protoc + protoc-gen-go v1.36.9).
 - Framing: the body is a stream of varint-length-delimited `Event` messages (the `protodelim` format, same as Java's
   `writeDelimitedTo`): `<uvarint len><Event bytes>` repeated, no trailer. An empty body is an empty batch.
-- Errors: a message longer than `max-line-bytes` is skipped and counted `oversize_line`; a well-framed message that
+- Errors: a message longer than `--max-message-bytes` is skipped and counted `oversize_message`; a well-framed message that
   does not decode (or has invalid inline JSON / invalid UTF-8) is counted `invalid_proto` and the next one is read.
   If the framing itself is broken (bad or truncated length prefix, truncated message) the collector cannot
   resynchronise: it counts one `invalid_proto`, stops reading, and ingests the events decoded so far. The response is
   still `200` with the usual JSON counters; `MaxBodyBytes` still yields `413`.
-- NUL characters in strings (and `\u0000` escapes in inline JSON) are replaced by U+FFFD, as on the NDJSON path.
-- SDK: `runtime.BatchEncoder` (`ContentType()`, `Encode([]core.Event)`) with an NDJSON default;
-  `runtime.Config{Encoder: tsessionproto.Encoder{}}` (or `ExporterConfig.Encoder`) switches the exporter to protobuf.
-  `sdk/autoinit` does not import the proto module and always uses NDJSON.
+- NUL characters in strings (and `\u0000` escapes in inline JSON) are replaced by U+FFFD (Postgres rejects NUL).
+- SDK: the exporter's default encoder is a hand-written protobuf encoder in `sdk/runtime` (stdlib only, conformance-tested
+  against the generated code); `runtime.BatchEncoder` (`ContentType()`, `Encode([]core.Event)`) remains the extension point.
+- **curl is not enough any more.** A test batch must be framed protobuf, e.g. a throwaway Go program in the workspace
+  (`tracectl` has no ingest command):
+  ```go
+  body, _ := tsessionproto.Encode([]core.Event{{SessionID: "ts_demo", SpanID: "a", Kind: core.KindAPIIn,
+      Instance: "i1", LocalSeq: 1, EndHLC: 1}}) // github.com/maheshpaliwal/agentic-test-session/proto/tsessionproto
+  req, _ := http.NewRequest("POST", "http://127.0.0.1:7071/v1/ingest", bytes.NewReader(body))
+  req.Header.Set("Content-Type", tsessionproto.ContentType)
+  ```
+  (`AppendFramed` appends one event at a time.) The collector tests use the same helper pattern (`protoBody`).
 - Measured (`go test -bench . ./tsessionproto` in `proto/`, Apple M3 Pro, one 256-event batch of synthetic events
   with mutations, inline payloads and attrs): wire size 307,090 B NDJSON vs 134,526 B protobuf (44%); encode 0.98 ms
   NDJSON vs 1.53 ms protobuf (SDK side is slower: values are converted to `Value` first, more allocations); decode
@@ -122,11 +142,12 @@ NDJSON exactly as before, and both formats feed the same ingest path, so idempot
 
 ### Collector hardening (v1.1)
 - **Ingest response**: always `200 {"accepted","duplicates","rejected","rejected_reasons":{reason:n}}` unless the whole
-  body exceeds `MaxBodyBytes` (413, default 32MB) or storage fails (500; 503 when a session's buffer is full). A line
-  larger than `--max-line-bytes` (`TSESSION_COLLECTOR_MAX_LINE_BYTES`, default 4MB; for protobuf the limit applies to
-  each encoded message) is rejected alone (`oversize_line`); other reasons: `invalid_json` (NDJSON), `invalid_proto`
-  (protobuf), `invalid_session_id`. Exporters must not discard a batch on 200.
-- **Poison events**: `\u0000` escapes in event JSON are replaced by `\ufffd` at ingest (Postgres jsonb/text rejects NUL).
+  body exceeds `MaxBodyBytes` (413, default 32MB) or storage fails (500; 503 when a session's buffer is full). A message
+  larger than `--max-message-bytes` (`TSESSION_COLLECTOR_MAX_MESSAGE_BYTES`, default 4MB, applies to each encoded
+  protobuf message) is rejected alone (`oversize_message`); other reasons: `invalid_proto`, `invalid_session_id`.
+  The old `--max-line-bytes` / `TSESSION_COLLECTOR_MAX_LINE_BYTES` still work as deprecated aliases and log a warning.
+  Exporters must not discard a batch on 200.
+- **Poison events**: NUL characters and `\u0000` escapes in event strings/inline JSON are replaced by U+FFFD at ingest (Postgres jsonb/text rejects NUL).
   Any other append failure is retried; after 3 consecutive failures the batch is bisected and a single event that
   still fails while the store answers reads is **quarantined** (dropped, counted per session, logged without payload).
   If the store itself is down nothing is quarantined. `quarantined` appears in drain-status, summary (also
@@ -150,12 +171,17 @@ NDJSON exactly as before, and both formats feed the same ingest path, so idempot
 - **Drain-status**: `last_event_unix_ns` (and the explicit alias `received_unix_ns`) is the collector's *receive*
   time of the latest ingest request for the session, updated on arrival (before the window flushes), independent
   of SDK clocks. `pending` = events buffered in the reorder window + open async entries.
+- **Shutdown**: `Close` flushes every session's reorder window before stopping; an ingest or seal that races with
+  it gets `503`. Stop the HTTP server first (the binary does).
+- **Slow store**: each store call made outside a request (window flush, catch-up, poison probe) is bounded by 30s.
+  A timed-out append is retried and is never treated as a poison event. An actor whose session disappeared from the
+  store (deleted by another process) rebuilds its state from the store instead of failing on Seq conflicts.
 - **Seal** is serialised on the session (concurrent calls write the bundle once; files are written via temp+rename)
   and idempotent.
 - **Access control**: the whole API is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
   `--allowed-hosts` / `TSESSION_COLLECTOR_ALLOWED_HOSTS`, comma-separated; browser `Origin` must be listed in
-  `--allowed-origins` / `TSESSION_COLLECTOR_ALLOWED_ORIGINS`; POST bodies must be `application/x-ndjson`,
-  `application/json` or `application/x-protobuf`). `/v1/internal/*` additionally requires a loopback peer or one inside
+  `--allowed-origins` / `TSESSION_COLLECTOR_ALLOWED_ORIGINS`; the only POST body the collector accepts is
+  `application/x-protobuf` (ingest; seal sends no body)). `/v1/internal/*` additionally requires a loopback peer or one inside
   `--internal-allow` / `TSESSION_COLLECTOR_INTERNAL_ALLOW` (CIDRs/IPs, default loopback only). Callers that proxy
   (dashboard, control plane in docker) must send a Host the collector allows and must not forward browser `Origin`.
 - **Postgres**: on `ErrSeqConflict` (a second collector wrote the session) the actor catches up from the store
@@ -170,7 +196,7 @@ call tree (api -> db/cache/queue -> worker), entity mutation history with before
 ## SDK runtime (in every service)
 Env: `TSESSION_ENABLED=true`, `TSESSION_SERVICE`, `TSESSION_CONTROLPLANE_URL` (default http://127.0.0.1:7070),
 `TSESSION_COLLECTOR_URL` (default http://127.0.0.1:7071). `import _ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"` is a no-op unless
-enabled. Exporter: bounded ring, batched POST to collector (NDJSON by default, protobuf opt-in), non-blocking; on overflow drop and emit
+enabled. Exporter: bounded ring, batched POST to collector (protobuf), non-blocking; on overflow drop and emit
 `sdk.dropped` event with `Attrs["count"]`. Active-set subscriber implements `core.SessionSet`.
 
 ### Bindings
@@ -188,6 +214,16 @@ Implements `docs/BINDING.md` (control plane half).
   `tsession.bind=header:x-user-id=u_1,jwt:sub=u_1` (comma-separated; containers share a session only if
   `tsession.id` and `tsession.bind` both match).
 
+### Redaction
+Payloads are redacted in the SDK, before they leave the process. A field, column, header or parameter name is
+sensitive when (case-insensitive) it equals a configured key ignoring `-`, `_` and spaces, ends with a configured key
+of five or more characters, or contains the words of a configured key as whole words (split on punctuation and
+camelCase): `user[password]`, `password_confirmation`, `currentPasswordValue`, `card.cvv`, `X-Auth-Key` are masked;
+`classname`, `tokenizer`, `max_tokens` are not. Whole-word matching is generous on purpose (`token_count` is masked);
+adjust the list with `core.SetRedactKeys`. Defaults: see `core.DefaultRedactKeys`. In query strings and form bodies
+`key`, `code`, `sig`, `pin` and `session` are masked as well. `x-tsession-id` is never masked.
+HTTP bodies that have no structural redactor (multipart, XML, binary types) are recorded as `<media/type, N bytes>`.
+
 ### SDK runtime hardening notes
 - `Instance` is always made unique per process start: a user-supplied `TSESSION_INSTANCE` is kept as a prefix and `-<pid>-<6 hex>` is appended (collector dedupes on `(Instance, LocalSeq)`).
 - Default exporter flush interval is 100ms (collector reorder window default: 500ms). A 413 from `/v1/ingest` bisects the batch; a single oversize event is replaced by a stub (ids/kind/name kept, `Flags=["oversize_dropped"]`). `rejected` in the ingest response is added to the `sdk.dropped` counters.
@@ -200,7 +236,8 @@ Mirror the wrapped library's signature; one-line adoption; if `!core.Enabled()` 
 object unchanged; idempotent (wrapping twice is a no-op); never panic/block the host; use only
 `core.Begin / BeginIngress / Inject / Span` (nil-safe) — never edit `core/` (report needed changes instead).
 Mutations: set `core.Mutation` (Store/Entity/PK/Op/Before/After/Diff, Source="sdk"); reads via `core.ReadSummary`.
-Queue carriers: Kafka headers, SQS message attributes, AMQP headers; opaque-payload queues use a
+Queue carriers: Kafka headers, SQS message attributes (with fewer than three free attribute slots the carrier is one
+compact `x-tsession-ctx` attribute; consumers still read the older name `ts`), AMQP headers; opaque-payload queues use a
 side-channel key `ts:ctx:{msgID}` (TTL) holding the injected carrier map. Producer span = `queue.publish`
 (Req = full job params); consumer = `worker.start` (BeginIngress adds the link) ... `worker.end`.
 

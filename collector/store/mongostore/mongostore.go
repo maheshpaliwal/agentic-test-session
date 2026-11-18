@@ -164,6 +164,7 @@ func noNUL(s string) string {
 	return strings.ReplaceAll(s, "\x00", "")
 }
 
+// Head implements store.Store.
 func (s *Store) Head(ctx context.Context, sid string) (uint64, error) {
 	ctx, cancel := s.ctx(ctx)
 	defer cancel()
@@ -185,6 +186,7 @@ func (s *Store) head(ctx context.Context, sid string) (uint64, error) {
 	return uint64(d.Seq), nil
 }
 
+// AppendEvents implements store.Store.
 func (s *Store) AppendEvents(ctx context.Context, sid string, evs []core.Event) error {
 	if len(evs) == 0 {
 		return nil
@@ -240,6 +242,7 @@ func (s *Store) AppendEvents(ctx context.Context, sid string, evs []core.Event) 
 	return err
 }
 
+// Events implements store.Store.
 func (s *Store) Events(ctx context.Context, sid string, from uint64, limit int) ([]core.Event, error) {
 	ctx, cancel := s.ctx(ctx)
 	defer cancel()
@@ -272,6 +275,7 @@ func (s *Store) Events(ctx context.Context, sid string, from uint64, limit int) 
 	return out, cur.Err()
 }
 
+// TxOutcomes implements store.Store.
 func (s *Store) TxOutcomes(ctx context.Context, sid string) (map[string]bool, error) {
 	ctx, cancel := s.ctx(ctx)
 	defer cancel()
@@ -296,6 +300,7 @@ func (s *Store) TxOutcomes(ctx context.Context, sid string) (map[string]bool, er
 	return out, cur.Err()
 }
 
+// ListSessions implements store.Store.
 func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 	ctx, cancel := s.ctx(ctx)
 	defer cancel()
@@ -351,6 +356,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 	return out, nil
 }
 
+// GetSeal implements store.Store.
 func (s *Store) GetSeal(ctx context.Context, sid string) (*store.SealInfo, error) {
 	ctx, cancel := s.ctx(ctx)
 	defer cancel()
@@ -366,6 +372,7 @@ func (s *Store) GetSeal(ctx context.Context, sid string) (*store.SealInfo, error
 	return &store.SealInfo{Incomplete: d.Incomplete, Orphaned: d.Orphaned, BundleURI: d.BundleURI, SealedAt: at, Quarantined: d.Quarantined}, nil
 }
 
+// PutSeal implements store.Store.
 func (s *Store) PutSeal(ctx context.Context, sid string, si store.SealInfo) error {
 	ctx, cancel := s.ctx(ctx)
 	defer cancel()
@@ -383,6 +390,20 @@ func (s *Store) PutSeal(ctx context.Context, sid string, si store.SealInfo) erro
 	return err
 }
 
+// DeleteSession implements store.Store. Events go first and the seal last:
+// if the call fails half way the session is still listed (ListSessions is
+// driven by events) and the delete can simply be repeated.
+func (s *Store) DeleteSession(ctx context.Context, sid string) error {
+	ctx, cancel := s.ctx(ctx)
+	defer cancel()
+	if _, err := s.events.DeleteMany(ctx, bson.D{{Key: "session_id", Value: sid}}); err != nil {
+		return err
+	}
+	_, err := s.seals.DeleteOne(ctx, bson.D{{Key: "_id", Value: sid}})
+	return err
+}
+
+// Close implements store.Store.
 func (s *Store) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

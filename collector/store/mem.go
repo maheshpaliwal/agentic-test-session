@@ -15,10 +15,12 @@ type Mem struct {
 	seal map[string]SealInfo
 }
 
+// NewMem returns an empty in-memory store.
 func NewMem() *Mem {
 	return &Mem{ev: map[string][]core.Event{}, seal: map[string]SealInfo{}}
 }
 
+// AppendEvents implements Store.
 func (m *Mem) AppendEvents(_ context.Context, sid string, evs []core.Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -32,6 +34,7 @@ func (m *Mem) AppendEvents(_ context.Context, sid string, evs []core.Event) erro
 	return nil
 }
 
+// Events implements Store.
 func (m *Mem) Events(_ context.Context, sid string, from uint64, limit int) ([]core.Event, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -50,12 +53,14 @@ func (m *Mem) Events(_ context.Context, sid string, from uint64, limit int) ([]c
 	return append([]core.Event(nil), all[start:end]...), nil
 }
 
+// Head implements Store.
 func (m *Mem) Head(_ context.Context, sid string) (uint64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return uint64(len(m.ev[sid])), nil
 }
 
+// TxOutcomes implements Store.
 func (m *Mem) TxOutcomes(_ context.Context, sid string) (map[string]bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -66,6 +71,7 @@ func (m *Mem) TxOutcomes(_ context.Context, sid string) (map[string]bool, error)
 	return out, nil
 }
 
+// ListSessions implements Store.
 func (m *Mem) ListSessions(context.Context) ([]SessionInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -87,6 +93,7 @@ func (m *Mem) ListSessions(context.Context) ([]SessionInfo, error) {
 	return out, nil
 }
 
+// GetSeal implements Store.
 func (m *Mem) GetSeal(_ context.Context, sid string) (*SealInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -96,6 +103,7 @@ func (m *Mem) GetSeal(_ context.Context, sid string) (*SealInfo, error) {
 	return nil, nil
 }
 
+// PutSeal implements Store.
 func (m *Mem) PutSeal(_ context.Context, sid string, si SealInfo) error {
 	m.mu.Lock()
 	m.seal[sid] = si
@@ -103,4 +111,14 @@ func (m *Mem) PutSeal(_ context.Context, sid string, si SealInfo) error {
 	return nil
 }
 
+// DeleteSession implements Store.
+func (m *Mem) DeleteSession(_ context.Context, sid string) error {
+	m.mu.Lock()
+	delete(m.ev, sid)
+	delete(m.seal, sid)
+	m.mu.Unlock()
+	return nil
+}
+
+// Close implements Store.
 func (m *Mem) Close() error { return nil }

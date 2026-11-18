@@ -18,7 +18,9 @@ func main() {
 	colURL := flag.String("collector", svc.Env("TSESSION_COLLECTOR_URL", "http://127.0.0.1:7071"), "collector base URL")
 	demo := flag.Bool("demo", os.Getenv("TSESSION_DASHBOARD_DEMO") == "true", "serve built-in synthetic data; no other services needed")
 	hosts := flag.String("allowed-hosts", svc.Env("TSESSION_DASHBOARD_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (default: loopback only)")
+	showVersion := svc.VersionFlag("tsession-dashboard")
 	flag.Parse()
+	showVersion()
 
 	h, err := dashboard.New(dashboard.Config{ControlPlaneURL: *cpURL, CollectorURL: *colURL, Demo: *demo, AllowedHosts: svc.SplitCSV(*hosts)})
 	if err != nil {

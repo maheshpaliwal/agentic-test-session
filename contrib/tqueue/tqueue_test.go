@@ -3,6 +3,7 @@ package tqueue
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -402,5 +403,57 @@ func TestMemSideChannelSweepAndCap(t *testing.T) {
 	}
 	if sc.Len() > 3 {
 		t.Fatalf("cap exceeded: %d", sc.Len())
+	}
+}
+
+// A Put into a full channel frees a batch, so the map is not rescanned on
+// every later Put; the entries closest to expiry go first and never-expiring
+// ones last.
+func TestMemSideChannelEvictsInBatches(t *testing.T) {
+	now := time.Now()
+	sc := &MemSideChannel{Now: func() time.Time { return now }, MaxEntries: 100}
+	bg := context.Background()
+	c := map[string]string{"x": "1"}
+	_ = sc.Put(bg, "forever", c, 0)
+	for i := 1; i < 100; i++ {
+		_ = sc.Put(bg, "k"+strconv.Itoa(i), c, time.Duration(i)*time.Minute)
+	}
+	if sc.Len() != 100 {
+		t.Fatalf("len = %d", sc.Len())
+	}
+	_ = sc.Put(bg, "new", c, time.Hour)
+	if got, want := sc.Len(), 100-100/memEvictFraction+1; got != want {
+		t.Fatalf("len after Put into a full channel = %d, want %d (batch eviction)", got, want)
+	}
+	for i := 1; i <= 10; i++ {
+		if _, err := sc.Get(bg, "k"+strconv.Itoa(i)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("k%d (closest to expiry) survived", i)
+		}
+	}
+	for _, k := range []string{"k11", "k99", "forever", "new"} {
+		if _, err := sc.Get(bg, k); err != nil {
+			t.Fatalf("%s evicted: %v", k, err)
+		}
+	}
+	// Replacing an existing key never evicts.
+	for n := sc.Len(); n < 100; n++ {
+		_ = sc.Put(bg, "fill"+strconv.Itoa(n), c, time.Hour)
+	}
+	_ = sc.Put(bg, "new", c, time.Hour)
+	if sc.Len() != 100 {
+		t.Fatalf("replace evicted: len = %d", sc.Len())
+	}
+}
+
+func BenchmarkMemSideChannelPutFull(b *testing.B) {
+	sc := &MemSideChannel{}
+	bg := context.Background()
+	c := map[string]string{"x": "1"}
+	for i := 0; i < DefaultMemMaxEntries; i++ {
+		_ = sc.Put(bg, "k"+strconv.Itoa(i), c, time.Hour)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sc.Put(bg, "n"+strconv.Itoa(i), c, time.Hour)
 	}
 }

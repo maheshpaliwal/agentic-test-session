@@ -11,6 +11,7 @@ import (
 	"github.com/maheshpaliwal/agentic-test-session/collector"
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/proto/tsessionproto"
 )
 
 // TestProtocol_FailedCommitAndRetryPending posts synthetic events to a real
@@ -43,13 +44,12 @@ func TestProtocol_FailedCommitAndRetryPending(t *testing.T) {
 	}
 	post := func(evs ...core.Event) {
 		t.Helper()
-		var buf bytes.Buffer
-		for _, e := range evs {
-			b, _ := json.Marshal(e)
-			buf.Write(append(b, '\n'))
+		body, err := tsessionproto.Encode(evs)
+		if err != nil {
+			t.Fatal(err)
 		}
-		req, _ := http.NewRequest("POST", in.colSrv.URL+"/v1/ingest", &buf)
-		req.Header.Set("Content-Type", "application/x-ndjson")
+		req, _ := http.NewRequest("POST", in.colSrv.URL+"/v1/ingest", bytes.NewReader(body))
+		req.Header.Set("Content-Type", tsessionproto.ContentType)
 		req.Header.Set("X-TSession-Instance", "synthetic-1")
 		resp, err := plain.Do(req)
 		if err != nil {

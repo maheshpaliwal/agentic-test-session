@@ -24,6 +24,9 @@ type fakeCollector struct {
 	dropped  int64
 	sealed   atomic.Int32
 	sealResp SealResult
+
+	deleted     []string // ids the control plane asked to delete
+	deleteFails atomic.Bool
 }
 
 func newFakeCollector(t *testing.T) *fakeCollector {
@@ -39,6 +42,16 @@ func newFakeCollector(t *testing.T) *fakeCollector {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		json.NewEncoder(w).Encode(f.sealResp)
+	})
+	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if f.deleteFails.Load() {
+			http.Error(w, `{"error":"store down"}`, http.StatusInternalServerError)
+			return
+		}
+		f.mu.Lock()
+		f.deleted = append(f.deleted, r.PathValue("id"))
+		f.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]any{"deleted": true})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

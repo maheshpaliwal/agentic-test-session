@@ -23,6 +23,7 @@ type stmtTrace struct {
 
 	sqlText string // query with sensitive literals masked; the only SQL text ever recorded
 	mask    []bool // args that must be masked
+	argVals []any  // rendered (masked) args, shared by the request and the read summary
 	flagged map[string]bool
 
 	retAll   bool // result rows are full-row RETURNING * images
@@ -45,7 +46,7 @@ func (t *stmtTrace) pg() bool { return t.store == "postgres" || (t.store == "sql
 
 // startTrace returns nil when nothing should be recorded (SDK off, no active
 // session in ctx) so callers fall straight through to the driver.
-func (c *conn) startTrace(ctx context.Context, query string, args []driver.NamedValue) (t *stmtTrace) {
+func (c *conn) startTrace(ctx context.Context, query string, args []driver.NamedValue, info mutation.Info) (t *stmtTrace) {
 	if !core.Enabled() {
 		return nil
 	}
@@ -54,11 +55,6 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 			t = nil
 		}
 	}()
-	d := mutation.Postgres
-	if c.cfg.store == "mysql" {
-		d = mutation.MySQL
-	}
-	info := parseCached(query, d)
 	kind := core.KindDBRead
 	if info.Kind.IsWrite() {
 		kind = core.KindDBWrite
@@ -96,7 +92,8 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 		if cons {
 			t.flag("args_redacted_conservatively")
 		}
-		req["args"] = argValues(args, c.cfg, t.mask)
+		t.argVals = argValues(args, c.cfg, t.mask)
+		req["args"] = t.argVals
 	}
 	sp.SetReq(req)
 	sp.SetTx(c.currentTx())
@@ -108,18 +105,22 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 }
 
 func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValue, run func() (driver.Result, error)) (driver.Result, error) {
-	t := c.startTrace(ctx, query, args)
+	info, ok := c.parse(query)
+	var t *stmtTrace
+	if ok {
+		t = c.startTrace(ctx, query, args, info)
+	}
 	if t == nil {
 		res, err := run()
 		if err == nil {
-			c.trackTxControl(query)
+			c.trackTx(info.Tx)
 		}
 		return res, err
 	}
 	safe(t.preImage)
 	res, err := run()
 	if err == nil {
-		c.trackTxControl(query)
+		c.trackTx(info.Tx)
 	}
 	safe(func() { t.finishExec(res, err) })
 	t.span.End()
@@ -129,11 +130,15 @@ func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValu
 // doQuery runs a Query-path statement. run receives the (possibly rewritten)
 // query text and may return a release func to call when the rows are closed.
 func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedValue, canRewrite bool, run func(q string) (driver.Rows, func(), error)) (driver.Rows, error) {
-	t := c.startTrace(ctx, query, args)
+	info, ok := c.parse(query)
+	var t *stmtTrace
+	if ok {
+		t = c.startTrace(ctx, query, args, info)
+	}
 	if t == nil {
 		r, rel, err := run(query)
 		if err == nil {
-			c.trackTxControl(query)
+			c.trackTx(info.Tx)
 		}
 		return wrapPlain(r, rel), err
 	}
@@ -144,11 +149,11 @@ func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedVal
 	}
 	r, rel, err := run(q)
 	if err != nil {
-		t.span.SetErr(err)
+		t.setErr(err)
 		t.span.End()
 		return nil, err
 	}
-	c.trackTxControl(query)
+	c.trackTx(info.Tx)
 	rw := &rows{inner: r, release: rel, onClose: t.finishRows, pkCols: t.cfg.pk(t.info.Schema, t.info.Table)}
 	switch {
 	case t.write:
@@ -224,6 +229,10 @@ func (t *stmtTrace) capture(q string, vals []driver.Value, limit int, failFlag s
 		t.flag("image_skipped")
 		t.flag("image_skipped:serializable")
 		t.span.SetAttr("image_skip_reason", "serializable")
+	case capDeadline:
+		t.flag("image_skipped")
+		t.flag("image_skipped:deadline")
+		t.span.SetAttr("image_skip_reason", "deadline")
 	case capTimeout:
 		t.flag("image_timeout")
 	default:
@@ -234,7 +243,7 @@ func (t *stmtTrace) capture(q string, vals []driver.Value, limit int, failFlag s
 
 func (t *stmtTrace) finishExec(res driver.Result, err error) {
 	if err != nil {
-		t.span.SetErr(err)
+		t.setErr(err)
 		return
 	}
 	affected := int64(-1)
@@ -253,8 +262,11 @@ func (t *stmtTrace) finishExec(res driver.Result, err error) {
 func (t *stmtTrace) finishRows(r *rows) {
 	defer t.span.End()
 	if r.err != nil {
-		t.span.SetErr(r.err)
+		t.setErr(r.err)
 		return
+	}
+	if !t.skip {
+		t.maskAliased(r.data)
 	}
 	if t.write {
 		affected := int64(-1)
@@ -265,7 +277,14 @@ func (t *stmtTrace) finishRows(r *rows) {
 		if t.info.HasReturning && !t.info.ReturningAll && !t.skip {
 			t.span.AddFlag("returning_partial")
 		}
-		t.addMutations(nil, imgsOf(r.data, r.raws), affected)
+		ret := imgsOf(r.data, r.raws)
+		switch {
+		case t.info.WritesInCTE:
+			ret = nil // the rows belong to the outer query, they are not row images
+		case !t.skip && (t.info.HasReturning || t.retAll) && r.count > len(r.data):
+			t.flag("mutations_truncated")
+		}
+		t.addMutations(nil, ret, affected)
 		return
 	}
 	rs := core.ReadSummary{
@@ -275,7 +294,7 @@ func (t *stmtTrace) finishRows(r *rows) {
 		RowCount:  r.count,
 	}
 	if !t.skip {
-		rs.Args = core.Payload(argValues(t.args, t.cfg, t.mask))
+		rs.Args = core.Payload(t.argVals)
 		pkCols := t.cfg.pk(t.info.Schema, t.info.Table)
 		for _, row := range r.data {
 			if pk := pkOf(row, pkCols); pk != nil && len(rs.PKs) < 20 {

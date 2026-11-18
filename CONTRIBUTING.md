@@ -8,7 +8,10 @@ needs throwaway Postgres and Redis (`integration/scripts/it.sh`).
 - A change stays inside one module's `go.mod`. The root module is stdlib-only; heavy dependencies belong in
   `collector/` or a `contrib/*` module.
 - Instrumentation must be **fail-open**: bounded work, no panics, no behaviour change for the host call.
-- Redaction happens before data leaves the process. Add a test for any new place that records payloads.
+- Redaction happens before data leaves the process. Add a test for any new place that records payloads. A payload
+  with no structural redactor (multipart, XML, binary) is recorded as a placeholder, never verbatim.
+- Exported identifiers carry a doc comment; a new `store.Store` method goes into the shared conformance suite
+  (`collector/store/storetest`).
 - Wire changes are additive and documented in `docs/PROTOCOL.md`.
 - Servers bind loopback by default; do not add defaults that listen on all interfaces.
 - Keep Redis-client-independent logic in `internal/redisx`, not duplicated across `tredis` and `tredisv8`.
@@ -16,4 +19,4 @@ needs throwaway Postgres and Redis (`integration/scripts/it.sh`).
 - Use synthetic data in tests and examples: no real credentials, hostnames, customer data or employer-specific names.
 
 ## Pull requests
-Run `make vet unit` and `gofmt -l .` first. Describe the behaviour change and how you tested it.
+Run `make vet lint race` and `gofmt -l .` first (CI runs the same). Describe the behaviour change and how you tested it.

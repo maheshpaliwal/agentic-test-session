@@ -111,7 +111,9 @@ func WithSampleRows(n int) Option {
 }
 
 // WithCaptureTimeout bounds each capture query (pre-image and re-read);
-// default 500ms. It never exceeds the caller context's deadline. On timeout
+// default 500ms. A capture also never uses more than a quarter of the time
+// the caller context's deadline leaves, and is skipped (flag
+// "image_skipped:deadline") when that is under 10ms. On timeout
 // the image is dropped and the event is flagged "image_timeout". Inside a
 // Postgres transaction the limit is also enforced server-side with a
 // transaction-local statement_timeout, so no client-side cancel (which can

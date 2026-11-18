@@ -17,18 +17,22 @@ type GuardConfig struct {
 	// clients) are always allowed.
 	AllowedOrigins []string
 	// BodyContentTypes are accepted Content-Types for requests with a body
-	// (default: application/json, application/x-ndjson).
+	// (default: application/json).
 	BodyContentTypes []string
+	// OnBadContentType, if set, writes the 415 response for a body with a
+	// disallowed Content-Type (default: a plain-text error), so a service can
+	// answer in its own error shape.
+	OnBadContentType func(w http.ResponseWriter, r *http.Request)
 }
 
 // LoopbackGuard defends unauthenticated local control endpoints against
 // DNS-rebinding and browser CSRF: it validates Host, rejects cross-origin
-// browser requests, and requires a JSON/NDJSON Content-Type on POST/PUT/PATCH/DELETE
+// browser requests, and requires an allowed (default JSON) Content-Type on POST/PUT/PATCH/DELETE
 // (which forces a CORS preflight that we never answer favourably).
 func LoopbackGuard(next http.Handler, cfg GuardConfig) http.Handler {
 	ct := cfg.BodyContentTypes
 	if len(ct) == 0 {
-		ct = []string{"application/json", "application/x-ndjson"}
+		ct = []string{"application/json"}
 	}
 	hostOK := func(h string) bool {
 		name := h
@@ -85,6 +89,10 @@ func LoopbackGuard(next http.Handler, cfg GuardConfig) http.Handler {
 					}
 				}
 				if !ok {
+					if cfg.OnBadContentType != nil {
+						cfg.OnBadContentType(w, r)
+						return
+					}
 					http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
 					return
 				}

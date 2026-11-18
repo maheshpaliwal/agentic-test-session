@@ -65,6 +65,7 @@ const (
 
 	chunkBytes   = 256 * 1024 // body bytes per item; keeps items well under 400KB
 	maxTxActions = 100        // DynamoDB limit per TransactWriteItems
+	maxBatchSize = 25         // DynamoDB limit per BatchWriteItem
 	txBudget     = 3_800_000  // headroom under the 4MB transaction size limit
 	itemOverhead = 512        // per-item allowance for keys, names and scalars
 	maxKeyBytes  = 2048       // partition key limit
@@ -120,6 +121,7 @@ type Config struct {
 type api interface {
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 	Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	Scan(context.Context, *dynamodb.ScanInput, ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	TransactWriteItems(context.Context, *dynamodb.TransactWriteItemsInput, ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
@@ -404,6 +406,7 @@ func (s *Store) getMeta(ctx context.Context, sid string) (meta, error) {
 		firstNs: getI(out.Item, aFirstNs), lastNs: getI(out.Item, aLastNs)}, nil
 }
 
+// AppendEvents implements store.Store.
 func (s *Store) AppendEvents(ctx context.Context, sid string, evs []core.Event) error {
 	if len(evs) == 0 {
 		return nil
@@ -471,7 +474,7 @@ func (s *Store) appendChunk(ctx context.Context, sid string, m meta, evs []core.
 		Key:              map[string]types.AttributeValue{aPK: strAV(sid), aSK: strAV(metaSK)},
 		UpdateExpression: aws.String("SET #head = :h, #cnt = :c, #first = :f, #last = :l"),
 		ExpressionAttributeNames: map[string]string{
-			"#pk": aPK, "#head": aHead, "#cnt": aCount, "#first": aFirstNs, "#last": aLastNs,
+			"#head": aHead, "#cnt": aCount, "#first": aFirstNs, "#last": aLastNs,
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":h": u64AV(next.head), ":c": u64AV(next.count), ":f": numAV(next.firstNs), ":l": numAV(next.lastNs),
@@ -481,7 +484,10 @@ func (s *Store) appendChunk(ctx context.Context, sid string, m meta, evs []core.
 		upd.ConditionExpression = aws.String("#head = :exp")
 		upd.ExpressionAttributeValues[":exp"] = u64AV(m.head)
 	} else {
+		// DynamoDB rejects names no expression references, so #pk is declared
+		// only on the branch that uses it.
 		upd.ConditionExpression = aws.String("attribute_not_exists(#pk)")
+		upd.ExpressionAttributeNames["#pk"] = aPK
 	}
 	acts := []types.TransactWriteItem{{Update: upd}}
 	for _, e := range enc {
@@ -537,6 +543,7 @@ type partial struct {
 	want  int // total items expected
 }
 
+// Events implements store.Store.
 func (s *Store) Events(ctx context.Context, sid string, from uint64, limit int) ([]core.Event, error) {
 	if err := checkSession(sid); err != nil {
 		return nil, err
@@ -617,6 +624,7 @@ func decodeEvent(parts [][]byte) (core.Event, error) {
 	return e, json.Unmarshal(raw, &e)
 }
 
+// Head implements store.Store.
 func (s *Store) Head(ctx context.Context, sid string) (uint64, error) {
 	if err := checkSession(sid); err != nil {
 		return 0, err
@@ -636,6 +644,7 @@ func (s *Store) Head(ctx context.Context, sid string) (uint64, error) {
 	return getU(out.Item, aHead), nil
 }
 
+// TxOutcomes implements store.Store.
 func (s *Store) TxOutcomes(ctx context.Context, sid string) (map[string]bool, error) {
 	if err := checkSession(sid); err != nil {
 		return nil, err
@@ -720,6 +729,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 	return out, nil
 }
 
+// GetSeal implements store.Store.
 func (s *Store) GetSeal(ctx context.Context, sid string) (*store.SealInfo, error) {
 	if err := checkSession(sid); err != nil {
 		return nil, err

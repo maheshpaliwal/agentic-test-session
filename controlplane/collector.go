@@ -33,6 +33,9 @@ type SealResult struct {
 type Collector interface {
 	DrainStatus(ctx context.Context, id string) (DrainStatus, error)
 	Seal(ctx context.Context, id string) (SealResult, error)
+	// Delete removes everything the collector recorded for the session. It
+	// must be idempotent: deleting an unknown session succeeds.
+	Delete(ctx context.Context, id string) error
 }
 
 // HTTPCollector talks to a collector over HTTP.
@@ -41,12 +44,17 @@ type HTTPCollector struct {
 	Client  *http.Client
 }
 
+// do calls /v1/internal/sessions/{id}[/suffix] and decodes the JSON reply
+// into out (skipped when out is nil).
 func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, out any) error {
 	cl := c.Client
 	if cl == nil {
 		cl = http.DefaultClient
 	}
-	u := strings.TrimRight(c.BaseURL, "/") + "/v1/internal/sessions/" + url.PathEscape(id) + "/" + suffix
+	u := strings.TrimRight(c.BaseURL, "/") + "/v1/internal/sessions/" + url.PathEscape(id)
+	if suffix != "" {
+		u += "/" + suffix
+	}
 	var body io.Reader
 	if method == http.MethodPost {
 		body = bytes.NewReader(nil)
@@ -64,15 +72,26 @@ func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, out a
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("collector %s %s: %s: %s", method, suffix, resp.Status, bytes.TrimSpace(b))
 	}
+	if out == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
+		return nil
+	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// Delete implements Collector.
+func (c *HTTPCollector) Delete(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, id, "", nil)
+}
+
+// DrainStatus implements Collector.
 func (c *HTTPCollector) DrainStatus(ctx context.Context, id string) (DrainStatus, error) {
 	var d DrainStatus
 	err := c.do(ctx, http.MethodGet, id, "drain-status", &d)
 	return d, err
 }
 
+// Seal implements Collector.
 func (c *HTTPCollector) Seal(ctx context.Context, id string) (SealResult, error) {
 	var r SealResult
 	err := c.do(ctx, http.MethodPost, id, "seal", &r)

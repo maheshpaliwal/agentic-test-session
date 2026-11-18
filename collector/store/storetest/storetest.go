@@ -75,4 +75,49 @@ func Run(t *testing.T, s store.Store) {
 	if !found {
 		t.Fatalf("list %+v", l)
 	}
+
+	// DeleteSession removes events and seal, leaves other sessions alone, and
+	// is idempotent. The id is then free for a fresh run starting at Seq 1.
+	other := sid + "_other"
+	oe := mk(1, core.KindDBWrite, "")
+	oe.SessionID = other
+	if err := s.AppendEvents(ctx, other, []core.Event{oe}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.DeleteSession(ctx, sid); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+	}
+	if evs, err := s.Events(ctx, sid, 0, 0); err != nil || len(evs) != 0 {
+		t.Fatalf("events after delete: %d %v", len(evs), err)
+	}
+	if h, err := s.Head(ctx, sid); err != nil || h != 0 {
+		t.Fatalf("head after delete %d %v", h, err)
+	}
+	if si, err := s.GetSeal(ctx, sid); err != nil || si != nil {
+		t.Fatalf("seal after delete %+v %v", si, err)
+	}
+	if o, err := s.TxOutcomes(ctx, sid); err != nil || len(o) != 0 {
+		t.Fatalf("outcomes after delete %v %v", o, err)
+	}
+	l, _ = s.ListSessions(ctx)
+	sawOther := false
+	for _, x := range l {
+		if x.ID == sid {
+			t.Fatalf("deleted session still listed: %+v", x)
+		}
+		sawOther = sawOther || x.ID == other
+	}
+	if !sawOther {
+		t.Fatalf("delete removed an unrelated session: %+v", l)
+	}
+	if err := s.AppendEvents(ctx, sid, []core.Event{mk(1, core.KindDBWrite, "")}); err != nil {
+		t.Fatalf("append after delete: %v", err)
+	}
+	for _, id := range []string{sid, other} {
+		if err := s.DeleteSession(ctx, id); err != nil {
+			t.Fatalf("cleanup %s: %v", id, err)
+		}
+	}
 }

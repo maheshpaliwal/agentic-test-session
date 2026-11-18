@@ -1,5 +1,5 @@
 // Package runtime wires the core seams to a control plane (active-set stream)
-// and a collector (batched NDJSON export). Nothing here blocks the host.
+// and a collector (batched protobuf export). Nothing here blocks the host.
 package runtime
 
 import (

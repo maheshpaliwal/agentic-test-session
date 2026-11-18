@@ -20,7 +20,9 @@ func main() {
 	hosts := flag.String("allowed-hosts", svc.Env("TSESSION_CP_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (e.g. controlplane:7070); default loopback only")
 	origins := flag.String("allowed-origins", svc.Env("TSESSION_CP_ALLOWED_ORIGINS", ""), "comma-separated browser Origins allowed to call the API (default none)")
 	retention := flag.Duration("retention", svc.EnvPositiveDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long")
+	showVersion := svc.VersionFlag("tsession-controlplane")
 	flag.Parse()
+	showVersion()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if svc.IsWildcardAddr(*addr) {
@@ -52,7 +54,8 @@ func main() {
 	defer stop()
 	go m.Run(ctx)
 
-	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// No WriteTimeout: /v1/active/stream is a long-lived SSE response.
+	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	log.Info("control plane listening", "addr", *addr, "collector", *collector)
 	if err := svc.Serve(ctx, srv, 5*time.Second, m.Close); err != nil { // Close ends SSE streams so Shutdown can finish
 		log.Error("serve", "err", err)

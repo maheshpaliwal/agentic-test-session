@@ -20,11 +20,13 @@ Then open http://127.0.0.1:7072.
 
 ## Server behaviour
 - `/api/cp/*` -> control plane, `/api/col/*` -> collector (prefix stripped). Cookie/Authorization/Origin/Referer/X-Forwarded-* are not forwarded; Set-Cookie and CORS headers are dropped from responses; no CORS headers are added.
-- Only GET/HEAD/POST. `/v1/internal/*` and `/v1/kill` are blocked (403). Cross-origin POSTs and non-loopback Host headers are refused.
+- Only GET/HEAD/POST, plus PATCH (rename) and DELETE (delete a finished session) for exactly `/v1/sessions/{id}` on
+  the control plane. `/v1/internal/*` and `/v1/kill` are blocked (403). Cross-origin POSTs and non-loopback Host headers are refused.
 - Demo mode serves the same endpoints from `demo.go`/`demodata.go`: sealed session `ts_demo0001` (POST /orders -> db/redis, rolled-back tx, queue publishes -> worker retry + DLQ), `ts_demo0002` (ACTIVE, events trickle in every 1.5s so live tail can be seen; Stop it to seal), `ts_demo0003` (incomplete, dropped events, orphaned publishes). `ts_demo0004` is bound by JWT sub, `ts_demo0005` is the multi-trigger flow. Start/Stop/rename work in memory.
 
 ## Views (hash routes: `#/`, `#/s/{id}/{timeline|tree|entities|summary}`)
-- Sessions: filter, Start/Stop, auto-refresh (3s), incomplete/dropped badges.
+- Sessions: filter, Start/Stop, Delete (finished sessions; two clicks, the first arms the button), auto-refresh (3s),
+  incomplete/dropped badges.
 - Timeline: filters (service, kind, errors, entity, text), click row -> drawer with req/resp (redaction markers highlighted), mutations before/after/diff, reads, ids. Live tail polls `events?from_seq=` every 1.5s while ACTIVE/DRAINING.
 - Call tree: from `/trace`; `linked` worker spans shown in a dashed "async" group, attempts/DLQ badges, duration bars, errors red, publishes without a worker flagged pending (live) or orphaned (sealed).
 - Entities: `/entities` list and per-pk history (seq, op, effective vs rolled back, diff).

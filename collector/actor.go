@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -44,7 +43,8 @@ type sessionActor struct {
 	st     store.Store
 	window time.Duration
 	ch     chan func(*sessionActor)
-	done   chan struct{}
+	quit   chan struct{} // closed to stop the loop (eviction, shutdown)
+	done   chan struct{} // closed when the loop has exited
 
 	// guarded by Sequencer.mu
 	inflight int
@@ -68,7 +68,7 @@ type sessionActor struct {
 
 func newActor(id string, s *Sequencer) *sessionActor {
 	a := &sessionActor{id: id, seqr: s, st: s.st, window: s.window,
-		ch: make(chan func(*sessionActor)), done: make(chan struct{})}
+		ch: make(chan func(*sessionActor)), quit: make(chan struct{}), done: make(chan struct{})}
 	a.lastActive.Store(time.Now().UnixNano())
 	go a.loop()
 	return a
@@ -84,14 +84,11 @@ func (a *sessionActor) loop() {
 			tc = nil
 		}
 		select {
-		case f, ok := <-a.ch:
-			if !ok {
-				if a.timer != nil {
-					a.timer.Stop()
-				}
-				return
-			}
+		case f := <-a.ch:
 			f(a)
+		case <-a.quit:
+			a.shutdown()
+			return
 		case <-tc:
 			a.timer = nil
 			if err := a.flush(); err != nil {
@@ -109,11 +106,43 @@ func (a *sessionActor) backoff() time.Duration {
 	return d
 }
 
-// run executes f on the actor goroutine and waits for it.
-func (a *sessionActor) run(f func(*sessionActor)) {
+// shutdown runs on the actor goroutine when it is told to stop. Whatever is
+// still inside the reorder window is flushed so that a graceful collector
+// stop (or an eviction) never discards accepted events.
+func (a *sessionActor) shutdown() {
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+	if len(a.buf) == 0 {
+		return
+	}
+	if err := a.flushNow(); err != nil {
+		a.seqr.log.Error("events lost at shutdown: store rejected the final flush",
+			"session", a.id, "events", len(a.buf), "err", err)
+	}
+}
+
+// stop asks the loop to exit; wait on a.done for it to finish.
+func (a *sessionActor) stop() { close(a.quit) }
+
+// run executes f on the actor goroutine and waits for it. It reports false,
+// without running f, when the actor has already stopped.
+func (a *sessionActor) run(f func(*sessionActor)) bool {
 	fin := make(chan struct{})
-	a.ch <- func(a *sessionActor) { f(a); close(fin) }
-	<-fin
+	select {
+	case a.ch <- func(a *sessionActor) { f(a); close(fin) }:
+		<-fin
+		return true
+	case <-a.done:
+		return false
+	}
+}
+
+// opCtx bounds one background store operation, so a hung store cannot wedge
+// the actor (and with it every request for the session) forever.
+func (a *sessionActor) opCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), a.seqr.storeTimeout)
 }
 
 func (a *sessionActor) arm(d time.Duration) {
@@ -268,7 +297,10 @@ func (a *sessionActor) flush() error {
 		return nil
 	}
 	if !a.loaded {
-		if err := a.load(context.Background()); err != nil {
+		ctx, cancel := a.opCtx()
+		err := a.load(ctx)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -296,7 +328,12 @@ func (a *sessionActor) tryAppend(evs []core.Event) error {
 	for i := range evs {
 		evs[i].Seq = a.next + uint64(i)
 	}
-	if err := a.st.AppendEvents(context.Background(), a.id, evs); err != nil {
+	ctx, cancel := a.opCtx()
+	defer cancel()
+	if err := a.st.AppendEvents(ctx, a.id, evs); err != nil {
+		if !errors.Is(err, store.ErrSeqConflict) { // a conflict is resolved by catching up
+			a.seqr.tel.appendFailures.Inc()
+		}
 		return err
 	}
 	a.next += uint64(len(evs))
@@ -343,9 +380,14 @@ func (a *sessionActor) persist(batch []core.Event) ([]core.Event, error) {
 // catchUp applies events another writer stored past a.next and returns batch
 // without the events that are now already stored.
 func (a *sessionActor) catchUp(batch []core.Event) ([]core.Event, error) {
-	tail, err := a.st.Events(context.Background(), a.id, a.next, 0)
+	ctx, cancel := a.opCtx()
+	defer cancel()
+	tail, err := a.st.Events(ctx, a.id, a.next, 0)
 	if err != nil {
 		return batch, err
+	}
+	if len(tail) == 0 {
+		return a.resync(ctx, batch)
 	}
 	stored := make(map[evKey]struct{}, len(tail))
 	for i := range tail {
@@ -362,6 +404,46 @@ func (a *sessionActor) catchUp(batch []core.Event) ([]core.Event, error) {
 	return out, nil
 }
 
+// resync handles a conflict that no newer event explains: the store holds
+// less than this actor believes (the session was deleted or restored behind
+// its back). The in-memory state is rebuilt from the store and batch is
+// returned without the events the store already has.
+func (a *sessionActor) resync(ctx context.Context, batch []core.Event) ([]core.Event, error) {
+	head, err := a.st.Head(ctx, a.id)
+	if err != nil || head+1 == a.next {
+		return batch, err // in step after all; the caller retries or gives up
+	}
+	a.loaded = false
+	if err := a.load(ctx); err != nil {
+		return batch, err
+	}
+	out := batch[:0:0]
+	for i := range batch {
+		k := evKey{batch[i].Instance, batch[i].LocalSeq}
+		if _, dup := a.seen[k]; !dup {
+			a.seen[k] = struct{}{} // still buffered: keep rejecting replays
+			out = append(out, batch[i])
+		}
+	}
+	return out, nil
+}
+
+// purge deletes the session from the store and forgets everything the actor
+// holds for it. Running on the actor serialises it against appends.
+func (a *sessionActor) purge(ctx context.Context) error {
+	if err := a.st.DeleteSession(ctx, a.id); err != nil {
+		return err
+	}
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+	a.setBuf(nil)
+	a.loaded, a.failures, a.lastRecv = false, 0, 0
+	a.sealed.Store(false)
+	return nil
+}
+
 // isolate bisects a batch that keeps failing. A single event that still
 // fails while the store answers reads is quarantined. If the store itself is
 // unhealthy nothing is quarantined and the events stay buffered.
@@ -370,11 +452,16 @@ func (a *sessionActor) isolate(batch []core.Event, cause error) ([]core.Event, e
 	if err == nil {
 		return nil, nil
 	}
-	if errors.Is(err, store.ErrSeqConflict) {
+	if errors.Is(err, store.ErrSeqConflict) || isTimeout(err) {
+		// A conflict is resolved by catching up, and a timeout says the store
+		// is slow, not that the event is bad: neither may cost an event.
 		return batch, err
 	}
 	if len(batch) == 1 {
-		if _, perr := a.st.Events(context.Background(), a.id, a.next, 1); perr != nil {
+		ctx, cancel := a.opCtx()
+		_, perr := a.st.Events(ctx, a.id, a.next, 1)
+		cancel()
+		if perr != nil {
 			return batch, perr // store down, not a poison event
 		}
 		a.quarantine(&batch[0], err)
@@ -388,12 +475,16 @@ func (a *sessionActor) isolate(batch []core.Event, cause error) ([]core.Event, e
 	return a.isolate(batch[mid:], cause)
 }
 
+func isTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
 func (a *sessionActor) quarantine(e *core.Event, err error) {
 	a.seqr.addQuarantine(a.id, 1)
 	msg := err.Error()
 	if len(msg) > 200 {
 		msg = msg[:200]
 	}
-	slog.Warn("quarantined poison event", "session", a.id, "span", e.SpanID, "kind", e.Kind,
+	a.seqr.log.Warn("quarantined poison event", "session", a.id, "span", e.SpanID, "kind", e.Kind,
 		"instance", e.Instance, "local_seq", e.LocalSeq, "err", msg)
 }

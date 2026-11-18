@@ -84,6 +84,14 @@ type Info struct {
 	CurrentOf    bool // WHERE CURRENT OF <cursor>
 	Bulk         bool // COPY ... FROM (bulk load, row set unknown)
 
+	// Tx is the transaction state the text leaves behind: every ';'-separated
+	// statement is classified and the last transaction-control one wins.
+	Tx TxControl
+	// Projections lists the aliased / computed items of every SELECT list and
+	// RETURNING clause, so callers can tell which output columns carry the
+	// value of a sensitive-named column under another name.
+	Projections []Projection
+
 	// ArgCols maps a 0-based bind argument to the column(s) it is assigned to
 	// or compared with (INSERT column list vs VALUES, SET col = $n, col op $n,
 	// IN lists, ON CONFLICT DO UPDATE SET ...). A column "" marks an argument

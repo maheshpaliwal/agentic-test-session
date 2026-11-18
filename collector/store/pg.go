@@ -172,6 +172,7 @@ func MutationPK(pk map[string]any) string {
 	return string(b)
 }
 
+// AppendEvents implements Store.
 func (p *PG) AppendEvents(ctx context.Context, sid string, evs []core.Event) error {
 	if len(evs) == 0 {
 		return nil
@@ -233,6 +234,7 @@ func (p *PG) AppendEvents(ctx context.Context, sid string, evs []core.Event) err
 	return tx.Commit(ctx)
 }
 
+// Events implements Store.
 func (p *PG) Events(ctx context.Context, sid string, from uint64, limit int) ([]core.Event, error) {
 	q := `SELECT body FROM session_events WHERE session_id=$1 AND seq>=$2 ORDER BY seq`
 	args := []any{sid, int64(from)}
@@ -260,6 +262,7 @@ func (p *PG) Events(ctx context.Context, sid string, from uint64, limit int) ([]
 	return out, rows.Err()
 }
 
+// TxOutcomes implements Store.
 func (p *PG) TxOutcomes(ctx context.Context, sid string) (map[string]bool, error) {
 	rows, err := p.pool.Query(ctx, `SELECT tx_id, kind, COALESCE(body->>'err',''), COALESCE(body->'attrs'->>'commit_failed','')
 		FROM session_events
@@ -284,6 +287,7 @@ func (p *PG) TxOutcomes(ctx context.Context, sid string) (map[string]bool, error
 	return out, rows.Err()
 }
 
+// Head implements Store.
 func (p *PG) Head(ctx context.Context, sid string) (uint64, error) {
 	var last *int64
 	if err := p.pool.QueryRow(ctx, `SELECT max(seq) FROM session_events WHERE session_id=$1`, sid).Scan(&last); err != nil {
@@ -295,6 +299,7 @@ func (p *PG) Head(ctx context.Context, sid string) (uint64, error) {
 	return uint64(*last), nil
 }
 
+// ListSessions implements Store.
 func (p *PG) ListSessions(ctx context.Context) ([]SessionInfo, error) {
 	rows, err := p.pool.Query(ctx, `SELECT e.session_id, count(*), min(e.start_ns), max(e.end_ns), COALESCE(s.sealed,false)
 		FROM session_events e LEFT JOIN sessions s ON s.id=e.session_id
@@ -315,13 +320,14 @@ func (p *PG) ListSessions(ctx context.Context) ([]SessionInfo, error) {
 	return out, rows.Err()
 }
 
+// GetSeal implements Store.
 func (p *PG) GetSeal(ctx context.Context, sid string) (*SealInfo, error) {
 	var si SealInfo
 	var orph []byte
 	var sealed bool
 	err := p.pool.QueryRow(ctx, `SELECT sealed, incomplete, orphaned, bundle_uri, COALESCE(sealed_at, now()), quarantined
 		FROM sessions WHERE id=$1`, sid).Scan(&sealed, &si.Incomplete, &orph, &si.BundleURI, &si.SealedAt, &si.Quarantined)
-	if err == pgx.ErrNoRows || (err == nil && !sealed) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !sealed) {
 		return nil, nil
 	}
 	if err != nil {
@@ -331,6 +337,7 @@ func (p *PG) GetSeal(ctx context.Context, sid string) (*SealInfo, error) {
 	return &si, nil
 }
 
+// PutSeal implements Store.
 func (p *PG) PutSeal(ctx context.Context, sid string, si SealInfo) error {
 	orph, _ := json.Marshal(si.Orphaned)
 	if si.Orphaned == nil {
@@ -343,4 +350,25 @@ func (p *PG) PutSeal(ctx context.Context, sid string, si SealInfo) error {
 	return err
 }
 
+// DeleteSession implements Store. The three tables are cleared in one
+// transaction, so a session is never left half deleted.
+func (p *PG) DeleteSession(ctx context.Context, sid string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	for _, q := range []string{
+		`DELETE FROM entity_mutations WHERE session_id=$1`,
+		`DELETE FROM session_events WHERE session_id=$1`,
+		`DELETE FROM sessions WHERE id=$1`,
+	} {
+		if _, err := tx.Exec(ctx, q, sid); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// Close implements Store.
 func (p *PG) Close() error { p.pool.Close(); return nil }

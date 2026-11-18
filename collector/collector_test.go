@@ -43,11 +43,7 @@ func newC(t *testing.T, window int, dir string) (*Collector, *httptest.Server) {
 
 func post(t *testing.T, url string, evs ...core.Event) IngestResult {
 	t.Helper()
-	var b bytes.Buffer
-	for _, e := range evs {
-		_ = json.NewEncoder(&b).Encode(e)
-	}
-	resp, err := http.Post(url+"/v1/ingest", "application/x-ndjson", &b)
+	resp, err := http.Post(url+"/v1/ingest", ctProto, bytes.NewReader(protoBody(t, evs...)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,11 +253,11 @@ func TestTxEffective(t *testing.T) {
 
 func mustView(t *testing.T, c *Collector) []core.Event {
 	t.Helper()
-	v, err := c.view(context.Background(), sid)
+	v, err := c.viewOf(context.Background(), sid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return v.evs
 }
 
 func TestTraceTreeWithLinkedWorker(t *testing.T) {
@@ -368,50 +364,40 @@ func TestSealBundleHash(t *testing.T) {
 
 func TestIngestLimitsAndValidation(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Window, cfg.MaxBodyBytes, cfg.MaxLineBytes = 0, 4096, 512
+	cfg.Window, cfg.MaxBodyBytes, cfg.MaxMessageBytes = 0, 4096, 512
 	c := New(store.NewMem(), cfg)
 	defer c.Close()
 	srv := httptest.NewServer(c.Handler())
 	defer srv.Close()
-	postRaw := func(body string) (int, IngestResult) {
-		resp, err := http.Post(srv.URL+"/v1/ingest", "application/x-ndjson", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		var r IngestResult
-		_ = json.NewDecoder(resp.Body).Decode(&r)
-		return resp.StatusCode, r
-	}
-	line := func(e core.Event) string { b, _ := json.Marshal(e); return string(b) + "\n" }
+	postRaw := func(body []byte) (int, IngestResult) { return rawPost(t, srv.URL, ctProto, body) }
 
-	// an oversize line is rejected on its own; neighbours are processed, 200.
+	// an oversize message is rejected on its own; neighbours are processed, 200.
 	big := ev("x", core.KindAPIIn, 1, 1)
 	big.Name = strings.Repeat("a", 1000)
-	code, r := postRaw(line(ev("a", core.KindAPIIn, 1, 1)) + line(big) + line(ev("b", core.KindAPIIn, 2, 2)))
-	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_line"] != 1 {
+	code, r := postRaw(protoBody(t, ev("a", core.KindAPIIn, 1, 1), big, ev("b", core.KindAPIIn, 2, 2)))
+	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_message"] != 1 {
 		t.Fatalf("oversize: %d %+v", code, r)
 	}
-	// oversize last line without trailing newline
-	code, r = postRaw(line(ev("c", core.KindAPIIn, 3, 3)) + strings.Repeat("z", 2000))
-	if code != 200 || r.Accepted != 1 || r.RejectedReasons["oversize_line"] != 1 {
+	// oversize last message
+	code, r = postRaw(protoBody(t, ev("c", core.KindAPIIn, 3, 3), big))
+	if code != 200 || r.Accepted != 1 || r.RejectedReasons["oversize_message"] != 1 {
 		t.Fatalf("oversize tail: %d %+v", code, r)
 	}
 	// whole body limit still 413
-	if code, _ = postRaw(strings.Repeat("{}\n", 4000)); code != http.StatusRequestEntityTooLarge {
+	if code, _ = postRaw(bytes.Repeat([]byte{1, 0}, 4000)); code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("big body: %d", code)
 	}
 	bad := ev("y", core.KindAPIIn, 1, 1)
 	bad.SessionID = "../etc"
-	code, r = postRaw(line(bad) + "not json\n")
-	if code != 200 || r.Accepted != 0 || r.Rejected != 2 || r.RejectedReasons["invalid_session_id"] != 1 || r.RejectedReasons["invalid_json"] != 1 {
+	code, r = postRaw(append(protoBody(t, bad), 3, 0x07, 0x07, 0x07)) // second message is well-framed, not protobuf
+	if code != 200 || r.Accepted != 0 || r.Rejected != 2 || r.RejectedReasons["invalid_session_id"] != 1 || r.RejectedReasons["invalid_proto"] != 1 {
 		t.Fatalf("%d %+v", code, r)
 	}
 }
 
 func TestDefaults(t *testing.T) {
 	d := DefaultConfig()
-	if d.Window != 500*time.Millisecond || d.MaxLineBytes != 4<<20 || d.IdleEvict != 5*time.Minute {
+	if d.Window != 500*time.Millisecond || d.MaxMessageBytes != 4<<20 || d.IdleEvict != 5*time.Minute {
 		t.Fatalf("%+v", d)
 	}
 }

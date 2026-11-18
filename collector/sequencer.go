@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +17,10 @@ type Sequencer struct {
 	window time.Duration
 	idle   time.Duration
 	maxBuf int
+	// storeTimeout bounds each background store call made by an actor.
+	storeTimeout time.Duration
+	log          *slog.Logger
+	tel          *telemetry
 
 	mu     sync.Mutex
 	actors map[string]*sessionActor
@@ -28,14 +33,13 @@ type Sequencer struct {
 	jd   chan struct{}
 }
 
-func newSequencer(st store.Store, window, idle time.Duration, maxBuf int) *Sequencer {
-	if maxBuf <= 0 {
-		maxBuf = 100000
-	}
-	s := &Sequencer{st: st, window: window, idle: idle, maxBuf: maxBuf,
+// newSequencer expects cfg to have been normalised by New.
+func newSequencer(st store.Store, cfg Config, tel *telemetry) *Sequencer {
+	s := &Sequencer{st: st, window: cfg.Window, idle: cfg.IdleEvict, maxBuf: cfg.MaxBufferedEvents,
+		storeTimeout: cfg.StoreTimeout, log: cfg.Logger, tel: tel,
 		actors: map[string]*sessionActor{}, quar: map[string]int{},
 		stop: make(chan struct{}), jd: make(chan struct{})}
-	if idle > 0 {
+	if s.idle > 0 {
 		go s.janitor()
 	} else {
 		close(s.jd)
@@ -73,7 +77,7 @@ func (s *Sequencer) sweep(now time.Time) {
 		}
 		if now.Sub(time.Unix(0, a.lastActive.Load())) >= limit {
 			delete(s.actors, id)
-			close(a.ch)
+			a.stop()
 			gone = append(gone, a)
 		}
 	}
@@ -106,11 +110,27 @@ func (s *Sequencer) with(id string, create, touch bool, f func(*sessionActor)) b
 		a.lastActive.Store(time.Now().UnixNano())
 	}
 	s.mu.Unlock()
-	a.run(f)
+	ok := a.run(f)
 	s.mu.Lock()
 	a.inflight--
 	s.mu.Unlock()
-	return true
+	return ok
+}
+
+// drop stops and forgets a session's actor right away when nothing is using
+// it. Deleting a session must not leave a goroutine behind until (or, with
+// eviction disabled, forever instead of) the next idle sweep.
+func (s *Sequencer) drop(id string) {
+	s.mu.Lock()
+	a := s.actors[id]
+	if a == nil || a.inflight > 0 || a.bufLen.Load() > 0 {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.actors, id)
+	a.stop()
+	s.mu.Unlock()
+	<-a.done
 }
 
 func (s *Sequencer) actorCount() int {
@@ -123,6 +143,31 @@ func (s *Sequencer) addQuarantine(id string, n int) {
 	s.qmu.Lock()
 	s.quar[id] += n
 	s.qmu.Unlock()
+	s.tel.quarantined.Add(n)
+}
+
+// buffered is the number of events sitting in reorder windows.
+func (s *Sequencer) buffered() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, a := range s.actors {
+		n += a.bufLen.Load()
+	}
+	return n
+}
+
+func (s *Sequencer) forgetQuarantine(id string) {
+	s.qmu.Lock()
+	delete(s.quar, id)
+	s.qmu.Unlock()
+}
+
+// has reports whether the session currently has a live actor.
+func (s *Sequencer) has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actors[id] != nil
 }
 
 func (s *Sequencer) quarantined(id string) int {
@@ -180,8 +225,9 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 	return t.status(), nil
 }
 
-// Close stops the janitor and every actor; buffered events are not flushed
-// (seal first if they matter).
+// Close stops the janitor and every actor. Each actor first flushes what is
+// still in its reorder window, so a graceful stop loses nothing the store
+// accepts.
 func (s *Sequencer) Close() {
 	s.mu.Lock()
 	already := s.closed
@@ -199,7 +245,7 @@ func (s *Sequencer) evictAll() {
 	s.mu.Lock()
 	gone := make([]*sessionActor, 0, len(s.actors))
 	for id, a := range s.actors {
-		close(a.ch)
+		a.stop()
 		gone = append(gone, a)
 		delete(s.actors, id)
 	}
@@ -212,7 +258,7 @@ func (s *Sequencer) evictAll() {
 // Flush forces the reorder window closed for an existing session and returns
 // its status afterwards.
 func (s *Sequencer) Flush(ctx context.Context, id string) (st Status, err error) {
-	s.with(id, true, true, func(a *sessionActor) {
+	ok := s.with(id, true, true, func(a *sessionActor) {
 		if err = a.load(ctx); err != nil {
 			return
 		}
@@ -221,5 +267,8 @@ func (s *Sequencer) Flush(ctx context.Context, id string) (st Status, err error)
 		}
 		st = a.status()
 	})
+	if !ok {
+		return Status{}, errSeqClosed
+	}
 	return
 }

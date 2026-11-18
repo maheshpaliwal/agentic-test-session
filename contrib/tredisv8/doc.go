@@ -11,6 +11,20 @@
 // redis.Nil is a normal miss. Wrap is a pass-through when !core.Enabled() and
 // idempotent per client.
 //
+// Mutations name only the keys a command writes: the destination of the
+// *STORE family, PFMERGE, BITOP and COPY (not their sources), and the key a
+// multi-key pop (BLPOP, BZPOPMIN, ...) actually popped from. A write whose
+// reply shows it changed nothing (SET NX|XX / SETNX / MSETNX / RENAMENX with a
+// failed condition; DEL, UNLINK, HDEL, SREM, ZREM, EXPIRE*, PERSIST returning
+// 0) still gets its span but no mutation.
+//
+// Image reads (GET/HSCAN/LRANGE/SSCAN/ZRANGE by TYPE, collections capped at
+// about 1000 elements) are bounded per command and per pipeline by
+// WithPipelineImageCap, WithImageTimeout and WithImageDeadline; a skipped read
+// is flagged with the attribute image_skipped (cap, deadline or error). When a
+// pipeline writes a key more than once, the first write carries the
+// before-image and the last successful one the after-image.
+//
 // Clients obtained through an internal wrapper. When the *redis.Client is
 // hidden behind a wrapper type (for example one that embeds a Cmdable
 // interface and already installs its own hooks), hook the concrete client the

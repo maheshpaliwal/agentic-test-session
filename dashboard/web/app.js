@@ -488,7 +488,7 @@
   function viewSessions(main, token, query) {
     document.title = 'Sessions - tsession';
     const f = { state: STATES.indexOf(query.get('state')) >= 0 ? query.get('state') : '', q: (query.get('q') || '').toLowerCase(), auto: true };
-    let rows = null, loadErr = null, lastSig = '', editing = null, entryVer = 0, entryBusy = false;
+    let rows = null, loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
     const pendingNames = new Map();
     const q = h('input', { class: 'field', type: 'search', placeholder: 'Search id, name, binding, entry point', 'aria-label': 'Search sessions', value: query.get('q') || '', oninput: (e) => { f.q = e.target.value.toLowerCase(); paint(true); } });
     const chipsEl = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by state' });
@@ -536,6 +536,19 @@
         e.stopPropagation();
         try { await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); load(); } catch (er) { showError('Stop failed: ' + er.message); }
       } }, icon('stop', 'sm'), 'Stop') : null;
+      // Delete is two clicks: the first arms the button for a few seconds, the second deletes.
+      const armed = confirming === s.id;
+      const del = TERMINAL[s.state] ? h('button', { type: 'button', class: 'btn sm ' + (armed ? 'danger' : 'ghost'),
+        title: 'Delete this session and everything recorded for it', onclick: async (e) => {
+          e.stopPropagation();
+          if (!armed) {
+            confirming = s.id; paint(true);
+            setTimeout(() => { if (confirming === s.id) { confirming = null; paint(true); } }, 4000);
+            return;
+          }
+          confirming = null;
+          try { await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' }); toast('Deleted ' + s.id, 'ok'); load(); } catch (er) { showError('Delete failed: ' + er.message); paint(true); }
+        } }, armed ? 'Confirm delete' : 'Delete') : null;
       const bound = null;
       return h('tr', { class: 'row', tabindex: 0, 'data-id': s.id, onclick: open, onkeydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(); } },
         h('td', null, statePill(s.state)),
@@ -548,12 +561,12 @@
           h('span', { title: 'wall-clock duration' }, icon('clock', 'sm'), h('b', { text: dur })))),
         h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', 'some async work or events are missing', 'warn') : null,
           s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag('seal error', 't-err', s.seal_error) : null)),
-        h('td', { class: 'num' }, stop));
+        h('td', { class: 'num' }, stop, del));
     }
     function paint(force) {
       const liveBucket = (rows || []).some(isLive) ? Math.floor(Date.now() / 5000) : 0;
       if (editing && !force) return;
-      const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing]);
+      const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing, confirming]);
       if (!force && sig === lastSig) return;
       lastSig = sig;
       const focusId = document.activeElement && document.activeElement.getAttribute && document.activeElement.closest && document.activeElement.closest('tr.row') ? document.activeElement.closest('tr.row').getAttribute('data-id') : null;

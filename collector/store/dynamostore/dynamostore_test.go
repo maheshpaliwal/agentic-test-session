@@ -357,8 +357,10 @@ func TestContextAndClose(t *testing.T) {
 		if err := s.AppendEvents(context.Background(), "", run("", 1, 1)); err == nil {
 			t.Fatal("empty session id must fail")
 		}
-		if s.Close() != nil || s.Close() != nil {
-			t.Fatal("Close must be a no-op")
+		for range 2 { // repeatable
+			if err := s.Close(); err != nil {
+				t.Fatalf("Close must be a no-op: %v", err)
+			}
 		}
 	})
 }
@@ -394,5 +396,54 @@ func TestEncodeEventScalars(t *testing.T) {
 	}
 	if !(contSK(7, 1) > eventSK(7) && contSK(7, 1) < eventSK(8) && contSK(7, 12) < eventSK(8)) {
 		t.Fatal("sort key order")
+	}
+}
+
+// DeleteSession has to page through the partition, chunk its BatchWriteItem
+// calls at 25 and resend what the service hands back as unprocessed.
+func TestDeleteSessionPagesAndRetries(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	db.unprocessed = 3
+	s, err := newStore(ctx, db, Config{CreateTable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sid, keep = "ts_del", "ts_keep"
+	// 60 small events plus one chunked event: well over one page (7) and one batch (25).
+	if err := s.AppendEvents(ctx, sid, run(sid, 1, 60)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvents(ctx, sid, []core.Event{bigEvent(sid, 61, 700*1024)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutSeal(ctx, sid, store.SealInfo{SealedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvents(ctx, keep, run(keep, 1, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSession(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	db.mu.Lock()
+	for k := range db.items {
+		if strings.HasPrefix(k, sid+"\x00") {
+			t.Errorf("item survived delete: %q", k)
+		}
+	}
+	calls := db.batchCalls
+	db.mu.Unlock()
+	if calls < 4 {
+		t.Fatalf("expected several BatchWriteItem calls (chunking + retries), got %d", calls)
+	}
+	if evs, err := s.Events(ctx, keep, 0, 0); err != nil || len(evs) != 3 {
+		t.Fatalf("unrelated session damaged: %d %v", len(evs), err)
+	}
+	// A cancelled context stops the delete instead of spinning.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.DeleteSession(cctx, keep); err == nil {
+		t.Fatal("expected an error from a cancelled delete")
 	}
 }

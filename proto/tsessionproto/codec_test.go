@@ -292,35 +292,12 @@ func benchBatch() []core.Event {
 	return evs
 }
 
-func BenchmarkEncodeNDJSON(b *testing.B) {
-	evs := benchBatch()
-	enc := runtime.NDJSONEncoder{}
-	n, _ := enc.Encode(evs)
-	b.SetBytes(int64(len(n)))
-	b.ReportMetric(float64(len(n)), "wire-bytes")
-	for b.Loop() {
-		enc.Encode(evs)
-	}
-}
-
 func BenchmarkEncodeProto(b *testing.B) {
 	evs := benchBatch()
 	n, _ := Encode(evs)
 	b.ReportMetric(float64(len(n)), "wire-bytes")
 	for b.Loop() {
 		Encode(evs)
-	}
-}
-
-func BenchmarkDecodeNDJSON(b *testing.B) {
-	data, _ := runtime.NDJSONEncoder{}.Encode(benchBatch())
-	for b.Loop() {
-		for _, l := range bytes.Split(data, []byte("\n")) {
-			if len(l) > 0 {
-				var e core.Event
-				_ = json.Unmarshal(l, &e)
-			}
-		}
 	}
 }
 
@@ -333,15 +310,5 @@ func BenchmarkDecodeProto(b *testing.B) {
 				break
 			}
 		}
-	}
-}
-
-func TestWireSizeComparison(t *testing.T) {
-	evs := benchBatch()
-	n, _ := runtime.NDJSONEncoder{}.Encode(evs)
-	p, _ := Encode(evs)
-	t.Logf("256 events: ndjson=%d B protobuf=%d B (%.0f%%)", len(n), len(p), 100*float64(len(p))/float64(len(n)))
-	if len(p) >= len(n) {
-		t.Fatalf("protobuf not smaller")
 	}
 }

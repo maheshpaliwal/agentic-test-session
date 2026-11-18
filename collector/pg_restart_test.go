@@ -2,11 +2,10 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
@@ -109,12 +108,12 @@ func TestPGHardening(t *testing.T) {
 	c, srv, pg := pgCollector(t, schema)
 	defer func() { srv.Close(); c.Close(); pg.Close(); dropSchema(t, schema) }()
 
-	nul := `{"session_id":"` + sid + `","span_id":"n","kind":"api.in","name":"a\u0000b","instance":"i1","local_seq":1,"end_hlc":1,"req":{"inline":{"x":"\u0000"}}}` + "\n"
-	resp, err := http.Post(srv.URL+"/v1/ingest", "application/x-ndjson", strings.NewReader(nul))
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("nul ingest: %v %v", err, resp)
+	nul := ev("n", core.KindAPIIn, 1, 1)
+	nul.Name = "a\x00b"
+	nul.Req.Inline = json.RawMessage(`{"x":"\u0000"}`)
+	if code, r := rawPost(t, srv.URL, ctProto, protoBody(t, nul)); code != 200 || r.Accepted != 1 {
+		t.Fatalf("nul ingest: %d %+v", code, r)
 	}
-	resp.Body.Close()
 	if n := len(events(t, c)); n != 1 {
 		t.Fatalf("stored %d", n)
 	}

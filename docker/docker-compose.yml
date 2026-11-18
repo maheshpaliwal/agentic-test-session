@@ -37,6 +37,8 @@ services:
       TSESSION_COLLECTOR_STORE: pg
       TSESSION_COLLECTOR_PG_DSN: postgres://tsession:${TSESSION_DB_PASSWORD}@postgres:5432/tsession?sslmode=disable
       TSESSION_COLLECTOR_BUNDLE_DIR: /data/bundles
+      # Delete sessions this long after their seal (Go duration, e.g. 168h); 0 keeps them forever.
+      TSESSION_COLLECTOR_RETENTION: ${TSESSION_COLLECTOR_RETENTION:-0}
       # Guards stay on: only these Host values (compose service name) and, for /v1/internal/*, peers in the
       # compose network's own subnet (control plane). Browser Origins stay denied (default none).
       TSESSION_COLLECTOR_ALLOWED_HOSTS: collector,collector:7071

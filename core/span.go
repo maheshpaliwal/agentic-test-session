@@ -115,30 +115,59 @@ func (s *Span) with(f func(e *Event)) {
 	}
 }
 
+// SpanID returns the span's id ("" for a nil span).
 func (s *Span) SpanID() string {
 	if s == nil {
 		return ""
 	}
 	return s.ev.SpanID
 }
+
+// The setters below record data on the span. Like every Span method they are
+// no-ops on a nil span and after End.
+
+// SetName replaces the span's name.
 func (s *Span) SetName(n string) { s.with(func(e *Event) { e.Name = n }) }
-func (s *Span) SetReq(v any)     { p := Payload(v); s.with(func(e *Event) { e.Req = p }) }
-func (s *Span) SetResp(v any)    { p := Payload(v); s.with(func(e *Event) { e.Resp = p }) }
-func (s *Span) SetTx(id string)  { s.with(func(e *Event) { e.TxID = id }) }
+
+// SetReq records the request payload; v is marshalled, redacted and capped
+// by Payload.
+func (s *Span) SetReq(v any) { p := Payload(v); s.with(func(e *Event) { e.Req = p }) }
+
+// SetResp records the response payload (see SetReq).
+func (s *Span) SetResp(v any) { p := Payload(v); s.with(func(e *Event) { e.Resp = p }) }
+
+// SetTx ties the span to a transaction; the collector uses the id to decide
+// whether the span's mutations took effect.
+func (s *Span) SetTx(id string) { s.with(func(e *Event) { e.TxID = id }) }
+
+// SetAttempt records which delivery attempt a worker span is (1-based).
 func (s *Span) SetAttempt(n int) { s.with(func(e *Event) { e.Attempt = n }) }
+
+// AddLink records a follows-from relation, e.g. a worker span linking to the
+// publish span that caused it.
 func (s *Span) AddLink(spanID string) {
 	s.with(func(e *Event) { e.LinkIDs = append(e.LinkIDs, spanID) })
 }
+
+// AddMutation records one change the span made.
 func (s *Span) AddMutation(m Mutation) {
 	s.with(func(e *Event) { e.Mutations = append(e.Mutations, m) })
 }
+
+// AddRead records a summary of one read the span made.
 func (s *Span) AddRead(r ReadSummary) { s.with(func(e *Event) { e.Reads = append(e.Reads, r) }) }
-func (s *Span) AddFlag(f string)      { s.with(func(e *Event) { e.Flags = append(e.Flags, f) }) }
+
+// AddFlag marks the span with a free-form flag such as "truncated".
+func (s *Span) AddFlag(f string) { s.with(func(e *Event) { e.Flags = append(e.Flags, f) }) }
+
+// SetErr records err's text; a nil err is ignored.
 func (s *Span) SetErr(err error) {
 	if err != nil {
 		s.with(func(e *Event) { e.Err = err.Error() })
 	}
 }
+
+// SetAttr sets a string attribute, replacing an earlier value for k.
 func (s *Span) SetAttr(k, v string) {
 	s.with(func(e *Event) {
 		if e.Attrs == nil {

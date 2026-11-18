@@ -19,9 +19,15 @@ import (
 // maxSQSAttrs is the SQS limit on message attributes per message.
 const maxSQSAttrs = 10
 
-// tsAttr is the compact single-attribute carrier ("k=v&k=v", url-encoded),
-// used when fewer than 3 attribute slots are free.
-const tsAttr = "ts"
+// ctxAttr is the compact single-attribute carrier ("k=v&k=v", url-encoded),
+// used when fewer than 3 attribute slots are free. The name is namespaced so
+// it cannot collide with an application attribute.
+const ctxAttr = "x-tsession-ctx"
+
+// legacyCtxAttr is the compact carrier name written by earlier versions. It is
+// still read, so messages from older producers keep their trace; it is never
+// written, because applications use "ts" for their own data.
+const legacyCtxAttr = "ts"
 
 type sqsCarrier map[string]types.MessageAttributeValue
 
@@ -30,9 +36,11 @@ func (c sqsCarrier) Get(key string) string {
 	if v, ok := c[key]; ok && v.StringValue != nil {
 		return *v.StringValue
 	}
-	if v, ok := c[tsAttr]; ok && v.StringValue != nil {
-		if q, err := url.ParseQuery(*v.StringValue); err == nil {
-			return q.Get(key)
+	for _, name := range [...]string{ctxAttr, legacyCtxAttr} {
+		if v, ok := c[name]; ok && v.StringValue != nil {
+			if q, err := url.ParseQuery(*v.StringValue); err == nil && q.Get(key) != "" {
+				return q.Get(key)
+			}
 		}
 	}
 	return ""
@@ -80,9 +88,11 @@ func SendMessage(ctx context.Context, c SQSAPI, in *sqs.SendMessageInput, optFns
 
 // SendMessageOpts is SendMessage with options. SQS allows 10 message
 // attributes: with 3 free slots the carrier uses 3 attributes; with 1-2 free it
-// uses one compact "ts" attribute; with none it uses opts.SideChannel when
-// configured, else propagation is skipped and the publish span is flagged
-// propagation_skipped:attr_limit (side-channel failure: ...:side_channel).
+// uses one compact "x-tsession-ctx" attribute; with none (or when the
+// application already set an attribute of that name, which is never
+// overwritten) it uses opts.SideChannel when configured, else propagation is
+// skipped and the publish span is flagged propagation_skipped:attr_limit
+// (side-channel failure: ...:side_channel).
 func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.SendMessageInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
 	if !core.Enabled() || in == nil {
 		return c.SendMessage(ctx, in, optFns...)
@@ -103,8 +113,8 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 	mode := "attrs"
 	switch {
 	case room >= 3:
-	case room >= 1:
-		mode, carrier = "ts", core.MapCarrier{}
+	case room >= 1 && !has(attrs, ctxAttr):
+		mode, carrier = "ctx", core.MapCarrier{}
 	case opts.SideChannel != nil:
 		mode, carrier = "side", core.MapCarrier{}
 	default:
@@ -117,8 +127,8 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 		case core.MapCarrier:
 			if len(m) > 0 {
 				switch mode {
-				case "ts":
-					sqsCarrier(attrs).Set(tsAttr, encodeTS(m))
+				case "ctx":
+					sqsCarrier(attrs).Set(ctxAttr, encodeTS(m))
 				case "side":
 					if e := putBounded(c2, opts.SideChannel, sqsSideKey(queue, md5Hex(body)), m, opts.PutTimeout); e != nil {
 						flag(span, FlagSideChannel)
@@ -140,7 +150,7 @@ func ReceiveMessage(ctx context.Context, c SQSAPI, in *sqs.ReceiveMessageInput, 
 	}
 	cp := *in
 	cp.MessageAttributeNames = append(append([]string(nil), in.MessageAttributeNames...),
-		core.KeyTraceparent, core.KeySession, core.KeyHLC, tsAttr)
+		core.KeyTraceparent, core.KeySession, core.KeyHLC, ctxAttr, legacyCtxAttr)
 	cp.MessageSystemAttributeNames = append(append([]types.MessageSystemAttributeName(nil), in.MessageSystemAttributeNames...),
 		types.MessageSystemAttributeNameApproximateReceiveCount)
 	return c.ReceiveMessage(ctx, &cp, optFns...)
@@ -173,6 +183,11 @@ func ConsumeSQSMessageOpts(ctx context.Context, queueURL string, msg types.Messa
 	d := Delivery{System: "sqs", Queue: queueURL, JobName: queueURL, Params: bodyParams([]byte(aws.ToString(msg.Body))),
 		Attempt: attempt, MessageID: aws.ToString(msg.MessageId), MaxAttempts: maxReceives, RetryExpected: opts.RetryExpected}
 	return Consume(ctx, carrier, d, handler)
+}
+
+func has(attrs map[string]types.MessageAttributeValue, name string) bool {
+	_, ok := attrs[name]
+	return ok
 }
 
 func secs(n int32) time.Duration { return time.Duration(n) * time.Second }

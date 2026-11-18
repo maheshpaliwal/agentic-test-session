@@ -110,16 +110,93 @@ type resolved struct {
 	Values map[string]any // placeholder -> redacted value
 }
 
-// resolveExpr resolves "#n" names and ":v" values of an expression. Values
-// assigned to / compared with a sensitive attribute (or bound to a placeholder
-// whose own name is sensitive) are masked.
-func resolveExpr(expr string, names map[string]string, vals map[string]types.AttributeValue) resolved {
+// sensitiveValues returns the ":v" placeholders of exprs (the expressions of
+// one request, which share their placeholders) whose value must be masked: a
+// placeholder is sensitive when its own name is, or when it shares a term with
+// a sensitive attribute. A term is one comparison, assignment, function call
+// or IN / BETWEEN list, on either side of the operator; terms end at AND, OR,
+// NOT, a clause keyword (SET, REMOVE, ADD, DELETE) or a comma outside
+// parentheses.
+func sensitiveValues(names map[string]string, exprs ...string) map[string]bool {
+	sens := map[string]bool{}
+	for _, e := range exprs {
+		var term []string // placeholders of the current term
+		hot := false      // the current term names a sensitive attribute
+		depth, between := 0, false
+		flush := func() {
+			if hot {
+				for _, p := range term {
+					sens[p] = true
+				}
+			}
+			term, hot = term[:0], false
+		}
+		for _, t := range lexExpr(e) {
+			switch t.kind {
+			case 'a', '#':
+				if core.IsSensitiveKey(lastSegment(resolveName(t.text, names))) {
+					hot = true
+				}
+			case ':':
+				term = append(term, t.text)
+				if core.IsSensitiveKey(strings.TrimPrefix(t.text, ":")) {
+					sens[t.text] = true
+				}
+			case 'f':
+				switch strings.ToLower(t.text) {
+				case "between":
+					between = true
+				case "and":
+					if between { // the AND of "a BETWEEN :lo AND :hi"
+						between = false
+					} else {
+						flush()
+					}
+				case "or", "not", "set", "remove", "add", "delete":
+					flush()
+				}
+			case 'p':
+				switch t.text {
+				case "(":
+					depth++
+				case ")":
+					depth--
+				case ",":
+					if depth <= 0 {
+						flush()
+					}
+				}
+			}
+		}
+		flush()
+	}
+	return sens
+}
+
+// resolveExprs resolves the "#n" names and ":v" values of the expressions of
+// one request (nil or empty expressions resolve to the zero value). Values
+// bound to a sensitive attribute anywhere in the request are masked in every
+// expression, see sensitiveValues.
+func resolveExprs(names map[string]string, vals map[string]types.AttributeValue, exprs ...*string) []resolved {
+	texts := make([]string, len(exprs))
+	for i, e := range exprs {
+		texts[i] = str(e)
+	}
+	sens := sensitiveValues(names, texts...)
+	out := make([]resolved, len(exprs))
+	for i, e := range texts {
+		out[i] = resolveExpr(e, names, vals, sens)
+	}
+	return out
+}
+
+// resolveExpr renders one expression; sens lists the placeholders to mask.
+func resolveExpr(expr string, names map[string]string, vals map[string]types.AttributeValue, sens map[string]bool) resolved {
 	r := resolved{Values: map[string]any{}}
 	if expr == "" {
 		return r
 	}
 	var expB, inB strings.Builder
-	lastAttr := ""
 	var prev exprTok
 	for _, t := range lexExpr(expr) {
 		if prev.text != "" && t.text != ")" && t.text != "," && prev.text != "(" &&
@@ -131,21 +208,21 @@ func resolveExpr(expr string, names map[string]string, vals map[string]types.Att
 		switch t.kind {
 		case 'a', '#':
 			name := resolveName(t.text, names)
-			lastAttr = lastSegment(name)
 			expB.WriteString(name)
 			inB.WriteString(name)
 		case ':':
 			expB.WriteString(t.text)
 			var v any = t.text
-			if av, ok := vals[t.text]; ok {
+			av, bound := vals[t.text]
+			if bound {
 				v = plainAV(av)
 			}
-			if core.IsSensitiveKey(lastAttr) || core.IsSensitiveKey(strings.TrimPrefix(t.text, ":")) {
+			if sens[t.text] {
 				v = core.RedactedValue
 			} else {
 				v = core.RedactAny(v)
 			}
-			if _, ok := vals[t.text]; ok {
+			if bound {
 				r.Values[t.text] = v
 			}
 			b, _ := json.Marshal(v)
@@ -156,9 +233,6 @@ func resolveExpr(expr string, names map[string]string, vals map[string]types.Att
 		default:
 			expB.WriteString(t.text)
 			inB.WriteString(t.text)
-			if t.kind == 'p' && t.text == "," {
-				lastAttr = ""
-			}
 		}
 	}
 	r.Expr = strings.TrimSpace(expB.String())

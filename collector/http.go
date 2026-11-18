@@ -1,8 +1,6 @@
 package collector
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,7 +31,11 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}/summary", c.handleSummary)
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", c.handleDrain)
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", c.handleDelete)
+	mux.Handle("GET /metrics", c.tel.reg.Handler())
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/internal/") && !c.internalPeerOK(r) {
 			writeErr(w, http.StatusForbidden, errors.New("internal endpoint: peer not allowed"))
@@ -42,9 +44,14 @@ func (c *Collector) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 	guarded := core.LoopbackGuard(h, core.GuardConfig{
-		AllowedHosts:     c.cfg.AllowedHosts,
-		AllowedOrigins:   c.cfg.AllowedOrigins,
-		BodyContentTypes: []string{"application/x-ndjson", "application/json", tsessionproto.ContentType},
+		AllowedHosts:   c.cfg.AllowedHosts,
+		AllowedOrigins: c.cfg.AllowedOrigins,
+		// Ingest is the only collector POST with a body (seal sends none), so
+		// protobuf is the only allowed type; the 415 keeps the JSON error shape.
+		BodyContentTypes: []string{tsessionproto.ContentType},
+		OnBadContentType: func(w http.ResponseWriter, _ *http.Request) {
+			writeErr(w, http.StatusUnsupportedMediaType, errBadContentType)
+		},
 	})
 	// /healthz is exempt from the Host guard (GET only; reveals nothing) so
 	// container probes using service names work.
@@ -88,75 +95,9 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
 
-// readLine reads one NDJSON line of at most max bytes. An over-long line is
-// consumed to its end and reported with over=true (its bytes are discarded),
-// so one huge event never costs the rest of the batch.
-func readLine(br *bufio.Reader, max int) (line []byte, over bool, err error) {
-	var acc []byte
-	for {
-		chunk, e := br.ReadSlice('\n')
-		if !over {
-			if len(acc)+len(chunk) > max+1 { // +1 for the newline
-				over, acc = true, nil
-			} else if e == nil && acc == nil {
-				return chunk, false, nil // common case: whole line, no copy
-			} else {
-				acc = append(acc, chunk...)
-			}
-		}
-		if e == bufio.ErrBufferFull {
-			continue
-		}
-		return acc, over, e
-	}
-}
-
-// ingestDecoder reads one request body into events. Items it cannot use are
-// recorded in res (reason -> count) without failing the request; a non-nil
-// error is a read failure (including *http.MaxBytesError) and aborts it.
-// Events decoded before an error are returned alongside it.
-type ingestDecoder func(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error)
-
-// ingestDecoders maps request media types to their decoder. A missing or
-// unrecognised Content-Type is read as NDJSON (the original behaviour); the
-// LoopbackGuard has already vetted the type for non-GET requests.
-var ingestDecoders = map[string]ingestDecoder{
-	"application/x-protobuf": decodeProtoBatch,
-}
-
-func pickDecoder(contentType string) ingestDecoder {
-	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
-		if d, ok := ingestDecoders[mt]; ok {
-			return d
-		}
-	}
-	return decodeNDJSONBatch
-}
-
-// decodeNDJSONBatch reads one JSON event per line.
-func decodeNDJSONBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Event, error) {
-	br := bufio.NewReaderSize(body, 64<<10)
-	var evs []core.Event
-	for {
-		raw, over, err := readLine(br, maxItem)
-		if err != nil && err != io.EOF {
-			return evs, err
-		}
-		if over {
-			res.reject("oversize_line", 1)
-		} else if line := bytes.TrimSpace(raw); len(line) > 0 {
-			var e core.Event
-			if jerr := json.Unmarshal(store.StripNUL(line), &e); jerr != nil {
-				res.reject("invalid_json", 1)
-			} else {
-				evs = append(evs, e)
-			}
-		}
-		if err == io.EOF {
-			return evs, nil
-		}
-	}
-}
+// errBadContentType is the 415 message for ingest bodies that are not framed
+// protobuf (NDJSON ingest was removed).
+var errBadContentType = errors.New("unsupported Content-Type: POST /v1/ingest requires " + tsessionproto.ContentType)
 
 // decodeProtoBatch reads a stream of length-delimited Event messages. A bad
 // message is rejected alone; broken framing ends the stream with one
@@ -172,7 +113,7 @@ func decodeProtoBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Ev
 		case err == io.EOF:
 			return evs, nil
 		case errors.Is(err, tsessionproto.ErrOversize):
-			res.reject("oversize_line", 1)
+			res.reject("oversize_message", 1)
 		case errors.Is(err, tsessionproto.ErrInvalid):
 			res.reject("invalid_proto", 1)
 		case errors.Is(err, tsessionproto.ErrCorrupt):
@@ -185,9 +126,14 @@ func decodeProtoBatch(body io.Reader, maxItem int, res *IngestResult) ([]core.Ev
 }
 
 func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
+	// The guard only vets bodies; an empty request must be refused too.
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != tsessionproto.ContentType {
+		writeErr(w, http.StatusUnsupportedMediaType, errBadContentType)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, c.cfg.MaxBodyBytes)
 	var res IngestResult
-	evs, err := pickDecoder(r.Header.Get("Content-Type"))(r.Body, c.cfg.MaxLineBytes, &res)
+	evs, err := decodeProtoBatch(r.Body, c.cfg.MaxMessageBytes, &res)
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
@@ -197,6 +143,9 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	for reason, n := range res.RejectedReasons { // refused while decoding; Ingest counts its own
+		c.tel.rejected.With(reason).Add(n)
+	}
 	ir, err := c.Ingest(r.Context(), r.Header.Get("X-TSession-Instance"), evs)
 	res.Accepted, res.Duplicates = ir.Accepted, ir.Duplicates
 	for k, n := range ir.RejectedReasons {
@@ -204,8 +153,12 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		c.log.Error("ingest", "err", err)
-		if errors.Is(err, errBackpressure) {
+		switch {
+		case errors.Is(err, errBackpressure):
 			writeErr(w, http.StatusServiceUnavailable, errors.New("session buffer full, retry later"))
+			return
+		case errors.Is(err, errSeqClosed):
+			writeErr(w, http.StatusServiceUnavailable, errors.New("collector is shutting down, retry later"))
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, errors.New("storage error"))
@@ -217,40 +170,32 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 func (c *Collector) handleSessions(w http.ResponseWriter, r *http.Request) {
 	l, err := c.st.ListSessions(r.Context())
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if l == nil {
 		l = []store.SessionInfo{}
 	}
-	writeJSON(w, 200, l)
+	writeJSON(w, http.StatusOK, l)
 }
 
-// view returns a session's events with tx outcomes and orphan flags applied
-// (cached until a new Seq arrives or the session is sealed).
-func (c *Collector) view(ctx context.Context, id string) ([]core.Event, error) {
-	v, err := c.viewOf(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return v.evs, nil
-}
-
-func (c *Collector) resolveView(ctx context.Context, id string, evs []core.Event, outcomes map[string]bool) ([]core.Event, error) {
+// resolvePage applies tx outcomes and orphan flags to one page of a session's
+// events and reports whether the session is sealed. Outcomes come from the
+// store because the deciding commit/rollback may lie outside the page.
+func (c *Collector) resolvePage(ctx context.Context, id string, evs []core.Event) (out []core.Event, sealed bool, err error) {
 	si, err := c.st.GetSeal(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if outcomes == nil {
-		if outcomes, err = c.st.TxOutcomes(ctx, id); err != nil {
-			return nil, err
-		}
+	outcomes, err := c.st.TxOutcomes(ctx, id)
+	if err != nil {
+		return nil, false, err
 	}
 	var orph map[string]bool
 	if si != nil {
 		orph = setOf(si.Orphaned)
 	}
-	return resolve(evs, outcomes, si != nil, orph), nil
+	return resolve(evs, outcomes, si != nil, orph), si != nil, nil
 }
 
 func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -264,86 +209,101 @@ func (c *Collector) handleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = min(v, 10000)
 	}
 	evs, err := c.st.Events(r.Context(), id, from, limit)
+	sealed := false
 	if err == nil {
-		evs, err = c.resolveView(r.Context(), id, evs, nil)
+		evs, sealed, err = c.resolvePage(r.Context(), id, evs)
 	}
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	next := from
 	if n := len(evs); n > 0 {
 		next = evs[n-1].Seq + 1
 	}
-	si, _ := c.st.GetSeal(r.Context(), id)
 	if evs == nil {
 		evs = []core.Event{}
 	}
-	writeJSON(w, 200, map[string]any{"events": evs, "next_seq": next, "sealed": si != nil})
+	writeJSON(w, http.StatusOK, map[string]any{"events": evs, "next_seq": next, "sealed": sealed})
 }
 
 func (c *Collector) handleTrace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	v, err := c.viewOf(r.Context(), id)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, v.getTrace(id))
+	writeJSON(w, http.StatusOK, v.getTrace(id))
 }
 
 func (c *Collector) handleEntities(w http.ResponseWriter, r *http.Request) {
 	v, err := c.viewOf(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, v.getEntities())
+	writeJSON(w, http.StatusOK, v.getEntities())
 }
 
 func (c *Collector) handleHistory(w http.ResponseWriter, r *http.Request) {
 	v, err := c.viewOf(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, History(v.evs, r.PathValue("store"), r.PathValue("entity"), r.PathValue("pk")))
+	writeJSON(w, http.StatusOK, History(v.evs, r.PathValue("store"), r.PathValue("entity"), r.PathValue("pk")))
 }
 
 func (c *Collector) handleSummary(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	v, err := c.viewOf(r.Context(), id)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	s, err := c.summary(r.Context(), id, v.getSummary(id))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, s)
+	writeJSON(w, http.StatusOK, s)
 }
 
 func (c *Collector) handleDrain(w http.ResponseWriter, r *http.Request) {
 	ds, err := c.DrainStatus(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, ds)
+	writeJSON(w, http.StatusOK, ds)
 }
 
 func (c *Collector) handleSeal(w http.ResponseWriter, r *http.Request) {
 	res, err := c.Seal(r.Context(), r.PathValue("id"))
 	if errors.Is(err, errBadID) {
-		writeErr(w, 400, err)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if err != nil {
 		c.log.Error("seal", "err", err)
-		writeErr(w, 500, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, 200, res)
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (c *Collector) handleDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	switch err := c.Delete(r.Context(), id); {
+	case errors.Is(err, errBadID):
+		writeErr(w, http.StatusBadRequest, err)
+	case errors.Is(err, errSeqClosed):
+		writeErr(w, http.StatusServiceUnavailable, errors.New("collector is shutting down, retry later"))
+	case err != nil:
+		c.log.Error("delete session", "session", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "session_id": id})
+	}
 }

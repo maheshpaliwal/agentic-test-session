@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -21,7 +22,7 @@ type ExporterConfig struct {
 	RetryBackoff  time.Duration // first backoff, doubles (default 100ms)
 	MaxCooldown   time.Duration // pause after a failed batch, capped (default 5s)
 	HTTPTimeout   time.Duration // per request (default 2s)
-	Encoder       BatchEncoder  // wire format (default NDJSON)
+	Encoder       BatchEncoder  // wire format (default ProtobufEncoder)
 }
 
 // Exporter drains a Recorder and ships batches to the collector from a single
@@ -35,6 +36,10 @@ type Exporter struct {
 	stop     chan struct{}
 	done     chan struct{}
 	once     sync.Once
+	// ctx is cancelled by Close so a request in flight to an unresponsive
+	// collector is abandoned instead of holding up shutdown.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	failures int
 	nextTry  time.Time
@@ -63,10 +68,13 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		cfg.HTTPTimeout = 2 * time.Second
 	}
 	if cfg.Encoder == nil {
-		cfg.Encoder = NDJSONEncoder{}
+		cfg.Encoder = ProtobufEncoder{}
 	}
 	cfg.CollectorURL = strings.TrimRight(cfg.CollectorURL, "/")
+	ctx, cancel := context.WithCancel(context.Background())
 	e := &Exporter{
+		ctx:      ctx,
+		cancel:   cancel,
 		cfg:      cfg,
 		rec:      rec,
 		client:   &http.Client{Timeout: cfg.HTTPTimeout, Transport: newPlainTransport()},
@@ -185,7 +193,7 @@ func (e *Exporter) post(batch []core.Event) postResult {
 			}
 			backoff *= 2
 		}
-		req, err := http.NewRequest(http.MethodPost, e.cfg.CollectorURL+"/v1/ingest", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, e.cfg.CollectorURL+"/v1/ingest", bytes.NewReader(body))
 		if err != nil {
 			return postFailed
 		}
@@ -245,6 +253,7 @@ func (e *Exporter) Close(timeout time.Duration) {
 	e.once.Do(func() {
 		e.Flush(timeout)
 		close(e.stop)
+		e.cancel()
 		<-e.done
 	})
 }

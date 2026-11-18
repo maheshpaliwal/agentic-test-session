@@ -42,6 +42,7 @@ type BindingConflictError struct {
 	Binding Binding
 }
 
+// Error implements error.
 func (e *BindingConflictError) Error() string {
 	return fmt.Sprintf("binding_conflict: %s:%s already bound by session %s", e.Binding.Source, e.Binding.Name, e.Session)
 }

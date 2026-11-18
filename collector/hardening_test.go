@@ -99,13 +99,13 @@ func TestStripNUL(t *testing.T) {
 
 func TestIngestSanitizesNUL(t *testing.T) {
 	c, srv := newC(t, 0, "")
-	line := `{"session_id":"` + sid + `","span_id":"a","kind":"api.in","name":"bad\u0000name","instance":"i1","local_seq":1,"end_hlc":1,` +
-		`"req":{"inline":{"k":"v\u0000w"}},"attrs":{"k\u0000":"v"}}` + "\n"
-	resp, err := http.Post(srv.URL+"/v1/ingest", "application/x-ndjson", strings.NewReader(line))
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatal(err, resp)
+	e := ev("a", core.KindAPIIn, 1, 1)
+	e.Name = "bad\x00name"
+	e.Req.Inline = json.RawMessage(`{"k":"v\u0000w"}`)
+	e.Attrs = map[string]string{"k\x00": "v"}
+	if code, r := rawPost(t, srv.URL, ctProto, protoBody(t, e)); code != 200 || r.Accepted != 1 {
+		t.Fatalf("%d %+v", code, r)
 	}
-	resp.Body.Close()
 	got := events(t, c)
 	if len(got) != 1 || strings.ContainsRune(got[0].Name, 0) || !strings.Contains(got[0].Name, "\ufffd") ||
 		bytes.Contains(got[0].Req.Inline, []byte(`\u0000`)) {
@@ -166,13 +166,9 @@ func TestPoisonWindowZeroDoesNotReturn500Forever(t *testing.T) {
 	c, srv := newSpyC(t, cfg, sp)
 	e := ev("p", core.KindDBRead, 1, 1)
 	e.Name = "POISON"
-	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(e)
-	resp, err := http.Post(srv.URL+"/v1/ingest", "application/x-ndjson", &buf)
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("%v %v", err, resp)
+	if code, _ := rawPost(t, srv.URL, ctProto, protoBody(t, e)); code != 200 {
+		t.Fatalf("status %d", code)
 	}
-	resp.Body.Close()
 	if st, _ := c.seq.Status(context.Background(), sid); st.Quarantined != 1 || st.Pending != 0 {
 		t.Fatalf("%+v", st)
 	}
@@ -465,9 +461,11 @@ func TestGuardAndInternalAccess(t *testing.T) {
 		{"internal ipv6 loopback", "GET", ds, "localhost:7071", "[::1]:5", "", "", 200},
 		{"internal foreign peer", "GET", ds, "collector:7071", "203.0.113.9:5", "", "", 403},
 		{"internal allowed cidr", "GET", ds, "collector:7071", "10.1.2.3:5", "", "", 200},
-		{"ingest ndjson", "POST", "/v1/ingest", "127.0.0.1:7071", "203.0.113.9:5", "application/x-ndjson", "{}\n", 200},
-		{"ingest json", "POST", "/v1/ingest", "127.0.0.1:7071", "127.0.0.1:5", "application/json", "{}\n", 200},
+		{"ingest protobuf", "POST", "/v1/ingest", "127.0.0.1:7071", "203.0.113.9:5", ctProto, string(protoBody(t, ev("a", core.KindAPIIn, 1, 1))), 200},
+		{"ingest ndjson refused", "POST", "/v1/ingest", "127.0.0.1:7071", "127.0.0.1:5", "application/x-ndjson", "{}\n", 415},
+		{"ingest json refused", "POST", "/v1/ingest", "127.0.0.1:7071", "127.0.0.1:5", "application/json", "{}\n", 415},
 		{"ingest text/plain", "POST", "/v1/ingest", "127.0.0.1:7071", "127.0.0.1:5", "text/plain", "{}\n", 415},
+		{"ingest no content type", "POST", "/v1/ingest", "127.0.0.1:7071", "127.0.0.1:5", "", "{}\n", 415},
 		{"seal foreign peer", "POST", "/v1/internal/sessions/" + sid + "/seal", "collector", "203.0.113.9:5", "", "", 403},
 		{"browser origin", "GET", "/v1/sessions", "127.0.0.1:7071", "127.0.0.1:5", "", "", 200},
 	} {
@@ -612,4 +610,18 @@ func TestSealedIdleActorEvicted(t *testing.T) {
 	if c2.seq.actorCount() != 1 {
 		t.Fatal("actor with buffered events was evicted")
 	}
+}
+
+// hangStore blocks AppendEvents until the context ends while hang is set.
+type hangStore struct {
+	store.Store
+	hang atomic.Bool
+}
+
+func (s *hangStore) AppendEvents(ctx context.Context, id string, evs []core.Event) error {
+	if s.hang.Load() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.Store.AppendEvents(ctx, id, evs)
 }

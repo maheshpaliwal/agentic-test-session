@@ -162,7 +162,7 @@ func TestSealCollectorDownThenUp(t *testing.T) {
 	down.Store(true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if down.Load() {
-			http.Error(w, "unavailable", 503)
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/seal") {
