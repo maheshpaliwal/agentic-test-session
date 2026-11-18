@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/redisx"
 )
 
 // countHook counts single-command round trips, image reads included (the
@@ -24,7 +25,7 @@ func (h *countHook) DialHook(next redis.DialHook) redis.DialHook {
 
 func (h *countHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if !isHandshake(cmd.Name()) {
+		if !redisx.IsHandshake(cmd.Name()) {
 			h.n.Add(1)
 		}
 		return next(ctx, cmd)
@@ -99,11 +100,11 @@ func TestCollectionImagesCapped(t *testing.T) {
 	c.HSet(ctx, "big:hash", "one-more", "v")
 	evs := rec.Events()
 	var set []string
-	if err := json.Unmarshal(evs[0].Mutations[0].Before.Inline, &set); err != nil || len(set) != imageLimit {
+	if err := json.Unmarshal(evs[0].Mutations[0].Before.Inline, &set); err != nil || len(set) != redisx.ImageLimit {
 		t.Fatalf("set image: %d elements, err=%v, truncated=%v", len(set), err, evs[0].Mutations[0].Before.Truncated)
 	}
 	var hash map[string]string
-	if err := json.Unmarshal(evs[1].Mutations[0].Before.Inline, &hash); err != nil || len(hash) != imageLimit {
+	if err := json.Unmarshal(evs[1].Mutations[0].Before.Inline, &hash); err != nil || len(hash) != redisx.ImageLimit {
 		t.Fatalf("hash image: %d fields, err=%v", len(hash), err)
 	}
 }
