@@ -40,7 +40,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +51,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 const (
@@ -725,7 +725,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 		si.Sealed = sealed[id]
 		out = append(out, *si)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slicex.SortBy(out, func(s store.SessionInfo) string { return s.ID })
 	return out, nil
 }
 

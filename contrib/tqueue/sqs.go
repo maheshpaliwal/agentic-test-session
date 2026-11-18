@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"maps"
 	"net/url"
 	"strconv"
 	"strings"
@@ -99,9 +100,7 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 	}
 	cp := *in
 	attrs := make(map[string]types.MessageAttributeValue, len(in.MessageAttributes)+3)
-	for k, v := range in.MessageAttributes {
-		attrs[k] = v
-	}
+	maps.Copy(attrs, in.MessageAttributes)
 	cp.MessageAttributes = attrs
 	queue := aws.ToString(in.QueueUrl)
 	body := aws.ToString(in.MessageBody)

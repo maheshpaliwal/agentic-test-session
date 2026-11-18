@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 )
 
 type activeSet struct {
@@ -123,10 +124,7 @@ func (s *Subscriber) Close() {
 }
 
 func (s *Subscriber) apply(a activeSet) {
-	sn := &snapshot{active: make(map[string]struct{}, len(a.Active)), exclusive: a.Exclusive, kill: a.Kill, bindings: core.NewBindingSet(a.Bindings)}
-	for _, id := range a.Active {
-		sn.active[id] = struct{}{}
-	}
+	sn := &snapshot{active: set.Of(a.Active...), exclusive: a.Exclusive, kill: a.Kill, bindings: core.NewBindingSet(a.Bindings)}
 	s.snap.Store(sn)
 	s.ready.Store(true)
 }

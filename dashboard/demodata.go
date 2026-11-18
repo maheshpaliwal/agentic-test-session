@@ -1,12 +1,14 @@
 package dashboard
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 // All demo data is synthetic. Hostnames use the reserved .invalid TLD.
@@ -205,21 +207,7 @@ func demoEvents(sid string, base time.Time) []core.Event {
 	b.add("w2b_dlq", tr, wk2, core.KindWorkerDLQ, "orders.notify", "w2b", 1086, 1087, chain(link("pub2"),
 		attempt(2), attrs("dlq", "orders.notify.dlq", "reason", "max attempts exceeded")))
 
-	evs := b.evs
-	sort.SliceStable(evs, func(i, j int) bool {
-		a, c := evs[i], evs[j]
-		if a.EndHLC != c.EndHLC {
-			return a.EndHLC < c.EndHLC
-		}
-		if a.Service != c.Service {
-			return a.Service < c.Service
-		}
-		return a.LocalSeq < c.LocalSeq
-	})
-	for i := range evs {
-		evs[i].Seq = uint64(i + 1)
-	}
-	return evs
+	return finalizeDemo(b)
 }
 
 // activityEvents builds the "multi-trigger" demo session: three separate API
@@ -288,15 +276,8 @@ func activityEvents(sid string, base time.Time) []core.Event {
 
 func finalizeDemo(b *builder) []core.Event {
 	evs := b.evs
-	sort.SliceStable(evs, func(i, j int) bool {
-		a, c := evs[i], evs[j]
-		if a.EndHLC != c.EndHLC {
-			return a.EndHLC < c.EndHLC
-		}
-		if a.Service != c.Service {
-			return a.Service < c.Service
-		}
-		return a.LocalSeq < c.LocalSeq
+	slices.SortStableFunc(evs, func(a, c core.Event) int {
+		return cmp.Or(cmp.Compare(a.EndHLC, c.EndHLC), cmp.Compare(a.Service, c.Service), cmp.Compare(a.LocalSeq, c.LocalSeq))
 	})
 	for i := range evs {
 		evs[i].Seq = uint64(i + 1)
@@ -368,12 +349,8 @@ func BuildTrace(evs []core.Event) []*Node {
 		}
 	}
 	less := func(s []*Node) {
-		sort.SliceStable(s, func(i, j int) bool {
-			a, b := s[i].Event, s[j].Event
-			if a.StartNs != b.StartNs {
-				return a.StartNs < b.StartNs
-			}
-			return a.Seq < b.Seq
+		slices.SortStableFunc(s, func(a, b *Node) int {
+			return cmp.Or(cmp.Compare(a.Event.StartNs, b.Event.StartNs), cmp.Compare(a.Event.Seq, b.Event.Seq))
 		})
 	}
 	less(roots)
@@ -390,11 +367,7 @@ func pkString(pk map[string]any) string {
 			return fmt.Sprint(v)
 		}
 	}
-	keys := make([]string, 0, len(pk))
-	for k := range pk {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := mapx.SortedKeys(pk)
 	s := ""
 	for i, k := range keys {
 		if i > 0 {
@@ -513,8 +486,8 @@ func summarize(evs []core.Event, sess Session) map[string]any {
 	for k, c := range muts {
 		ml = append(ml, m{"store": k.Store, "entity": k.Entity, "count": c})
 	}
-	sort.Slice(ml, func(i, j int) bool {
-		return fmt.Sprint(ml[i]["store"], ml[i]["entity"]) < fmt.Sprint(ml[j]["store"], ml[j]["entity"])
+	slices.SortFunc(ml, func(a, b m) int {
+		return cmp.Compare(fmt.Sprint(a["store"], a["entity"]), fmt.Sprint(b["store"], b["entity"]))
 	})
 	return m{"session_id": sess.ID, "event_count": len(evs), "duration_ns": maxE - minS,
 		"by_kind": byKind, "by_service": bySvc, "mutations": ml, "failures": failures,

@@ -5,11 +5,13 @@
 package metrics
 
 import (
+	"cmp"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -138,12 +140,7 @@ func (v *CounterVec) kind() string { return "counter" }
 func (v *CounterVec) help() string { return v.desc }
 func (v *CounterVec) write(w io.Writer, name string) {
 	v.mu.RLock()
-	keys := make([]string, 0, len(v.children))
-	for k := range v.children {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(v.children)) {
 		fmt.Fprintf(w, "%s%s %d\n", name, labelSet(v.labels, strings.Split(k, "\xff")), v.children[k].v.Load())
 	}
 	v.mu.RUnlock()
@@ -165,8 +162,8 @@ func (g *gaugeFunc) kind() string { return "gauge" }
 func (g *gaugeFunc) help() string { return g.desc }
 func (g *gaugeFunc) write(w io.Writer, name string) {
 	samples := g.fn()
-	sort.SliceStable(samples, func(i, j int) bool {
-		return strings.Join(samples[i].Labels, "\xff") < strings.Join(samples[j].Labels, "\xff")
+	slices.SortStableFunc(samples, func(a, b Sample) int {
+		return cmp.Compare(strings.Join(a.Labels, "\xff"), strings.Join(b.Labels, "\xff"))
 	})
 	for _, s := range samples {
 		if len(s.Labels) != len(g.labels) {
@@ -248,12 +245,8 @@ func formatFloat(f float64) string {
 // WriteTo renders every metric, sorted by name, in the text exposition format.
 func (r *Registry) WriteTo(w io.Writer) (int64, error) {
 	r.mu.Lock()
-	names := make([]string, 0, len(r.metrics))
-	for n := range r.metrics {
-		names = append(names, n)
-	}
+	names := slices.Sorted(maps.Keys(r.metrics))
 	cs := make([]collector, len(names))
-	sort.Strings(names)
 	for i, n := range names {
 		cs[i] = r.metrics[n]
 	}

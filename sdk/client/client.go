@@ -4,6 +4,7 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -361,7 +362,7 @@ func (s *Session) call(ctx context.Context, base, method, path string, in, out a
 		if e.Error == "" {
 			e.Error = strings.TrimSpace(string(b))
 		}
-		if id := firstNonEmpty(e.ConflictingSession, e.SessionID); id != "" {
+		if id := cmp.Or(e.ConflictingSession, e.SessionID); id != "" {
 			e.Error += " (held by session " + id + ")"
 		}
 		if e.Binding != nil {
@@ -391,11 +392,4 @@ func List(ctx context.Context, o Options, state string) ([]Info, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

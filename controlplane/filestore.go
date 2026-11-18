@@ -7,8 +7,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // FileStore wraps a MemStore and rewrites a JSON file on every Put.
@@ -144,10 +146,7 @@ func (f *FileStore) Get(id string) (Session, bool) {
 // List implements Store: sessions in memory plus the archived ones.
 func (f *FileStore) List() []Session {
 	out := f.MemStore.List()
-	inMem := make(map[string]struct{}, len(out))
-	for _, s := range out {
-		inMem[s.ID] = struct{}{}
-	}
+	inMem := slicex.ToMap(out, func(s Session) string { return s.ID })
 	// The archive is append-only and a renamed session may appear more than
 	// once: the last line wins.
 	arch := map[string]Session{}
@@ -157,15 +156,8 @@ func (f *FileStore) List() []Session {
 		}
 		return true
 	})
-	for _, s := range arch {
-		out = append(out, s)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
-	})
+	out = append(out, mapx.Values(arch)...)
+	sortSessions(out)
 	return out
 }
 

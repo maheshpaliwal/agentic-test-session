@@ -5,12 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/collector/store/dynamostore"
 	"github.com/maheshpaliwal/agentic-test-session/collector/store/mongostore"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 )
 
@@ -69,12 +69,7 @@ type usageError string
 func (e usageError) Error() string { return string(e) }
 
 func storeKinds() []string {
-	var ks []string
-	for k := range (storeFlags{}).storeOpeners() {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
+	return mapx.SortedKeys(storeFlags{}.storeOpeners())
 }
 
 // open builds the selected backend; bad invocations return a usageError.

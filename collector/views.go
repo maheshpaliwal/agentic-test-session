@@ -1,10 +1,12 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -134,15 +136,8 @@ func ListEntities(evs []core.Event) []Entity {
 	for key, n := range cnt {
 		out = append(out, Entity{key.s, key.e, key.p, n})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.Store != b.Store {
-			return a.Store < b.Store
-		}
-		if a.Entity != b.Entity {
-			return a.Entity < b.Entity
-		}
-		return a.PK < b.PK
+	slices.SortFunc(out, func(a, b Entity) int {
+		return cmp.Or(cmp.Compare(a.Store, b.Store), cmp.Compare(a.Entity, b.Entity), cmp.Compare(a.PK, b.PK))
 	})
 	return out
 }
@@ -259,9 +254,7 @@ func (c *Collector) summary(ctx context.Context, id string, base Summary) (Summa
 		s.Quarantined = q
 		s.Incomplete = true
 		fl := make(map[string]int, len(base.Flags)+1)
-		for k, v := range base.Flags {
-			fl[k] = v
-		}
+		maps.Copy(fl, base.Flags)
 		fl["quarantined"] = q
 		s.Flags = fl
 	}

@@ -3,12 +3,12 @@ package collector
 import (
 	"context"
 	"log/slog"
-	"sort"
 	"sync"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 // Sequencer routes events to per-session actors and evicts idle ones.
@@ -198,10 +198,7 @@ type Status struct {
 func (a *sessionActor) status() Status {
 	st := Status{Buffered: len(a.buf), LastEventNs: a.lastRecv, EventCount: a.count, Dropped: a.dropped,
 		Quarantined: a.seqr.quarantined(a.id)}
-	for k := range a.open {
-		st.Open = append(st.Open, k)
-	}
-	sort.Strings(st.Open)
+	st.Open = mapx.SortedKeys(a.open)
 	st.Pending = len(a.open) + len(a.buf)
 	return st
 }

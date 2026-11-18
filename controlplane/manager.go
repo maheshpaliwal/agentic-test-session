@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // Config tunes a Manager. Zero values pick sensible defaults.
@@ -368,13 +370,7 @@ func (m *Manager) List(state State) []Session {
 	if state == "" {
 		return all
 	}
-	out := all[:0:0]
-	for _, s := range all {
-		if s.State == state {
-			out = append(out, s)
-		}
-	}
-	return out
+	return slicex.Filter(all, func(s Session) bool { return s.State == state })
 }
 
 // SetKill flips the global kill switch: while set, SDKs record nothing.
@@ -409,7 +405,7 @@ func (m *Manager) activeLocked() ActiveSet {
 			a.Exclusive = s.ID
 		}
 	}
-	sort.Strings(a.Active) // IDs are time-prefixed, so this is creation order
+	slices.Sort(a.Active) // IDs are time-prefixed, so this is creation order
 	for _, id := range a.Active {
 		if s := m.live[id]; s.State == StateActive {
 			for _, b := range s.Bindings {

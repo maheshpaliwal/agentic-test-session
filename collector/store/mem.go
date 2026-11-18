@@ -2,10 +2,10 @@ package store
 
 import (
 	"context"
-	"sort"
 	"sync"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // Mem is the in-memory Store (default; used in tests).
@@ -89,7 +89,7 @@ func (m *Mem) ListSessions(context.Context) ([]SessionInfo, error) {
 		_, si.Sealed = m.seal[id]
 		out = append(out, si)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slicex.SortBy(out, func(s SessionInfo) string { return s.ID })
 	return out, nil
 }
 
