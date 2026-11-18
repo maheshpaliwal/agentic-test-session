@@ -3,13 +3,16 @@
 package controlplane
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 // State is a session's position in the lifecycle FSM.
@@ -157,20 +160,19 @@ func (s *MemStore) Get(id string) (Session, bool) {
 	return x, ok
 }
 
+// sortSessions orders sessions by creation time, then ID.
+func sortSessions(s []Session) {
+	slices.SortFunc(s, func(a, b Session) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
+	})
+}
+
 // List implements Store.
 func (s *MemStore) List() []Session {
 	s.mu.RLock()
-	out := make([]Session, 0, len(s.m))
-	for _, x := range s.m {
-		out = append(out, x)
-	}
+	out := mapx.Values(s.m)
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
-	})
+	sortSessions(out)
 	return out
 }
 

@@ -3,12 +3,13 @@ package tsql
 import (
 	"database/sql/driver"
 	"fmt"
-	"sort"
+	"maps"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 )
 
 const maxCellLen = 1024
@@ -129,19 +130,10 @@ func pkString(pk map[string]any, cols []string) string {
 // reports that a field compared equal only on its captured prefix (both
 // values were cut at maxCellLen), so a change beyond it may be missing.
 func diffMaps(before, after map[string]any) (out []core.FieldChange, truncated bool) {
-	seen := map[string]struct{}{}
-	var keys []string
-	for k := range before {
-		seen[k] = struct{}{}
-		keys = append(keys, k)
-	}
-	for k := range after {
-		if _, ok := seen[k]; !ok {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	keys := set.Set[string]{}
+	keys.AddSeq(maps.Keys(before))
+	keys.AddSeq(maps.Keys(after))
+	for _, k := range set.Sorted(keys) {
 		o, oOK := before[k]
 		n, nOK := after[k]
 		if before != nil && after != nil && oOK && nOK && fmt.Sprint(o) == fmt.Sprint(n) {

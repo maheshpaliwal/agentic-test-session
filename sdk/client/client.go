@@ -4,6 +4,7 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -143,9 +144,7 @@ func baseURL(explicit, env, def string) string {
 	if explicit == "" {
 		explicit = os.Getenv(env)
 	}
-	if explicit == "" {
-		explicit = def
-	}
+	explicit = cmp.Or(explicit, def)
 	return strings.TrimRight(explicit, "/")
 }
 
@@ -168,9 +167,7 @@ func newSession(o Options, info Info) *Session {
 
 // Start creates and activates a session.
 func Start(ctx context.Context, o Options) (*Session, error) {
-	if o.InitiatedBy == "" {
-		o.InitiatedBy = "client"
-	}
+	o.InitiatedBy = cmp.Or(o.InitiatedBy, "client")
 	body := map[string]any{
 		"name": o.Name, "mode": o.Mode, "ttl_seconds": o.TTLSeconds,
 		"quiesce_seconds": o.QuiesceSeconds, "max_drain_seconds": o.MaxDrainSeconds,
@@ -361,7 +358,7 @@ func (s *Session) call(ctx context.Context, base, method, path string, in, out a
 		if e.Error == "" {
 			e.Error = strings.TrimSpace(string(b))
 		}
-		if id := firstNonEmpty(e.ConflictingSession, e.SessionID); id != "" {
+		if id := cmp.Or(e.ConflictingSession, e.SessionID); id != "" {
 			e.Error += " (held by session " + id + ")"
 		}
 		if e.Binding != nil {
@@ -391,11 +388,4 @@ func List(ctx context.Context, o Options, state string) ([]Info, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

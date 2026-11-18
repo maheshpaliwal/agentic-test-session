@@ -3,7 +3,7 @@ package tdynamo
 import (
 	"context"
 	"fmt"
-	"sort"
+	"maps"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -11,6 +11,7 @@ import (
 	"github.com/aws/smithy-go/middleware"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 const (
@@ -151,9 +152,7 @@ func takeAttributes(result any, strip bool) map[string]types.AttributeValue {
 func mergeVals(ms ...map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, m := range ms {
-		for k, v := range m {
-			out[k] = v
-		}
+		maps.Copy(out, m)
 	}
 	return out
 }
@@ -264,12 +263,7 @@ func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, pa
 }
 
 func tableNames(m map[string][]types.WriteRequest) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return mapx.SortedKeys(m)
 }
 
 // prune drops empty entries so requests stay compact.
@@ -307,12 +301,7 @@ func (t *tracer) learnKey(table string, key map[string]types.AttributeValue) {
 	if _, ok := t.schema.Load(table); ok {
 		return
 	}
-	names := make([]string, 0, len(key))
-	for k := range key {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	t.schema.Store(table, names)
+	t.schema.Store(table, mapx.SortedKeys(key))
 }
 
 // pk picks the key attributes out of a full item (or returns a Key as-is).
@@ -546,13 +535,7 @@ func (t *tracer) listSummary(table, stmt string, count int, items []map[string]t
 			break
 		}
 		if len(ks) > 0 {
-			sub := map[string]types.AttributeValue{}
-			for _, k := range ks {
-				if v, ok := it[k]; ok {
-					sub[k] = v
-				}
-			}
-			rs.PKs = append(rs.PKs, pkString(sub))
+			rs.PKs = append(rs.PKs, pkString(mapx.Pick(it, ks...)))
 		}
 	}
 	if len(items) > 0 {

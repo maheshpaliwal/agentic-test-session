@@ -58,6 +58,12 @@
   JSON payload went from about 590 µs / 3.7 MB to 148 µs / 143 KB, a traced 100-byte request through `thttp` from
   about 51 µs / 240 KB to 20 µs / 14 KB (`go test -bench` in `core/` and `thttp/` on the development machine).
 
+### Internal
+- New `internal/slicex`, `internal/mapx` and `internal/set` helpers; hand-written loops, `sort.Slice` calls and
+  default-value blocks replaced by them or by the standard `slices` / `maps` / `cmp` packages.
+- The go-redis v8 and v9 wrappers share one implementation (`internal/redisx.Tracer`); each keeps only its hook
+  methods and client adapter.
+
 ### For implementers of the interfaces
 - `collector/store.Store`: add `DeleteSession(ctx, sessionID) error`.
 - `controlplane.Store`: add `Delete(id string) error`. `controlplane.Collector`: add `Delete(ctx, id) error`.

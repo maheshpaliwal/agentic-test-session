@@ -34,13 +34,13 @@ package dynamostore
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +52,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 const (
@@ -160,9 +161,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 }
 
 func newStore(ctx context.Context, db api, cfg Config) (*Store, error) {
-	if cfg.TableName == "" {
-		cfg.TableName = DefaultTable
-	}
+	cfg.TableName = cmp.Or(cfg.TableName, DefaultTable)
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultTimeout
 	}
@@ -725,7 +724,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 		si.Sealed = sealed[id]
 		out = append(out, *si)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slicex.SortBy(out, func(s store.SessionInfo) string { return s.ID })
 	return out, nil
 }
 

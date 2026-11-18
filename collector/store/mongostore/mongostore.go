@@ -1,12 +1,12 @@
 package mongostore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // MaxEventBytes is the largest event JSON accepted. MongoDB's document limit
@@ -39,15 +40,9 @@ type Config struct {
 }
 
 func (c *Config) defaults() {
-	if c.Database == "" {
-		c.Database = "tsession"
-	}
-	if c.EventsCollection == "" {
-		c.EventsCollection = "events"
-	}
-	if c.SealsCollection == "" {
-		c.SealsCollection = "seals"
-	}
+	c.Database = cmp.Or(c.Database, "tsession")
+	c.EventsCollection = cmp.Or(c.EventsCollection, "events")
+	c.SealsCollection = cmp.Or(c.SealsCollection, "seals")
 	if c.ConnectTimeout <= 0 {
 		c.ConnectTimeout = 10 * time.Second
 	}
@@ -352,7 +347,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]store.SessionInfo, error) {
 	for i := range out {
 		out[i].Sealed = sealed[out[i].ID]
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slicex.SortBy(out, func(s store.SessionInfo) string { return s.ID })
 	return out, nil
 }
 

@@ -1,12 +1,12 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 const pgSchema = `
@@ -90,9 +91,7 @@ func OpenPG(ctx context.Context, dsn string) (*PG, error) {
 // auto-migrates.
 func OpenPGConfig(ctx context.Context, cfg PGConfig) (*PG, error) {
 	schema := cfg.Schema
-	if schema == "" {
-		schema = DefaultPGSchema
-	}
+	schema = cmp.Or(schema, DefaultPGSchema)
 	if err := ValidateSchemaName(schema); err != nil {
 		return nil, err
 	}
@@ -316,7 +315,7 @@ func (p *PG) ListSessions(ctx context.Context) ([]SessionInfo, error) {
 		}
 		out = append(out, si)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slicex.SortBy(out, func(s SessionInfo) string { return s.ID })
 	return out, rows.Err()
 }
 

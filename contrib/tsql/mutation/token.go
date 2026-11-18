@@ -6,6 +6,7 @@
 package mutation
 
 import (
+	"cmp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -170,9 +171,7 @@ func tokenize(s string, d Dialect) (toks []token, named bool) {
 				add(token{typ: tWord, text: s[st:i], val: strings.ToUpper(s[st:i]), start: st, end: i})
 				break
 			}
-			if sz == 0 {
-				sz = 1
-			}
+			sz = cmp.Or(sz, 1)
 			t := token{typ: tPunct, text: s[i : i+sz], start: i, end: i + sz}
 			i += sz
 			switch t.text {

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 const store = "mongo"
@@ -250,13 +251,8 @@ func bulk(in *inflight, reply doc, mk func(string, string, map[string]any) core.
 
 // summarize reduces a server reply to a small, useful object.
 func summarize(reply doc) doc {
-	out := doc{}
-	for _, k := range []string{"ok", "n", "nModified", "upserted", "writeErrors", "errmsg", "code",
-		"lastErrorObject", "value"} {
-		if v, ok := reply[k]; ok {
-			out[k] = v
-		}
-	}
+	out := mapx.Pick(reply, "ok", "n", "nModified", "upserted", "writeErrors", "errmsg", "code",
+		"lastErrorObject", "value")
 	if c := asDoc(reply["cursor"]); c != nil {
 		out["cursor"] = doc{"id": c["id"], "count": len(batch(c))}
 	}

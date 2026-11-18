@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -89,15 +90,7 @@ func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 
 // joinCounts renders "a 3, b 1" with keys sorted so output is stable.
 func joinCounts(m map[string]int) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = fmt.Sprintf("%s %d", k, m[k])
-	}
+	parts := slicex.Map(mapx.SortedKeys(m), func(k string) string { return fmt.Sprintf("%s %d", k, m[k]) })
 	return strings.Join(parts, ", ")
 }
 
@@ -116,13 +109,7 @@ func clip(s string, n int) string {
 type kindFilter []string
 
 func newKindFilter(s string) kindFilter {
-	var f kindFilter
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			f = append(f, p)
-		}
-	}
-	return f
+	return slicex.SplitTrim(s, ",")
 }
 
 func (f kindFilter) match(k core.Kind) bool {

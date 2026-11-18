@@ -3,21 +3,25 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // Config tunes a Collector. Window 0 means "sequence immediately".
@@ -91,9 +95,7 @@ func New(st store.Store, cfg Config) *Collector {
 	if cfg.MaxMessageBytes <= 0 {
 		cfg.MaxMessageBytes = d.MaxMessageBytes
 	}
-	if cfg.IdleEvict == 0 {
-		cfg.IdleEvict = d.IdleEvict
-	}
+	cfg.IdleEvict = cmp.Or(cfg.IdleEvict, d.IdleEvict)
 	if cfg.MaxBufferedEvents <= 0 {
 		cfg.MaxBufferedEvents = d.MaxBufferedEvents
 	}
@@ -185,18 +187,11 @@ func (c *Collector) Ingest(ctx context.Context, instance string, evs []core.Even
 			res.reject("invalid_session_id", 1)
 			continue
 		}
-		if e.Instance == "" {
-			e.Instance = instance
-		}
+		e.Instance = cmp.Or(e.Instance, instance)
 		by[e.SessionID] = append(by[e.SessionID], e)
 	}
-	ids := make([]string, 0, len(by))
-	for id := range by {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
 	var firstErr error
-	for _, id := range ids {
+	for _, id := range mapx.SortedKeys(by) {
 		a, d, err := c.seq.Add(ctx, id, by[id])
 		res.Accepted += a
 		res.Duplicates += d
@@ -461,13 +456,7 @@ func retryPending(evs []core.Event, orphaned []string) []string {
 			}
 		}
 	}
-	var out []string
-	for _, id := range orphaned {
-		if retrying[id] {
-			out = append(out, id)
-		}
-	}
-	return out
+	return slicex.Filter(orphaned, func(id string) bool { return retrying[id] })
 }
 
 func nonNil(s []string) []string {
@@ -483,14 +472,6 @@ func setOf(s []string) map[string]bool {
 		m[v] = true
 	}
 	return m
-}
-
-func keys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func ptr(b bool) *bool { return &b }
@@ -513,7 +494,7 @@ func resolve(evs []core.Event, outcomes map[string]bool, final bool, orphans map
 	}
 	retry := map[string]bool{}
 	if len(orphans) > 0 {
-		for _, id := range retryPending(evs, keys(orphans)) {
+		for _, id := range retryPending(evs, slices.Collect(maps.Keys(orphans))) {
 			retry[id] = true
 		}
 	}

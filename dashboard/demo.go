@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -214,9 +215,7 @@ func (d *Demo) ControlPlane() http.Handler {
 			writeJSON(w, 400, m{"error": "bad json"})
 			return
 		}
-		if in.Mode == "" {
-			in.Mode = "header"
-		}
+		in.Mode = cmp.Or(in.Mode, "header")
 		if in.Mode != "header" && in.Mode != "exclusive" {
 			writeJSON(w, 400, m{"error": "mode must be header or exclusive"})
 			return

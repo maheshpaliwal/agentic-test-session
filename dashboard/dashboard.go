@@ -4,6 +4,7 @@
 package dashboard
 
 import (
+	"cmp"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -40,12 +41,8 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 's
 
 // New builds the dashboard handler.
 func New(cfg Config) (http.Handler, error) {
-	if cfg.ControlPlaneURL == "" {
-		cfg.ControlPlaneURL = "http://127.0.0.1:7070"
-	}
-	if cfg.CollectorURL == "" {
-		cfg.CollectorURL = "http://127.0.0.1:7071"
-	}
+	cfg.ControlPlaneURL = cmp.Or(cfg.ControlPlaneURL, "http://127.0.0.1:7070")
+	cfg.CollectorURL = cmp.Or(cfg.CollectorURL, "http://127.0.0.1:7071")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

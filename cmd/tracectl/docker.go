@@ -2,17 +2,20 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os/exec"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -63,9 +66,7 @@ func ParseDockerEvent(line string) (ev DockerEvent, ok bool, err error) {
 		return ev, false, nil
 	}
 	action := raw.Action
-	if action == "" {
-		action = raw.Status
-	}
+	action = cmp.Or(action, raw.Status)
 	if action != "start" && action != "die" {
 		return ev, false, nil
 	}
@@ -74,9 +75,7 @@ func ParseDockerEvent(line string) (ev DockerEvent, ok bool, err error) {
 		return ev, false, nil
 	}
 	id := raw.Actor.ID
-	if id == "" {
-		id = raw.ID
-	}
+	id = cmp.Or(id, raw.ID)
 	return DockerEvent{Action: action, ContainerID: id, Name: name, Bind: raw.Actor.Attributes[BindLabelKey], SessName: raw.Actor.Attributes[NameLabelKey]}, true, nil
 }
 
@@ -189,7 +188,7 @@ func sessionKey(name string, binds []client.Binding) string {
 		}
 		parts[i] = b.Source + "\x00" + b.Name + "\x00" + b.Value
 	}
-	sort.Strings(parts)
+	slices.Sort(parts)
 	return name + "\x01" + strings.Join(parts, "\x01")
 }
 
@@ -199,13 +198,10 @@ func sessionKey(name string, binds []client.Binding) string {
 func (w *Watcher) Reconcile(ctx context.Context, running []DockerEvent) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	alive := make(map[string]struct{}, len(running))
-	for _, c := range running {
-		alive[c.ContainerID] = struct{}{}
-	}
+	alive := set.Of(slicex.Map(running, func(c DockerEvent) string { return c.ContainerID })...)
 	var gone []DockerEvent
 	for cid := range w.containers {
-		if _, ok := alive[cid]; !ok {
+		if !alive.Has(cid) {
 			gone = append(gone, DockerEvent{Action: "die", ContainerID: cid})
 		}
 	}

@@ -1,10 +1,11 @@
 package core
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,7 +103,7 @@ func NewBindingSet(bs []Binding) BindingSet {
 			m[b.Value] = b.SessionID
 		}
 	}
-	sort.Slice(s.keys, func(i, j int) bool { return s.keys[i].String() < s.keys[j].String() })
+	slices.SortFunc(s.keys, func(a, b BindingKey) int { return cmp.Compare(a.String(), b.String()) })
 	return s
 }
 

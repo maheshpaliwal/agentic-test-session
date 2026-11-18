@@ -6,8 +6,9 @@ import (
 	"cmp"
 	"os"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // Env returns the environment variable k, or def when it is unset or empty.
@@ -47,11 +48,5 @@ func positive[T cmp.Ordered](v, def T) T {
 
 // SplitCSV splits a comma-separated list, trimming blanks and dropping empties.
 func SplitCSV(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	return slicex.SplitTrim(s, ",")
 }

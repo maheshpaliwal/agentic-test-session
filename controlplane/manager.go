@@ -1,12 +1,15 @@
 package controlplane
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // Config tunes a Manager. Zero values pick sensible defaults.
@@ -200,9 +203,7 @@ type StartRequest struct {
 // ErrInvalid, ErrConflict (an exclusive session is running) or a
 // *BindingConflictError.
 func (m *Manager) Start(req StartRequest) (Session, error) {
-	if req.Mode == "" {
-		req.Mode = ModeHeader
-	}
+	req.Mode = cmp.Or(req.Mode, ModeHeader)
 	if req.Mode != ModeHeader && req.Mode != ModeExclusive {
 		return Session{}, ErrInvalid
 	}
@@ -224,9 +225,7 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 		}
 		return v
 	}
-	if req.InitiatedBy == "" {
-		req.InitiatedBy = "api"
-	}
+	req.InitiatedBy = cmp.Or(req.InitiatedBy, "api")
 	now := time.Now().UTC()
 	name, auto := resolveName(req.Name, bindings, req.InitiatedBy, now)
 	s := Session{
@@ -368,13 +367,7 @@ func (m *Manager) List(state State) []Session {
 	if state == "" {
 		return all
 	}
-	out := all[:0:0]
-	for _, s := range all {
-		if s.State == state {
-			out = append(out, s)
-		}
-	}
-	return out
+	return slicex.Filter(all, func(s Session) bool { return s.State == state })
 }
 
 // SetKill flips the global kill switch: while set, SDKs record nothing.
@@ -409,7 +402,7 @@ func (m *Manager) activeLocked() ActiveSet {
 			a.Exclusive = s.ID
 		}
 	}
-	sort.Strings(a.Active) // IDs are time-prefixed, so this is creation order
+	slices.Sort(a.Active) // IDs are time-prefixed, so this is creation order
 	for _, id := range a.Active {
 		if s := m.live[id]; s.State == StateActive {
 			for _, b := range s.Bindings {

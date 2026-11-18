@@ -1,8 +1,10 @@
 package tqueue
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -34,9 +36,7 @@ func PublishAMQP(ctx context.Context, ch AMQPChannel, exchange, key string, mand
 		return ch.PublishWithContext(ctx, exchange, key, mandatory, immediate, msg)
 	}
 	h := amqp.Table{}
-	for k, v := range msg.Headers {
-		h[k] = v
-	}
+	maps.Copy(h, msg.Headers)
 	msg.Headers = h
 	q := exchange + "/" + key
 	info := Message{System: "amqp", Queue: q, JobName: key, Params: bodyParams(msg.Body)}
@@ -64,13 +64,6 @@ func ConsumeDelivery(ctx context.Context, queue string, dl amqp.Delivery, maxAtt
 		h[strings.ToLower(k)] = v
 	}
 	d := Delivery{System: "amqp", Queue: queue, JobName: dl.RoutingKey, Params: bodyParams(dl.Body), Attempt: attempt,
-		MessageID: firstNonEmpty(dl.MessageId, fmt.Sprint(dl.DeliveryTag)), MaxAttempts: maxAttempts}
+		MessageID: cmp.Or(dl.MessageId, fmt.Sprint(dl.DeliveryTag)), MaxAttempts: maxAttempts}
 	return Consume(ctx, h, d, handler)
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

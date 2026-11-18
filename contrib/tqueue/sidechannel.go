@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -116,9 +117,7 @@ func (s *MemSideChannel) evict(now time.Time) {
 // Put stores a copy of c under key for ttl (ttl <= 0: no expiry).
 func (s *MemSideChannel) Put(_ context.Context, key string, c map[string]string, ttl time.Duration) error {
 	cp := make(map[string]string, len(c))
-	for k, v := range c {
-		cp[k] = v
-	}
+	maps.Copy(cp, c)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.m == nil {
@@ -157,9 +156,7 @@ func (s *MemSideChannel) Get(_ context.Context, key string) (map[string]string, 
 		return nil, ErrNotFound
 	}
 	cp := make(map[string]string, len(e.c))
-	for k, v := range e.c {
-		cp[k] = v
-	}
+	maps.Copy(cp, e.c)
 	return cp, nil
 }
 
