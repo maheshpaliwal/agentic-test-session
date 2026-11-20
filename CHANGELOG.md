@@ -21,6 +21,11 @@
 - Dashboard: "Copy as curl" on the Request tab of HTTP events, with shell-safe quoting, a `$BASE_URL` placeholder
   for path-only URLs, and notes for left-out headers, redacted values and truncated bodies.
 - Dashboard: an empty session now says which services are connected to the control plane, or that none is.
+- `tracectl kill on|off|status` sets and reads the control plane's global kill switch; `client.SetKill` and
+  `client.KillSwitch` do the same from Go. `tracectl doctor` reports when the switch is on.
+- `docs/CONFIG.md` lists every setting and every metric of the collector and the control plane; a test in each
+  package keeps the metric tables in step with the code.
+- Dashboard demo: HTTP events have the shape the HTTP wrapper records, so "Copy as curl" appears on them.
 - `tracectl doctor` checks that the control plane and collector answer and lists the services connected to the
   control plane (`GET /v1/subscribers`); the SDK now reports its service and instance name when it connects.
   An empty session no longer looks the same whether the service is unconnected or simply got no traffic.

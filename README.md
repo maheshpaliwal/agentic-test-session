@@ -186,6 +186,8 @@ process list. The `dynamodb` backend has only been tested against an in-process 
 - `GET /metrics` on the collector and control plane (Prometheus text format). A scraper in another container
   needs its Host value in `--allowed-hosts`.
 - On SIGINT/SIGTERM the collector writes buffered events to the store, for up to 15s.
+- `tracectl kill on` stops recording in every service, for every session, at once; `tracectl kill off` resumes it
+  and `tracectl kill status` (or `tracectl doctor`) shows the state.
 - `collector`, `controlplane` and `dashboard` accept `-version`; `tracectl version` prints tracectl's.
 - `POST /v1/ingest` accepts protobuf only, so `curl` with a JSON body does not work; see
   [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
