@@ -20,11 +20,53 @@ package tsessiontest
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
+
+// ArtifactDirEnv names the environment variable that makes Run save the
+// session of a failed test as a file in that directory (created if missing),
+// so the run can still be opened after the CI job and its collector are gone:
+//
+//	TSESSION_ARTIFACT_DIR=artifacts go test ./...   # then upload artifacts/ from CI
+//	dashboard -open artifacts/TestCheckout.ndjson
+//
+// The files hold recorded payloads (redacted, but possibly still sensitive)
+// and are written with mode 0600. Whether they may be uploaded to CI storage
+// is a question for your own data-handling policy.
+const ArtifactDirEnv = "TSESSION_ARTIFACT_DIR"
+
+// saveArtifact exports s to dir/<test name>.ndjson and returns the path.
+func saveArtifact(ctx context.Context, s *client.Session, dir, test string) (path string, err error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	// Subtest names contain slashes; keep the file inside dir.
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		}
+		return '_'
+	}, test)
+	path = filepath.Join(dir, strings.TrimLeft(name, ".")+".ndjson")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	_, err = s.Export(ctx, f)
+	return path, err
+}
 
 // StopTimeout bounds how long stopping a session may take (drain and seal included).
 var StopTimeout = 60 * time.Second
@@ -58,6 +100,13 @@ func Run(t testing.TB, o client.Options) *client.Session {
 		if sum, err := s.Summary(ctx); err == nil {
 			for _, f := range sum.Failures {
 				t.Logf("tsession: failed event #%d %s %s %s: %s", f.Seq, f.Service, f.Kind, f.Name, f.Err)
+			}
+		}
+		if dir := os.Getenv(ArtifactDirEnv); dir != "" {
+			if path, err := saveArtifact(ctx, s, dir, t.Name()); err != nil {
+				t.Logf("tsession: saving the session to %s: %v", dir, err)
+			} else {
+				t.Logf("tsession: session saved; open it with: dashboard -open %s", path)
 			}
 		}
 	})

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -172,6 +174,42 @@ func TestFailedTestLogsTheSession(t *testing.T) {
 	out := strings.Join(r.msgs, "\n")
 	if !strings.Contains(out, "tracectl summary "+s.ID) || !strings.Contains(out, "#3 worker worker.end ship: timeout") {
 		t.Fatalf("log of a failed test:\n%s", out)
+	}
+}
+
+func TestFailedTestSavesAnArtifact(t *testing.T) {
+	e := newEnv(t)
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	t.Setenv(tsessiontest.ArtifactDirEnv, dir)
+	run := func(failed bool) string {
+		r := &recorder{TB: t}
+		var cleanups []func()
+		tsessiontest.Run(&cleanupRecorder{recorder: r, fns: &cleanups}, e.opts)
+		r.failed = failed
+		for _, fn := range cleanups {
+			fn()
+		}
+		return strings.Join(r.msgs, "\n")
+	}
+	if out := run(false); strings.Contains(out, "saved") {
+		t.Fatalf("a passing test must not save anything:\n%s", out)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("artifact directory created for a passing test: %v", err)
+	}
+	out := run(true)
+	// The recorder reports the outer test's name, which contains no slash here;
+	// the sanitising is exercised through the file name below.
+	path := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".ndjson")
+	if !strings.Contains(out, "dashboard -open "+path) {
+		t.Fatalf("log does not point at the artifact:\n%s", out)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || strings.Count(string(b), "\n") != 3 || !strings.Contains(string(b), `"seq":1`) {
+		t.Fatalf("artifact: %q %v", b, err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("artifact mode %v, want 0600", fi.Mode().Perm())
 	}
 }
 

@@ -1,7 +1,10 @@
 package client
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -190,6 +193,25 @@ func (s *Session) Mutations(ctx context.Context, f MutationFilter) ([]Mutation, 
 		}
 	}
 	return out, nil
+}
+
+// Export writes every event recorded so far to w, one JSON object per line
+// in Seq order, and returns how many it wrote. This is the format
+// `tracectl export` produces and `dashboard -open` reads. Events hold recorded
+// payloads (redacted, but possibly still sensitive): treat the output accordingly.
+func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
+	evs, err := s.Events(ctx)
+	if err != nil {
+		return 0, err
+	}
+	out := bufio.NewWriter(w)
+	enc := json.NewEncoder(out)
+	for i := range evs {
+		if err := enc.Encode(&evs[i]); err != nil {
+			return i, err
+		}
+	}
+	return len(evs), out.Flush()
 }
 
 // Entities lists the entities the session mutated.

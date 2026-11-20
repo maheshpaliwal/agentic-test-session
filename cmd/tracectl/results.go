@@ -266,10 +266,6 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	evs, err := s.Events(ctx)
-	if err != nil {
-		return err
-	}
 	w := c.stdout
 	if *path != "" {
 		f, ferr := os.OpenFile(*path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // events may hold sensitive payloads
@@ -283,18 +279,12 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 		}()
 		w = f
 	}
-	out := bufio.NewWriter(w)
-	enc := json.NewEncoder(out)
-	for i := range evs {
-		if err := enc.Encode(&evs[i]); err != nil {
-			return err
-		}
-	}
-	if err := out.Flush(); err != nil {
+	n, err := s.Export(ctx, w)
+	if err != nil {
 		return err
 	}
 	if *path != "" {
-		fmt.Fprintf(c.stderr, "wrote %d events to %s\n", len(evs), *path)
+		fmt.Fprintf(c.stderr, "wrote %d events to %s\n", n, *path)
 	}
 	return nil
 }

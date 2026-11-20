@@ -23,6 +23,9 @@
 - **Open a run offline.** `dashboard -open run.ndjson` (repeatable) serves sessions written by `tracectl export`,
   read-only and without the control plane or collector, so a failed CI run can be attached as a file and opened
   locally.
+- **A failed test leaves an openable file.** With `TSESSION_ARTIFACT_DIR` set, `tsessiontest.Run` saves the session
+  of a failed test there (mode 0600) and logs the `dashboard -open` command, so the run outlives the CI job.
+  `Session.Export` writes the same format from Go.
 - **Assertions for Go tests.** `sdk/client/tsessiontest` ties a session to a test (`Run`) and asserts on what it
   recorded (`RequireNoFailures`, `RequireMutation`, `RequireNoMutation`); `Session.Mutations` returns a session's
   mutations as a flat, filterable list.
