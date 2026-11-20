@@ -284,10 +284,17 @@ func PublishVia(ctx context.Context, sc SideChannel, msgID string, m Message, se
 
 // ConsumeVia looks the carrier up by message id (bounded by the same timeout);
 // on a miss, error or timeout the handler runs untraced (unless an exclusive
-// session applies).
+// session applies). While no session is active the side channel is not
+// consulted at all: the handler runs at once, however slow the store is.
 func ConsumeVia(ctx context.Context, sc SideChannel, d Delivery, handler func(ctx context.Context) error, opts ...ViaOption) error {
+	if handler == nil {
+		return nil
+	}
+	if !core.AnyActive() {
+		return handler(ctx) // no span could be recorded: skip the lookup
+	}
 	carrier := core.MapCarrier{}
-	if sc != nil && d.MessageID != "" && core.Enabled() {
+	if sc != nil && d.MessageID != "" {
 		if m, err := getBounded(ctx, sc, SideKey(d.MessageID), viaTimeout(opts)); err == nil {
 			carrier = core.MapCarrier(m)
 		}
@@ -302,6 +309,9 @@ func WrapHandler(sc SideChannel, system, queue, job string, maxAttempts int,
 	h func(ctx context.Context, msgID string, attempt int, payload []byte) error,
 ) func(ctx context.Context, msgID string, attempt int, payload []byte) error {
 	return func(ctx context.Context, msgID string, attempt int, payload []byte) error {
+		if !core.AnyActive() {
+			return h(ctx, msgID, attempt, payload)
+		}
 		d := Delivery{System: system, Queue: queue, JobName: job, Params: bodyParams(payload),
 			Attempt: attempt, MessageID: msgID, MaxAttempts: maxAttempts}
 		return ConsumeVia(ctx, sc, d, func(c context.Context) error { return h(c, msgID, attempt, payload) })

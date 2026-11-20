@@ -162,14 +162,22 @@ func ConsumeSQSMessage(ctx context.Context, queueURL string, msg types.Message, 
 }
 
 // ConsumeSQSMessageOpts is ConsumeSQSMessage with options (side-channel
-// lookup when the message carries no trace attributes, RetryExpected).
+// lookup when the message carries no trace attributes, RetryExpected). While
+// no session is active the handler runs at once and the side channel is not
+// consulted.
 func ConsumeSQSMessageOpts(ctx context.Context, queueURL string, msg types.Message, maxReceives int, opts SQSOptions, handler func(ctx context.Context) error) error {
+	if handler == nil {
+		return nil
+	}
+	if !core.AnyActive() {
+		return handler(ctx) // no span could be recorded: skip the lookup
+	}
 	attrs := sqsCarrier{}
 	for k, v := range msg.MessageAttributes {
 		attrs[strings.ToLower(k)] = v
 	}
 	var carrier core.Carrier = attrs
-	if opts.SideChannel != nil && core.Enabled() && attrs.Get(core.KeySession) == "" {
+	if opts.SideChannel != nil && attrs.Get(core.KeySession) == "" {
 		md := aws.ToString(msg.MD5OfBody)
 		if md == "" {
 			md = md5Hex(aws.ToString(msg.Body))

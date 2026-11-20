@@ -91,6 +91,15 @@ func (s *Subscriber) Exclusive() (string, bool) {
 	return sn.exclusive, true
 }
 
+// AnyActive implements core.AnyActiver: some session is ACTIVE/DRAINING or an
+// exclusive session is set, and the kill switch is off. False until the first
+// state arrives from the control plane.
+func (s *Subscriber) AnyActive() bool { return s.snap.Load().anyActive() }
+
+func (sn *snapshot) anyActive() bool {
+	return !sn.kill && (len(sn.active) > 0 || sn.exclusive != "")
+}
+
 // MatchAttrs implements core.Binder. It extracts only the attribute keys that
 // active bindings use (none when there are none) and never matches while killed.
 func (s *Subscriber) MatchAttrs(a core.Attributes) (string, bool) {
