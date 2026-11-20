@@ -560,7 +560,7 @@
           s.service_count !== undefined ? h('span', { title: 'services seen' }, h('b', { text: s.service_count }), 'services') : null,
           h('span', { title: 'wall-clock duration' }, icon('clock', 'sm'), h('b', { text: dur })))),
         h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', 'some async work or events are missing', 'warn') : null,
-          s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag('seal error', 't-err', s.seal_error) : null)),
+          s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag(s.seal_pending ? 'seal retrying' : 'seal error', 't-err', s.seal_error) : null)),
         h('td', { class: 'num' }, stop, del));
     }
     function paint(force) {
@@ -828,7 +828,7 @@
           h('span', { text: 'The JWT signature is not verified, so traffic can be spoofed. Test environments only.' }))));
       }
     }
-    if (s.seal_error) head.appendChild(h('div', { class: 'callout err', role: 'alert' }, icon('err'), h('div', { class: 'ct' }, h('strong', { text: 'Seal failed' }), h('span', { text: s.seal_error }))));
+    if (s.seal_error) head.appendChild(h('div', { class: 'callout err', role: 'alert' }, icon('err'), h('div', { class: 'ct' }, h('strong', { text: s.seal_pending ? 'Seal failed, retrying in the background' : 'Seal failed' }), h('span', { text: s.seal_error }))));
     if (s.incomplete || s.dropped_events) {
       const w = U.sessionWarnings(Object.assign({}, s, { seal_error: '' }));
       head.appendChild(h('div', { class: 'callout warn', role: 'alert' }, icon('warn'), h('div', { class: 'ct' },

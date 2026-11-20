@@ -34,6 +34,7 @@ type Session struct {
 	BundleURI       string `json:"bundle_uri"`
 	Reason          string `json:"reason,omitempty"`
 	SealError       string `json:"seal_error,omitempty"`
+	SealPending     bool   `json:"seal_pending,omitempty"`
 	// Bindings attribute requests carrying matching attributes (docs/BINDING.md).
 	Bindings []Binding `json:"bindings,omitempty"`
 }

@@ -117,8 +117,14 @@ type Info struct {
 	Reason string `json:"reason,omitempty"`
 	// SealError is set when the collector could not seal the session; the
 	// session is then SEALED with Incomplete set.
-	SealError string    `json:"seal_error,omitempty"`
-	Bindings  []Binding `json:"bindings,omitempty"`
+	SealError string `json:"seal_error,omitempty"`
+	// SealPending is set while the control plane is still retrying a seal
+	// that failed; SealError and BundleURI change once a retry succeeds.
+	SealPending bool `json:"seal_pending,omitempty"`
+	// DrainTimedOut is set when the drain ended at MaxDrainSeconds with
+	// asynchronous work still outstanding.
+	DrainTimedOut bool      `json:"drain_timed_out,omitempty"`
+	Bindings      []Binding `json:"bindings,omitempty"`
 }
 
 // Done reports whether the session reached a terminal state.
