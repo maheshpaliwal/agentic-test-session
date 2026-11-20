@@ -9,12 +9,21 @@ import (
 	"strings"
 )
 
-// Version returns the version of the running binary's main module ("(devel)"
-// under `go run`), with the VCS revision appended when the toolchain recorded
-// one that the version does not already contain, and the Go version it was
-// built with.
+// buildVersion is set at link time by builds that have no VCS information for
+// the toolchain to record, such as the container images:
+//
+//	go build -ldflags "-X github.com/maheshpaliwal/agentic-test-session/internal/svc.buildVersion=v1.2.3"
+var buildVersion string
+
+// Version returns the version of the running binary: the one set at link
+// time if any, else the main module's ("(devel)" under `go run`) with the VCS
+// revision appended when the toolchain recorded one that the version does not
+// already contain. goVersion is the Go version it was built with.
 func Version() (version, goVersion string) {
 	version, goVersion = "unknown", runtime.Version()
+	if buildVersion != "" {
+		return buildVersion, goVersion
+	}
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return version, goVersion

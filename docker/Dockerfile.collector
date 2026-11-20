@@ -3,10 +3,12 @@
 #   docker build -f docker/Dockerfile.collector .
 FROM golang:1.26-alpine AS build
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
+# The build context has no .git, so the version is passed in (see the Makefile); empty leaves "(devel)".
+ARG VERSION=
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    go build -ldflags='-s -w' -o /out/collector ./collector/cmd/collector
+    go build -ldflags="-s -w -X github.com/maheshpaliwal/agentic-test-session/internal/svc.buildVersion=${VERSION}" -o /out/collector ./collector/cmd/collector
 
 FROM alpine:3.21
 RUN addgroup -S -g 10001 ts && adduser -S -u 10001 -G ts ts && mkdir -p /data/bundles && chown -R ts:ts /data

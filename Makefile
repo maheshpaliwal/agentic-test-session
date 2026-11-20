@@ -1,5 +1,7 @@
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo docker-compose)
-DC = DOCKER_BUILDKIT=1 $(COMPOSE) -f docker/docker-compose.yml --env-file docker/.env
+# Version stamped into the container binaries (the images are built without .git).
+TSESSION_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
+DC = DOCKER_BUILDKIT=1 TSESSION_VERSION=$(TSESSION_VERSION) $(COMPOSE) -f docker/docker-compose.yml --env-file docker/.env
 CP ?= http://127.0.0.1:7070
 
 # Every module in go.work (root, collector, contrib/*, integration), resolved dynamically.

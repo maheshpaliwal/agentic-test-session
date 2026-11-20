@@ -29,6 +29,8 @@
   control plane accepts `--listen` as well as `--addr`.
 - `tracectl summary` and `tracectl report` take `--fail-on-empty` (exit 3 when the session recorded no events): a
   run in which nothing was connected or attributed passed every other gate.
+- Container images report a real version: `make up` stamps `git describe` into the binaries (they are built
+  without `.git` and used to say `(devel)`).
 - `tracectl kill on|off|status` sets and reads the control plane's global kill switch; `client.SetKill` and
   `client.KillSwitch` do the same from Go. `tracectl doctor` reports when the switch is on.
 - `docs/CONFIG.md` lists every setting and every metric of the collector and the control plane; a test in each
