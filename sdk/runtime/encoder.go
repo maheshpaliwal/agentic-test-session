@@ -10,7 +10,7 @@ type BatchEncoder interface {
 	// ContentType is sent as the request Content-Type; the collector picks its
 	// decoder from it.
 	ContentType() string
-	// Encode must not retain batch. An error drops the batch (counted like
-	// any failed export).
+	// Encode must not retain batch. An error drops the batch for good
+	// (counted in sdk.dropped); it is not retried.
 	Encode(batch []core.Event) ([]byte, error)
 }
