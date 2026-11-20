@@ -49,6 +49,8 @@ session results (collector):
                                 what differs in b (candidate) from a (baseline): failures, mutations,
                                 events, first divergence; --fail-on-diff exits 3 when anything differs
 
+  doctor [--json]               check that the control plane and collector answer and list the
+                                services connected to the control plane
   version                       print the tracectl version
 
 --cp defaults to $TSESSION_CONTROLPLANE_URL or http://127.0.0.1:7070
@@ -90,6 +92,7 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"show":         (*cli).show,
 	"export":       (*cli).export,
 	"diff":         (*cli).diff,
+	"doctor":       (*cli).doctor,
 	"version":      (*cli).version,
 }
 

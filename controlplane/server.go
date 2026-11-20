@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -25,6 +26,9 @@ func (m *Manager) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, m.Active())
 	})
 	mux.HandleFunc("GET /v1/active/stream", m.hStream)
+	mux.HandleFunc("GET /v1/subscribers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, m.Subscribers())
+	})
 	mux.HandleFunc("POST /v1/kill", m.hKill)
 	mux.Handle("GET /metrics", m.tel.reg.Handler())
 	guarded := core.LoopbackGuard(mux, core.GuardConfig{
@@ -146,6 +150,21 @@ func (m *Manager) hKill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m.Active())
 }
 
+// identity cleans a self-reported service or instance name: printable ASCII
+// only, at most 128 bytes. It is shown to operators, never trusted.
+func identity(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 0x7e {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > 128 {
+		s = s[:128]
+	}
+	return s
+}
+
 func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -155,7 +174,7 @@ func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	ch, cancel := m.Subscribe()
+	ch, cancel := m.SubscribeAs(identity(r.Header.Get(core.HeaderService)), identity(r.Header.Get(core.HeaderInstance)))
 	defer cancel()
 	hb := time.NewTicker(m.cfg.HeartbeatPeriod)
 	defer hb.Stop()

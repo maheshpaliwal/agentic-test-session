@@ -37,7 +37,7 @@ handler := thttp.Handler(mux)               // inbound: attribution + capture
 client  := thttp.Client(http.DefaultClient) // outbound: propagation
 ```
 
-Then start a session (dashboard, `tracectl start`, or `POST /v1/sessions`) and send traffic with
+`tracectl doctor` shows whether the service is connected. Then start a session (dashboard, `tracectl start`, or `POST /v1/sessions`) and send traffic with
 `x-tsession-id: <id>`, or with an attribute bound to the session (user-id header, JWT claim, cookie, query
 param; see [`docs/BINDING.md`](docs/BINDING.md)). Only the first instrumented hop needs it; the session
 propagates downstream, including through message queues.

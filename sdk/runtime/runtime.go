@@ -80,7 +80,7 @@ func Start(cfg Config) error {
 	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority})
 	s := &state{rec: NewRecorder(cfg.BufferSize)}
 	s.exp = NewExporter(s.rec, cfg.Exporter)
-	s.sub = NewSubscriber(cfg.ControlPlaneURL)
+	s.sub = NewSubscriberFor(cfg.ControlPlaneURL, cfg.Service, cfg.Instance)
 	core.SetRecorder(s.rec)
 	core.SetSessions(s.sub)
 	if cfg.PatchDefaultTransport {

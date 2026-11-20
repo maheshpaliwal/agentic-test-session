@@ -382,6 +382,22 @@ func (s *Session) call(ctx context.Context, base, method, path string, in, out a
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// Subscriber is one process following the control plane's active set,
+// normally the SDK inside an instrumented service. Service and Instance are
+// empty for SDKs that do not report them.
+type Subscriber struct {
+	Service     string    `json:"service,omitempty"`
+	Instance    string    `json:"instance,omitempty"`
+	ConnectedAt time.Time `json:"connected_at"`
+}
+
+// Subscribers lists the processes currently connected to the control plane.
+// A service that is missing here cannot record anything.
+func Subscribers(ctx context.Context, o Options) ([]Subscriber, error) {
+	var out []Subscriber
+	return out, newSession(o, Info{}).do(ctx, http.MethodGet, "/v1/subscribers", nil, &out)
+}
+
 // List returns sessions known to the control plane, optionally filtered by state.
 func List(ctx context.Context, o Options, state string) ([]Info, error) {
 	s := newSession(o, Info{})

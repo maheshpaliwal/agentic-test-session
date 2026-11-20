@@ -37,6 +37,14 @@ const (
 	KeyHLC         = "x-tsession-hlc"
 )
 
+// HeaderService and HeaderInstance are sent by the SDK when it follows the
+// control plane's active set, so the control plane can list which services
+// are connected. They identify the process, not a request.
+const (
+	HeaderService  = "X-Tsession-Service"
+	HeaderInstance = "X-Tsession-Instance"
+)
+
 // Carrier abstracts a header-like key/value store. Keys are lowercase.
 type Carrier interface {
 	Get(key string) string

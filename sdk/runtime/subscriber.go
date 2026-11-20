@@ -37,6 +37,8 @@ type Subscriber struct {
 	maxBackoff time.Duration
 	idle       time.Duration // no bytes for this long => reconnect
 	client     *http.Client  // own transport: unaffected by DefaultTransport patching
+	service    string        // reported to the control plane, for its list of connected services
+	instance   string
 	snap       atomic.Pointer[snapshot]
 	ready      atomic.Bool
 	streaming  atomic.Bool
@@ -47,12 +49,21 @@ type Subscriber struct {
 
 // NewSubscriber starts following controlPlaneURL in the background.
 func NewSubscriber(controlPlaneURL string) *Subscriber {
+	return NewSubscriberFor(controlPlaneURL, "", "")
+}
+
+// NewSubscriberFor is NewSubscriber for a process that names itself: the
+// control plane lists service and instance among its connected services
+// (GET /v1/subscribers, `tracectl doctor`).
+func NewSubscriberFor(controlPlaneURL, service, instance string) *Subscriber {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Subscriber{
 		base:       strings.TrimRight(controlPlaneURL, "/"),
 		maxBackoff: 5 * time.Second,
 		idle:       45 * time.Second,
 		client:     &http.Client{Transport: newPlainTransport()},
+		service:    service,
+		instance:   instance,
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
@@ -181,6 +192,12 @@ func (s *Subscriber) stream(parent context.Context) bool {
 		return false
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if s.service != "" {
+		req.Header.Set(core.HeaderService, s.service)
+	}
+	if s.instance != "" {
+		req.Header.Set(core.HeaderInstance, s.instance)
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return false

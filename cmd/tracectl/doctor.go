@@ -1,0 +1,129 @@
+package main
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
+)
+
+// doctor checks the pieces a recording needs: both services reachable and
+// the instrumented services connected to the control plane.
+func (c *cli) doctor(ctx context.Context, args []string) error {
+	fs := c.flags("doctor")
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	if _, err := parseArgs(fs, args, 0, ""); err != nil {
+		return err
+	}
+	cp := strings.TrimRight(cmp.Or(c.opts.BaseURL, os.Getenv("TSESSION_CONTROLPLANE_URL"), client.DefaultURL), "/")
+	col := strings.TrimRight(cmp.Or(c.opts.CollectorURL, os.Getenv("TSESSION_COLLECTOR_URL"), client.DefaultCollectorURL), "/")
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rep := doctorReport{ControlPlane: probe(ctx, cp), Collector: probe(ctx, col), Subscribers: []client.Subscriber{}}
+	if rep.ControlPlane.OK {
+		if active, err := client.List(ctx, c.opts, "ACTIVE"); err == nil {
+			rep.ActiveSessions = len(active)
+		}
+		subs, err := client.Subscribers(ctx, c.opts)
+		switch {
+		case err == nil:
+			rep.Subscribers = append(rep.Subscribers, subs...)
+		case strings.Contains(err.Error(), "404"):
+			rep.Notes = append(rep.Notes, "this control plane is too old to list connected services")
+		default:
+			rep.Notes = append(rep.Notes, "listing connected services failed: "+err.Error())
+		}
+		if err == nil && len(subs) == 0 {
+			rep.Notes = append(rep.Notes, "no service is connected, so nothing can be recorded: check that the service runs with "+
+				"TSESSION_ENABLED=true and that its TSESSION_CONTROLPLANE_URL points at "+cp)
+		}
+	}
+	if *asJSON {
+		printJSON(c.stdout, rep)
+	} else {
+		rep.print(c.stdout)
+	}
+	if !rep.ControlPlane.OK || !rep.Collector.OK {
+		return fmt.Errorf("doctor: a service is unreachable")
+	}
+	return nil
+}
+
+type probeResult struct {
+	URL   string `json:"url"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type doctorReport struct {
+	ControlPlane   probeResult         `json:"control_plane"`
+	Collector      probeResult         `json:"collector"`
+	ActiveSessions int                 `json:"active_sessions"`
+	Subscribers    []client.Subscriber `json:"subscribers"`
+	Notes          []string            `json:"notes,omitempty"`
+}
+
+// probe asks a service's /healthz.
+func probe(ctx context.Context, base string) probeResult {
+	res := probeResult{URL: base}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		res.Error = "GET /healthz: " + resp.Status
+		return res
+	}
+	res.OK = true
+	return res
+}
+
+func (r doctorReport) print(w io.Writer) {
+	line := func(name string, p probeResult) {
+		status := "ok"
+		if !p.OK {
+			status = "UNREACHABLE  " + p.Error
+		}
+		fmt.Fprintf(w, "%-14s %s  %s\n", name, p.URL, status)
+	}
+	line("control plane", r.ControlPlane)
+	line("collector", r.Collector)
+	if !r.ControlPlane.OK {
+		return
+	}
+	fmt.Fprintf(w, "active sessions  %d\n", r.ActiveSessions)
+	fmt.Fprintf(w, "connected services  %d\n", len(r.Subscribers))
+	unnamed := 0
+	for _, s := range r.Subscribers {
+		if s.Service == "" {
+			unnamed++
+			continue
+		}
+		fmt.Fprintf(w, "  %-24s %-28s connected %s\n", clip(s.Service, 24), clip(s.Instance, 28),
+			time.Since(s.ConnectedAt).Round(time.Second))
+	}
+	if unnamed > 0 {
+		fmt.Fprintf(w, "  %d unnamed (an older SDK, or another client following the active set)\n", unnamed)
+	}
+	if len(r.Subscribers) > 0 {
+		fmt.Fprintln(w, "  connected means the service follows sessions; it does not show that it can reach the collector")
+	}
+	for _, n := range r.Notes {
+		fmt.Fprintln(w, "note: "+n)
+	}
+}

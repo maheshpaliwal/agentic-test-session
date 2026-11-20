@@ -11,6 +11,9 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- `tracectl doctor` checks that the control plane and collector answer and lists the services connected to the
+  control plane (`GET /v1/subscribers`); the SDK now reports its service and instance name when it connects.
+  An empty session no longer looks the same whether the service is unconnected or simply got no traffic.
 - `tracectl diff <a> <b>` compares two sessions: failures in one run only, mutation and event counts, and the
   first point where a service's event sequence diverges, with ids and literals in names normalised.
   `--fail-on-diff` exits 3; `--ignore-counts` tolerates retries; `--json`.

@@ -57,7 +57,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	kill    bool
-	subs    map[chan ActiveSet]struct{}
+	subs    map[chan ActiveSet]Subscriber
 	cancels map[string]context.CancelFunc // in-flight drains
 	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
 
@@ -121,7 +121,7 @@ func NewManager(cfg Config) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		cfg: cfg, log: log,
-		subs:    map[chan ActiveSet]struct{}{},
+		subs:    map[chan ActiveSet]Subscriber{},
 		cancels: map[string]context.CancelFunc{},
 		pending: map[string]*sealRetry{},
 		live:    map[string]Session{},
@@ -462,12 +462,42 @@ func (m *Manager) activeLocked() ActiveSet {
 	return a
 }
 
+// Subscriber describes one connection following the active set, normally the
+// SDK inside an instrumented service.
+type Subscriber struct {
+	// Service and Instance are what the SDK reported about itself; both are
+	// empty for SDKs that do not send them and for other clients.
+	Service     string    `json:"service,omitempty"`
+	Instance    string    `json:"instance,omitempty"`
+	ConnectedAt time.Time `json:"connected_at"`
+}
+
+// Subscribers lists the current followers of the active set, by service and
+// instance. It answers "is my service connected?" when a session stays empty.
+func (m *Manager) Subscribers() []Subscriber {
+	m.mu.Lock()
+	out := make([]Subscriber, 0, len(m.subs))
+	for _, s := range m.subs {
+		out = append(out, s)
+	}
+	m.mu.Unlock()
+	slices.SortFunc(out, func(a, b Subscriber) int {
+		return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance), a.ConnectedAt.Compare(b.ConnectedAt))
+	})
+	return out
+}
+
 // Subscribe returns a channel that receives the current active set
 // immediately and again on every change (slow readers see only the latest).
 func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
+	return m.SubscribeAs("", "")
+}
+
+// SubscribeAs is Subscribe for a follower that identified itself.
+func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
 	m.mu.Lock()
-	m.subs[ch] = struct{}{}
+	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC()}
 	ch <- m.activeLocked()
 	m.mu.Unlock()
 	return ch, func() {

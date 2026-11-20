@@ -85,6 +85,7 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 					Diff: []core.FieldChange{{Field: "status", Old: "new", New: "shipped"}}},
 			}})
 	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	// internal API used by the control plane
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(controlplane.DrainStatus{})
