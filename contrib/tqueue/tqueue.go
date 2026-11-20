@@ -237,13 +237,27 @@ func finish(hctx context.Context, end *core.Span, d Delivery, attempt int, pub s
 // ErrNotFound is returned by SideChannel.Get on a miss or expiry.
 var ErrNotFound = errors.New("tqueue: side-channel key not found")
 
-// bodyParams turns a raw message body into a value core.Payload can redact by
-// key: valid JSON is decoded to structured data and passed through
-// core.RedactAny; anything else is scrubbed with core.RedactText.
+// bodyParams wraps a raw message body for Message.Params / Delivery.Params.
+// The body is rendered only if a span records it (see lazyBody), so messages
+// outside a session are not decoded or redacted at all. The caller must not
+// modify b until Publish or Consume has started.
 func bodyParams(b []byte) any {
 	if len(b) == 0 {
 		return nil
 	}
+	return lazyBody(b)
+}
+
+// lazyBody is a message body that renders itself when marshalled.
+type lazyBody []byte
+
+// MarshalJSON renders the body the way core.Payload can redact by key.
+func (b lazyBody) MarshalJSON() ([]byte, error) { return json.Marshal(renderBody(b)) }
+
+// renderBody turns a raw message body into a value core.Payload can redact by
+// key: valid JSON is decoded to structured data and passed through
+// core.RedactAny; anything else is scrubbed with core.RedactText.
+func renderBody(b []byte) any {
 	if json.Valid(b) {
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()

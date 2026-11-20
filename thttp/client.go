@@ -29,6 +29,7 @@ func (t tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	span.SetAttr("host", req.URL.Host)
 
 	finish := func(resp *http.Response, respCap *limitBuf, err error) {
+		defer core.Recover() // recording must never break the call
 		span.SetReq(message{
 			Method:   req.Method,
 			URL:      core.RedactURLBound(req.URL),
@@ -44,7 +45,7 @@ func (t tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			span.SetResp(message{Status: resp.StatusCode, Headers: redactHeaders(resp.Header), Body: respCap.body(resp.Header.Get("Content-Type")), BodySize: respCap.size()})
 		}
-		if reqCap.truncated || (respCap != nil && respCap.truncated) {
+		if reqCap.cut() || respCap.cut() {
 			span.AddFlag("truncated")
 		}
 		span.End()

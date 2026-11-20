@@ -71,7 +71,13 @@ func beginIngress(ctx context.Context, method string) (context.Context, *core.Sp
 // core.RedactAny. Redaction happens here, on the full message, in addition to
 // the structural pass core.Payload applies later. Non-JSON output is scrubbed
 // with core.RedactText.
-func toJSON(m any) json.RawMessage {
+func toJSON(m any) (out json.RawMessage) {
+	// A message whose own marshalling panics must not take the RPC down.
+	defer func() {
+		if recover() != nil {
+			out, _ = json.Marshal("<unmarshalable>")
+		}
+	}()
 	var raw []byte
 	if pm, ok := m.(proto.Message); ok {
 		if b, err := protojson.Marshal(pm); err == nil {
@@ -103,6 +109,7 @@ func toJSON(m any) json.RawMessage {
 }
 
 func finish(span *core.Span, req, resp any, err error) {
+	defer core.Recover() // recording must never break the RPC
 	span.SetReq(req)
 	if resp != nil {
 		span.SetResp(resp)

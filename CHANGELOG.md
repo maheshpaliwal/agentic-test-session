@@ -66,6 +66,10 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
   events still unwritten then are dropped and logged.
+- `thttp`: the request-body capture of the HTTP client wrapper raced with the transport when the server answered
+  before the body was fully sent (data race, possible garbage in the recorded body).
+- Wrappers: recording code in `thttp`, `tgrpc` and the Redis wrappers now recovers from its own panics instead of
+  letting them reach the host call (for example a gRPC message whose `MarshalJSON` panics).
 - Control plane: a seal that failed past its 30s budget left the session `SEALED` with `seal_error` forever. It is
   now retried in the background (backoff up to 1m, for up to 24h, across restarts). New session fields
   `seal_pending` and `drain_timed_out`; new metrics `tsession_controlplane_seals_pending`,
@@ -89,6 +93,9 @@
 - SDK exporter: `Close` waited out a request stuck on an unresponsive collector.
 
 ### Performance
+- Outside a session, the Redis wrappers no longer classify the command or allocate, and the queue wrappers no
+  longer decode and redact every message body (a 64 KB JSON message cost about 1.7 ms and 1.4 MB per consume,
+  an 8 KB binary one about 1 ms, with no session active). `core.Active(ctx)` is the check wrappers use.
 - Control plane: the file store (`--store-file`) appends each change to `<file>.journal` instead of rewriting the
   whole file under the session lock (a write with 10,000 sessions: about 51 ms to 0.1 ms; a sweep evicting 500:
   about 20 s to 2 ms, on the development machine). Snapshots are fsynced, torn lines and leftover temp files are

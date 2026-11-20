@@ -109,12 +109,17 @@ func (t *Tracer) deadline() time.Time {
 func expired(deadline time.Time) bool { return !deadline.IsZero() && !time.Now().Before(deadline) }
 
 // Begin starts the span of a command issued outside a pipeline. It returns nil when the command is not traced.
-func (t *Tracer) Begin(ctx context.Context, cmd Cmd) *Op {
+func (t *Tracer) Begin(ctx context.Context, cmd Cmd) (o *Op) {
+	if !core.Active(ctx) {
+		return nil // outside a session: no classification, no allocation
+	}
+	defer core.Recover() // tracing must never break the command
 	return t.begin(ctx, cmd, false, t.newBatch(false))
 }
 
 // End finishes the span started by Begin. err is the command's error.
 func (t *Tracer) End(ctx context.Context, o *Op, cmd Cmd, err error) {
+	defer core.Recover()
 	if o != nil {
 		o.after = o.imaged
 		o.finish(ctx, t, cmd, err, t.deadline())
@@ -123,8 +128,12 @@ func (t *Tracer) End(ctx context.Context, o *Op, cmd Cmd, err error) {
 
 // BeginPipeline starts one span per command of a pipeline; the result is index-aligned with cmds and holds nil
 // for commands that are not traced.
-func BeginPipeline[C Cmd](ctx context.Context, t *Tracer, cmds []C) []*Op {
-	ops := make([]*Op, len(cmds))
+func BeginPipeline[C Cmd](ctx context.Context, t *Tracer, cmds []C) (ops []*Op) {
+	if !core.Active(ctx) {
+		return nil
+	}
+	defer core.Recover()
+	ops = make([]*Op, len(cmds))
 	b := t.newBatch(true)
 	for i, c := range cmds {
 		name := strings.ToLower(c.Name())
@@ -143,6 +152,7 @@ func BeginPipeline[C Cmd](ctx context.Context, t *Tracer, cmds []C) []*Op {
 // EndPipeline ends the spans started by BeginPipeline. The after-image of a key
 // written more than once belongs to its last successful write.
 func EndPipeline[C Cmd](ctx context.Context, t *Tracer, ops []*Op, cmds []C) {
+	defer core.Recover()
 	var last map[string]*Op
 	for i, o := range ops {
 		if o == nil || i >= len(cmds) || cmds[i].Err() != nil {

@@ -49,6 +49,18 @@ func Begin(ctx context.Context, kind Kind, name string) (context.Context, *Span)
 	return startSpan(ctx, parent, kind, name)
 }
 
+// Active reports whether a span begun on ctx would be recorded: the SDK is
+// enabled and ctx belongs to a session that is active. Wrappers call it before
+// doing any work that only a recorded span needs (parsing, rendering,
+// redacting), so traffic outside a session pays nothing for it.
+func Active(ctx context.Context) bool {
+	if !Enabled() {
+		return false
+	}
+	parent, ok := FromContext(ctx)
+	return ok && activeSessions().IsActive(parent.SessionID)
+}
+
 // BeginIngress starts a span from an incoming carrier (HTTP headers, gRPC
 // metadata, message headers). If the carrier has no session and the control
 // plane runs an exclusive session, the request is stamped with it. For

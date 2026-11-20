@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -87,8 +88,12 @@ func scrubHeaderValue(v string) string {
 	return core.RedactText(v)
 }
 
-// limitBuf keeps the first max bytes written to it and notes overflow.
+// limitBuf keeps the first max bytes written to it and notes overflow. It is
+// written by whoever reads the body (for a client request that is the
+// transport's write goroutine) and read when the span finishes, which can be
+// another goroutine while the body is still being sent, hence the lock.
 type limitBuf struct {
+	mu        sync.Mutex
 	buf       bytes.Buffer
 	max       int
 	truncated bool
@@ -98,6 +103,8 @@ type limitBuf struct {
 func newLimitBuf() *limitBuf { return &limitBuf{max: core.GetConfig().MaxInlineBytes} }
 
 func (l *limitBuf) add(p []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.total += len(p)
 	room := l.max - l.buf.Len()
 	if room <= 0 {
@@ -119,7 +126,19 @@ func (l *limitBuf) size() int {
 	if l == nil {
 		return 0
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.total
+}
+
+// cut reports whether bytes past the cap were dropped.
+func (l *limitBuf) cut() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.truncated
 }
 
 // body renders the captured bytes. Complete valid JSON stays JSON (redacted
@@ -129,15 +148,21 @@ func (l *limitBuf) size() int {
 // (multipart, XML, other application types) is replaced by a
 // "<media/type, N bytes>" placeholder so it is never recorded verbatim.
 func (l *limitBuf) body(contentType string) any {
-	if l == nil || l.buf.Len() == 0 {
+	if l == nil {
 		return nil
 	}
-	b := l.buf.Bytes()
+	// Work on a private copy: the buffer may still be written to.
+	l.mu.Lock()
+	b, truncated, total := bytes.Clone(l.buf.Bytes()), l.truncated, l.total
+	l.mu.Unlock()
+	if len(b) == 0 {
+		return nil
+	}
 	if !utf8.Valid(b) {
 		return "<binary>"
 	}
-	if !l.truncated && json.Valid(b) {
-		out, _ := core.Redactor(append([]byte(nil), b...))
+	if !truncated && json.Valid(b) {
+		out, _ := core.Redactor(b)
 		return json.RawMessage(out)
 	}
 	s := string(b)
@@ -146,7 +171,7 @@ func (l *limitBuf) body(contentType string) any {
 	case mt == "application/x-www-form-urlencoded":
 		return core.RedactQuery(s)
 	case !redactable(mt):
-		return fmt.Sprintf("<%s, %d bytes>", mt, l.total)
+		return fmt.Sprintf("<%s, %d bytes>", mt, total)
 	case looksLikeForm(s):
 		return core.RedactQuery(s)
 	}
