@@ -78,8 +78,20 @@ type Session struct {
 	// Reason is "ttl" when the session was ended by TTL expiry (empty otherwise).
 	Reason string `json:"reason,omitempty"`
 	// SealError is set when the collector seal could not be completed after
-	// bounded retries; the session is then SEALED with Incomplete=true.
+	// bounded retries; the session is then SEALED with Incomplete=true. It is
+	// cleared if a background retry (see SealPending) seals the session later.
 	SealError string `json:"seal_error,omitempty"`
+	// SealPending marks a finished session whose seal failed past
+	// Config.SealRetryBudget and is still being retried in the background.
+	// The session is terminal meanwhile (SDKs have stopped recording). The
+	// marker is cleared when a retry succeeds (SealError is cleared and
+	// BundleURI/Incomplete are filled in), or when Config.SealPendingBudget
+	// runs out (SealError stays).
+	SealPending bool `json:"seal_pending,omitempty"`
+	// DrainTimedOut is true when the drain ended at max_drain_seconds instead
+	// of on a quiet collector. It is kept so that a seal that succeeds late
+	// still reports the session Incomplete.
+	DrainTimedOut bool `json:"drain_timed_out,omitempty"`
 	// Bindings attribute requests carrying a matching attribute to this
 	// session (see docs/BINDING.md). Live only while the session is ACTIVE.
 	Bindings []Binding `json:"bindings,omitempty"`

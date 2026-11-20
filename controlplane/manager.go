@@ -27,7 +27,15 @@ type Config struct {
 	// SealRetryBudget bounds how long a failing collector seal call is retried
 	// (exponential backoff from PollInterval, capped at 2s); default 30s.
 	SealRetryBudget time.Duration
-	HeartbeatPeriod time.Duration // SSE heartbeat; default 15s
+	// SealRetryMaxInterval caps the backoff between background retries of a
+	// seal that failed past SealRetryBudget (they start at PollInterval and
+	// double after every failure); default 1m.
+	SealRetryMaxInterval time.Duration
+	// SealPendingBudget bounds how long such a seal keeps being retried,
+	// counted from the session's EndedAt; default 24h. After it the session
+	// keeps its SealError and is no longer retried.
+	SealPendingBudget time.Duration
+	HeartbeatPeriod   time.Duration // SSE heartbeat; default 15s
 	// Retention is how long terminal sessions stay in the hot in-memory set
 	// before being evicted from it (still readable if the Store archives them,
 	// e.g. FileStore); default 24h.
@@ -51,6 +59,7 @@ type Manager struct {
 	kill    bool
 	subs    map[chan ActiveSet]struct{}
 	cancels map[string]context.CancelFunc // in-flight drains
+	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
 
 	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
 	// O(all sessions ever). terminal queues finished sessions for eviction.
@@ -62,9 +71,9 @@ type Manager struct {
 	wg      sync.WaitGroup
 }
 
-// NewManager builds a Manager and resumes the drains that were in flight
-// when a persistent Store was last written. Call Run for TTL expiry and Close
-// when done.
+// NewManager builds a Manager and resumes the drains and the pending seal
+// retries that were in flight when a persistent Store was last written. Call
+// Run for TTL expiry and further seal retries, and Close when done.
 func NewManager(cfg Config) *Manager {
 	if cfg.Store == nil {
 		cfg.Store = NewMemStore()
@@ -87,6 +96,12 @@ func NewManager(cfg Config) *Manager {
 	if cfg.SealRetryBudget <= 0 {
 		cfg.SealRetryBudget = 30 * time.Second
 	}
+	if cfg.SealRetryMaxInterval <= 0 {
+		cfg.SealRetryMaxInterval = time.Minute
+	}
+	if cfg.SealPendingBudget <= 0 {
+		cfg.SealPendingBudget = 24 * time.Hour
+	}
 	if cfg.HeartbeatPeriod <= 0 {
 		cfg.HeartbeatPeriod = 15 * time.Second
 	}
@@ -108,17 +123,25 @@ func NewManager(cfg Config) *Manager {
 		cfg: cfg, log: log,
 		subs:    map[chan ActiveSet]struct{}{},
 		cancels: map[string]context.CancelFunc{},
+		pending: map[string]*sealRetry{},
 		live:    map[string]Session{},
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
-	// Resume drains that were in flight when a persistent store was last written.
+	// Resume drains and pending seals that were in flight when a persistent
+	// store was last written (List includes archived sessions).
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, s := range cfg.Store.List() {
 		m.indexLocked(s)
-		if s.State == StateDraining {
-			m.startDrain(s.ID)
+		switch {
+		case s.State == StateDraining:
+			m.startDrainLocked(s.ID)
+		case s.SealPending && s.State.Terminal():
+			m.armSealRetryLocked(s.ID, time.Time{})
 		}
 	}
+	m.retrySealsLocked(time.Now())
 	return m
 }
 
@@ -168,7 +191,8 @@ func (m *Manager) pruneLocked(now time.Time) {
 	}
 }
 
-// Run executes the TTL janitor until ctx is done.
+// Run executes the janitor (TTL expiry, retention, pending seal retries)
+// until ctx is done.
 func (m *Manager) Run(ctx context.Context) {
 	t := time.NewTicker(m.cfg.SweepInterval)
 	defer t.Stop()
@@ -182,7 +206,7 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// Close cancels in-flight drains and waits for them.
+// Close cancels in-flight drains and seal retries and waits for them.
 func (m *Manager) Close() {
 	m.stop()
 	m.wg.Wait()
@@ -255,7 +279,9 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 }
 
 // Stop moves ACTIVE -> DRAINING and kicks off the drain. Stopping a session
-// that is already DRAINING or SEALED is a no-op returning its current state.
+// that is already DRAINING or SEALED is a no-op returning its current state
+// (a SEALED session with SealPending is sealed by the background retry, not
+// by Stop).
 func (m *Manager) Stop(id string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -310,21 +336,41 @@ func (m *Manager) Abort(id string) (Session, error) {
 // seal and bundle, then the control plane forgets it. Only terminal sessions
 // can be deleted (ErrBadState otherwise): stop or abort a running one first.
 // A collector failure leaves the session in place so the call can be retried.
+//
+// A session whose seal is still pending (SealPending) can be deleted too: its
+// seal retries are stopped first, and an attempt already in flight is
+// cancelled and waited for, so that it cannot reach the collector after the
+// delete. If the collector delete then fails, the retries resume.
 func (m *Manager) Delete(ctx context.Context, id string) error {
+	m.mu.Lock()
 	s, ok := m.cfg.Store.Get(id)
 	if !ok {
+		m.mu.Unlock()
 		return ErrNotFound
 	}
 	if !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+		m.mu.Unlock()
 		return fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
+	}
+	inFlight := m.disarmSealRetryLocked(id)
+	m.mu.Unlock()
+	if inFlight != nil {
+		select {
+		case <-inFlight:
+		case <-ctx.Done():
+			m.rearmSealRetry(id)
+			return ctx.Err()
+		}
 	}
 	if m.cfg.Collector != nil {
 		if err := m.cfg.Collector.Delete(ctx, id); err != nil {
+			m.rearmSealRetry(id)
 			return fmt.Errorf("%w: %v", ErrCollector, err)
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.disarmSealRetryLocked(id) // a concurrent Delete that failed may have re-armed it
 	if err := m.cfg.Store.Delete(id); err != nil {
 		return err
 	}
@@ -335,6 +381,8 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 // Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through
 // DRAINING and the normal seal path (reason=ttl); drain() records the final
 // state (EXPIRED on a clean seal, SEALED+incomplete+seal_error otherwise).
+// Sweep also evicts finished sessions past Retention and starts the pending
+// seal retries that are due.
 func (m *Manager) Sweep(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -353,6 +401,7 @@ func (m *Manager) Sweep(now time.Time) {
 		}
 	}
 	m.pruneLocked(now)
+	m.retrySealsLocked(now)
 	if changed {
 		m.broadcastLocked()
 	}

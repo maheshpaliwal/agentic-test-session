@@ -391,6 +391,7 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 	f.set(0, time.Time{}, 0)
 	m2 := newMgr(t, f, func(c *Config) { c.Store = fs2 })
 	waitState(t, m2, s.ID, StateSealed)
+	m2.Close() // the store shows SEALED before the file is rewritten: wait for the drain to return
 	fs3, _ := NewFileStore(path)
 	if got, _ := fs3.Get(s.ID); got.State != StateSealed {
 		t.Fatalf("persisted %+v", got)

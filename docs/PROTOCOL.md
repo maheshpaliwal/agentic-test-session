@@ -18,11 +18,22 @@ States: `CREATED → ACTIVE → DRAINING → SEALED`, plus `ABORTED`, `EXPIRED`.
  "ttl_seconds":3600,"quiesce_seconds":3,"max_drain_seconds":60,
  "incomplete":false,"dropped_events":0,"bundle_uri":""}
 ```
-Extra optional fields: `reason` (`"ttl"` when ended by TTL) and `seal_error` (set when the collector seal failed).
+Extra optional fields (omitted when empty/false):
+- `reason`: `"ttl"` when ended by TTL.
+- `seal_error`: set when the collector seal failed; cleared if a later retry seals the session.
+- `seal_pending`: `true` while a seal that failed past its budget is still being retried in the background. The
+  session is already terminal (`SEALED`, out of the active set, so SDKs have stopped recording), but the collector
+  has not sealed it yet: `bundle_uri` is empty and `incomplete` is `true`. When a retry succeeds the field
+  disappears together with `seal_error`, and `bundle_uri`/`incomplete` are filled in from the seal. When the retries
+  are given up (see "Control plane hardening") the field disappears and `seal_error` stays.
+- `drain_timed_out`: `true` when the drain ended at `max_drain_seconds` rather than on a quiet collector (such a
+  session is `incomplete` even if the seal itself succeeds).
+
 TTL expiry is not a shortcut: an ACTIVE session past `ttl_seconds` moves to DRAINING (reason=ttl) and goes through
 the normal drain + seal path. A clean seal records `EXPIRED`; if the seal call keeps failing (retried with
-exponential backoff, default budget 30s) the session is recorded `SEALED` with `incomplete=true` and `seal_error`.
-The same retry/`seal_error` rule applies to a normal stop.
+exponential backoff, default budget 30s) the session is recorded `SEALED` with `incomplete=true`, `seal_error` and
+`seal_pending`. The same retry/`seal_error` rule applies to a normal stop. A session sealed by a later background
+retry stays `SEALED` (a terminal state never changes), also when it was ended by TTL.
 
 `exclusive`: Start fails (409) if another exclusive session is ACTIVE/DRAINING.
 
@@ -35,9 +46,12 @@ The same retry/`seal_error` rule applies to a normal stop.
 - `POST /v1/sessions/{id}/abort`
 - `DELETE /v1/sessions/{id}` -> `{"deleted":true,"id":"..."}`; finished sessions only (`409` while CREATED/ACTIVE/
   DRAINING, `404` unknown). The collector is asked first to drop the session's events, seal and bundle; if that
-  fails the answer is `502` and the session stays, so the call can be repeated.
+  fails the answer is `502` and the session stays, so the call can be repeated. A session with `seal_pending` can
+  be deleted: its seal retries stop first (an attempt in flight is cancelled and waited for), and resume if the
+  collector delete fails.
 - `GET /metrics` Prometheus text format (sessions by state, started/finished/deleted totals, seal failures,
-  subscribers, kill switch, `tsession_build_info`)
+  `tsession_controlplane_seals_pending`, `tsession_controlplane_seal_retries_total{result="success|failure"}`,
+  `tsession_controlplane_seals_abandoned_total`, subscribers, kill switch, `tsession_build_info`)
 - `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false}` (active = ACTIVE+DRAINING)
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
 - `POST /v1/kill` {"kill":true|false} global kill switch (included in active-set)
@@ -64,7 +78,13 @@ The same retry/`seal_error` rule applies to a normal stop.
   `event_count`, `last_event_unix_ns`, `received_unix_ns`, `dropped_events` changed for `quiesce_seconds`. Collector timestamps are
   opaque change tokens, never compared with local time.
 - Seal is retried (backoff, bounded by a 30s budget, each attempt capped by the remaining budget); on exhaustion the session ends
-  `SEALED` with `incomplete=true` and `seal_error` (also for TTL expiry).
+  `SEALED` with `incomplete=true`, `seal_error` and `seal_pending` (also for TTL expiry).
+- A pending seal keeps being retried in the background (the collector seal is idempotent): from the periodic sweep and
+  right after a restart (the marker is stored with the session, archived sessions included), with exponential backoff
+  from the poll interval (500ms) up to 1 minute, each attempt bounded by 30s. Success clears `seal_error` and
+  `seal_pending` and records `bundle_uri`/`incomplete`. The retries end when the session is deleted, or 24h after
+  `ended_at` (`Config.SealPendingBudget`; at least one attempt is made after a restart), when `seal_pending` is
+  cleared and `seal_error` stays.
 - Finished sessions leave the in-memory index after `--retention`/`TSESSION_CP_RETENTION` (default 24h); with `--store-file` they
   are archived to `<file>.archive` and stay readable via GET.
 

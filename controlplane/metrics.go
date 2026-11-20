@@ -13,7 +13,10 @@ type telemetry struct {
 	started      *metrics.Counter
 	finished     *metrics.CounterVec // state: SEALED | EXPIRED | ABORTED
 	sealFailures *metrics.Counter
-	deleted      *metrics.Counter
+	// Background retries of a seal that failed past its budget.
+	sealRetries    *metrics.CounterVec // result: success | failure
+	sealsAbandoned *metrics.Counter
+	deleted        *metrics.Counter
 }
 
 func newTelemetry(m *Manager) *telemetry {
@@ -33,6 +36,13 @@ func newTelemetry(m *Manager) *telemetry {
 				out = append(out, metrics.Sample{Labels: []string{string(st)}, Value: float64(c)})
 			}
 			return out
+		})
+	r.GaugeFunc("tsession_controlplane_seals_pending",
+		"Finished sessions whose collector seal failed and is still being retried.",
+		func() float64 {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return float64(len(m.pending))
 		})
 	r.GaugeFunc("tsession_controlplane_subscribers", "Open active-set streams (one per connected SDK).",
 		func() float64 {
@@ -56,6 +66,10 @@ func newTelemetry(m *Manager) *telemetry {
 			"Sessions that reached a terminal state, by state.", "state"),
 		sealFailures: r.Counter("tsession_controlplane_seal_failures_total",
 			"Sessions whose collector seal failed after all retries (recorded incomplete)."),
+		sealRetries: r.CounterVec("tsession_controlplane_seal_retries_total",
+			"Background attempts to seal a session whose seal failed past its budget, by result.", "result"),
+		sealsAbandoned: r.Counter("tsession_controlplane_seals_abandoned_total",
+			"Sessions whose pending seal was given up after the pending budget (seal_error stays)."),
 		deleted: r.Counter("tsession_controlplane_sessions_deleted_total", "Sessions deleted through the API."),
 	}
 }
