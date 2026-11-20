@@ -174,8 +174,9 @@ func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	ch, cancel := m.SubscribeAs(identity(r.Header.Get(core.HeaderService)), identity(r.Header.Get(core.HeaderInstance)))
+	ch, cancel := m.subscribe(identity(r.Header.Get(core.HeaderService)), identity(r.Header.Get(core.HeaderInstance)))
 	defer cancel()
+	sent := uint64(0) // generation written but not yet flushed
 	hb := time.NewTicker(m.cfg.HeartbeatPeriod)
 	defer hb.Stop()
 	for {
@@ -187,9 +188,11 @@ func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 		case a := <-ch:
 			b, _ := json.Marshal(a)
 			fmt.Fprintf(w, "data: %s\n\n", b)
+			sent = a.Generation
 		case <-hb.C:
 			fmt.Fprint(w, ": heartbeat\n\n")
 		}
 		fl.Flush()
+		m.delivered(ch, sent)
 	}
 }

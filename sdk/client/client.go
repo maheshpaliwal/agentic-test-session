@@ -389,6 +389,8 @@ type Subscriber struct {
 	Service     string    `json:"service,omitempty"`
 	Instance    string    `json:"instance,omitempty"`
 	ConnectedAt time.Time `json:"connected_at"`
+	// Generation is the newest version of the active set sent to it.
+	Generation uint64 `json:"generation"`
 }
 
 // Subscribers lists the processes currently connected to the control plane.
@@ -396,6 +398,53 @@ type Subscriber struct {
 func Subscribers(ctx context.Context, o Options) ([]Subscriber, error) {
 	var out []Subscriber
 	return out, newSession(o, Info{}).do(ctx, http.MethodGet, "/v1/subscribers", nil, &out)
+}
+
+// WaitPropagated blocks until every service connected to the control plane
+// has been sent the current set of active sessions, and returns how many are
+// connected. Call it after Start when the very first request must be
+// recorded: a service only records a session once it has heard of it.
+//
+// "Sent" means written to the service's connection; the service applies it a
+// moment later, so this narrows the window to network latency rather than
+// closing it. It returns ctx's error when ctx ends first, and (0, nil) at
+// once against a control plane too old to report delivery.
+func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
+	var active struct {
+		Generation uint64 `json:"generation"`
+	}
+	if err := s.do(ctx, http.MethodGet, "/v1/active", nil, &active); err != nil {
+		return 0, err
+	}
+	if active.Generation == 0 {
+		return 0, nil
+	}
+	connected := 0
+	for {
+		var subs []Subscriber
+		if err := s.do(ctx, http.MethodGet, "/v1/subscribers", nil, &subs); err != nil {
+			switch {
+			case ctx.Err() != nil:
+				return connected, ctx.Err()
+			case strings.Contains(err.Error(), "404"):
+				return 0, nil
+			}
+			return connected, err
+		}
+		connected = len(subs)
+		behind := false
+		for _, sub := range subs {
+			behind = behind || sub.Generation < active.Generation
+		}
+		if !behind {
+			return len(subs), nil
+		}
+		select {
+		case <-ctx.Done():
+			return len(subs), ctx.Err()
+		case <-time.After(min(s.poll, 20*time.Millisecond)):
+		}
+	}
 }
 
 // List returns sessions known to the control plane, optionally filtered by state.

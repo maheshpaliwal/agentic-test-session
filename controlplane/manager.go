@@ -57,6 +57,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	kill    bool
+	gen     uint64 // bumped on every broadcast; identifies a version of the active set
 	subs    map[chan ActiveSet]Subscriber
 	cancels map[string]context.CancelFunc // in-flight drains
 	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
@@ -449,7 +450,7 @@ func (m *Manager) exclusiveLocked() string {
 }
 
 func (m *Manager) activeLocked() ActiveSet {
-	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill}
+	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen}
 	for _, s := range m.live {
 		a.Active = append(a.Active, s.ID)
 		if s.Mode == ModeExclusive {
@@ -475,6 +476,10 @@ type Subscriber struct {
 	Service     string    `json:"service,omitempty"`
 	Instance    string    `json:"instance,omitempty"`
 	ConnectedAt time.Time `json:"connected_at"`
+	// Generation is the newest ActiveSet.Generation written to this follower's
+	// connection. A follower at or past the generation in which a session
+	// became active has been sent that session (sent, not necessarily applied).
+	Generation uint64 `json:"generation"`
 }
 
 // Subscribers lists the current followers of the active set, by service and
@@ -500,6 +505,10 @@ func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
 
 // SubscribeAs is Subscribe for a follower that identified itself.
 func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func()) {
+	return m.subscribe(service, instance)
+}
+
+func (m *Manager) subscribe(service, instance string) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
 	m.mu.Lock()
 	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC()}
@@ -512,7 +521,18 @@ func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func(
 	}
 }
 
+// delivered records that the follower behind ch was sent generation gen.
+func (m *Manager) delivered(ch chan ActiveSet, gen uint64) {
+	m.mu.Lock()
+	if s, ok := m.subs[ch]; ok && gen > s.Generation {
+		s.Generation = gen
+		m.subs[ch] = s
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) broadcastLocked() {
+	m.gen++
 	a := m.activeLocked()
 	for ch := range m.subs {
 		select {

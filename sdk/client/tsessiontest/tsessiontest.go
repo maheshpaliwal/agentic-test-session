@@ -13,9 +13,9 @@
 // The assertions stop the session and wait for its seal first, so asynchronous work (queue consumers,
 // retries) and transaction outcomes are included.
 //
-// Instrumented services learn about a new session over a stream, shortly after Run returns. A request sent
-// in the same instant can go unrecorded; when the first request of a test must be captured, give the services
-// a moment or retry it.
+// Instrumented services learn about a new session over a stream. Run waits (up to PropagationTimeout) until
+// the control plane has sent the session to every connected service, so the first request of a test is
+// normally recorded; a service that connects later, or one still applying the update, can miss it.
 package tsessiontest
 
 import (
@@ -68,6 +68,10 @@ func saveArtifact(ctx context.Context, s *client.Session, dir, test string) (pat
 	return path, err
 }
 
+// PropagationTimeout bounds how long Run waits for the connected services to
+// be sent the new session.
+var PropagationTimeout = 2 * time.Second
+
 // StopTimeout bounds how long stopping a session may take (drain and seal included).
 var StopTimeout = 60 * time.Second
 
@@ -86,6 +90,13 @@ func Run(t testing.TB, o client.Options) *client.Session {
 		t.Fatalf("tsession: start session: %v", err)
 		return nil
 	}
+	// Give the connected services the session before the test's first request.
+	pctx, pcancel := context.WithTimeout(ctx, PropagationTimeout)
+	if _, err := s.WaitPropagated(pctx); err != nil {
+		t.Logf("tsession: not every connected service was sent session %s within %v (%v); its first requests may go unrecorded",
+			s.ID, PropagationTimeout, err)
+	}
+	pcancel()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 		defer cancel()

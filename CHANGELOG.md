@@ -29,6 +29,9 @@
 - **Open a run offline.** `dashboard -open run.ndjson` (repeatable) serves sessions written by `tracectl export`,
   read-only and without the control plane or collector, so a failed CI run can be attached as a file and opened
   locally.
+- **The first request of a test is recorded.** The control plane tracks which version of the active set each
+  connected service was sent (`generation` on `GET /v1/active` and `GET /v1/subscribers`); `Session.WaitPropagated`
+  waits for all of them, and `tsessiontest.Run` calls it (up to 2s) before returning.
 - **A failed test leaves an openable file.** With `TSESSION_ARTIFACT_DIR` set, `tsessiontest.Run` saves the session
   of a failed test there (mode 0600) and logs the `dashboard -open` command, so the run outlives the CI job.
   `Session.Export` writes the same format from Go.

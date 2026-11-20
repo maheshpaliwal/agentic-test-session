@@ -55,8 +55,11 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false}` (active = ACTIVE+DRAINING)
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
   The SDK sends `X-Tsession-Service` and `X-Tsession-Instance` with the request (optional; shown to operators, not trusted).
-- `GET /v1/subscribers` -> `[{"service","instance","connected_at"}]`: the current followers of the stream, i.e. the
-  connected SDKs. `service`/`instance` are omitted for followers that did not send them.
+- `GET /v1/subscribers` -> `[{"service","instance","connected_at","generation"}]`: the current followers of the
+  stream, i.e. the connected SDKs. `service`/`instance` are omitted for followers that did not send them.
+  `generation` is the newest active-set `generation` (also on `GET /v1/active` and in every stream message)
+  written to that follower: a follower at or past the generation in which a session became active has been sent
+  it (sent, not necessarily applied yet).
 - `POST /v1/kill` {"kill":true|false} global kill switch (included in active-set)
 
 ### Session names

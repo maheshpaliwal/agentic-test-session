@@ -104,6 +104,10 @@ type ActiveSet struct {
 	Kill      bool     `json:"kill"`
 	// Bindings lists the bindings of ACTIVE sessions only (not DRAINING).
 	Bindings []ActiveBinding `json:"bindings,omitempty"`
+	// Generation counts the changes to the active set since the control plane
+	// started. Compare it with Subscriber.Generation to see which followers
+	// have been sent this version.
+	Generation uint64 `json:"generation"`
 }
 
 // Errors returned by Manager; the HTTP layer maps them to status codes.
