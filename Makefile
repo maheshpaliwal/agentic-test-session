@@ -22,7 +22,7 @@ race:
 lint:
 	@fail=0; for d in $(MODDIRS); do echo "== staticcheck $$d"; (cd $$d && $(STATICCHECK) ./...) || fail=1; done; exit $$fail
 fmt-check:
-	@out=$$(gofmt -l . | grep -v '\.pb\.go$$'); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	@out=$$(gofmt -l $(MODDIRS) 2>&1 | grep -v '\.pb\.go$$' | grep -v '/\.claude/'); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 it:
 	cd integration && ./scripts/it.sh all
 test:
