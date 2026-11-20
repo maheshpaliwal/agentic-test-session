@@ -107,6 +107,10 @@
 - SDK exporter: `Close` waited out a request stuck on an unresponsive collector.
 
 ### Performance
+- `tqueue`: consumers no longer consult the side channel while no session is active, so a slow side-channel
+  store no longer delays every job by the lookup bound (200 ms by default). `tdynamo`: calls outside a session
+  no longer render the request and allocate nothing, while still learning table key schemas.
+  New `core.AnyActive()` and the optional `core.AnyActiver` interface for session sets.
 - Outside a session, the Redis wrappers no longer classify the command or allocate, and the queue wrappers no
   longer decode and redact every message body (a 64 KB JSON message cost about 1.7 ms and 1.4 MB per consume,
   an 8 KB binary one about 1 ms, with no session active). `core.Active(ctx)` is the check wrappers use.
