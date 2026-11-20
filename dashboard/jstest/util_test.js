@@ -229,4 +229,120 @@ assert.strictEqual(U.bindingText({ source: 'header', name: 'x-user-id', value: '
 const hay = U.sessionHay({ id: 'ts_1', name: 'N', bindings: [{ source: 'jwt_claim', name: 'sub', value: 'u_123' }] }, en);
 assert.ok(hay.indexOf('u_123') >= 0 && hay.indexOf('drop-zone') >= 0 && hay.indexOf('jwt_claim') >= 0);
 
+// ---------- copy as curl ----------
+const httpEv = (kind, inline, extra) => Object.assign({ kind: kind, req: { inline: inline } }, extra || {});
+const SKIP_NOTE = 'Left out headers that curl sets itself or that would attribute the replay to the recorded session: ';
+const BASE_NOTE = 'The recorded URL has no scheme or host: set BASE_URL first, for example export BASE_URL=http://127.0.0.1:8080.';
+const TYPE_NOTE = 'No Content-Type header was recorded: curl will send application/x-www-form-urlencoded.';
+
+// plain GET (outbound, absolute URL, Go-style header arrays); computed and propagation headers are left out
+const cGet = U.curlFor(httpEv('api.out', { method: 'GET', url: 'https://shipping.example.invalid/v1/labels?id=7',
+  headers: { Accept: ['application/json'], 'Accept-Encoding': ['gzip'], Host: ['shipping.example.invalid'], Traceparent: ['00-aa-bb-01'], 'User-Agent': ['Go-http-client/1.1'], 'X-Tsession-Id': ['ts_1'], 'X-Tsession-Hlc': ['12'] } }));
+assert.strictEqual(cGet.command, [
+  "curl -X GET 'https://shipping.example.invalid/v1/labels?id=7' \\",
+  "  -H 'Accept: application/json' \\",
+  "  -H 'User-Agent: Go-http-client/1.1'"].join('\n'));
+assert.deepStrictEqual(cGet.notes, [SKIP_NOTE + 'Accept-Encoding, Host, Traceparent, X-Tsession-Id, X-Tsession-Hlc.']);
+
+// POST with a JSON body; repeated header values get one -H each
+const cPost = U.curlFor(httpEv('api.out', { method: 'POST', url: 'https://shipping.example.invalid/v1/labels',
+  headers: { 'Content-Type': ['application/json'], 'Content-Length': ['41'], 'X-Tag': ['a', 'b'] }, body: { order_id: 'ord_1001', service: 'ground' }, body_size: 41 }));
+assert.strictEqual(cPost.command, [
+  "curl -X POST 'https://shipping.example.invalid/v1/labels' \\",
+  "  -H 'Content-Type: application/json' \\",
+  "  -H 'X-Tag: a' \\",
+  "  -H 'X-Tag: b' \\",
+  "  --data-raw '{\"order_id\":\"ord_1001\",\"service\":\"ground\"}'"].join('\n'));
+assert.deepStrictEqual(cPost.notes, [SKIP_NOTE + 'Content-Length.']);
+
+// inbound: path-only URL behind a $BASE_URL placeholder; redacted header and body values stay in place (demo data shape)
+const cIn = U.curlFor({ kind: 'api.in', flags: ['redacted'], req: { redacted: true, inline: { method: 'POST', path: '/orders?expand=items',
+  headers: { authorization: '[REDACTED]', 'content-type': 'application/json', 'x-api-key': '[REDACTED]' },
+  body: { customer_id: 'cus_synth_001', payment: { token: '[REDACTED]' } } } } });
+assert.strictEqual(cIn.command, [
+  "curl -X POST \"$BASE_URL\"'/orders?expand=items' \\",
+  "  -H 'authorization: [REDACTED]' \\",
+  "  -H 'content-type: application/json' \\",
+  "  -H 'x-api-key: [REDACTED]' \\",
+  "  --data-raw '{\"customer_id\":\"cus_synth_001\",\"payment\":{\"token\":\"[REDACTED]\"}}'"].join('\n'));
+assert.deepStrictEqual(cIn.notes, [BASE_NOTE,
+  'Not replayable as is: redacted headers still hold [REDACTED] (authorization, x-api-key). Put the real values back.',
+  'Not replayable as is: the body holds redacted values ([REDACTED]).']);
+// a redacted query value, and glob characters in the URL
+const cQ = U.curlFor(httpEv('api.in', { method: 'HEAD', url: '/items?token=%5BREDACTED%5D&ids[]=1' }));
+assert.strictEqual(cQ.command, "curl --head --globoff \"$BASE_URL\"'/items?token=%5BREDACTED%5D&ids[]=1'");
+assert.deepStrictEqual(cQ.notes, [BASE_NOTE, 'Not replayable as is: the URL holds redacted values ([REDACTED]).']);
+
+// hostile input: nothing recorded may leave its quotes
+const hostile = httpEv('api.out', { method: 'PUT', url: 'https://h.example.invalid/a\'b?q=$(id)&r=`id`;x="y"',
+  headers: {
+    'X-Note': ['it\'s "q" `id` $(id); echo $HOME \\ !'],
+    'X-Quote\'Name': ['v'],
+    'X-Empty': [''],
+    'X-Split': ['a\r\nInjected: 1'],
+    'X-Tab': ['a\tb'],
+    'X Bad': ['v'],
+    '@/etc/passwd': ['v'],
+    'X-Colon:': ['v'],
+    'X-Num': [5],
+  }, body: 'a\'b\n$(reboot) `id` "$HOME"' });
+const cHost = U.curlFor(hostile);
+assert.strictEqual(cHost.command, [
+  "curl -X PUT 'https://h.example.invalid/a'\\''b?q=$(id)&r=`id`;x=\"y\"' \\",
+  "  -H 'X-Note: it'\\''s \"q\" `id` $(id); echo $HOME \\ !' \\",
+  "  -H 'X-Quote'\\''Name: v' \\",
+  "  -H 'X-Empty;' \\",
+  "  --data-raw 'a'\\''b\n$(reboot) `id` \"$HOME\"'"].join('\n'));
+assert.deepStrictEqual(cHost.notes, [
+  'Dropped headers whose name or value cannot be passed to a shell safely: "X-Split", "X-Tab", "X Bad", "@/etc/passwd", "X-Colon:", "X-Num".',
+  TYPE_NOTE]);
+// control characters other than a newline in the body: ANSI-C quoting with every special character escaped
+const cAnsi = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', headers: { 'Content-Type': 'text/plain' }, body: 'it\'s\r\n\u001b[201~ \\ ! \u0085\tend' }));
+assert.strictEqual(cAnsi.command, [
+  "curl -X POST 'http://h.example.invalid/' \\",
+  "  -H 'Content-Type: text/plain' \\",
+  "  --data-raw $'it\\'s\\r\\n\\x1b[201~ \\\\ \\x21 \\xc2\\x85\\tend'"].join('\n'));
+assert.deepStrictEqual(cAnsi.notes, ["The body has control characters, so it is quoted as $'...': run the command in bash or zsh."]);
+const cNul = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', body: 'a\u0000b' }));
+assert.strictEqual(cNul.command, "curl -X POST 'http://h.example.invalid/'");
+assert.deepStrictEqual(cNul.notes, ['The body contains a NUL byte, which no shell argument can carry: it was left out.']);
+// what a real shell makes of the commands: curl is replaced by a function that prints its arguments
+(function shellRoundTrip() {
+  const cp = require('child_process');
+  const argv = (cmd) => {
+    const r = cp.spawnSync('bash', ['-c', 'curl() { printf \'%s\\0\' "$@"; }\n' + cmd], { env: { PATH: process.env.PATH, BASE_URL: 'http://127.0.0.1:1', HOME: '/nonexistent' }, encoding: 'utf8' });
+    if (r.error || r.status !== 0) return null;
+    return r.stdout.split('\u0000').slice(0, -1);
+  };
+  if (!argv("curl 'x'")) { console.log('bash not available: shell round trip skipped'); return; }
+  assert.deepStrictEqual(argv(cHost.command), ['-X', 'PUT', hostile.req.inline.url,
+    '-H', 'X-Note: it\'s "q" `id` $(id); echo $HOME \\ !', '-H', 'X-Quote\'Name: v', '-H', 'X-Empty;', '--data-raw', hostile.req.inline.body]);
+  assert.deepStrictEqual(argv(cAnsi.command), ['-X', 'POST', 'http://h.example.invalid/', '-H', 'Content-Type: text/plain', '--data-raw', 'it\'s\r\n\u001b[201~ \\ ! \u0085\tend']);
+  assert.deepStrictEqual(argv(cIn.command).slice(0, 3), ['-X', 'POST', 'http://127.0.0.1:1/orders?expand=items']);
+})();
+
+// truncated body: the recorded part stays, the note says how much is missing
+const cTrunc = U.curlFor(httpEv('api.in', { method: 'POST', url: '/bulk', headers: { 'Content-Type': ['application/json'] }, body: '{"items":[{"sku":"A"', body_size: 5000 }, { flags: ['truncated'] }));
+assert.strictEqual(cTrunc.command, [
+  "curl -X POST \"$BASE_URL\"'/bulk' \\",
+  "  -H 'Content-Type: application/json' \\",
+  "  --data-raw '{\"items\":[{\"sku\":\"A\"'"].join('\n'));
+assert.deepStrictEqual(cTrunc.notes, [BASE_NOTE, 'Not replayable as is: the body is truncated (20 of 5000 bytes recorded).']);
+assert.deepStrictEqual(U.curlFor({ kind: 'api.in', req: { truncated: true, inline: { method: 'POST', url: '/bulk', headers: { 'Content-Type': ['text/plain'] }, body: 'abc' } } }).notes,
+  [BASE_NOTE, 'Not replayable as is: the body is truncated.']);
+// a body the recorder replaced by a placeholder
+assert.deepStrictEqual(U.curlFor(httpEv('api.in', { method: 'POST', url: '/upload', headers: { 'Content-Type': ['multipart/form-data; boundary=x'] }, body: '<multipart/form-data, 2048 bytes>', body_size: 2048 })).notes,
+  [BASE_NOTE, 'Not replayable as is: the body was not recorded, only the placeholder <multipart/form-data, 2048 bytes>.']);
+
+// not an HTTP request event, or no usable request payload
+assert.strictEqual(U.curlFor(null), null);
+assert.strictEqual(U.curlFor({ kind: 'db.write', req: { inline: { method: 'GET', url: '/x' } } }), null);
+assert.strictEqual(U.curlFor({ kind: 'queue.publish', req: { inline: { order_id: 'ord_1001' } } }), null);
+assert.strictEqual(U.curlFor({ kind: 'api.in' }), null);
+assert.strictEqual(U.curlFor(httpEv('api.out', { order_id: 'ord_1001', service: 'ground' })), null); // no method or URL recorded
+assert.strictEqual(U.curlFor({ kind: 'api.in', req: { truncated: true, inline: '{"method":"POST","url":"/orders","hea' } }), null); // whole payload cut
+assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET -o /tmp/x', url: '/x' })), null);
+assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET', url: '-o /tmp/x' })), null);
+assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET', url: '/x\nrm -rf ~' })), null);
+
 console.log('util ok');

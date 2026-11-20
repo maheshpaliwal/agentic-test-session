@@ -929,7 +929,26 @@
     const b = payloadBlock(label, p);
     pane.appendChild(b || emptyState('events', 'No ' + label.toLowerCase() + ' captured', 'The SDK did not record a payload for this event.'));
   }
-  const drReq = (D, e, pane) => drPayload('Request', e.req, pane);
+  /* "Copy as curl" for HTTP events. The notes (placeholders, left-out headers, redaction, truncation)
+     appear under the button once the command is on the clipboard. */
+  function curlBar(e) {
+    const c = U.curlFor(e);
+    if (!c) return null;
+    const notes = h('ul', { class: 'curl-notes' });
+    const b = h('button', { type: 'button', class: 'btn sm', title: 'Copy this request as a curl command', onclick: async () => {
+      if (!(await copyText(c.command, 'curl command'))) return;
+      b.replaceChild(icon('check', 'sm'), b.firstChild);
+      setTimeout(() => { if (b.firstChild) b.replaceChild(icon('copy', 'sm'), b.firstChild); }, 1200);
+      clear(notes);
+      c.notes.forEach((n) => notes.appendChild(h('li', { text: n })));
+    } }, icon('copy', 'sm'), 'Copy as curl');
+    return h('div', { class: 'curl-bar' }, b, h('div', { role: 'status', 'aria-live': 'polite' }, notes));
+  }
+  function drReq(D, e, pane) {
+    const bar = curlBar(e);
+    if (bar) pane.appendChild(bar);
+    drPayload('Request', e.req, pane);
+  }
   const drResp = (D, e, pane) => drPayload('Response', e.resp, pane);
   function drMut(D, e, pane) {
     const ms = e.mutations || [];

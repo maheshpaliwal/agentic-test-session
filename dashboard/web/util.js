@@ -320,8 +320,95 @@
   // One-line "3 db.read · 5 db.write" summary of a group's counts.
   const chipsText = (g) => g.chips.map((c) => c.n + ' ' + c.label).join(' · ');
 
+  /* ---------- copy as curl ----------
+     Everything below is built from recorded traffic and ends up pasted into a terminal, so no
+     recorded byte is emitted outside quotes and nothing that could act as a curl option is passed through. */
+  const CURL_SKIP = { host: 1, 'content-length': 1, connection: 1, 'accept-encoding': 1, 'transfer-encoding': 1, traceparent: 1 };
+  const curlSkipped = (name) => { const n = name.toLowerCase(); return CURL_SKIP[n] === 1 || n.indexOf('x-tsession-') === 0; };
+  const HDR_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/; // RFC 9110 token
+  const CTL = /[\u0000-\u001f\u007f-\u009f]/;
+  const CTL_NOT_LF = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const MARK_Q = '%5BREDACTED%5D'; // the marker as the recorder writes it into a query string
+  const hex2 = (n) => (n < 16 ? '0' : '') + n.toString(16);
+  // POSIX single quotes: everything is literal; an embedded quote closes, escapes and reopens.
+  function shQuote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
+  // bash/zsh $'...': backslash, quote and every control character are escaped (C1 controls as their UTF-8 bytes).
+  // '!' is escaped too, because some shells run history expansion inside $'...'.
+  function shAnsi(s) {
+    return "$'" + s.replace(/[\\'!\u0000-\u001f\u007f-\u009f]/g, (c) => {
+      if (c === '\\') return '\\\\';
+      if (c === "'") return "\\'";
+      if (c === '\n') return '\\n';
+      if (c === '\r') return '\\r';
+      if (c === '\t') return '\\t';
+      const n = c.charCodeAt(0);
+      return n < 0x80 ? '\\x' + hex2(n) : '\\xc2\\x' + hex2(n);
+    }) + "'";
+  }
+  function utf8Len(s) { return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : s.length; }
+  const curlList = (names) => names.filter((n, i) => names.indexOf(n) === i).join(', ');
+  /* curl command for an HTTP event (api.in / api.out) whose request payload has a method and a URL
+     or path; null otherwise. notes says what was changed and why the command may not replay as is. */
+  function curlFor(e) {
+    if (!e || (e.kind !== 'api.in' && e.kind !== 'api.out') || !e.req) return null;
+    const p = e.req.inline;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return null; // absent, or cut by the inline cap
+    const method = p.method, url = typeof p.url === 'string' && p.url ? p.url : p.path;
+    if (typeof method !== 'string' || !/^[A-Za-z]+$/.test(method)) return null;
+    if (typeof url !== 'string' || !url || CTL.test(url)) return null;
+    const absolute = /^https?:[/][/]/i.test(url); // written without a double slash: the asset test reads one as an external URL
+    if (!absolute && url[0] !== '/') return null; // neither a URL nor a path; curl could read it as an option
+    const notes = [];
+    let first = 'curl ' + (method === 'HEAD' ? '--head' : '-X ' + method);
+    if (/[[\]{}]/.test(url)) first += ' --globoff';
+    first += ' ' + (absolute ? '' : '"$BASE_URL"') + shQuote(url);
+    const parts = [first];
+    if (!absolute) notes.push('The recorded URL has no scheme or host: set BASE_URL first, for example export BASE_URL=http://127.0.0.1:8080.');
+
+    const skipped = [], dropped = [], redactedH = [];
+    let hasType = false;
+    const hs = p.headers && typeof p.headers === 'object' && !Array.isArray(p.headers) ? p.headers : {};
+    Object.keys(hs).forEach((name) => {
+      const label = JSON.stringify(name.length > 40 ? name.slice(0, 40) + '…' : name);
+      if (!HDR_NAME.test(name)) { dropped.push(label); return; }
+      if (curlSkipped(name)) { skipped.push(name); return; }
+      (Array.isArray(hs[name]) ? hs[name] : [hs[name]]).forEach((v) => {
+        if (typeof v !== 'string' || CTL.test(v)) { dropped.push(label); return; }
+        if (v.indexOf(MARK) >= 0) redactedH.push(name);
+        if (name.toLowerCase() === 'content-type') hasType = true;
+        parts.push('-H ' + shQuote(v === '' ? name + ';' : name + ': ' + v)); // "Name;" is how curl sends an empty header
+      });
+    });
+    if (skipped.length) notes.push('Left out headers that curl sets itself or that would attribute the replay to the recorded session: ' + curlList(skipped) + '.');
+    if (dropped.length) notes.push('Dropped headers whose name or value cannot be passed to a shell safely: ' + curlList(dropped) + '.');
+
+    let bodyRedacted = false;
+    const body = p.body;
+    if (body !== undefined && body !== null && body !== '') {
+      const text = typeof body === 'string' ? body : JSON.stringify(body);
+      if (text.indexOf('\u0000') >= 0) notes.push('The body contains a NUL byte, which no shell argument can carry: it was left out.');
+      else {
+        const ansi = CTL_NOT_LF.test(text);
+        parts.push('--data-raw ' + (ansi ? shAnsi(text) : shQuote(text)));
+        if (ansi) notes.push("The body has control characters, so it is quoted as $'...': run the command in bash or zsh.");
+        if (!hasType) notes.push('No Content-Type header was recorded: curl will send application/x-www-form-urlencoded.');
+        bodyRedacted = text.indexOf(MARK) >= 0;
+        const flagged = !!e.req.truncated || (e.flags || []).indexOf('truncated') >= 0;
+        if (typeof body === 'string' && (body === '<binary>' || /^<[^<>]{1,80}, \d+ bytes>$/.test(body))) notes.push('Not replayable as is: the body was not recorded, only the placeholder ' + body + '.');
+        else if (typeof body === 'string' && flagged && typeof p.body_size === 'number' && p.body_size > utf8Len(body)) notes.push('Not replayable as is: the body is truncated (' + utf8Len(body) + ' of ' + p.body_size + ' bytes recorded).');
+        else if (e.req.truncated) notes.push('Not replayable as is: the body is truncated.');
+      }
+    }
+    const urlRedacted = url.indexOf(MARK) >= 0 || url.indexOf(MARK_Q) >= 0;
+    if (redactedH.length) notes.push('Not replayable as is: redacted headers still hold ' + MARK + ' (' + curlList(redactedH) + '). Put the real values back.');
+    if (urlRedacted) notes.push('Not replayable as is: the URL holds redacted values (' + MARK + ').');
+    if (bodyRedacted) notes.push('Not replayable as is: the body holds redacted values (' + MARK + ').');
+    if (e.req.redacted && !redactedH.length && !urlRedacted && !bodyRedacted) notes.push('The recorder masked sensitive values in this request: the replay may differ from the original.');
+    return { command: parts.join(' \\\n  '), notes: notes };
+  }
+
   const api = { entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
-    mergeEvents, ndjson, sessionWarnings };
+    mergeEvents, ndjson, sessionWarnings, curlFor };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
 })(typeof window !== 'undefined' ? window : globalThis);
