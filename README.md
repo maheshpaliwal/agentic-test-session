@@ -111,6 +111,10 @@ go run ./cmd/dashboard -open run.ndjson
 
 # CI gate: exit 3 on failed events or an incomplete session
 tracectl summary my-run --fail-on-error --fail-on-incomplete
+
+# CI report: Markdown for the job summary, JUnit for the test tab
+tracectl report my-run --fail-on-error >> "$GITHUB_STEP_SUMMARY"
+tracectl report my-run --format junit -o tsession-junit.xml
 ```
 
 ```go

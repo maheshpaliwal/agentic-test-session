@@ -14,6 +14,12 @@
 - The SDK says whether it records: `sdk/autoinit` logs one line at start (enabled with its URLs, or why it is
   disabled), and a request rejected by the Host guard now gets a 403 that names the host and the setting to
   change. The README quick start gained the environment block and an "empty session" checklist.
+- `tracectl report <id|name> [--format markdown|junit] [-o FILE]` writes a CI report of one session. Markdown (for
+  a job summary) lists each failed event with the request it came from, why the session is incomplete, and
+  mutation counts by outcome; JUnit gives one test case per request. `--fail-on-error` and
+  `--fail-on-incomplete` exit 3 after the report is written.
+- Dashboard: "Copy as curl" on the Request tab of HTTP events, with shell-safe quoting, a `$BASE_URL` placeholder
+  for path-only URLs, and notes for left-out headers, redacted values and truncated bodies.
 - `tracectl doctor` checks that the control plane and collector answer and lists the services connected to the
   control plane (`GET /v1/subscribers`); the SDK now reports its service and instance name when it connects.
   An empty session no longer looks the same whether the service is unconnected or simply got no traffic.

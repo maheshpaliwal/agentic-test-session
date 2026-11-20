@@ -15,9 +15,7 @@ import (
 type panicsOnMarshal struct{ M map[string]any }
 
 func (panicsOnMarshal) MarshalJSON() ([]byte, error) {
-	var m map[string]int
-	m["x"] = 1
-	return nil, nil
+	panic("marshal failed badly")
 }
 
 // Recording a message must never take the RPC down, whatever its marshalling does.
