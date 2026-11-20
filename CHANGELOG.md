@@ -51,6 +51,8 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
   events still unwritten then are dropped and logged.
+- Collector: the reorder window applied to a whole flush instead of to each event, so an event could be sequenced
+  a moment after it arrived and ahead of a straggler that sorts before it. Each event now gets a full window.
 - Collector: a session removed from the store behind the collector's back no longer wedges on Seq conflicts.
 - Redaction: a secret after an escaped quote in truncated JSON survived; DynamoDB expression values inside
   function calls, `IN` lists and reused placeholders leaked; Redis member arguments of read commands on sensitive

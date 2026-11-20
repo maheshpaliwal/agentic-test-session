@@ -91,8 +91,10 @@ func (a *sessionActor) loop() {
 			return
 		case <-tc:
 			a.timer = nil
-			if err := a.flush(); err != nil {
+			if err := a.flush(false); err != nil {
 				a.arm(a.backoff()) // store trouble: retry shortly
+			} else {
+				a.armNext()
 			}
 		}
 	}
@@ -153,6 +155,43 @@ func (a *sessionActor) arm(d time.Duration) {
 	if a.timer == nil {
 		a.timer = time.NewTimer(d)
 	}
+}
+
+// due returns how many events at the front of the sorted buffer may be
+// released at now. An event is held for one window after it arrived, so that
+// a straggler which sorts before it can still take its place. The releasable
+// part is therefore the longest sorted prefix in which every event has aged
+// one window: an aged event behind a younger one waits for it, or it would be
+// stored ahead of an event that sorts first. That wait is capped: an event
+// two windows old is released together with everything sorting before it, so
+// a service whose clock runs ahead cannot hold its events back indefinitely.
+func (a *sessionActor) due(now time.Time) int {
+	aged, forced := now.Add(-a.window), now.Add(-2*a.window)
+	n := 0
+	for n < len(a.buf) && !a.buf[n].at.After(aged) {
+		n++
+	}
+	for i := len(a.buf) - 1; i >= n; i-- {
+		if !a.buf[i].at.After(forced) {
+			return i + 1
+		}
+	}
+	return n
+}
+
+// armNext arms the timer for the moment the next buffered event falls due
+// (see due). The buffer must be sorted, as flush leaves it.
+func (a *sessionActor) armNext() {
+	if len(a.buf) == 0 {
+		return
+	}
+	next := a.buf[0].at.Add(a.window)
+	for i := range a.buf {
+		if t := a.buf[i].at.Add(2 * a.window); t.Before(next) {
+			next = t
+		}
+	}
+	a.arm(max(time.Until(next), time.Millisecond))
 }
 
 func (a *sessionActor) setBuf(b []buffered) {
@@ -285,7 +324,7 @@ func (a *sessionActor) add(ctx context.Context, evs []core.Event) (acc, dup int,
 // is isolated within one call (used by seal and zero-window ingest).
 func (a *sessionActor) flushNow() (err error) {
 	for i := 0; i <= isolateAfter; i++ {
-		if err = a.flush(); err == nil {
+		if err = a.flush(true); err == nil {
 			return nil
 		}
 		if a.seqr.bg.Err() != nil {
@@ -296,10 +335,11 @@ func (a *sessionActor) flushNow() (err error) {
 	return err
 }
 
-// flush releases every buffered event in (EndHLC, Service, LocalSeq) order.
-// On failure the unpersisted events stay buffered; a persistently failing
-// batch is bisected and the offending event quarantined.
-func (a *sessionActor) flush() error {
+// flush releases buffered events in (EndHLC, Service, LocalSeq) order: all
+// of them (seal, shutdown, zero window), or only those whose reorder window
+// has passed (see due). On failure the unpersisted events stay buffered; a
+// persistently failing batch is bisected and the offending event quarantined.
+func (a *sessionActor) flush(all bool) error {
 	if len(a.buf) == 0 {
 		return nil
 	}
@@ -311,22 +351,30 @@ func (a *sessionActor) flush() error {
 			return err
 		}
 	}
-	batch := make([]core.Event, len(a.buf))
-	for i := range a.buf {
+	sort.SliceStable(a.buf, func(i, j int) bool { return less(&a.buf[i].ev, &a.buf[j].ev) })
+	n := len(a.buf)
+	if !all {
+		if n = a.due(time.Now()); n == 0 {
+			return nil
+		}
+	}
+	batch := make([]core.Event, n)
+	for i := range batch {
 		batch[i] = a.buf[i].ev
 	}
-	sort.SliceStable(batch, func(i, j int) bool { return less(&batch[i], &batch[j]) })
 	rest, err := a.persist(batch)
-	if len(rest) == 0 {
+	held := a.buf[n:]
+	if len(rest) == 0 && len(held) == 0 {
 		a.setBuf(nil)
 		return nil
 	}
-	now := time.Now()
-	nb := make([]buffered, len(rest))
+	// What the store did not take goes back to the front, already due (zero
+	// arrival time), ahead of the events still inside their window.
+	nb := make([]buffered, 0, len(rest)+len(held))
 	for i := range rest {
-		nb[i] = buffered{rest[i], now}
+		nb = append(nb, buffered{ev: rest[i]})
 	}
-	a.setBuf(nb)
+	a.setBuf(append(nb, held...))
 	return err
 }
 

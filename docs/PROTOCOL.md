@@ -76,8 +76,10 @@ The same retry/`seal_error` rule applies to a normal stop.
   collector doesn't know are accepted (CP/collector may race) but still stored.
 - Ordering: collector keeps a short reorder window (default 500ms) per session and assigns `Seq`
   (1..N, gapless, single writer per session) ordered by `(EndHLC, Service, LocalSeq)`.
-  **Seq = completion order.** Tree/nesting comes from `ParentID`/`LinkIDs`, not Seq. Events arriving
-  after their window closed get the next Seq (approximation; documented).
+  **Seq = completion order.** Tree/nesting comes from `ParentID`/`LinkIDs`, not Seq. Each event is held for one
+  reorder window after it arrives, so a straggler that sorts before it can still take its place; an event held
+  back by younger ones is released after two windows at the latest. Events arriving after that get the next Seq
+  (approximation; documented).
 - Read API:
   - `GET /v1/sessions/{id}/events?from_seq=0&limit=1000` -> `{"events":[...],"next_seq":n,"sealed":bool}`
   - `GET /v1/sessions/{id}/trace` -> tree: `{"session_id","roots":[Node]}` where
