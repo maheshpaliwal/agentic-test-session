@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,8 +92,57 @@ func (m *Manager) hStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, s)
 }
 
+// Response headers of GET /v1/sessions. The body stays a JSON array of
+// sessions, so what a page needs besides them travels here.
+const (
+	// HeaderNext is the cursor of the next page (the "before" parameter),
+	// present on a response to a request with "limit" when older sessions
+	// exist.
+	HeaderNext = "X-Tsession-Next"
+	// HeaderTotal is the number of sessions matching the filters of a request
+	// with "limit", whatever the page; absent when the store cannot tell.
+	HeaderTotal = "X-Tsession-Total"
+	// HeaderUnreadable is the number of sessions that belong in the response
+	// and are missing from it because the store could not read them; absent
+	// when there is none.
+	HeaderUnreadable = "X-Tsession-Unreadable"
+)
+
+// hList serves GET /v1/sessions[?state=&name=&limit=&before=]. Without limit
+// it answers as it always has: every session (matching state and name),
+// oldest first.
 func (m *Manager) hList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, m.List(State(r.URL.Query().Get("state"))))
+	v := r.URL.Query()
+	q := PageQuery{State: State(v.Get("state")), Name: v.Get("name"), Before: v.Get("before")}
+	if v.Has("limit") {
+		n, err := strconv.Atoi(v.Get("limit"))
+		if err != nil || n < 1 || n > MaxPageLimit {
+			writeErr(w, fmt.Errorf("%w: limit must be 1..%d", ErrInvalid, MaxPageLimit))
+			return
+		}
+		q.Limit = n
+	}
+	p, err := m.ListPage(q)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	h := w.Header()
+	if q.Limit > 0 {
+		if p.Next != "" {
+			h.Set(HeaderNext, p.Next)
+		}
+		if p.Total >= 0 {
+			h.Set(HeaderTotal, strconv.Itoa(p.Total))
+		}
+	}
+	if p.Unreadable > 0 {
+		h.Set(HeaderUnreadable, strconv.Itoa(p.Unreadable))
+	}
+	if p.Sessions == nil {
+		p.Sessions = []Session{}
+	}
+	writeJSON(w, http.StatusOK, p.Sessions)
 }
 
 func (m *Manager) hGet(w http.ResponseWriter, r *http.Request) {

@@ -51,14 +51,18 @@ const journalCompactBytes = 4 << 20
 // line is fsynced before Delete or Evict returns.
 //
 // Memory: the hot set is held in full. Of an archived session the store
-// holds its id and a fixed-size index entry (archRef: where its line is, its
-// state and its seal marker), about 100 bytes, and reads the line from the
-// file when the session is asked for. Up to archCacheMax decoded archived
-// sessions are cached, so Get and List do not touch the file while the
-// archive is that small. List returns every session, so its result grows
-// with the archive whatever the store holds; beyond the cache it reads the
-// archive once per call, without holding a lock. ListState and ListPending
-// read only the lines of the sessions they return.
+// holds its id and a fixed-size index entry (archRef: where its line is, when
+// it was created, its state, its seal marker and a hash of its name), about
+// 100 bytes, and reads the line from the file when the session is asked for.
+// Up to archCacheMax decoded archived sessions are cached, so Get and List do
+// not touch the file while the archive is that small. List returns every
+// session, so its result grows with the archive whatever the store holds;
+// beyond the cache it reads the archive once per call, without holding a
+// lock. ListState and ListPending read only the lines of the sessions they
+// return, and so does ListPage with a Limit: it picks the page from the hot
+// set and the index (a pass over the index, no file access) and then reads
+// at most Limit lines, or, for a query by name, the lines of the sessions
+// whose name has the same hash until the page is full.
 //
 // Read errors: Get and the List methods have no error result. An archived
 // session whose line cannot be read (an I/O error, or a file that was cut or
@@ -73,6 +77,7 @@ type FileStore struct {
 	path      string
 	log       *slog.Logger
 	readErrs  atomic.Int64 // archived sessions that could not be read
+	lineReads atomic.Int64 // archive lines decoded from the file (not served by the cache)
 
 	// wmu serialises the writers and all file changes. It is held across the
 	// in-memory change and its journal append, so the journal order is the
@@ -153,11 +158,27 @@ func defaultArchOps() archOps {
 }
 
 // archRef is the index entry of an archived session.
+// It holds what selects the sessions of a list or a page, so that only the
+// lines of the selected ones are read. Its size is what an archived session
+// costs in memory besides its id: keep it at 24 bytes.
 type archRef struct {
 	off         int64  // offset of the session's line in the archive file
+	created     int64  // the session's place in the listing order: createdNanos(CreatedAt)
 	n           uint32 // length of the line, without the newline
+	nameHash    uint16 // nameHash16 of the session's Name
 	state       uint8  // the session's State, as an index into archStates
 	sealPending bool   // the session's SealPending
+}
+
+// nameHash16 is the hash of a session name kept in the index. Sessions with
+// another hash do not have the name; of the others about one in 65,536 has
+// another name, so their lines are read to know.
+func nameHash16(name string) uint16 {
+	h := uint32(2166136261) // FNV-1a
+	for i := 0; i < len(name); i++ {
+		h = (h ^ uint32(name[i])) * 16777619
+	}
+	return uint16(h ^ h>>16)
 }
 
 // archStates lists the states an archRef can name. Index 0 stands for any
@@ -174,7 +195,8 @@ func archStateCode(st State) uint8 {
 }
 
 func newArchRef(s Session, off int64, n int) archRef {
-	return archRef{off: off, n: uint32(n), state: archStateCode(s.State), sealPending: s.SealPending}
+	return archRef{off: off, created: createdNanos(s.CreatedAt), n: uint32(n), nameHash: nameHash16(s.Name),
+		state: archStateCode(s.State), sealPending: s.SealPending}
 }
 
 // archCacheMax is the number of decoded archived sessions kept in memory
@@ -533,7 +555,7 @@ func (f *FileStore) rewriteArchive() error {
 	size := int64(0)
 	for i := range live {
 		var line []byte
-		if line, err = lr.read(live[i].ref); err != nil {
+		if line, err = lr.read(live[i].ref, lineReaderChunk); err != nil {
 			break
 		}
 		if _, err = w.Write(line); err != nil {
@@ -570,23 +592,45 @@ func (f *FileStore) rewriteArchive() error {
 }
 
 // lineReader reads archive lines through f. Lines asked for in ascending
-// offset order share reads of lineReaderChunk bytes. A returned line is valid
-// until the next call.
+// offset order share reads: a line that is not in the buffer is read together
+// with the span bytes from its start on (at least the line itself). A
+// returned line is valid until the next call.
 type lineReader struct {
 	f   *os.File
 	buf []byte
 	off int64 // file offset of buf[0]
 }
 
-const lineReaderChunk = 256 << 10
+const (
+	// lineReaderChunk is the most one read asks for, unless a line is longer.
+	lineReaderChunk = 256 << 10
+	// lineReaderGap is the most bytes between two wanted lines that are read
+	// along rather than skipped with a read of their own.
+	lineReaderGap = 16 << 10
+)
 
-func (r *lineReader) read(ref archRef) ([]byte, error) {
+// readSpan is the span to read at the first of entries (sorted by offset) so
+// that the read also holds the wanted lines that follow it closely.
+func readSpan(entries []archEntry) int {
+	start := entries[0].ref.off
+	end := start + int64(entries[0].ref.n)
+	for _, e := range entries[1:] {
+		eEnd := e.ref.off + int64(e.ref.n)
+		if e.ref.off-end > lineReaderGap || eEnd-start > lineReaderChunk {
+			break
+		}
+		end = max(end, eEnd)
+	}
+	return int(end - start)
+}
+
+func (r *lineReader) read(ref archRef, span int) ([]byte, error) {
 	if r.f == nil {
 		return nil, os.ErrClosed
 	}
 	end := ref.off + int64(ref.n)
 	if ref.off < r.off || end > r.off+int64(len(r.buf)) {
-		want := max(int(ref.n), lineReaderChunk)
+		want := max(int(ref.n), span)
 		if cap(r.buf) < want {
 			r.buf = make([]byte, want)
 		}
@@ -1058,6 +1102,7 @@ func (f *FileStore) getArchived(id string) (Session, bool, error) {
 	if _, err := f.ar.ReadAt(line, ref.off); err != nil {
 		return Session{}, false, err
 	}
+	f.lineReads.Add(1)
 	s, err := decodeArchived(id, line)
 	if err != nil {
 		return Session{}, false, err
@@ -1071,36 +1116,42 @@ func (f *FileStore) getArchived(id string) (Session, bool, error) {
 // once, with its hot record. The archived sessions that are not cached are
 // read from the archive file, after the locks are released.
 func (f *FileStore) List() []Session {
-	return f.list(nil, func(Session, bool) bool { return true })
+	out, _ := f.list(nil, func(Session, bool) bool { return true })
+	return out
 }
 
 // ListState implements SelectiveLister. Only the archive lines of sessions
 // in that state are read.
 func (f *FileStore) ListState(st State) []Session {
 	code := archStateCode(st)
-	return f.list(
+	out, _ := f.list(
 		func(r archRef) bool { return r.state == code || r.state == 0 },
 		func(s Session, _ bool) bool { return s.State == st })
+	return out
 }
 
 // ListPending implements SelectiveLister. Only the archive lines of sessions
 // that are not finished or have a seal pending are read; a Manager never
 // evicts the former, so that is normally a handful.
 func (f *FileStore) ListPending() []Session {
-	return f.list(
+	out, _ := f.list(
 		func(r archRef) bool { return r.sealPending || !archStates[r.state].Terminal() },
 		func(s Session, hot bool) bool { return hot || s.SealPending || !s.State.Terminal() })
+	return out
 }
 
-// list returns the sessions that keep accepts, ordered like List. keep is
-// told whether the session is in the hot set. keepRef, if not nil, is asked
-// first about an archived session and must accept every index entry whose
-// session keep would accept; it saves reading the lines of the others.
-func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bool) bool) []Session {
-	type entry struct {
-		id  string
-		ref archRef
-	}
+// archEntry is an archived session as the index has it.
+type archEntry struct {
+	id  string
+	ref archRef
+}
+
+// list returns the sessions that keep accepts, ordered like List, and the
+// number of archived sessions that could not be read (they are missing).
+// keep is told whether the session is in the hot set. keepRef, if not nil, is
+// asked first about an archived session and must accept every index entry
+// whose session keep would accept; it saves reading the lines of the others.
+func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bool) bool) ([]Session, int) {
 	f.MemStore.mu.RLock()
 	f.amu.RLock()
 	n := len(f.m)
@@ -1113,13 +1164,13 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 			out = append(out, s)
 		}
 	}
-	var archived []entry
+	var archived []archEntry
 	if keepRef == nil {
-		archived = make([]entry, 0, len(f.arch))
+		archived = make([]archEntry, 0, len(f.arch))
 	}
 	for id, r := range f.arch {
 		if _, hot := f.m[id]; !hot && (keepRef == nil || keepRef(r)) {
-			archived = append(archived, entry{id, r})
+			archived = append(archived, archEntry{id, r})
 		}
 	}
 	ar, gen := f.ar, f.archGen
@@ -1129,23 +1180,41 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 	if f.testHookListed != nil {
 		f.testHookListed()
 	}
-	// The lines are read without a lock, in file order. One that was
-	// overwritten meanwhile does not parse (and when the last archived
-	// session was deleted, the file is closed): then the session was deleted,
-	// or it was archived again and is looked up once more.
-	slices.SortFunc(archived, func(a, b entry) int { return cmp.Compare(a.ref.off, b.ref.off) })
+	failed := f.readArchived(archived, ar, gen, false, func(_ archEntry, s Session, hot bool) {
+		if keep(s, hot) {
+			out = append(out, s)
+		}
+	})
+	sortSessions(out)
+	return out, failed
+}
+
+// readArchived reads the sessions of entries, which were taken from the index
+// when the archive file was ar and its generation gen, and calls fn for each
+// one it could read, in file order (entries is sorted by offset). hot is set
+// when the session was changed meanwhile and s is its hot record. It returns
+// the number of sessions the store has and could not read, which it has
+// counted and logged. With evict a session that is read takes the place of
+// another one in a full cache.
+//
+// The lines are read without a lock. One that was overwritten meanwhile does
+// not parse (and when the last archived session was deleted, the file is
+// closed): then the session was deleted, or it was archived again and is
+// looked up once more.
+func (f *FileStore) readArchived(entries []archEntry, ar *os.File, gen uint64, evict bool, fn func(e archEntry, s Session, hot bool)) (failed int) {
+	slices.SortFunc(entries, func(a, b archEntry) int { return cmp.Compare(a.ref.off, b.ref.off) })
 	lr := lineReader{f: ar}
 	var (
-		failed   int
 		firstID  string
 		firstErr error
 	)
-	for _, e := range archived {
+	for i, e := range entries {
 		s, ok := f.cache.get(e.id, gen, e.ref.off)
 		hot := false
 		if !ok {
-			line, err := lr.read(e.ref)
+			line, err := lr.read(e.ref, readSpan(entries[i:]))
 			if err == nil {
+				f.lineReads.Add(1)
 				s, err = decodeArchived(e.id, line)
 			}
 			if err == nil {
@@ -1154,7 +1223,7 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 				// must not come back.
 				f.amu.RLock()
 				if r, ok := f.arch[e.id]; ok && r.off == e.ref.off && f.archGen == gen && f.ar != nil {
-					f.cache.put(e.id, gen, e.ref.off, s, false)
+					f.cache.put(e.id, gen, e.ref.off, s, evict)
 				}
 				f.amu.RUnlock()
 			} else if s, hot = f.MemStore.Get(e.id); !hot {
@@ -1171,9 +1240,7 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 				}
 			}
 		}
-		if keep(s, hot) {
-			out = append(out, s)
-		}
+		fn(e, s, hot)
 	}
 	if failed > 0 {
 		// One line per call, not per session: a damaged archive can hold many.
@@ -1181,8 +1248,138 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 		f.log.Error("file store: archived sessions could not be read and are missing from a list",
 			"sessions", failed, "first_id", firstID, "archive", f.archivePath(), "err", firstErr)
 	}
-	sortSessions(out)
-	return out
+	return failed
+}
+
+// ListPage implements PageLister. Without a Limit it is List with the
+// filters of q, reading only the lines of the sessions whose index entry
+// passes them. With a Limit it selects the page from the hot set and the
+// index and reads the lines of the selected sessions only:
+//
+//   - by state, or unfiltered: the index says exactly which sessions match,
+//     so at most Limit lines are read and Total is known;
+//   - by name: the index holds a 16-bit hash of the name. The sessions with
+//     that hash are read from the newest on until the page is full, so the
+//     lines read are those of the page plus about one in 65,536 of the
+//     archived sessions before it, and Total is not known (-1).
+//
+// The pass over the index costs a few nanoseconds per archived session;
+// nothing else grows with the archive.
+func (f *FileStore) ListPage(q PageQuery) (Page, error) {
+	cur, hasCur, err := q.cursor()
+	if err != nil {
+		return Page{}, err
+	}
+	code, hash := archStateCode(q.State), nameHash16(q.Name)
+	// An entry names its state unless that is none of archStates (code 0).
+	keepRef := func(r archRef) bool {
+		return (q.State == "" || r.state == code) && (q.Name == "" || r.nameHash == hash)
+	}
+	if q.Limit == 0 {
+		if q.State == "" && q.Name == "" {
+			keepRef = nil
+		}
+		out, failed := f.list(keepRef, func(s Session, _ bool) bool { return q.matches(s) })
+		return Page{Sessions: out, Total: len(out), Unreadable: failed}, nil
+	}
+	// exact: an index entry that passes keepRef is a session that matches.
+	// Not so for a name (a hash) and for a state the index has no code for.
+	exact := q.Name == "" && (q.State == "" || code != 0)
+	var (
+		top   = newest{n: q.Limit + 1}
+		cands []pageCand
+		hot   = map[string]Session{}
+		total = 0
+	)
+	consider := func(c pageCand) {
+		total++
+		switch {
+		case hasCur && !c.older(cur):
+		case exact:
+			top.add(c)
+		default:
+			cands = append(cands, c)
+		}
+	}
+	f.MemStore.mu.RLock()
+	f.amu.RLock()
+	for _, s := range f.m {
+		if q.matches(s) {
+			consider(pageCand{pageKey: keyOf(s), hot: true})
+			if !exact {
+				hot[s.ID] = s
+			}
+		}
+	}
+	for id, r := range f.arch {
+		if _, isHot := f.m[id]; !isHot && keepRef(r) {
+			consider(pageCand{pageKey: pageKey{r.created, id}, ref: r})
+		}
+	}
+	if exact {
+		cands = top.sorted()
+		for _, c := range cands {
+			if c.hot {
+				hot[c.id] = f.m[c.id]
+			}
+		}
+	}
+	ar, gen := f.ar, f.archGen
+	f.amu.RUnlock()
+	f.MemStore.mu.RUnlock()
+
+	if f.testHookListed != nil {
+		f.testHookListed()
+	}
+	p := Page{Total: total, Sessions: make([]Session, 0, min(len(cands), q.Limit))}
+	if exact {
+		// The candidates are the page. The cursor is the place of its last
+		// one, also when that session turns out to be unreadable or deleted.
+		if len(cands) > q.Limit {
+			cands = cands[:q.Limit]
+			p.Next = encodeCursor(cands[q.Limit-1].pageKey)
+		}
+		p.Unreadable = f.appendPage(&p.Sessions, cands, hot, ar, gen, q)
+		return p, nil
+	}
+	// The candidates are verified from the newest on, a batch at a time, until
+	// one more than the page is found: that one says there is a next page.
+	p.Total = -1
+	sortNewestFirst(cands)
+	for len(cands) > 0 && len(p.Sessions) <= q.Limit {
+		n := min(len(cands), max(q.Limit+1-len(p.Sessions), 32))
+		p.Unreadable += f.appendPage(&p.Sessions, cands[:n], hot, ar, gen, q)
+		cands = cands[n:]
+	}
+	if len(p.Sessions) > q.Limit {
+		p.Sessions = p.Sessions[:q.Limit]
+		p.Next = encodeCursor(keyOf(p.Sessions[q.Limit-1]))
+	}
+	return p, nil
+}
+
+// appendPage appends to out the sessions of cands that match q, in the order
+// of cands: the hot ones from hot, the archived ones read from the archive
+// (see readArchived). It returns the number that could not be read.
+func (f *FileStore) appendPage(out *[]Session, cands []pageCand, hot map[string]Session, ar *os.File, gen uint64, q PageQuery) (failed int) {
+	var entries []archEntry
+	for _, c := range cands {
+		if !c.hot {
+			entries = append(entries, archEntry{c.id, c.ref})
+		}
+	}
+	read := make(map[string]Session, len(entries))
+	failed = f.readArchived(entries, ar, gen, true, func(e archEntry, s Session, _ bool) { read[e.id] = s })
+	for _, c := range cands {
+		s, ok := hot[c.id]
+		if !c.hot {
+			s, ok = read[c.id]
+		}
+		if ok && q.matches(s) {
+			*out = append(*out, s)
+		}
+	}
+	return failed
 }
 
 // Compact folds the journal into a new snapshot and removes it, after which

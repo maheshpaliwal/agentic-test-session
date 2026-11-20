@@ -39,7 +39,29 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 
 ## Control plane (`:7070`)
 - `POST /v1/sessions` {name,mode,ttl_seconds,quiesce_seconds,max_drain_seconds,initiated_by} -> Session (ACTIVE)
-- `GET /v1/sessions[?state=]`, `GET /v1/sessions/{id}`
+- `GET /v1/sessions[?state=&name=&limit=&before=]` -> JSON array of Sessions; `GET /v1/sessions/{id}`
+  - Without `limit`: every session, oldest first (by `created_at`, then `id`), optionally only those in `state`
+    and/or named exactly `name`. This is what the endpoint has always answered; its cost and size grow with the
+    number of sessions ever recorded, so clients that show or search sessions should page.
+  - `limit=N` (1..1000): the newest N matching sessions, **newest first**. `before=<cursor>` (only with `limit`)
+    continues after an earlier page. The body stays a plain array; the rest is in response headers:
+    `X-Tsession-Next: <cursor>` when older sessions exist (absent on the last page), `X-Tsession-Total: <n>` the
+    number of sessions matching `state`/`name` whatever the page (absent when the store cannot tell cheaply: the
+    file store for a query by `name`). `400` for a `limit` out of range, a `before` that is not a cursor from this
+    API, or `before` without `limit`.
+  - The cursor is opaque. It names a place in the order (creation time and id of the last session of the page),
+    not a count, so it stays valid when that session is deleted and across restarts. While sessions are created,
+    archived, changed and deleted, a run of pages never returns a session twice; a session that exists and
+    matches the filters during the whole run is returned exactly once; one that is created, deleted, or starts or
+    stops matching during the run may or may not be returned (sessions created after the first page are not: they
+    are newer than it). A page can hold fewer than `limit` sessions, even none, and still carry `X-Tsession-Next`.
+  - `name` is an exact match (names are not unique). With `--store-file` a lookup by name reads only the archived
+    sessions whose name has the same 16-bit hash, newest first, until the page is full.
+  - `X-Tsession-Unreadable: <n>` on any list response (with or without `limit`) from which n sessions are missing
+    because the store has them and could not read them (see hardening below); absent when the list is complete.
+  - A control plane older than these parameters ignores them: it answers with every session (in `state`), oldest
+    first, without the headers. A client that sends `name` should check the names in the reply, and one that sends
+    `limit` should be ready for more sessions than it asked for.
 - `PATCH /v1/sessions/{id}` {"name":"..."} -> Session; relabel in any state incl. SEALED/archived (404 unknown id,
   400 empty name after sanitising; sets `name_auto=false`; same loopback guard, needs `Content-Type: application/json`)
 - `POST /v1/sessions/{id}/stop` -> DRAINING; CP then polls collector drain-status and calls collector seal
@@ -105,10 +127,14 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - An archived session whose line in `<file>.archive` cannot be read (I/O error, file cut or changed by something
   else) is not reported as unknown: `GET`, `PATCH`, stop and abort of it answer `500` and can be repeated. `DELETE`
   still works, here and in the collector: an archived session is finished, and refusing would leave it
-  undeletable. It is missing from `GET /v1/sessions`, which has no way to say so. A failed read of one session is
-  logged, a list logs one line per call, and `tsession_controlplane_store_read_errors_total` counts failed reads
-  (not distinct sessions). At start, archive lines that do not parse are saved to `<file>.archive.corrupt`,
-  logged and counted, instead of being dropped when the archive is tidied.
+  undeletable. It is missing from `GET /v1/sessions`, whose response then carries `X-Tsession-Unreadable: <n>`
+  with the number of sessions missing from that response. A failed read of one session is logged, a list logs one
+  line per call, and `tsession_controlplane_store_read_errors_total` counts failed reads (not distinct sessions).
+  At start, archive lines that do not parse are saved to `<file>.archive.corrupt`, logged and counted, instead of
+  being dropped when the archive is tidied; their sessions are no longer known, so later lists do not report them.
+- The file store keeps about 100 bytes in memory per archived session (its id and a 24-byte index entry: line
+  offset and length, creation time, state, seal marker, name hash). A list with `limit` picks its page from that
+  index and reads only the lines of the sessions it returns.
 
 ## Collector (`:7071`)
 - `POST /v1/ingest` framed protobuf `Event` messages (`Content-Type: application/x-protobuf`, required; anything

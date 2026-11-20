@@ -461,7 +461,8 @@ func (m *Manager) stored(id string) (Session, error) {
 	return s, nil
 }
 
-// List returns sessions, optionally filtered by state ("" = all).
+// List returns sessions, optionally filtered by state ("" = all), oldest
+// first. It produces every one of them: see ListPage for a part.
 func (m *Manager) List(state State) []Session {
 	if state == "" {
 		return m.cfg.Store.List()
