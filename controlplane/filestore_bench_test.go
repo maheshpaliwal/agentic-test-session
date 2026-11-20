@@ -36,6 +36,7 @@ func benchStore(b *testing.B, snapshot []byte) *FileStore {
 		b.Fatal(err)
 	}
 	fs, err := NewFileStore(path)
+	closeLater(b, fs)
 	if err != nil {
 		b.Fatal(err)
 	}

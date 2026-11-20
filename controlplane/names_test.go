@@ -203,6 +203,7 @@ func TestRenameSealedAndAbortedAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.json")
 	fs, _ := NewFileStore(path)
+	closeLater(t, fs)
 	f := newFakeCollector(t)
 	m := newMgr(t, f, func(c *Config) { c.Store = fs; c.Retention = time.Hour })
 	a, _ := m.Start(StartRequest{})
@@ -235,6 +236,7 @@ func TestRenameSealedAndAbortedAndPersistence(t *testing.T) {
 	// restart: new store + manager read renamed sealed session
 	m.Close()
 	fs2, err := NewFileStore(path)
+	closeLater(t, fs2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +248,7 @@ func TestRenameSealedAndAbortedAndPersistence(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 	fs3, _ := NewFileStore(path)
+	closeLater(t, fs3)
 	if g, _ := fs3.Get(a.ID); g.Name != "after restart" {
 		t.Fatalf("not persisted: %q", g.Name)
 	}

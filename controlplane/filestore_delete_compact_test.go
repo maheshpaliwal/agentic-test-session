@@ -17,6 +17,7 @@ func delSess(id string, v int, st State) Session {
 func delOpen(t testing.TB, path string) *FileStore {
 	t.Helper()
 	fs, err := NewFileStore(path)
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

@@ -39,10 +39,14 @@ func main() {
 		}
 		store = fs
 		// Runs after m.Close below: fold the journal into the snapshot, so a
-		// clean shutdown leaves the whole hot set in the one JSON file.
+		// clean shutdown leaves the whole hot set in the one JSON file, and
+		// release the archive file.
 		defer func() {
 			if err := fs.Compact(); err != nil {
 				log.Warn("compact store", "err", err)
+			}
+			if err := fs.Close(); err != nil {
+				log.Warn("close store", "err", err)
 			}
 		}()
 	}

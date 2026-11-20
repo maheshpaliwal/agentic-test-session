@@ -85,6 +85,7 @@ func TestFileStoreArchiveScale(t *testing.T) {
 			before := heapInUse()
 			t0 := time.Now()
 			fs, err := NewFileStore(path)
+			closeLater(t, fs)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -67,7 +67,7 @@ const journalCompactBytes = 4 << 20
 // session the store does not have.
 //
 // A FileStore is safe for concurrent use. One process may use a path at a
-// time.
+// time. It keeps the archive file open; Close releases it.
 type FileStore struct {
 	*MemStore // the hot set
 	path      string
@@ -83,6 +83,7 @@ type FileStore struct {
 	compactAt   int64         // journal size that starts the next compaction
 	compactMin  int64         // journalCompactBytes; tests lower it
 	compacting  chan struct{} // non-nil while a background compaction runs; closed when it ends
+	closed      bool          // set by Close: no more changes
 	// archiveUnsynced is set by an archive append that was not fsynced. The
 	// next snapshot waits for that fsync: it no longer holds those sessions.
 	archiveUnsynced bool
@@ -731,6 +732,9 @@ func (f *FileStore) replayJournal() (exists bool, unfinished []archRef, err erro
 func (f *FileStore) Put(s Session) error {
 	f.wmu.Lock()
 	defer f.wmu.Unlock()
+	if f.closed {
+		return ErrStoreClosed
+	}
 	_ = f.MemStore.Put(s)
 	return f.journalLocked(journalRecord{Op: "put", Session: &s})
 }
@@ -742,6 +746,9 @@ func (f *FileStore) Put(s Session) error {
 func (f *FileStore) Evict(ids ...string) {
 	f.wmu.Lock()
 	defer f.wmu.Unlock()
+	if f.closed {
+		return // they stay in the hot set
+	}
 	var (
 		moved []Session
 		ends  []int // ends[i] is where the line of moved[i] ends in lines, newline included
@@ -898,6 +905,9 @@ func (f *FileStore) undoAppend(ar *os.File, before int64, n, want int) (left boo
 func (f *FileStore) Delete(id string) error {
 	f.wmu.Lock()
 	defer f.wmu.Unlock()
+	if f.closed {
+		return ErrStoreClosed
+	}
 	_, hot := f.MemStore.Get(id)
 	f.amu.RLock()
 	ref, archived := f.arch[id]
@@ -978,7 +988,7 @@ func (f *FileStore) getArchived(id string) (Session, bool, error) {
 		return Session{}, false, nil
 	}
 	if f.ar == nil {
-		return Session{}, false, os.ErrClosed
+		return Session{}, false, ErrStoreClosed
 	}
 	if s, ok := f.cache.get(id, f.archGen, ref.off); ok {
 		return s, true, nil
@@ -1119,17 +1129,55 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 // The store stays usable. It is called when the store is opened; call it on
 // shutdown to leave a single up-to-date file behind.
 func (f *FileStore) Compact() error {
+	f.lockIdle()
+	defer f.wmu.Unlock()
+	if f.closed {
+		return ErrStoreClosed
+	}
+	return f.compactLocked()
+}
+
+// lockIdle takes f.wmu once no background compaction is running.
+func (f *FileStore) lockIdle() {
 	for {
 		f.wmu.Lock()
 		running := f.compacting
 		if running == nil {
-			break
+			return
 		}
 		f.wmu.Unlock()
 		<-running
 	}
+}
+
+// ErrStoreClosed is returned by a FileStore that was closed.
+var ErrStoreClosed = errors.New("file store is closed")
+
+// Close waits for a background compaction to end and closes the archive
+// file. It does not fold the journal into the snapshot: call Compact first
+// for that. Closing a closed store does nothing and returns nil.
+//
+// After Close the store changes nothing, in memory or on disk: Put, Delete
+// and Compact return ErrStoreClosed and Evict does nothing. The sessions of
+// the hot set can still be read. Archived sessions cannot: GetErr returns
+// ErrStoreClosed for them, Get reports them as not found and the List
+// methods leave them out, each counted as a read error.
+func (f *FileStore) Close() error {
+	f.lockIdle()
 	defer f.wmu.Unlock()
-	return f.compactLocked()
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+	f.amu.Lock()
+	ar := f.ar
+	f.ar = nil
+	f.cache.reset() // no archived session is served from now on
+	f.amu.Unlock()
+	if ar == nil {
+		return nil
+	}
+	return ar.Close()
 }
 
 // compactLocked writes the hot set as the snapshot and removes the journal.

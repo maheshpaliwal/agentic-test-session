@@ -15,10 +15,19 @@ import (
 func openStore(t *testing.T, path string) *FileStore {
 	t.Helper()
 	fs, err := NewFileStore(path)
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	return fs
+}
+
+// closeLater closes the store when the test ends, so that tests do not leave
+// archive files open. fs may be nil (a store that failed to open).
+func closeLater(t testing.TB, fs *FileStore) {
+	if fs != nil {
+		t.Cleanup(func() { _ = fs.Close() })
+	}
 }
 
 // storeSession builds the i-th test session: ids and creation times ascend

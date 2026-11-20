@@ -117,6 +117,7 @@ func TestDeleteOverHTTP(t *testing.T) {
 func TestFileStoreDelete(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path)
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +144,7 @@ func TestFileStoreDelete(t *testing.T) {
 		}
 	}
 	reopened, err := NewFileStore(path)
+	closeLater(t, reopened)
 	if err != nil {
 		t.Fatal(err)
 	}

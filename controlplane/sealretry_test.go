@@ -245,6 +245,7 @@ func TestSealPendingSurvivesRestart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "s.json")
 			fs, err := NewFileStore(path)
+			closeLater(t, fs)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,6 +263,7 @@ func TestSealPendingSurvivesRestart(t *testing.T) {
 			}
 
 			fs2, err := NewFileStore(path)
+			closeLater(t, fs2)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -283,6 +285,7 @@ func TestSealPendingSurvivesRestart(t *testing.T) {
 			m2.Close() // the store shows the result before the file is rewritten: wait for the retry to return
 
 			fs3, err := NewFileStore(path)
+			closeLater(t, fs3)
 			if err != nil {
 				t.Fatal(err)
 			}

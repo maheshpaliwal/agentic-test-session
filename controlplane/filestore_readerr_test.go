@@ -67,6 +67,7 @@ func TestFileStoreReadErrorsAreReported(t *testing.T) {
 	var logs logBuffer
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +152,7 @@ func TestManagerTellsUnreadableFromUnknown(t *testing.T) {
 	var logs logBuffer
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +224,7 @@ func TestManagerLogsUnreadableSessionsAtStart(t *testing.T) {
 	var storeLogs, logs logBuffer
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path, WithStoreLogger(storeLogs.logger()))
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,6 +257,7 @@ func TestSealRetrySurvivesUnreadableSession(t *testing.T) {
 	var logs logBuffer
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}

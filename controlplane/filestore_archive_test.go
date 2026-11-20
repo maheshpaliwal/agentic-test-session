@@ -454,6 +454,7 @@ func TestFileStoreArchiveCrashes(t *testing.T) {
 			t.Fatal(err)
 		}
 		re, err := NewFileStore(fs.path)
+		closeLater(t, re)
 		if cerr := os.Chmod(dir, 0o700); cerr != nil {
 			t.Fatal(cerr)
 		}
