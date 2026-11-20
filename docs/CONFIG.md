@@ -75,3 +75,41 @@ Prefer the variables for connection strings: flag values show up in the process 
 
 `TSESSION_ARTIFACT_DIR` makes `sdk/client/tsessiontest` save the session of a failed test into that directory;
 use an absolute path.
+
+## Metrics
+
+The collector and the control plane serve `GET /metrics` in the Prometheus text format. The dashboard, tracectl
+and the SDK export no metrics. A scraper on another host needs its Host value in `--allowed-hosts`. Counters
+start at zero when the process starts. A labelled counter has no sample until the first event with that label
+value.
+
+### Collector
+
+| Name | Type | Labels | Meaning |
+|---|---|---|---|
+| `tsession_build_info` | gauge | `service` (`collector`), `version`, `goversion` | Build information; the value is always 1. |
+| `tsession_collector_buffered_events` | gauge | none | Events waiting in reorder windows, not yet in the store. |
+| `tsession_collector_deleted_sessions_total` | counter | `cause`: `api`, `retention` | Sessions deleted, by cause (api or retention). |
+| `tsession_collector_ingest_errors_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Ingest requests that failed, by cause (backpressure, shutdown or storage). |
+| `tsession_collector_ingested_events_total` | counter | `result`: `accepted`, `duplicate` | Events received by ingest, by result (accepted or duplicate). |
+| `tsession_collector_quarantined_events_total` | counter | none | Poison events isolated and dropped because the store kept rejecting them. |
+| `tsession_collector_rejected_events_total` | counter | `reason`: `invalid_session_id`, `invalid_proto`, `oversize_message` | Events refused by ingest, by reason. |
+| `tsession_collector_seals_total` | counter | `result`: `complete`, `incomplete`, `error` | Seal requests, by result (complete, incomplete or error). |
+| `tsession_collector_sessions_in_memory` | gauge | none | Sessions that currently have an in-memory actor. |
+| `tsession_collector_store_append_failures_total` | counter | none | Failed attempts to append a batch of events to the store (each is retried). |
+
+### Control plane
+
+| Name | Type | Labels | Meaning |
+|---|---|---|---|
+| `tsession_build_info` | gauge | `service` (`controlplane`), `version`, `goversion` | Build information; the value is always 1. |
+| `tsession_controlplane_kill_switch` | gauge | none | 1 while the global kill switch is on. |
+| `tsession_controlplane_seal_failures_total` | counter | none | Sessions whose collector seal failed after all retries (recorded incomplete). |
+| `tsession_controlplane_seal_retries_total` | counter | `result`: `success`, `failure` | Background attempts to seal a session whose seal failed past its budget, by result. |
+| `tsession_controlplane_seals_abandoned_total` | counter | none | Sessions whose pending seal was given up after the pending budget (seal_error stays). |
+| `tsession_controlplane_seals_pending` | gauge | none | Finished sessions whose collector seal failed and is still being retried. |
+| `tsession_controlplane_sessions` | gauge | `state`: `ACTIVE`, `DRAINING` | Sessions that have not finished, by state. |
+| `tsession_controlplane_sessions_deleted_total` | counter | none | Sessions deleted through the API. |
+| `tsession_controlplane_sessions_finished_total` | counter | `state`: `SEALED`, `EXPIRED`, `ABORTED` | Sessions that reached a terminal state, by state. |
+| `tsession_controlplane_sessions_started_total` | counter | none | Sessions started. |
+| `tsession_controlplane_subscribers` | gauge | none | Open active-set streams (one per connected SDK). |
