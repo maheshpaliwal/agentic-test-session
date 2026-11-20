@@ -1757,7 +1757,7 @@
   paintThemeBtn();
   paintConn();
   fetch('/healthz', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
-    document.getElementById('mode-note').textContent = j.demo ? 'demo mode · synthetic data' : '';
+    document.getElementById('mode-note').textContent = j.demo ? 'demo mode · synthetic data' : j.offline ? 'offline · opened from export files (read-only)' : '';
   }).catch(() => {});
   route();
 })();

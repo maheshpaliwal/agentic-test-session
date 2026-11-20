@@ -78,6 +78,9 @@ type demoSess struct {
 	started time.Time
 	stopAt  time.Time
 	sealed  bool // static terminal session
+	// resolved marks events that already carry transaction outcomes (read
+	// from an export); they are served as they are.
+	resolved bool
 }
 
 // Demo serves fake control-plane and collector APIs backed by synthetic data.
@@ -86,6 +89,8 @@ type Demo struct {
 	sess []*demoSess
 	seq  int
 	now  func() time.Time
+	// readOnly refuses every change (sessions opened from files).
+	readOnly bool
 }
 
 const liveStep = 1500 * time.Millisecond
@@ -168,6 +173,9 @@ func (d *Demo) view(s *demoSess) (Session, []core.Event) {
 			}
 		}
 	}
+	if s.resolved {
+		return sess, evs
+	}
 	return sess, resolveTx(evs)
 }
 
@@ -190,6 +198,13 @@ func notFound(w http.ResponseWriter) { writeJSON(w, 404, m{"error": "not found"}
 
 // ControlPlane returns the fake control-plane API (paths without /api/cp).
 func (d *Demo) ControlPlane() http.Handler {
+	if d.readOnly {
+		return readOnlyAPI(d.controlPlane())
+	}
+	return d.controlPlane()
+}
+
+func (d *Demo) controlPlane() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()

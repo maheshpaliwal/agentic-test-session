@@ -11,6 +11,9 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- **Open a run offline.** `dashboard -open run.ndjson` (repeatable) serves sessions written by `tracectl export`,
+  read-only and without the control plane or collector, so a failed CI run can be attached as a file and opened
+  locally.
 - **Assertions for Go tests.** `sdk/client/tsessiontest` ties a session to a test (`Run`) and asserts on what it
   recorded (`RequireNoFailures`, `RequireMutation`, `RequireNoMutation`); `Session.Mutations` returns a session's
   mutations as a flat, filterable list.

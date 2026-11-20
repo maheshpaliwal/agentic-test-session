@@ -6,6 +6,7 @@ package dashboard
 import (
 	"cmp"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -31,6 +32,9 @@ type Config struct {
 	ControlPlaneURL string // default http://127.0.0.1:7070
 	CollectorURL    string // default http://127.0.0.1:7071
 	Demo            bool   // serve synthetic data instead of proxying
+	// Open lists files written by `tracectl export`; when set, the dashboard
+	// serves those sessions read-only and contacts no other service.
+	Open []string
 	// AllowedHosts are extra Host header values (host or host:port) accepted
 	// in addition to loopback names (DNS-rebinding protection).
 	AllowedHosts []string
@@ -46,10 +50,19 @@ func New(cfg Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"ok":true,"demo":%t}`, cfg.Demo)
+		fmt.Fprintf(w, `{"ok":true,"demo":%t,"offline":%t}`, cfg.Demo, len(cfg.Open) > 0)
 	})
-	if cfg.Demo {
+	if cfg.Demo && len(cfg.Open) > 0 {
+		return nil, errors.New("demo mode and opening export files are mutually exclusive")
+	}
+	if cfg.Demo || len(cfg.Open) > 0 {
 		d := NewDemo()
+		if len(cfg.Open) > 0 {
+			var err error
+			if d, err = NewOffline(cfg.Open); err != nil {
+				return nil, err
+			}
+		}
 		mux.Handle("/api/cp/", http.StripPrefix("/api/cp", d.ControlPlane()))
 		mux.Handle("/api/col/", http.StripPrefix("/api/col", d.Collector()))
 	} else {
