@@ -59,11 +59,14 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 	if info.Kind.IsWrite() {
 		kind = core.KindDBWrite
 	}
-	sqlText := redactSQL(query, info)
-	_, sp := core.Begin(ctx, kind, capSQL(sqlText, 2000))
+	_, sp := core.Begin(ctx, kind, "")
 	if sp == nil {
 		return nil
 	}
+	// Redaction walks the whole statement; it only happens once there is a
+	// span to put the text on.
+	sqlText := redactSQL(query, info)
+	sp.SetName(capSQL(sqlText, 2000))
 	t = &stmtTrace{c: c, cfg: c.cfg, span: sp, ctx: ctx, info: info, query: query, sqlText: sqlText, args: args, write: info.Kind.IsWrite()}
 	t.store = c.cfg.store
 	if t.store == "" {
@@ -104,7 +107,17 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 	return t
 }
 
+// doExec runs an Exec-path statement. A statement whose ctx belongs to no
+// active session is neither parsed nor redacted: it goes straight to the
+// driver and only its transaction control, if any, is noted.
 func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValue, run func() (driver.Result, error)) (driver.Result, error) {
+	if !core.Active(ctx) {
+		res, err := run()
+		if err == nil {
+			c.trackTxUntraced(query)
+		}
+		return res, err
+	}
 	info, ok := c.parse(query)
 	var t *stmtTrace
 	if ok {
@@ -129,7 +142,15 @@ func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValu
 
 // doQuery runs a Query-path statement. run receives the (possibly rewritten)
 // query text and may return a release func to call when the rows are closed.
+// Outside an active session it does as little as doExec.
 func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedValue, canRewrite bool, run func(q string) (driver.Rows, func(), error)) (driver.Rows, error) {
+	if !core.Active(ctx) {
+		r, rel, err := run(query)
+		if err == nil {
+			c.trackTxUntraced(query)
+		}
+		return wrapPlain(r, rel), err
+	}
 	info, ok := c.parse(query)
 	var t *stmtTrace
 	if ok {
