@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,8 @@ type Exporter struct {
 	// down and refusalLogged make the exporter say once when delivery stops,
 	// once when it resumes, and once when the collector refuses events.
 	down          bool
+	outageLogged  bool      // the current outage was logged, so its recovery is too
+	lastOutageLog time.Time // when an outage was last logged
 	refusalLogged bool
 
 	// pending is the unresolved rest of the batch being exported: the first
@@ -160,14 +163,19 @@ func (e *Exporter) drain() bool {
 		refusedDrops := ok && !hadRing && len(lost) > 0
 		if ok && len(lost) > 0 && !e.refusalLogged {
 			e.refusalLogged = true
-			log.Printf("tsession: the collector at %s refused events and they were dropped; check that TSESSION_COLLECTOR_URL points at a tsession collector of a matching version", e.cfg.CollectorURL)
+			log.Printf("tsession: the collector at %s refused events and they were dropped; check that TSESSION_COLLECTOR_URL points at a tsession collector of a matching version", DisplayURL(e.cfg.CollectorURL))
 		}
 		if !ok || refusedDrops {
-			if !ok && e.failures == 0 {
-				// Once per outage: a wrong collector URL otherwise shows up
-				// only as an empty session.
-				log.Printf("tsession: cannot deliver events to the collector at %s; they stay buffered and are retried, and are dropped when the buffer fills", e.cfg.CollectorURL)
+			if !ok && !e.down {
+				// A wrong collector URL otherwise shows up only as an empty
+				// session. At most one outage (and its recovery) is logged
+				// per outageLogGap, so a flapping collector cannot flood the
+				// host's log.
 				e.down = true
+				if now := time.Now(); e.lastOutageLog.IsZero() || now.Sub(e.lastOutageLog) >= outageLogGap {
+					e.lastOutageLog, e.outageLogged = now, true
+					log.Printf("tsession: cannot deliver events to the collector at %s; they stay buffered and are retried, and are dropped when the buffer fills", DisplayURL(e.cfg.CollectorURL))
+				}
 			}
 			e.failures++
 			cd := e.cfg.FlushInterval << min(e.failures, 6)
@@ -176,11 +184,27 @@ func (e *Exporter) drain() bool {
 		}
 		if e.down {
 			e.down = false
-			log.Printf("tsession: delivering events to the collector at %s again", e.cfg.CollectorURL)
+			if e.outageLogged {
+				e.outageLogged = false
+				log.Printf("tsession: delivering events to the collector at %s again", DisplayURL(e.cfg.CollectorURL))
+			}
 		}
 		e.failures = 0
 		e.nextTry = time.Time{}
 	}
+}
+
+// outageLogGap is the least time between two logged outages.
+const outageLogGap = time.Minute
+
+// DisplayURL returns raw in a form that is safe to log: without userinfo,
+// query or fragment, any of which can carry a credential.
+func DisplayURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<unparseable URL>"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
 }
 
 type postResult int

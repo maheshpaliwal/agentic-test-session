@@ -112,6 +112,11 @@ func bodyParams(b []byte) any {
 		dec.UseNumber()
 		var v any
 		if dec.Decode(&v) == nil {
+			// A body that is one JSON string is text: the value sits inside a
+			// larger recorded object, where nothing scrubs string leaves later.
+			if s, ok := v.(string); ok {
+				return core.RedactText(s)
+			}
 			return core.RedactAny(v)
 		}
 	}

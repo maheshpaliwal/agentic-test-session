@@ -166,8 +166,7 @@ func identity(s string) string {
 }
 
 func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
-	fl, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
@@ -196,7 +195,11 @@ func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		fl.Flush()
+		// Flush through the controller: unlike Flusher.Flush it reports a
+		// connection that is gone, and that must not count as a delivery.
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			return
+		}
 		m.delivered(ch, sent)
 	}
 }

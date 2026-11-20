@@ -86,8 +86,12 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	if *failErr && len(rep.failures) > 0 {
 		failed = append(failed, fmt.Sprintf("%d failed event(s)", len(rep.failures)))
 	}
-	if *failInc && rep.incomplete {
+	switch {
+	case !*failInc:
+	case rep.incomplete:
 		failed = append(failed, "session is incomplete")
+	case rep.info.State == "":
+		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
 	}
 	if *failEmpty && rep.sum.EventCount == 0 {
 		failed = append(failed, emptySession)

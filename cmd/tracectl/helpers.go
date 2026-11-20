@@ -47,8 +47,11 @@ func resolve(ctx context.Context, o client.Options, ref string) (*client.Session
 		if err != nil && strings.Contains(err.Error(), ": 404 ") {
 			// The control plane forgets finished sessions (retention, restart)
 			// while the collector may still hold their events: read those.
+			// The collector answers for any id, with zero events for one it
+			// has never seen: fall back only when it really holds events, or
+			// a mistyped id would read as an empty, passing session.
 			d := client.Detached(o, ref)
-			if _, serr := d.Summary(ctx); serr == nil {
+			if sum, serr := d.Summary(ctx); serr == nil && sum.EventCount > 0 {
 				fmt.Fprintf(os.Stderr, "tracectl: the control plane no longer knows %s; reading what the collector holds\n", ref)
 				return d, nil
 			}

@@ -41,8 +41,14 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	}
 	// The control plane knows about a failed seal and a drain that timed out;
 	// the collector's summary does not.
-	if info := s.Info(); *failInc && (sum.Incomplete || info.Incomplete || info.SealError != "") {
+	switch info := s.Info(); {
+	case !*failInc:
+	case sum.Incomplete || info.Incomplete || info.SealError != "":
 		failed = append(failed, "session is incomplete")
+	case info.State == "":
+		// Read through the collector only: whether the seal failed or the
+		// drain timed out is not known, so the gate cannot pass.
+		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
 	}
 	if *failEmpty && sum.EventCount == 0 {
 		failed = append(failed, emptySession)

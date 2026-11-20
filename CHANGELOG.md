@@ -101,6 +101,13 @@
   evicted session unreadable after a restart; a failed delete could bring an older archived record back.
 - `dashboard -open`: a file cut short mid-line still opens (marked incomplete); duplicate or out-of-range
   sequence numbers are rejected instead of silently hiding events.
+- `tkafkaconfluent`: a record value that is a JSON string literal was recorded unmasked.
+- SDK log lines never print the collector or control plane URL with its userinfo or query, and a flapping
+  collector logs at most one outage and one recovery per minute.
+- `tracectl`: a mistyped `ts_` id is an error again (the fallback for forgotten sessions made it read as an
+  empty session that passed every gate), and `--fail-on-incomplete` fails for a session the control plane no
+  longer knows, since its seal state is unknown.
+- Build: a tag name can no longer inject shell or linker flags through `make up`.
 - Redaction: scrubbing text that was already scrubbed left `[REDACTED]]` behind and changed the recorded size;
   `core.RedactText` is idempotent now. Queue message bodies are scrubbed exactly once, and bodies nested in a
   Kafka batch that are JSON string literals are scrubbed too.

@@ -53,8 +53,10 @@ func init() {
 		log.Printf("tsession: disabled: %v", err)
 		return
 	}
+	// The URLs can carry credentials: log them without userinfo and query.
 	log.Printf("tsession: enabled for service %q (control plane %s, collector %s)", service,
-		cmp.Or(os.Getenv("TSESSION_CONTROLPLANE_URL"), "http://127.0.0.1:7070"), cmp.Or(os.Getenv("TSESSION_COLLECTOR_URL"), "http://127.0.0.1:7071"))
+		runtime.DisplayURL(cmp.Or(os.Getenv("TSESSION_CONTROLPLANE_URL"), "http://127.0.0.1:7070")),
+		runtime.DisplayURL(cmp.Or(os.Getenv("TSESSION_COLLECTOR_URL"), "http://127.0.0.1:7071")))
 }
 
 func splitList(s string) []string {
