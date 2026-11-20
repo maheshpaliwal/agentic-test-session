@@ -1,5 +1,8 @@
-// Package client is a Go client for the tsession control plane. Test code
-// uses it to start a session, tag outgoing requests, and wait for the seal.
+// Package client is a Go client for tsession. Test code uses it to start and
+// stop sessions on the control plane, tag outgoing requests, and read what a
+// session recorded from the collector (Summary, Events, Mutations, History,
+// Trace, Export). Subscribers and Session.WaitPropagated report which
+// services are connected and whether they were sent a new session.
 package client
 
 import (

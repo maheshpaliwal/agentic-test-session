@@ -15,11 +15,11 @@ import (
 func main() {
 	addr := flag.String("addr", svc.Env("TSESSION_CP_ADDR", "127.0.0.1:7070"), "listen address")
 	collector := flag.String("collector-url", svc.Env("TSESSION_COLLECTOR_URL", "http://127.0.0.1:7071"), "collector base URL")
-	storeFile := flag.String("store-file", svc.Env("TSESSION_CP_STORE", ""), "optional JSON file for session persistence")
+	storeFile := flag.String("store-file", svc.Env("TSESSION_CP_STORE", ""), "optional file for session persistence (also writes FILE.journal and FILE.archive)")
 	ttl := flag.Int("default-ttl", svc.EnvPositiveInt("TSESSION_CP_DEFAULT_TTL", 3600), "default session TTL (seconds)")
 	hosts := flag.String("allowed-hosts", svc.Env("TSESSION_CP_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (e.g. controlplane:7070); default loopback only")
 	origins := flag.String("allowed-origins", svc.Env("TSESSION_CP_ALLOWED_ORIGINS", ""), "comma-separated browser Origins allowed to call the API (default none)")
-	retention := flag.Duration("retention", svc.EnvPositiveDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long")
+	retention := flag.Duration("retention", svc.EnvPositiveDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long; without --store-file they are then forgotten")
 	showVersion := svc.VersionFlag("tsession-controlplane")
 	flag.Parse()
 	showVersion()

@@ -13,8 +13,8 @@ root module (core, thttp, sdk/*, controlplane, dashboard, cmd/*; stdlib only) ·
 ## Session model (control plane owns the FSM)
 States: `CREATED → ACTIVE → DRAINING → SEALED`, plus `ABORTED`, `EXPIRED`.
 ```json
-{"id":"ts_<ulid-ish>","name":"","mode":"header|exclusive","state":"ACTIVE",
- "initiated_by":"dashboard|client|docker|api","created_at":"RFC3339","started_at":"","ended_at":"",
+{"id":"ts_<ulid-ish>","name":"","name_auto":false,"mode":"header|exclusive","state":"ACTIVE",
+ "initiated_by":"dashboard|client|docker|api","created_at":"RFC3339","started_at":"RFC3339","ended_at":"RFC3339",
  "ttl_seconds":3600,"quiesce_seconds":3,"max_drain_seconds":60,
  "incomplete":false,"dropped_events":0,"bundle_uri":""}
 ```
@@ -52,7 +52,7 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `GET /metrics` Prometheus text format (sessions by state, started/finished/deleted totals, seal failures,
   `tsession_controlplane_seals_pending`, `tsession_controlplane_seal_retries_total{result="success|failure"}`,
   `tsession_controlplane_seals_abandoned_total`, subscribers, kill switch, `tsession_build_info`)
-- `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false}` (active = ACTIVE+DRAINING)
+- `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false,"generation":n}` (active = ACTIVE+DRAINING)
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
   The SDK sends `X-Tsession-Service` and `X-Tsession-Instance` with the request (optional; shown to operators, not trusted).
 - `GET /v1/subscribers` -> `[{"service","instance","connected_at","generation"}]`: the current followers of the
@@ -106,22 +106,25 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `POST /v1/ingest` framed protobuf `Event` messages (`Content-Type: application/x-protobuf`, required; anything
   else, including a missing type or NDJSON, gets `415` naming it; see "Protobuf ingest") (header
   `X-TSession-Instance`). Idempotent on `(session_id, instance, local_seq)`. Returns
-  `{"accepted":n,"duplicates":m,"rejected":r,"rejected_reasons":{...}}`. Events for sessions the
+  `{"accepted":n,"duplicates":m,"rejected":r,"rejected_reasons":{...}}` (the last two are omitted when zero). Events for sessions the
   collector doesn't know are accepted (CP/collector may race) but still stored.
-- Ordering: collector keeps a short reorder window (default 500ms) per session and assigns `Seq`
+- Ordering: the collector holds each event for a reorder window (default 500ms) after it arrives and assigns `Seq`
   (1..N, gapless, single writer per session) ordered by `(EndHLC, Service, LocalSeq)`.
   **Seq = completion order.** Tree/nesting comes from `ParentID`/`LinkIDs`, not Seq. Each event is held for one
   reorder window after it arrives, so a straggler that sorts before it can still take its place; an event held
   back by younger ones is released after two windows at the latest. Events arriving after that get the next Seq
   (approximation; documented).
 - Read API:
-  - `GET /v1/sessions/{id}/events?from_seq=0&limit=1000` -> `{"events":[...],"next_seq":n,"sealed":bool}`
+  - `GET /v1/sessions/{id}/events?from_seq=1&limit=1000` -> `{"events":[...],"next_seq":n,"sealed":bool}`
+    (`from_seq` is inclusive; `limit` is at most 10000)
   - `GET /v1/sessions/{id}/trace` -> tree: `{"session_id","roots":[Node]}` where
     `Node={"event":Event,"children":[Node],"linked":[Node]}` (`linked` = worker spans whose LinkIDs contain this span)
   - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count}`
-  - `GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}` -> ordered mutations with before/after/diff + seq
-  - `GET /v1/sessions/{id}/summary` -> counts by kind/service, mutations by store/entity, failures,
-    pending_async, dropped_events, flags, duration
+  - `GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}` ->
+    `{"store","entity","pk","mutations":[{seq,span_id,service,kind,tx_id,end_ns,op,before,after,diff,source,effective}]}`
+    in Seq order; `{pk}` is the canonical JSON key or, for a single-column key, the bare value
+  - `GET /v1/sessions/{id}/summary` -> `{session_id,event_count,by_kind,by_service,mutations,failures,pending_async,
+    pending_async_ids,dropped_events,flags,duration_ns,sealed,incomplete,quarantined}`
   - `GET /v1/sessions` -> sessions the collector holds events for `[{id,event_count,first_ns,last_ns,sealed}]`
 - Internal (control plane -> collector):
   - `GET /v1/internal/sessions/{id}/drain-status` -> `{"pending":n,"last_event_unix_ns":n,"event_count":n,"dropped_events":n}`
@@ -140,7 +143,7 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - Postgres store: tables live in a dedicated schema (`--pg-schema` / `TSESSION_COLLECTOR_PG_SCHEMA`, default `tsession`;
   `[a-z_][a-z0-9_]{0,62}` only), created if missing and set as the pool `search_path`.
 - Storage interface (collector/store): in-memory impl (default, tests), Postgres (pgx), MongoDB (`store/mongostore`) and DynamoDB (`store/dynamostore`) impls, selected with `--store mem|pg|mongo|dynamodb`. The Postgres impl uses pgx with the
-  schema from the design doc; large payloads stay inline-truncated in v1 (blob store is a stub, fs impl optional).
+  large payloads are truncated inline; there is no blob store.
 
 ### Protobuf ingest
 Mandatory: `POST /v1/ingest` requires `Content-Type: application/x-protobuf` (parameters ignored); any other or missing
@@ -170,14 +173,12 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
   req.Header.Set("Content-Type", tsessionproto.ContentType)
   ```
   (`AppendFramed` appends one event at a time.) The collector tests use the same helper pattern (`protoBody`).
-- Measured (`go test -bench . ./tsessionproto` in `proto/`, Apple M3 Pro, one 256-event batch of synthetic events
-  with mutations, inline payloads and attrs): wire size 307,090 B NDJSON vs 134,526 B protobuf (44%); encode 0.98 ms
-  NDJSON vs 1.53 ms protobuf (SDK side is slower: values are converted to `Value` first, more allocations); decode
-  3.29 ms NDJSON vs 1.60 ms protobuf. Payload-heavy batches shrink less, tiny events more. Your mileage will vary:
-  measure with your own traffic before switching.
+- Measured once, when NDJSON ingest still existed (Apple M3 Pro, one 256-event batch of synthetic events with
+  mutations, inline payloads and attrs): wire size 307,090 B NDJSON vs 134,526 B protobuf; SDK encode 0.98 ms vs
+  1.53 ms; decode 3.29 ms vs 1.60 ms. Historical figures: the NDJSON benchmarks were removed with NDJSON ingest.
 
 ### Collector hardening (v1.1)
-- **Ingest response**: always `200 {"accepted","duplicates","rejected","rejected_reasons":{reason:n}}` unless the whole
+- **Ingest response**: `200 {"accepted","duplicates","rejected","rejected_reasons":{reason:n}}` (`rejected*` omitted when zero) unless the whole
   body exceeds `MaxBodyBytes` (413, default 32MB) or storage fails (500; 503 when a session's buffer is full). A message
   larger than `--max-message-bytes` (`TSESSION_COLLECTOR_MAX_MESSAGE_BYTES`, default 4MB, applies to each encoded
   protobuf message) is rejected alone (`oversize_message`); other reasons: `invalid_proto`, `invalid_session_id`.
@@ -194,7 +195,7 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
 - **Memory**: a sealed session's actor (goroutine + dedupe state) is evicted after `--idle-evict`
   (`TSESSION_COLLECTOR_IDLE_EVICT`, default 5m; unsealed idle sessions after 12x that); state reloads from the
   store on demand. Read endpoints never create actors; unknown ids return empty documents (200). Resolved views
-  (`/trace`, `/entities`, `/summary`) are cached per session and invalidated by a new `Seq` or the seal.
+  (`/trace`, `/entities`, `/summary`) are cached per session, extended with newly stored events, and rebuilt on seal or delete.
 - **Tx resolution**: a `db.tx.commit` with `Err != ""` or `Attrs["commit_failed"]=="true"` is NOT effective
   (as is any `db.tx.rollback`, including tsql's failed-commit rollback with `commit_failed=true`). Any negative
   outcome for a TxID is sticky regardless of arrival order. Applies to the live, paged and sealed views and to
@@ -207,14 +208,15 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
 - **Drain-status**: `last_event_unix_ns` (and the explicit alias `received_unix_ns`) is the collector's *receive*
   time of the latest ingest request for the session, updated on arrival (before the window flushes), independent
   of SDK clocks. `pending` = events buffered in the reorder window + open async entries.
-- **Shutdown**: `Close` flushes every session's reorder window before stopping; an ingest or seal that races with
+- **Shutdown**: `Close` flushes every session's reorder window for at most `Config.ShutdownTimeout` (15s, not a
+  flag); events still unwritten then are dropped and logged; an ingest or seal that races with
   it gets `503`. Stop the HTTP server first (the binary does).
 - **Slow store**: each store call made outside a request (window flush, catch-up, poison probe) is bounded by 30s.
   A timed-out append is retried and is never treated as a poison event. An actor whose session disappeared from the
   store (deleted by another process) rebuilds its state from the store instead of failing on Seq conflicts.
 - **Seal** is serialised on the session (concurrent calls write the bundle once; files are written via temp+rename)
   and idempotent.
-- **Access control**: the whole API is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
+- **Access control**: the whole API except `GET /healthz` is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
   `--allowed-hosts` / `TSESSION_COLLECTOR_ALLOWED_HOSTS`, comma-separated; browser `Origin` must be listed in
   `--allowed-origins` / `TSESSION_COLLECTOR_ALLOWED_ORIGINS`; the only POST body the collector accepts is
   `application/x-protobuf` (ingest; seal sends no body)). `/v1/internal/*` additionally requires a loopback peer or one inside
@@ -270,7 +272,7 @@ HTTP bodies that have no structural redactor (multipart, XML, binary types) are 
 
 ## Wrapper contract (contrib + thttp)
 Mirror the wrapped library's signature; one-line adoption; if `!core.Enabled()` return the original
-object unchanged; idempotent (wrapping twice is a no-op); never panic/block the host; use only
+object unchanged; idempotent (wrapping twice is a no-op; except `tgrpc`: install each interceptor once); never panic/block the host; use only
 `core.Begin / BeginIngress / Inject / Span` (nil-safe) — never edit `core/` (report needed changes instead).
 Mutations: set `core.Mutation` (Store/Entity/PK/Op/Before/After/Diff, Source="sdk"); reads via `core.ReadSummary`.
 Queue carriers: Kafka headers, SQS message attributes (with fewer than three free attribute slots the carrier is one

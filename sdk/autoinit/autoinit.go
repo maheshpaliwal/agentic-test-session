@@ -4,11 +4,16 @@
 //
 // It does nothing unless TSESSION_ENABLED is exactly "true". The settings are
 // read from TSESSION_SERVICE, TSESSION_INSTANCE, TSESSION_CONTROLPLANE_URL and
-// TSESSION_COLLECTOR_URL (see docs/PROTOCOL.md for the rest). Import it before
-// the packages that build handlers and clients: the wrappers (thttp.Handler,
-// tsql.Register, ...) decide once, when they are called, whether the SDK is on.
+// TSESSION_COLLECTOR_URL (see docs/PROTOCOL.md for the rest).
 //
-// It logs one line at start so a service's log shows whether it records.
+// The wrappers (thttp.Handler, tsql.Register, ...) decide once, when they are
+// called, whether the SDK is on. Call them from main or from functions it
+// calls, which run after every package's init. A package that wraps in a
+// package-level variable or an init function must import autoinit itself:
+// the order of imports in a source file does not decide initialisation order.
+//
+// When TSESSION_ENABLED is set, it logs one line at start saying whether the
+// SDK records and where it sends; it logs nothing when the variable is unset.
 package autoinit
 
 import (

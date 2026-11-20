@@ -38,7 +38,9 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	if *failErr && len(sum.Failures) > 0 {
 		failed = append(failed, fmt.Sprintf("%d failed event(s)", len(sum.Failures)))
 	}
-	if *failInc && sum.Incomplete {
+	// The control plane knows about a failed seal and a drain that timed out;
+	// the collector's summary does not.
+	if info := s.Info(); *failInc && (sum.Incomplete || info.Incomplete || info.SealError != "") {
 		failed = append(failed, "session is incomplete")
 	}
 	if len(failed) > 0 {

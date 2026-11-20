@@ -56,6 +56,9 @@ session results (collector):
                                 services connected to the control plane
   version                       print the tracectl version
 
+exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
+             3 a --fail-on-* check failed
+
 --cp defaults to $TSESSION_CONTROLPLANE_URL or http://127.0.0.1:7070
 --collector defaults to $TSESSION_COLLECTOR_URL or http://127.0.0.1:7071`
 

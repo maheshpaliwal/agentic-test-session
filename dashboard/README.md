@@ -17,6 +17,8 @@ Then open http://127.0.0.1:7072.
 | `-collector` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` |
 | `-demo` | `TSESSION_DASHBOARD_DEMO=true` | off |
 | `-allowed-hosts` | `TSESSION_DASHBOARD_ALLOWED_HOSTS` | loopback Host headers only |
+| `-open FILE` | | serve a session written by `tracectl export`, read-only, without other services; repeatable; not with `-demo` |
+| `-version` | | print the version and exit |
 
 ## Server behaviour
 - `/api/cp/*` -> control plane, `/api/col/*` -> collector (prefix stripped). Cookie/Authorization/Origin/Referer/X-Forwarded-* are not forwarded; Set-Cookie and CORS headers are dropped from responses; no CORS headers are added.

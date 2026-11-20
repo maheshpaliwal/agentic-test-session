@@ -34,7 +34,7 @@ up: env
 down:
 	$(DC) --profile app --profile watch down -v
 demo: up
-	@id=$$(curl -fsS -X POST $(CP)/v1/sessions -d '{"name":"make-demo","mode":"header","initiated_by":"api"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
+	@id=$$(curl -fsS -X POST -H 'Content-Type: application/json' $(CP)/v1/sessions -d '{"name":"make-demo","mode":"header","initiated_by":"api"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
 	echo "session $$id"; curl -fsS $(CP)/v1/active; echo; \
 	curl -fsS -X POST $(CP)/v1/sessions/$$id/stop >/dev/null; echo "stopped; dashboard: http://127.0.0.1:7072"
 

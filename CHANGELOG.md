@@ -11,7 +11,7 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
-- The SDK says whether it records: `sdk/autoinit` logs one line at start (enabled with its URLs, or why it is
+- The SDK says whether it records: `sdk/autoinit` logs one line at start when `TSESSION_ENABLED` is set (enabled with its URLs, or why it is
   disabled), and a request rejected by the Host guard now gets a 403 that names the host and the setting to
   change. The README quick start gained the environment block and an "empty session" checklist.
 - `tracectl report <id|name> [--format markdown|junit] [-o FILE]` writes a CI report of one session. Markdown (for
@@ -42,8 +42,8 @@
 - `tracectl trace` prints the call tree (`--errors`, `--depth`), and `tracectl show <session> <seq>` prints one
   event in full, so a failed run can be read from a CI log or over SSH without the dashboard.
 - The dashboard can delete finished sessions (two-click Delete in the session list).
-- **Metrics.** `GET /metrics` (Prometheus text format) on the collector and the control plane; `-version` on every
-  binary.
+- **Metrics.** `GET /metrics` (Prometheus text format) on the collector and the control plane; `-version` on the collector,
+  control plane and dashboard, and `tracectl version`.
 - `tsql.UnwrapConn` / `tsql.UnwrapDriver`; `WithImageDeadline` in `tredis` / `tredisv8`; gRPC ingress now honours
   header and JWT-claim bindings.
 - `make lint`, `make race`, `make fmt-check`; CI runs them.
@@ -55,7 +55,8 @@
   `code`, `sig`, `pin` and `session`. Expect more `[REDACTED]` values than before, including harmless fields such as
   `token_count`; tune with `core.SetRedactKeys`.
 - HTTP bodies without a structural redactor (multipart, XML, binary types) are recorded as `<media/type, N bytes>`.
-- The collector flushes every session's reorder window on shutdown instead of discarding it.
+- The collector flushes every session's reorder window on shutdown instead of discarding it, for at most
+  `Config.ShutdownTimeout` (15s) in total; events still unwritten then are dropped and logged.
 - SQS: the compact single-attribute carrier is now `x-tsession-ctx` (was `ts`, which collided with application
   attributes). Consumers read both names; an old consumer reading a new producer loses the trace in compact mode.
 - kafka-go: a traced batch is written with one `WriteMessages` call (one publish span per message) instead of one
@@ -67,15 +68,18 @@
 - `tsql`: capture uses at most a quarter of the caller's remaining deadline; recorded error text is redacted;
   multi-table `TRUNCATE` yields one mutation per table. New flags: `image_skipped:deadline`,
   `rows_redacted_conservatively`, `diff_truncated`.
-- `tracectl`: an unknown command exits 2 (was 1), like other usage errors.
+- `tracectl`: an unknown command exits 2 (was 1), like a bad global flag. Usage errors inside a command still
+  exit 1.
+- `tracectl summary --fail-on-incomplete` also fails for a session the control plane marked incomplete (a failed
+  seal, a drain that timed out), not only for what the collector's summary reports.
 
 ### Fixed
 - Collector: an ingest or seal racing with shutdown could panic (send on a closed channel); it now gets `503`.
 - Collector: a store call that timed out could get an event quarantined as "poison"; timeouts are retried instead,
   and background store calls are bounded (30s).
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
-  store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
-  events still unwritten then are dropped and logged.
+  store timeouts; it is bounded by `ShutdownTimeout` now, also when a request is still inside the hung store, and
+  a retention sweep in flight ends when the collector closes.
 - Control plane file store: a partial line left in the archive by a failed write (disk full) made the next
   evicted session unreadable after a restart; a failed delete could bring an older archived record back.
 - `dashboard -open`: a file cut short mid-line still opens (marked incomplete); duplicate or out-of-range
@@ -92,8 +96,6 @@
   retried with backoff instead of dropping events after about 300ms, so a collector restart no longer loses
   events, and `Flush` returns false while events are still buffered. `runtime.Stop` with an unreachable
   collector now uses its full timeout (2s).
-- Collector: `Close` is also bounded by `ShutdownTimeout` when a request is still inside a hung store, and a
-  retention sweep in flight ends when the collector closes.
 - Collector: the reorder window applied to a whole flush instead of to each event, so an event could be sequenced
   a moment after it arrived and ahead of a straggler that sorts before it. Each event now gets a full window.
 - Collector: a session removed from the store behind the collector's back no longer wedges on Seq conflicts.
@@ -108,11 +110,11 @@
 
 ### Performance
 - `tsql`: statements outside an active session are no longer parsed or redacted; they go straight to the driver
-  with no added allocation (a 54 KB literal INSERT with no session active: about 3 ms and 8.6 MB down to about
+  with no added allocation in the benchmark (a 54 KB literal INSERT with no session active: about 3 ms and 8.6 MB down to about
   1 µs, against a fake driver). Hand-written transaction control outside a session is still tracked.
 - `tqueue`: consumers no longer consult the side channel while no session is active, so a slow side-channel
   store no longer delays every job by the lookup bound (200 ms by default). `tdynamo`: calls outside a session
-  no longer render the request and allocate nothing, while still learning table key schemas.
+  no longer render the request (no allocation in the benchmark), while still learning table key schemas.
   New `core.AnyActive()` and the optional `core.AnyActiver` interface for session sets.
 - Outside a session, the Redis wrappers no longer classify the command or allocate, and the queue wrappers no
   longer decode and redact every message body (a 64 KB JSON message cost about 1.7 ms and 1.4 MB per consume,
@@ -137,3 +139,4 @@
 ### For implementers of the interfaces
 - `collector/store.Store`: add `DeleteSession(ctx, sessionID) error`.
 - `controlplane.Store`: add `Delete(id string) error`. `controlplane.Collector`: add `Delete(ctx, id) error`.
+- `controlplane.Evictor`: `Evict(ids ...string)` (was a single id).

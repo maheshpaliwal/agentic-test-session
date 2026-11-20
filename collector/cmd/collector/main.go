@@ -21,7 +21,7 @@ func main() {
 	maxMsg := flag.Int("max-message-bytes", svc.EnvInt("TSESSION_COLLECTOR_MAX_MESSAGE_BYTES", 4<<20), "max encoded bytes of one protobuf Event message; longer ones are rejected individually")
 	maxLine := flag.Int("max-line-bytes", 0, "deprecated alias of --max-message-bytes")
 	idle := flag.Duration("idle-evict", svc.EnvDur("TSESSION_COLLECTOR_IDLE_EVICT", 5*time.Minute), "evict a sealed session's in-memory actor after this idle time (negative disables)")
-	retention := flag.Duration("retention", svc.EnvDur("TSESSION_COLLECTOR_RETENTION", 0), "delete a session this long after it was sealed, e.g. 168h (0 keeps sessions forever)")
+	retention := flag.Duration("retention", svc.EnvDur("TSESSION_COLLECTOR_RETENTION", 0), "delete a session this long after it was sealed, or after its last event if it never was, e.g. 168h (0 keeps sessions forever)")
 	hosts := flag.String("allowed-hosts", os.Getenv("TSESSION_COLLECTOR_ALLOWED_HOSTS"), "comma-separated extra Host values accepted besides loopback (e.g. docker service names)")
 	origins := flag.String("allowed-origins", os.Getenv("TSESSION_COLLECTOR_ALLOWED_ORIGINS"), "comma-separated browser origins allowed to call the API")
 	internal := flag.String("internal-allow", os.Getenv("TSESSION_COLLECTOR_INTERNAL_ALLOW"), "comma-separated CIDRs/IPs besides loopback allowed to call /v1/internal/*")
