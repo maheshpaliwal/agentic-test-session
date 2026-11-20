@@ -990,7 +990,10 @@
     const ms = e.mutations || [];
     if (ms.length) {
       pane.appendChild(h('h3', { text: 'Mutations (' + ms.length + ')' }));
-      ms.forEach((m) => pane.appendChild(mutCard(Object.assign({ tx: e.tx_id }, m))));
+      // Each mutation links to the history of its row, key or document in the Entities tab.
+      ms.forEach((m) => pane.appendChild(mutCard(Object.assign({ tx: e.tx_id }, m),
+        h('button', { type: 'button', class: 'linkbtn', text: 'entity history', title: 'Every change this session made to this ' + (m.entity || 'entity'),
+          onclick: () => { D.entSel = [m.store, m.entity, U.pkRaw(m.pk)].join('\u0000'); D.entQ = ''; location.hash = sessionHref(D.id, 'entities'); } }))));
     }
     if (e.reads && e.reads.length) {
       pane.appendChild(h('h3', { text: 'Reads (' + e.reads.length + ')' }));
