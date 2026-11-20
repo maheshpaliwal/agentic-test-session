@@ -110,6 +110,12 @@ func TestTemplateHugeInput(t *testing.T) {
 	if utf8.RuneCountInString(n) > MaxNameRunes || time.Since(start) > 2*time.Second {
 		t.Fatalf("len=%d took %v", utf8.RuneCountInString(n), time.Since(start))
 	}
+	// Cutting a long template must not change what a name within the limit expands to.
+	long := strings.Repeat("{bind.h}-", 200) // 1800 bytes, 400 runes once expanded
+	if got, want := SanitizeName(ExpandNameTemplate(long+strings.Repeat("x", 1<<20), []Binding{{BindHeader, "h", "v"}}, "api", t0)),
+		SanitizeName(ExpandNameTemplate(long, []Binding{{BindHeader, "h", "v"}}, "api", t0)); got != want {
+		t.Fatalf("a long tail changed the name: %q != %q", got, want)
+	}
 }
 
 func TestSanitizeName(t *testing.T) {
