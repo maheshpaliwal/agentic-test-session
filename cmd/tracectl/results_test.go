@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/maheshpaliwal/agentic-test-session/controlplane"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -28,8 +30,10 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 	yes, no := true, false
 	evs := []core.Event{
 		{Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "POST /orders", StartNs: 1_000_000_000, EndNs: 1_050_000_000},
-		{Seq: 2, Service: "api", Kind: core.KindDBWrite, Name: "INSERT INTO orders", StartNs: 1_010_000_000,
-			Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &yes}}},
+		{Seq: 2, Service: "api", Kind: core.KindDBWrite, Name: "INSERT INTO orders", StartNs: 1_010_000_000, EndNs: 1_012_000_000,
+			TxID: "tx1", Attrs: map[string]string{"rows": "1"}, Req: core.PayloadRef{Inline: json.RawMessage(`{"args":[42,"[REDACTED]"]}`), Redacted: true},
+			Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &yes, PK: map[string]any{"id": 42},
+				Diff: []core.FieldChange{{Field: "status", New: "new"}}}}},
 		{Seq: 3, Service: "worker", Kind: core.KindDBRead, Name: "SELECT 1", StartNs: 1_020_000_000},
 		{Seq: 4, Service: "worker", Kind: core.KindWorkerEnd, Name: "ship", StartNs: 1_030_000_000, Err: "carrier\n  timeout"},
 	}
@@ -38,7 +42,22 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 		json.NewEncoder(w).Encode(env.sum)
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(client.EventPage{Events: evs, NextSeq: 5, Sealed: true})
+		from, _ := strconv.ParseUint(r.URL.Query().Get("from_seq"), 10, 64)
+		page := slicex.Filter(evs, func(e core.Event) bool { return e.Seq >= from })
+		if n, _ := strconv.Atoi(r.URL.Query().Get("limit")); n > 0 && len(page) > n {
+			page = page[:n]
+		}
+		json.NewEncoder(w).Encode(client.EventPage{Events: page, NextSeq: 5, Sealed: true})
+	})
+	mux.HandleFunc("GET /v1/sessions/{id}/trace", func(w http.ResponseWriter, r *http.Request) {
+		node := func(i int, children, linked []*client.TraceNode) *client.TraceNode {
+			return &client.TraceNode{Event: evs[i], Children: children, Linked: linked}
+		}
+		ship := node(3, nil, nil)
+		json.NewEncoder(w).Encode(client.Trace{SessionID: r.PathValue("id"), Roots: []*client.TraceNode{
+			node(0, []*client.TraceNode{node(1, nil, []*client.TraceNode{ship})}, nil),
+			node(2, nil, nil),
+		}})
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/entities", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]client.Entity{{Store: "postgres", Entity: "orders", PK: `{"id":42}`, MutationCount: 2}})

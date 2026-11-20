@@ -81,6 +81,8 @@ tracectl summary my-run                      # counts, mutations, failures
 tracectl events my-run --kind 'db.*' --errors
 tracectl entities my-run                     # what the session changed
 tracectl history my-run postgres orders 42   # every change to one row, with diffs
+tracectl trace my-run --errors               # call tree, only branches that failed
+tracectl show my-run 17                      # one event in full: request, response, mutations
 tracectl export my-run -o run.ndjson
 
 # CI gate: exit 3 on failed events or an incomplete session

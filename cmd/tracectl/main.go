@@ -41,6 +41,9 @@ session results (collector):
   entities <id|name> [--json]   rows/documents/keys the session changed
   history <id|name> <store> <entity> <pk> [--json]
                                 every change to one entity, with diffs and tx outcome
+  trace <id|name> [--errors] [--depth N] [--json]
+                                the call tree; ~> marks async work a span triggered
+  show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
 
   version                       print the tracectl version
@@ -80,6 +83,8 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"events":       (*cli).events,
 	"entities":     (*cli).entities,
 	"history":      (*cli).history,
+	"trace":        (*cli).trace,
+	"show":         (*cli).show,
 	"export":       (*cli).export,
 	"version":      (*cli).version,
 }

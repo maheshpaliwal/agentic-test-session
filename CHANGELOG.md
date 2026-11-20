@@ -11,6 +11,8 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- `tracectl trace` prints the call tree (`--errors`, `--depth`), and `tracectl show <session> <seq>` prints one
+  event in full, so a failed run can be read from a CI log or over SSH without the dashboard.
 - The dashboard can delete finished sessions (two-click Delete in the session list).
 - **Metrics.** `GET /metrics` (Prometheus text format) on the collector and the control plane; `-version` on every
   binary.
