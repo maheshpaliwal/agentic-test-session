@@ -25,6 +25,15 @@ func drain(t *testing.T, rows interface {
 	rows.Close()
 }
 
+// Tests that register a driver must survive a second run in the same process
+// (go test -count=2): sql.Register panics on a name it has already seen.
+func TestDriverRegistrationIsRerunnable(t *testing.T) {
+	for range 2 {
+		TestDisabledIsPassthrough(t)
+		TestIdempotentWrapping(t)
+	}
+}
+
 // A slow capture may only use a fraction of the caller's remaining time, so
 // the application's own statement still has most of its deadline.
 func TestCaptureLeavesCallerDeadline(t *testing.T) {

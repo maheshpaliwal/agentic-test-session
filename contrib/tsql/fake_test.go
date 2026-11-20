@@ -235,6 +235,13 @@ func values(a []driver.NamedValue) []driver.Value {
 
 var driverSeq atomic.Int64
 
+// uniqueName returns a driver name no earlier call returned. The database/sql
+// registry is process-wide and has no Unregister, so registering a fixed name
+// panics the second time a test runs in one process (go test -count=2).
+func uniqueName(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, driverSeq.Add(1))
+}
+
 // setup enables the SDK with an in-memory recorder and one active session.
 func setup(t *testing.T) (*core.MemRecorder, context.Context) {
 	t.Helper()
@@ -253,7 +260,7 @@ func setup(t *testing.T) (*core.MemRecorder, context.Context) {
 // open registers fake under a unique name and opens it through tsql.
 func open(t *testing.T, f *fakeDB, driverName string, opts ...tsql.Option) *sql.DB {
 	t.Helper()
-	name := fmt.Sprintf("%s-fake-%d", driverName, driverSeq.Add(1))
+	name := uniqueName(driverName + "-fake")
 	sql.Register(name, f)
 	db, err := tsql.Open(name, "dsn", opts...)
 	if err != nil {

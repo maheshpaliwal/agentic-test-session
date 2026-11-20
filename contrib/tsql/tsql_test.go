@@ -32,7 +32,7 @@ func jsonMap(t *testing.T, p core.PayloadRef) map[string]any {
 func TestDisabledIsPassthrough(t *testing.T) {
 	core.Configure(core.Config{Enabled: false})
 	f := &fakeDB{}
-	name := "disabled-fake"
+	name := uniqueName("disabled-fake")
 	sql.Register(name, f)
 	db, err := tsql.Open(name, "dsn")
 	if err != nil {
@@ -57,7 +57,7 @@ func TestIdempotentWrapping(t *testing.T) {
 	if tsql.WrapDriver(w) != w {
 		t.Fatal("double WrapDriver must be a no-op")
 	}
-	name := "idem-fake"
+	name := uniqueName("idem-fake")
 	sql.Register(name, w)
 	db, err := tsql.Open(name, "x")
 	if err != nil {
