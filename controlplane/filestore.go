@@ -97,6 +97,9 @@ type FileStore struct {
 	// newline (a failed append that could neither be removed nor ended). The
 	// next append starts with a newline of its own.
 	archTorn bool
+	// keepArchiveAsIs is set at open when the archive holds damaged lines
+	// that could not be copied aside: the file is then not rewritten.
+	keepArchiveAsIs bool
 	// stale holds, by id, the archive lines that a later line of the id
 	// replaced and that are still in the file. It is empty unless overwriting
 	// such a line failed. Delete overwrites them with the latest line, so that
@@ -406,9 +409,17 @@ func (f *FileStore) loadArchive() error {
 		return err
 	}
 	f.ar = fh
+	type badLine struct {
+		off  int64
+		data []byte
+	}
+	var bad []badLine
 	size, nl, err := scanLines(fh, func(off int64, line []byte) {
 		var s Session
 		if json.Unmarshal(line, &s) != nil || s.ID == "" {
+			if len(bytes.TrimSpace(line)) > 0 {
+				bad = append(bad, badLine{off, bytes.Clone(line)})
+			}
 			return
 		}
 		if old, ok := f.arch[s.ID]; ok {
@@ -418,6 +429,28 @@ func (f *FileStore) loadArchive() error {
 	})
 	if err != nil {
 		return err
+	}
+	if n := len(bad); n > 0 && !nl && bad[n-1].off+int64(len(bad[n-1].data)) == size {
+		bad = bad[:n-1] // a torn last line is an interrupted append, not damage
+	}
+	if len(bad) > 0 {
+		// A damaged line is a session this store can no longer serve. Tidying
+		// the archive would erase it without a trace: keep it aside and say so.
+		var kept bytes.Buffer
+		for _, b := range bad {
+			kept.Write(b.data)
+			kept.WriteByte('\n')
+		}
+		side := f.archivePath() + ".corrupt"
+		if werr := appendFile(side, kept.Bytes(), true); werr != nil {
+			f.keepArchiveAsIs = true // do not rewrite the file the lines are in
+			f.log.Error("file store: the archive has lines that cannot be read and they could not be saved aside; the archive is left as it is",
+				"lines", len(bad), "archive", f.archivePath(), "err", werr)
+		} else {
+			f.log.Error("file store: the archive has lines that cannot be read; their sessions are gone from the control plane (the collector may still hold their events) and the lines were saved aside",
+				"lines", len(bad), "archive", f.archivePath(), "saved_to", side)
+		}
+		f.readErrs.Add(int64(len(bad)))
 	}
 	f.archSize = size
 	if !nl {
@@ -447,9 +480,11 @@ func (f *FileStore) tidyArchive(unfinished []archRef) error {
 	if len(unfinished) == 0 && len(f.stale) == 0 && live == f.archSize {
 		return nil
 	}
-	err := f.rewriteArchive()
-	if err == nil {
-		return nil
+	err := errors.New("the archive holds damaged lines that could not be saved aside")
+	if !f.keepArchiveAsIs {
+		if err = f.rewriteArchive(); err == nil {
+			return nil
+		}
 	}
 	if berr := f.blankLines(unfinished...); berr != nil {
 		return errors.Join(err, berr)
@@ -880,7 +915,14 @@ func (f *FileStore) undoAppend(ar *os.File, before int64, n, want int) (left boo
 	if n > 0 {
 		if _, err := f.ops.writeAt(ar, bytes.Repeat([]byte{' '}, n), before); err == nil {
 			f.archSize = before + int64(n)
-			return f.ops.sync(ar) != nil
+			if f.ops.sync(ar) != nil {
+				// The blanks may never reach the disk. Start the next append
+				// on a line of its own, or the torn bytes and the next
+				// session's line would load as one unparseable line.
+				f.archTorn = true
+				return true
+			}
+			return false
 		}
 	}
 	end := before + int64(want)
@@ -1111,7 +1153,7 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 				// Evict have removed the entry of a line they replaced, and it
 				// must not come back.
 				f.amu.RLock()
-				if r, ok := f.arch[e.id]; ok && r.off == e.ref.off && f.archGen == gen {
+				if r, ok := f.arch[e.id]; ok && r.off == e.ref.off && f.archGen == gen && f.ar != nil {
 					f.cache.put(e.id, gen, e.ref.off, s, false)
 				}
 				f.amu.RUnlock()

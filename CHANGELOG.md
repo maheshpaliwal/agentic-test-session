@@ -31,6 +31,8 @@
   run in which nothing was connected or attributed passed every other gate.
 - Container images report a real version: `make up` stamps `git describe` into the binaries (they are built
   without `.git` and used to say `(devel)`).
+- `FileStore.Close` (the control plane closes its store on a clean shutdown), `ErrStoreClosed`, `WithStoreLogger`,
+  and the optional `CheckedStore` and `SelectiveLister` store capabilities.
 - `tracectl kill on|off|status` sets and reads the control plane's global kill switch; `client.SetKill` and
   `client.KillSwitch` do the same from Go. `tracectl doctor` reports when the switch is on.
 - `docs/CONFIG.md` lists every setting and every metric of the collector and the control plane; a test in each
@@ -95,6 +97,12 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts; it is bounded by `ShutdownTimeout` now, also when a request is still inside the hung store, and
   a retention sweep in flight ends when the collector closes.
+- Control plane file store: an archived session whose line cannot be read is no longer reported as unknown.
+  Reading, renaming, stopping and aborting it answer `500`; it can still be deleted, here and in the collector; a
+  pending seal retry is kept. At start, damaged archive lines are saved to `FILE.archive.corrupt` and logged
+  instead of being erased. New metric `tsession_controlplane_store_read_errors_total`.
+- Control plane file store: after a failed archive write whose cleanup also failed, an older record of a session
+  could win, or a deleted session could come back, at the next start.
 - Control plane file store: a delete whose journal record started a background compaction was undone by the next
   unclean restart (the snapshot was taken while the session was still in memory).
 - Control plane file store: a partial line left in the archive by a failed write (disk full) made the next
@@ -151,6 +159,11 @@
 - Outside a session, the Redis wrappers no longer classify the command or allocate, and the queue wrappers no
   longer decode and redact every message body (a 64 KB JSON message cost about 1.7 ms and 1.4 MB per consume,
   an 8 KB binary one about 1 ms, with no session active). `core.Active(ctx)` is the check wrappers use.
+- Control plane: the file store keeps an index entry per archived session (about 100 bytes) instead of the whole
+  session and reads archived sessions from the archive on demand; deleting an archived session overwrites its
+  line in place instead of rewriting the archive (at 100,000 archived sessions about 0.6 s down to a few ms).
+  The trade-off: beyond about 16,000 archived sessions an unfiltered session list reads the archive on every
+  call and is several times slower (about 0.15 s to 0.45 s per request at 100,000).
 - Control plane: the file store (`--store-file`) appends each change to `<file>.journal` instead of rewriting the
   whole file under the session lock (a write with 10,000 sessions: about 51 ms to 0.1 ms; a sweep evicting 500:
   about 20 s to 2 ms, on the development machine). Snapshots are fsynced, torn lines and leftover temp files are

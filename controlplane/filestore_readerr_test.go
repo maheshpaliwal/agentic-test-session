@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -169,14 +168,7 @@ func TestManagerTellsUnreadableFromUnknown(t *testing.T) {
 		return do(t, m.Handler(), method, target, "127.0.0.1:7070", body, map[string]string{"Content-Type": "application/json"}).Code
 	}
 
-	repair := damageArchive(t, fs, 10)
-	err = m.Delete(context.Background(), fin.ID)
-	if !errors.Is(err, ErrStore) || errors.Is(err, ErrNotFound) {
-		t.Fatalf("delete of an unreadable session: %v, want ErrStore", err)
-	}
-	if calls := c.callLog(); len(calls) != 0 {
-		t.Fatalf("collector calls for a session that could not be read: %v", calls)
-	}
+	damageArchive(t, fs, 10)
 	if _, err := m.Rename(fin.ID, "new name"); !errors.Is(err, ErrStore) {
 		t.Fatalf("rename of an unreadable session: %v, want ErrStore", err)
 	}
@@ -187,7 +179,6 @@ func TestManagerTellsUnreadableFromUnknown(t *testing.T) {
 		t.Fatalf("abort of an unreadable session: %v, want ErrStore", err)
 	}
 	for _, r := range [][3]string{
-		{"DELETE", "/v1/sessions/" + fin.ID, ""},
 		{"GET", "/v1/sessions/" + fin.ID, ""},
 		{"PATCH", "/v1/sessions/" + fin.ID, `{"name":"x"}`},
 	} {
@@ -206,9 +197,10 @@ func TestManagerTellsUnreadableFromUnknown(t *testing.T) {
 		t.Fatalf("metrics do not have %q:\n%s", want, scrapeMetrics(t, m))
 	}
 
-	repair()
+	// It can still be deleted, here and in the collector: an archived session
+	// is finished, and refusing would leave it undeletable.
 	if code := status("DELETE", "/v1/sessions/"+fin.ID, ""); code != http.StatusOK {
-		t.Fatalf("delete once the archive can be read again: %d", code)
+		t.Fatalf("delete of an unreadable session: %d, want 200", code)
 	}
 	if calls := c.callLog(); len(calls) != 1 || calls[0] != "delete" {
 		t.Fatalf("collector calls: %v", calls)

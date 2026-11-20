@@ -3,6 +3,7 @@ package controlplane
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -368,14 +369,16 @@ func (m *Manager) Abort(id string) (Session, error) {
 func (m *Manager) Delete(ctx context.Context, id string) error {
 	m.mu.Lock()
 	s, err := m.stored(id)
-	if err != nil {
-		// ErrStore, not ErrNotFound, when the store has the session and
-		// cannot read it: the collector still holds its data, and "not found"
-		// would tell the caller that there is nothing left to delete.
+	// A session the store has but cannot read (ErrStore) is an archived one,
+	// and only finished sessions are archived: it can still be deleted, here
+	// and in the collector. Refusing would leave it undeletable until a
+	// restart, which then forgets it while the collector keeps its events.
+	unreadable := errors.Is(err, ErrStore)
+	if err != nil && !unreadable {
 		m.mu.Unlock()
 		return err
 	}
-	if !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+	if !unreadable && !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
 		m.mu.Unlock()
 		return fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
 	}
