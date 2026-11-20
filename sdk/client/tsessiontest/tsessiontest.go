@@ -102,7 +102,18 @@ func RequireNoFailures(t testing.TB, s *client.Session) {
 		t.Errorf("tsession: session %s is incomplete: %d dropped, %d quarantined, %d async job(s) unfinished",
 			s.ID, sum.DroppedEvents, sum.Quarantined, sum.PendingAsync)
 	}
-	if len(sum.Failures) > 0 || sum.Incomplete {
+	// The control plane knows things the collector's summary does not: a drain
+	// that ran out of time and a seal that failed.
+	info := s.Info()
+	switch {
+	case info.SealError != "":
+		t.Errorf("tsession: session %s was not sealed: %s", s.ID, info.SealError)
+	case info.DrainTimedOut:
+		t.Errorf("tsession: session %s stopped draining at its time limit with asynchronous work still running", s.ID)
+	case info.Incomplete && !sum.Incomplete:
+		t.Errorf("tsession: the control plane marked session %s incomplete", s.ID)
+	}
+	if len(sum.Failures) > 0 || sum.Incomplete || info.SealError != "" || info.DrainTimedOut || info.Incomplete {
 		t.FailNow()
 	}
 }
@@ -133,6 +144,12 @@ func RequireNoMutation(t testing.TB, s *client.Session, f client.MutationFilter)
 func mutations(t testing.TB, s *client.Session, f client.MutationFilter) []client.Mutation {
 	t.Helper()
 	Stop(t, s)
+	if e := s.Info().SealError; e != "" {
+		// Without the seal, open transactions are unresolved: an assertion
+		// about what took effect would be a guess.
+		t.Fatalf("tsession: session %s was not sealed, so transaction outcomes are not final: %s", s.ID, e)
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	ms, err := s.Mutations(ctx, f)

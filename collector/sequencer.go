@@ -39,8 +39,9 @@ type Sequencer struct {
 	// memo holds the status of sessions without a live actor, valid while the
 	// store's head Seq is unchanged, so polling an evicted session does not
 	// read all of its events every time.
-	memoMu sync.Mutex
-	memo   map[string]statusMemo
+	memoMu  sync.Mutex
+	memo    map[string]statusMemo
+	memoGen uint64 // bumped by forgetStatus; a status computed across one is not kept
 
 	stop chan struct{}
 	jd   chan struct{}
@@ -188,6 +189,7 @@ type statusMemo struct {
 func (s *Sequencer) forgetStatus(id string) {
 	s.memoMu.Lock()
 	delete(s.memo, id)
+	s.memoGen++
 	s.memoMu.Unlock()
 }
 
@@ -204,8 +206,18 @@ func (s *Sequencer) quarantined(id string) int {
 	return s.quar[id]
 }
 
+// bound returns ctx cancelled as well when the shutdown budget runs out, so
+// a request still inside the store cannot hold Close past it.
+func (s *Sequencer) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.bg, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
 // Add submits events of one session.
 func (s *Sequencer) Add(ctx context.Context, id string, evs []core.Event) (acc, dup int, err error) {
+	ctx, cancel := s.bound(ctx)
+	defer cancel()
 	if !s.with(id, true, true, func(a *sessionActor) { acc, dup, err = a.add(ctx, evs) }) {
 		return 0, 0, errSeqClosed
 	}
@@ -234,6 +246,8 @@ func (a *sessionActor) status() Status {
 // Status reports a session's live state without creating an actor: unknown
 // or evicted sessions are answered from the store.
 func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error) {
+	ctx, cancel := s.bound(ctx)
+	defer cancel()
 	ok := s.with(id, false, false, func(a *sessionActor) {
 		if err = a.load(ctx); err != nil {
 			return
@@ -249,6 +263,7 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 	}
 	s.memoMu.Lock()
 	m, hit := s.memo[id]
+	gen := s.memoGen
 	s.memoMu.Unlock()
 	if hit && m.head == head {
 		m.st.Quarantined = s.quarantined(id)
@@ -261,10 +276,12 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 	st = t.status()
 	if t.next == head+1 { // the load saw exactly the head it is filed under
 		s.memoMu.Lock()
-		if s.memo == nil || len(s.memo) >= maxStatusMemo {
-			s.memo = map[string]statusMemo{}
+		if s.memoGen == gen {
+			if s.memo == nil || len(s.memo) >= maxStatusMemo {
+				s.memo = map[string]statusMemo{}
+			}
+			s.memo[id] = statusMemo{head: head, st: st}
 		}
-		s.memo[id] = statusMemo{head: head, st: st}
 		s.memoMu.Unlock()
 	}
 	return st, nil
@@ -310,6 +327,8 @@ func (s *Sequencer) evictAll() {
 // Flush forces the reorder window closed for an existing session and returns
 // its status afterwards.
 func (s *Sequencer) Flush(ctx context.Context, id string) (st Status, err error) {
+	ctx, cancel := s.bound(ctx)
+	defer cancel()
 	ok := s.with(id, true, true, func(a *sessionActor) {
 		if err = a.load(ctx); err != nil {
 			return

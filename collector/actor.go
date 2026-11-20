@@ -191,7 +191,9 @@ func (a *sessionActor) armNext() {
 			next = t
 		}
 	}
-	a.arm(max(time.Until(next), time.Millisecond))
+	// Wake-ups are spaced at least a tenth of the window apart, so a stream
+	// of small ingests shares flushes instead of sorting the buffer for each.
+	a.arm(max(time.Until(next), a.window/10, time.Millisecond))
 }
 
 func (a *sessionActor) setBuf(b []buffered) {
@@ -364,8 +366,13 @@ func (a *sessionActor) flush(all bool) error {
 	}
 	rest, err := a.persist(batch)
 	held := a.buf[n:]
-	if len(rest) == 0 && len(held) == 0 {
-		a.setBuf(nil)
+	if len(rest) == 0 {
+		if len(held) == 0 {
+			a.setBuf(nil)
+			return nil
+		}
+		clear(a.buf[:n]) // let go of the stored events' payloads
+		a.setBuf(held)
 		return nil
 	}
 	// What the store did not take goes back to the front, already due (zero
@@ -479,6 +486,12 @@ func (a *sessionActor) resync(ctx context.Context, batch []core.Event) ([]core.E
 			a.seen[k] = struct{}{} // still buffered: keep rejecting replays
 			out = append(out, batch[i])
 		}
+	}
+	// The reload forgot the events still held in their window (the batch is
+	// only the due part of the buffer): mark them again, or a resend of one
+	// would be stored twice.
+	for i := range a.buf {
+		a.seen[evKey{a.buf[i].ev.Instance, a.buf[i].ev.LocalSeq}] = struct{}{}
 	}
 	return out, nil
 }

@@ -87,6 +87,7 @@ type Collector struct {
 	vmu   sync.Mutex
 	views map[string]*viewEntry
 	vtick uint64
+	vgen  uint64 // bumped by every delete; a view built across one is not cached
 
 	stopOnce  sync.Once
 	stop      chan struct{} // closed by Close
@@ -282,6 +283,8 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	if !validID.MatchString(id) {
 		return errBadID
 	}
+	ctx, cancel := c.seq.bound(ctx)
+	defer cancel()
 	var err error
 	if !c.seq.with(id, true, false, func(a *sessionActor) { err = a.purge(ctx) }) {
 		return errSeqClosed
@@ -294,6 +297,7 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	c.seq.forgetStatus(id)
 	c.vmu.Lock()
 	delete(c.views, id)
+	c.vgen++
 	c.vmu.Unlock()
 	if c.cfg.BundleDir != "" {
 		// validID admits no path separators and no leading dot, so the join
@@ -315,8 +319,18 @@ func (c *Collector) retentionLoop() {
 		case <-c.stop:
 			return
 		case now := <-t.C:
+			// A sweep in flight ends when the collector is closed.
 			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.StoreTimeout)
+			swept := make(chan struct{})
+			go func() {
+				select {
+				case <-c.stop:
+					cancel()
+				case <-swept:
+				}
+			}()
 			n, err := c.PurgeExpired(ctx, now)
+			close(swept)
 			cancel()
 			if err != nil {
 				c.log.Warn("retention sweep", "err", err)
@@ -381,6 +395,8 @@ func (c *Collector) Seal(ctx context.Context, id string) (res SealResult, err er
 	if !validID.MatchString(id) {
 		return SealResult{}, errBadID
 	}
+	ctx, cancel := c.seq.bound(ctx)
+	defer cancel()
 	if !c.seq.with(id, true, true, func(a *sessionActor) { res, err = c.sealLocked(ctx, a) }) {
 		err = errSeqClosed
 	}

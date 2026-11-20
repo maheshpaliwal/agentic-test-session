@@ -65,6 +65,8 @@
   retried with backoff instead of dropping events after about 300ms, so a collector restart no longer loses
   events, and `Flush` returns false while events are still buffered. `runtime.Stop` with an unreachable
   collector now uses its full timeout (2s).
+- Collector: `Close` is also bounded by `ShutdownTimeout` when a request is still inside a hung store, and a
+  retention sweep in flight ends when the collector closes.
 - Collector: the reorder window applied to a whole flush instead of to each event, so an event could be sequenced
   a moment after it arrived and ahead of a straggler that sorts before it. Each event now gets a full window.
 - Collector: a session removed from the store behind the collector's back no longer wedges on Seq conflicts.

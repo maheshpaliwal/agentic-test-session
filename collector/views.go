@@ -270,16 +270,23 @@ func (c *Collector) extend(ctx context.Context, id string, old *viewEntry, head 
 		if head == old.head {
 			return old.raw, nil
 		}
-		more, err := c.st.Events(ctx, id, old.head+1, 0)
+		// Read from the cached head itself: if the store no longer holds the
+		// same event there, the session was replaced (deleted and recorded
+		// again) and the cached events must not be spliced onto it.
+		more, err := c.st.Events(ctx, id, old.head, 0)
 		if err != nil {
 			return nil, err
 		}
-		if len(more) > 0 && more[0].Seq == old.head+1 {
+		if last := &old.raw[len(old.raw)-1]; len(more) > 1 && sameEvent(&more[0], last) && more[1].Seq == old.head+1 {
 			// The full slice expression forces a copy: old.raw stays as it is.
-			return append(old.raw[:len(old.raw):len(old.raw)], more...), nil
+			return append(old.raw[:len(old.raw):len(old.raw)], more[1:]...), nil
 		}
 	}
 	return c.st.Events(ctx, id, 0, 0)
+}
+
+func sameEvent(a, b *core.Event) bool {
+	return a.Seq == b.Seq && a.Instance == b.Instance && a.LocalSeq == b.LocalSeq && a.SpanID == b.SpanID
 }
 
 // maxViews bounds the per-session view cache.
@@ -348,7 +355,7 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 		sealedNs = si.SealedAt.UnixNano() | 1
 	}
 	c.vmu.Lock()
-	old := c.views[id]
+	old, gen := c.views[id], c.vgen
 	if old != nil && old.head == head && old.sealedNs == sealedNs {
 		c.vtick++
 		old.used = c.vtick
@@ -372,6 +379,12 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 		e.head = 0
 	}
 	c.vmu.Lock()
+	if c.vgen != gen {
+		// A session was deleted while this view was being built; it may be
+		// this one, so the view is returned but not cached.
+		c.vmu.Unlock()
+		return e, nil
+	}
 	c.vtick++
 	e.used = c.vtick
 	c.views[id] = e
