@@ -83,6 +83,10 @@
 - SDK exporter: `Close` waited out a request stuck on an unresponsive collector.
 
 ### Performance
+- Control plane: the file store (`--store-file`) appends each change to `<file>.journal` instead of rewriting the
+  whole file under the session lock (a write with 10,000 sessions: about 51 ms to 0.1 ms; a sweep evicting 500:
+  about 20 s to 2 ms, on the development machine). Snapshots are fsynced, torn lines and leftover temp files are
+  tolerated, and existing files load unchanged. `Evictor.Evict` now takes a batch of ids.
 - Collector: a cached session view is extended with the events stored since, instead of re-reading the whole
   session whenever it grows, and the status of a session with no live actor is remembered while the store is
   unchanged. Polling a live session reads each event about once rather than once per poll.
