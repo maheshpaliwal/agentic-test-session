@@ -35,6 +35,10 @@ make up                                 # then open http://127.0.0.1:7072
 make down                               # when finished; this also deletes the recorded data
 ```
 
+To move a port: `--listen` (collector, control plane), `-listen` (dashboard). Then point the services and
+`tracectl` at the new addresses with `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`. Run the collector
+from a directory you choose: it writes sealed bundles to `./bundles` there.
+
 ## Instrument a service
 
 ```go
@@ -69,8 +73,10 @@ TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
 ## Record a session
 
 ```bash
+go build -o tracectl ./cmd/tracectl      # or: go run ./cmd/tracectl <command>
+
 tracectl doctor                          # both services answer; which services are connected
-tracectl start --name my-run             # prints the session id
+tracectl start --name my-run             # prints the session as JSON; the id is the "id" field
 curl -H 'x-tsession-id: <id>' http://127.0.0.1:8080/orders
 tracectl stop my-run --wait              # drains async work, then seals
 ```
@@ -106,6 +112,9 @@ tsessiontest.RequireNoFailures(t, sess)
 tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", Entity: "orders", Op: "insert"})
 ```
 
+Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
+`client.Options.QuiesceSeconds` if your system has no asynchronous work.
+
 `sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
 `Trace`).
 
@@ -130,10 +139,17 @@ named after the file.
 
 1. `tracectl doctor` lists the service as connected. If not: `TSESSION_ENABLED` must be exactly `true`, and the
    service logs `tsession: enabled ...` at start when it is.
-2. The handlers were wrapped after the SDK started (see "Instrument a service").
+2. The handlers were wrapped after the SDK started (see "Instrument a service"). If not, the service still
+   shows as connected, and logs `tsession: thttp.Handler was called before the SDK started` at start.
 3. In containers, the control plane and collector accept loopback Host names only. Add the service names with
    `--allowed-hosts`; the 403 response names the rejected host.
-4. The request carried `x-tsession-id` or a bound attribute, and was sent after the session started.
+4. The request carried `x-tsession-id` (the id, not the name) or a bound attribute, and was sent after the
+   session started.
+5. The service can reach the collector. `doctor` only shows that it follows the control plane; a service that
+   cannot deliver logs `tsession: cannot deliver events to the collector at ...`.
+
+A failed event is one that returned an error or an HTTP status of 500 or above; a 4xx response is recorded
+but does not count as a failure.
 
 ## How it works
 
@@ -177,8 +193,8 @@ process list. The `dynamodb` backend has only been tested against an in-process 
   hold recorded payloads.
 - **The control plane's session list** lives in memory by default: finished sessions disappear from
   `tracectl list` and the dashboard after `--retention` (`TSESSION_CP_RETENTION`, default 24h) and on restart,
-  even though the collector still has their events. Run it with `--store-file FILE` (`TSESSION_CP_STORE`) to
-  keep them.
+  even though the collector still has their events. `tracectl` can still read those by session id (not by
+  name). Run the control plane with `--store-file FILE` (`TSESSION_CP_STORE`) to keep the list.
 - `tracectl delete <id|name>` removes one finished session from both.
 
 ## Operations

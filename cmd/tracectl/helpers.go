@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
@@ -42,7 +43,17 @@ func parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, e
 // session with that name, falling back to the latest with that name).
 func resolve(ctx context.Context, o client.Options, ref string) (*client.Session, error) {
 	if strings.HasPrefix(ref, "ts_") {
-		return client.Attach(ctx, o, ref)
+		s, err := client.Attach(ctx, o, ref)
+		if err != nil && strings.Contains(err.Error(), ": 404 ") {
+			// The control plane forgets finished sessions (retention, restart)
+			// while the collector may still hold their events: read those.
+			d := client.Detached(o, ref)
+			if _, serr := d.Summary(ctx); serr == nil {
+				fmt.Fprintf(os.Stderr, "tracectl: the control plane no longer knows %s; reading what the collector holds\n", ref)
+				return d, nil
+			}
+		}
+		return s, err
 	}
 	list, err := client.List(ctx, o, "")
 	if err != nil {

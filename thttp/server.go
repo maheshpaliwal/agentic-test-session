@@ -21,6 +21,7 @@ type tracedHandler struct{ http.Handler }
 // When the SDK is disabled, or h is already wrapped, h is returned as is.
 func Handler(h http.Handler) http.Handler {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("thttp.Handler")
 		return h
 	}
 	if _, ok := h.(*tracedHandler); ok {

@@ -43,8 +43,12 @@ func main() {
 	if len(open) > 0 {
 		mode = fmt.Sprintf("OFFLINE, %d exported session(s), read-only", len(open))
 	}
+	ln, err := svc.Listen(*listen, "-listen or TSESSION_DASHBOARD_ADDR")
+	if err != nil {
+		log.Fatalf("dashboard: %v", err)
+	}
 	log.Printf("dashboard on http://%s - %s", *listen, mode)
-	if err := svc.Serve(ctx, srv, 3*time.Second, nil); err != nil {
+	if err := svc.ServeOn(ctx, srv, ln, 3*time.Second, nil); err != nil {
 		log.Fatal(err)
 	}
 }

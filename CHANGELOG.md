@@ -21,6 +21,12 @@
 - Dashboard: "Copy as curl" on the Request tab of HTTP events, with shell-safe quoting, a `$BASE_URL` placeholder
   for path-only URLs, and notes for left-out headers, redacted values and truncated bodies.
 - Dashboard: an empty session now says which services are connected to the control plane, or that none is.
+- The SDK logs once when it cannot deliver events to the collector, once when delivery resumes, and once when the
+  collector refuses them, and at start when a wrapper (`thttp.Handler`) was called before the SDK was enabled.
+  Both cases used to show up only as an empty session.
+- `tracectl` reads results by session id for a session the control plane has forgotten (`client.Detached`).
+- The services bind their port before logging that they listen; a taken port names the flag to change. The
+  control plane accepts `--listen` as well as `--addr`.
 - `tracectl kill on|off|status` sets and reads the control plane's global kill switch; `client.SetKill` and
   `client.KillSwitch` do the same from Go. `tracectl doctor` reports when the switch is on.
 - `docs/CONFIG.md` lists every setting and every metric of the collector and the control plane; a test in each

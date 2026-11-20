@@ -47,9 +47,9 @@ Prefer the variables for connection strings: flag values show up in the process 
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--addr` | `TSESSION_CP_ADDR` | `127.0.0.1:7070` | Listen address. |
+| `--addr`, `--listen` | `TSESSION_CP_ADDR` | `127.0.0.1:7070` | Listen address. |
 | `--collector-url` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` | Collector it drains and seals through. |
-| `--store-file` | `TSESSION_CP_STORE` | none (memory only) | File for session persistence; also writes `FILE.journal` and `FILE.archive`. |
+| `--store-file` | `TSESSION_CP_STORE` | none (memory only) | File for session persistence; `FILE.journal` and `FILE.archive` appear next to it as sessions change and age out. |
 | `--retention` | `TSESSION_CP_RETENTION` | `24h` | Keep finished sessions in memory this long; without `--store-file` they are then forgotten. |
 | `--default-ttl` | `TSESSION_CP_DEFAULT_TTL` | `3600` | Default session time limit, in seconds. |
 | `--allowed-hosts` | `TSESSION_CP_ALLOWED_HOSTS` | loopback only | Extra Host values accepted. |

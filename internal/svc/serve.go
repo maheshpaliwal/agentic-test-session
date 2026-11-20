@@ -3,6 +3,7 @@ package svc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -34,6 +35,29 @@ func IsLoopbackHost(addr string) bool {
 // timeout. beforeShutdown (optional) runs first, e.g. to end long-lived streams
 // that would otherwise block Shutdown. A clean shutdown returns nil.
 func Serve(ctx context.Context, srv *http.Server, timeout time.Duration, beforeShutdown func()) error {
+	ln, err := Listen(srv.Addr, "")
+	if err != nil {
+		return err
+	}
+	return ServeOn(ctx, srv, ln, timeout, beforeShutdown)
+}
+
+// Listen binds addr. Binding before the service announces itself keeps
+// "listening" out of the log when the port is taken, and the error names the
+// setting to change (setting may be empty).
+func Listen(addr, setting string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		return ln, nil
+	}
+	if setting != "" {
+		return nil, fmt.Errorf("%w; is another instance running? Choose another address with %s", err, setting)
+	}
+	return nil, err
+}
+
+// ServeOn is Serve on a listener obtained from Listen.
+func ServeOn(ctx context.Context, srv *http.Server, ln net.Listener, timeout time.Duration, beforeShutdown func()) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -45,7 +69,7 @@ func Serve(ctx context.Context, srv *http.Server, timeout time.Duration, beforeS
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	err := srv.ListenAndServe()
+	err := srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
 		<-done // let Shutdown finish draining before main returns
 		return nil

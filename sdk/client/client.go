@@ -33,7 +33,7 @@ const (
 
 // ErrConflict is returned by Start on HTTP 409: an exclusive session is already
 // running, or a binding is held by another active session (error text carries the conflicting id).
-var ErrConflict = errors.New("tsession: exclusive session already running")
+var ErrConflict = errors.New("tsession: conflicts with a running session")
 
 // Options configure Start. Zero values use control-plane defaults.
 type Options struct {
@@ -201,6 +201,15 @@ func Attach(ctx context.Context, o Options, id string) (*Session, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// Detached returns a handle to a session by id without asking the control
+// plane. It is for reading results (Summary, Events, ...) of a session the
+// control plane no longer knows, such as one it forgot after its retention
+// or a restart, while the collector still holds the events. Info is empty
+// apart from the id, and the lifecycle calls (Stop, Wait, ...) will fail.
+func Detached(o Options, id string) *Session {
+	return newSession(o, Info{ID: id})
 }
 
 // Info returns the last fetched session state without a network call.

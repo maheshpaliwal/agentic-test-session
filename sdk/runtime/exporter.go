@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -46,6 +47,10 @@ type Exporter struct {
 
 	failures int
 	nextTry  time.Time
+	// down and refusalLogged make the exporter say once when delivery stops,
+	// once when it resumes, and once when the collector refuses events.
+	down          bool
+	refusalLogged bool
 
 	// pending is the unresolved rest of the batch being exported: the first
 	// pendingRing events are still at the front of the ring, the others are
@@ -153,11 +158,25 @@ func (e *Exporter) drain() bool {
 		// returned to the recorder, which would hand them straight back: pause
 		// like for a transient failure instead of spinning.
 		refusedDrops := ok && !hadRing && len(lost) > 0
+		if ok && len(lost) > 0 && !e.refusalLogged {
+			e.refusalLogged = true
+			log.Printf("tsession: the collector at %s refused events and they were dropped; check that TSESSION_COLLECTOR_URL points at a tsession collector of a matching version", e.cfg.CollectorURL)
+		}
 		if !ok || refusedDrops {
+			if !ok && e.failures == 0 {
+				// Once per outage: a wrong collector URL otherwise shows up
+				// only as an empty session.
+				log.Printf("tsession: cannot deliver events to the collector at %s; they stay buffered and are retried, and are dropped when the buffer fills", e.cfg.CollectorURL)
+				e.down = true
+			}
 			e.failures++
 			cd := e.cfg.FlushInterval << min(e.failures, 6)
 			e.nextTry = time.Now().Add(min(cd, e.cfg.MaxCooldown))
 			return ok
+		}
+		if e.down {
+			e.down = false
+			log.Printf("tsession: delivering events to the collector at %s again", e.cfg.CollectorURL)
 		}
 		e.failures = 0
 		e.nextTry = time.Time{}

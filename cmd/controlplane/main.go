@@ -14,6 +14,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", svc.Env("TSESSION_CP_ADDR", "127.0.0.1:7070"), "listen address")
+	flag.StringVar(addr, "listen", *addr, "alias of --addr, the name the collector and dashboard use")
 	collector := flag.String("collector-url", svc.Env("TSESSION_COLLECTOR_URL", "http://127.0.0.1:7071"), "collector base URL")
 	storeFile := flag.String("store-file", svc.Env("TSESSION_CP_STORE", ""), "optional file for session persistence (also writes FILE.journal and FILE.archive)")
 	ttl := flag.Int("default-ttl", svc.EnvPositiveInt("TSESSION_CP_DEFAULT_TTL", 3600), "default session TTL (seconds)")
@@ -63,8 +64,13 @@ func main() {
 
 	// No WriteTimeout: /v1/active/stream is a long-lived SSE response.
 	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	ln, err := svc.Listen(*addr, "--addr or TSESSION_CP_ADDR")
+	if err != nil {
+		log.Error("listen", "err", err)
+		os.Exit(1)
+	}
 	log.Info("control plane listening", "addr", *addr, "collector", *collector)
-	if err := svc.Serve(ctx, srv, 5*time.Second, m.Close); err != nil { // Close ends SSE streams so Shutdown can finish
+	if err := svc.ServeOn(ctx, srv, ln, 5*time.Second, m.Close); err != nil { // Close ends SSE streams so Shutdown can finish
 		log.Error("serve", "err", err)
 		os.Exit(1)
 	}

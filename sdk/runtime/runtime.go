@@ -3,6 +3,7 @@ package runtime
 import (
 	"cmp"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -77,6 +78,9 @@ func Start(cfg Config) error {
 		cfg.Exporter.Encoder = cfg.Encoder
 	}
 
+	if w := core.WrappedWhileDisabled(); w != "" {
+		log.Printf("tsession: %s was called before the SDK started, so what it wrapped records nothing; start the SDK first (import sdk/autoinit in that package, or wrap inside main)", w)
+	}
 	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority})
 	s := &state{rec: NewRecorder(cfg.BufferSize)}
 	s.exp = NewExporter(s.rec, cfg.Exporter)
