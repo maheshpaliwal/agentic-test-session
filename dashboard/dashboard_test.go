@@ -269,8 +269,12 @@ func TestDemoEndpointShapes(t *testing.T) {
 			t.Errorf("summary missing %s", k)
 		}
 	}
-	if p, _ := sum["pending_async"].([]any); len(p) != 0 {
-		t.Errorf("sealed demo session should have no pending async: %v", p)
+	// The collector reports a count plus the ids; the demo must use the same shape.
+	if n, ok := sum["pending_async"].(float64); !ok || n != 0 {
+		t.Errorf("pending_async must be a number, 0 for the sealed demo session: %#v", sum["pending_async"])
+	}
+	if ids, ok := sum["pending_async_ids"].([]any); !ok || len(ids) != 0 {
+		t.Errorf("pending_async_ids must be a list, empty for the sealed demo session: %#v", sum["pending_async_ids"])
 	}
 }
 

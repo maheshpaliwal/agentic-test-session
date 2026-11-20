@@ -500,7 +500,7 @@
     setTimeout(() => { inp.focus(); inp.select(); }, 0);
     return inp;
   }
-  const renameBtn = (onclick) => h('button', { type: 'button', class: 'icon-btn sm', title: 'Rename session', 'aria-label': 'Rename session', onclick: (e) => { e.stopPropagation(); onclick(); } }, icon('edit'));
+  const renameBtn = (onclick) => h('button', { type: 'button', class: 'icon-btn sm', 'data-rw': '', title: 'Rename session', 'aria-label': 'Rename session', onclick: (e) => { e.stopPropagation(); onclick(); } }, icon('edit'));
   /* Entry point of a session (first trigger), cached per session and event count. */
   const ENTRY = new Map();
 
@@ -518,7 +518,7 @@
     const sub = h('div', { class: 'sub' });
     S.search = q;
     main.appendChild(h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Test sessions' }), sub), h('span', { class: 'grow' }),
-      h('button', { type: 'button', class: 'btn primary', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start session')));
+      h('button', { type: 'button', class: 'btn primary', 'data-rw': '', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start session')));
     main.appendChild(h('div', { class: 'toolbar' },
       h('div', { class: 'search' }, icon('search', 'sm'), q, span('kbd', '/')), chipsEl, h('span', { class: 'grow' }),
       h('label', { class: 'switch' }, auto, h('span', { class: 'track', 'aria-hidden': 'true' }), 'Auto-refresh'),
@@ -553,13 +553,13 @@
       const open = () => { location.hash = sessionHref(s.id); };
       const start = Date.parse(s.started_at || s.created_at), end = s.ended_at ? Date.parse(s.ended_at) : now;
       const dur = isNaN(start) ? '-' : fmtNs(Math.max(0, end - start) * 1e6);
-      const stop = s.state === 'ACTIVE' ? h('button', { type: 'button', class: 'btn danger sm', onclick: async (e) => {
+      const stop = s.state === 'ACTIVE' ? h('button', { type: 'button', class: 'btn danger sm', 'data-act': 'stop', 'data-rw': '', onclick: async (e) => {
         e.stopPropagation();
-        try { await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); load(); } catch (er) { showError('Stop failed: ' + er.message); }
+        try { await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); load(); } catch (er) { actionError('Stop failed: ' + er.message); }
       } }, icon('stop', 'sm'), 'Stop') : null;
       // Delete is two clicks: the first arms the button for a few seconds, the second deletes.
       const armed = confirming === s.id;
-      const del = TERMINAL[s.state] ? h('button', { type: 'button', class: 'btn sm ' + (armed ? 'danger' : 'ghost'),
+      const del = TERMINAL[s.state] ? h('button', { type: 'button', class: 'btn sm ' + (armed ? 'danger' : 'ghost'), 'data-act': 'delete', 'data-rw': '',
         title: 'Delete this session and everything recorded for it', onclick: async (e) => {
           e.stopPropagation();
           if (!armed) {
@@ -568,7 +568,7 @@
             return;
           }
           confirming = null;
-          try { await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' }); toast('Deleted ' + s.id, 'ok'); load(); } catch (er) { showError('Delete failed: ' + er.message); paint(true); }
+          try { await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' }); toast('Deleted ' + s.id, 'ok'); load(); } catch (er) { actionError('Delete failed: ' + er.message); paint(true); }
         } }, armed ? 'Confirm delete' : 'Delete') : null;
       const bound = null;
       return h('tr', { class: 'row', tabindex: 0, 'data-id': s.id, onclick: open, onkeydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(); } },
@@ -590,7 +590,9 @@
       const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing, confirming]);
       if (!force && sig === lastSig) return;
       lastSig = sig;
-      const focusId = document.activeElement && document.activeElement.getAttribute && document.activeElement.closest && document.activeElement.closest('tr.row') ? document.activeElement.closest('tr.row').getAttribute('data-id') : null;
+      const ae = document.activeElement;
+      const focusId = ae && ae.getAttribute && ae.closest && ae.closest('tr.row') ? ae.closest('tr.row').getAttribute('data-id') : null;
+      const focusAct = focusId ? ae.getAttribute('data-act') : null; // a button inside the row keeps the focus, not just the row
       clear(body);
       if (loadErr) {
         body.appendChild(emptyState('error', 'Cannot load sessions', 'The control plane or collector did not answer: ' + loadErr + '. Check that both are running and that the dashboard can reach them.',
@@ -604,7 +606,7 @@
       sub.textContent = vis.length === rows.length ? rows.length + ' session' + (rows.length === 1 ? '' : 's') : vis.length + ' of ' + rows.length + ' sessions';
       if (!rows.length) {
         body.appendChild(emptyState('sessions', 'No sessions yet', 'A session captures every event produced by your test traffic. Start one, then send requests with the x-tsession-id header.',
-          h('button', { type: 'button', class: 'btn primary', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start your first session')));
+          h('button', { type: 'button', class: 'btn primary', 'data-rw': '', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start your first session')));
         return;
       }
       if (!vis.length) {
@@ -616,8 +618,21 @@
       body.appendChild(h('div', { class: 'tablewrap' }, h('table', { class: 'stable' },
         h('thead', null, h('tr', null, [['State', ''], ['Session', ''], ['Mode', 'hide-sm'], ['Initiated by', 'hide-sm'], ['Started', ''], ['Activity', ''], ['Flags', ''], ['', '']].map((x) => h('th', { class: x[1], text: x[0] })))),
         h('tbody', null, vis.map((s) => sessionRow(s, now))))));
-      if (focusId) { const el = body.querySelector('tr.row[data-id="' + focusId.replace(/["\\]/g, '') + '"]'); if (el) el.focus(); }
+      if (focusId) {
+        const el = body.querySelector('tr.row[data-id="' + focusId.replace(/["\\]/g, '') + '"]');
+        const ctl = el && focusAct ? el.querySelector('[data-act="' + focusAct + '"]') : null;
+        if (ctl || el) (ctl || el).focus();
+      }
+      // An armed Delete is disarmed by Escape or by a click anywhere else in the list.
+      const wrap = body.querySelector('.tablewrap');
+      if (wrap && confirming) {
+        wrap.addEventListener('keydown', (e) => { if (e.key === 'Escape' && confirming) { e.stopPropagation(); confirming = null; paint(true); } });
+        wrap.addEventListener('click', (e) => { if (confirming && !(e.target.closest && e.target.closest('[data-act="delete"]'))) { confirming = null; paint(true); } }, true);
+      }
     }
+    // An error from a row action stays visible for a while; the periodic refresh must not wipe it at once.
+    let actionErrUntil = 0;
+    function actionError(msg) { actionErrUntil = Date.now() + 10000; showError(msg); }
     async function load() {
       try {
         const [a, b] = await Promise.all([cp('/v1/sessions'), col('/v1/sessions').catch(() => [])]);
@@ -627,7 +642,7 @@
         rows = asList(a, 'sessions').map((s) => { const pn = pendingNames.get(s.id); return Object.assign({}, s, { event_count: counts[s.id], service_count: svcs[s.id] }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); });
         pendingNames.forEach((v, k) => { const r = rows.find((x) => x.id === k); if (!r || r.name === v.n) pendingNames.delete(k); });
         rows.sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)));
-        loadErr = null; showError('');
+        loadErr = null; if (Date.now() > actionErrUntil) showError('');
         setLive(rows.some((s) => s.state === 'ACTIVE'));
       } catch (e) { if (token !== S.token) return; loadErr = e.message; }
       paint();
@@ -1231,14 +1246,16 @@
       if (grouped()) {
         const total = G.groups.length;
         count.textContent = (b.active || f.err) && b.nGroups !== total ? b.nGroups + ' of ' + total + ' triggers · ' + b.nRows + ' events' : total + (total === 1 ? ' trigger' : ' triggers') + ' · ' + D.events.length + ' events';
-      } else count.textContent = b.nRows + ' of ' + D.events.length + ' events';
+      } else count.textContent = b.nRows + ' of ' + D.events.length + (D.events.length === 1 ? ' event' : ' events');
       sizer.style.height = b.total + 'px';
       sizer.hidden = !items.length;
       emptyEl.hidden = !!items.length;
       if (!items.length) {
         clear(emptyEl).appendChild(D.events.length
           ? emptyState('events', 'No events match the filters', 'Loosen the search or clear the filters to see all ' + D.events.length + ' events.')
-          : emptyState('events', 'No events recorded yet', 'Send traffic through the instrumented services with this session\'s x-tsession-id header and events will appear here.', connectedNote()));
+          : D.sess && TERMINAL[D.sess.state]
+            ? emptyState('events', 'No events were recorded', 'This session ended without recording anything: no instrumented service was connected, none could reach the collector, or no request carried the session.')
+            : emptyState('events', 'No events recorded yet', 'Send traffic through the instrumented services with this session\'s x-tsession-id header and events will appear here.', connectedNote()));
       }
       D.paintGen = (D.paintGen || 0) + 1;
       if (reset) list.scrollTop = 0; else restoreAnchor(anchor);
@@ -1706,7 +1723,7 @@
       const rbCount = Object.keys(muts).reduce((a, k) => a + muts[k].rb, 0);
       const mutTotal = Object.keys(muts).reduce((a, k) => a + muts[k].n, 0);
       const dur = has('duration_ns') ? srv.duration_ns : (evs.length ? maxE - minS : 0);
-      const pendN = has('pending_async') ? srv.pending_async : pending.length;
+      const pendN = has('pending_async') ? (Array.isArray(srv.pending_async) ? srv.pending_async.length : srv.pending_async) : pending.length;
       const nEv = has('event_count') ? srv.event_count : evs.length;
       box.appendChild(h('div', { class: 'stat-cards' },
         stat('timeline', 'Events', String(nEv), Object.keys(kindC).length + ' kinds'), stat('clock', 'Duration', fmtNs(dur), 'first to last event'),
@@ -1798,6 +1815,8 @@
   paintConn();
   fetch('/healthz', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
     document.getElementById('mode-note').textContent = j.demo ? 'demo mode · synthetic data' : j.offline ? 'offline · opened from export files (read-only)' : '';
+    // Sessions opened from files cannot be changed: hide what could only fail (see [data-rw] in style.css).
+    document.body.classList.toggle('offline', !!j.offline);
   }).catch(() => {});
   route();
 })();

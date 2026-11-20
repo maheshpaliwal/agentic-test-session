@@ -548,5 +548,5 @@ func summarize(evs []core.Event, sess Session) map[string]any {
 	})
 	return m{"session_id": sess.ID, "event_count": len(evs), "duration_ns": maxE - minS,
 		"by_kind": byKind, "by_service": bySvc, "mutations": ml, "failures": failures,
-		"pending_async": pending, "dropped_events": dropped, "flags": flagc}
+		"pending_async": len(pending), "pending_async_ids": pending, "dropped_events": dropped, "flags": flagc}
 }

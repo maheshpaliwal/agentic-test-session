@@ -478,7 +478,8 @@ details.more>summary:hover{color:var(--text)}
 .vsticky .ghead{position:absolute;left:0;right:0;top:0;height:64px}
 .ghead{position:absolute;left:0;right:0;display:flex;flex-direction:column;justify-content:center;gap:7px;padding:0 16px;background:var(--surface-3);border-bottom:1px solid var(--border-strong);border-left:4px solid var(--k-sys);cursor:pointer;overflow:hidden}
 .ghead:hover{background:color-mix(in srgb,var(--surface-3) 85%,var(--accent-solid))}
-.ghead.sel{background:var(--sel)}
+.ghead.sel{background:linear-gradient(var(--sel),var(--sel)),var(--surface-3)}
+.offline [data-rw]{display:none}
 .ghead.gk-api{border-left-color:var(--k-api)}.ghead.gk-worker,.ghead.gk-consume{border-left-color:var(--k-worker)}
 .ghead.err{border-left-color:var(--k-err)}
 .gl1,.gl2{display:flex;align-items:center;gap:8px;min-width:0;white-space:nowrap}

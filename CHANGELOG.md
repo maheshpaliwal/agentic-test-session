@@ -108,6 +108,11 @@
   empty session that passed every gate), and `--fail-on-incomplete` fails for a session the control plane no
   longer knows, since its seal state is unknown.
 - Build: a tag name can no longer inject shell or linker flags through `make up`.
+- Dashboard: keyboard focus stays on a row's Stop or Delete button across repaints (pressing Enter twice on
+  Delete opened the session instead of deleting it); an armed Delete is disarmed by Escape or a click elsewhere;
+  an action error is no longer wiped by the next refresh; the selected sticky group header is opaque; a finished
+  session without events says so; offline mode hides the controls that could only fail; the demo's summary
+  reports pending async work in the collector's shape, so its card is no longer blank.
 - Redaction: scrubbing text that was already scrubbed left `[REDACTED]]` behind and changed the recorded size;
   `core.RedactText` is idempotent now. Queue message bodies are scrubbed exactly once, and bodies nested in a
   Kafka batch that are JSON string literals are scrubbed too.
