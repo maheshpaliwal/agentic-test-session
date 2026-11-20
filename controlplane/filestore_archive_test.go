@@ -797,3 +797,86 @@ func TestFileStoreConcurrentModel(t *testing.T) {
 		}
 	}
 }
+
+// Deleted and replaced sessions leave the cache: after any number of them the
+// cache holds live archived sessions only, so a List can cache every line it
+// reads and the next one reads none.
+func TestFileStoreArchiveCacheHoldsNoDeadEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	fs := openStore(t, path)
+	fs.cache.max = 8
+	var live []Session
+	for i := range 6 {
+		live = append(live, archiveSession(i, fmt.Sprintf("live %d", i), StateAborted))
+	}
+	mustPut(t, fs, live...)
+	for _, s := range live {
+		fs.Evict(s.ID)
+	}
+	cached := func() map[string]bool {
+		fs.cache.mu.Lock()
+		defer fs.cache.mu.Unlock()
+		ids := map[string]bool{}
+		for id := range fs.cache.m {
+			ids[id] = true
+		}
+		return ids
+	}
+	for i := range 200 {
+		s := archiveSession(100+i, "short-lived", StateSealed)
+		mustPut(t, fs, s)
+		fs.Evict(s.ID) // cached
+		if i%3 == 0 {  // archived twice: the first record is replaced
+			s.Name = "short-lived, second record"
+			mustPut(t, fs, s)
+			fs.Evict(s.ID)
+		}
+		if i%5 == 0 {
+			fs.List() // may cache it again
+		}
+		if _, ok := fs.Get(s.ID); !ok {
+			t.Fatalf("cycle %d: session not found", i)
+		}
+		if err := fs.Delete(s.ID); err != nil {
+			t.Fatal(err)
+		}
+		if cached()[s.ID] {
+			t.Fatalf("cycle %d: the deleted session is still cached", i)
+		}
+	}
+	for id := range cached() {
+		if _, ok := fs.arch[id]; !ok {
+			t.Fatalf("%s is cached and not archived", id)
+		}
+	}
+	wantSameSessions(t, "list", fs.List(), live)
+	for _, s := range live {
+		if !cached()[s.ID] {
+			t.Fatalf("%s is not cached after a List (cache holds %d of %d)", s.ID, len(cached()), fs.cache.max)
+		}
+	}
+	// The second List needs no line from the file: it works without it.
+	if err := fs.ar.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantSameSessions(t, "list from the cache", fs.List(), live)
+	if n := fs.ReadErrors(); n != 0 {
+		t.Fatalf("%d lines were read again and failed", n)
+	}
+
+	// The last archived session takes the archive file and the cache with it.
+	re := openStore(t, path)
+	re.cache.max = 8
+	re.List()
+	for _, s := range live {
+		if err := re.Delete(s.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	re.cache.mu.Lock()
+	n := len(re.cache.m)
+	re.cache.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d sessions cached after all were deleted", n)
+	}
+}

@@ -180,8 +180,10 @@ const archCacheMax = 16384
 // archCache holds up to max decoded archived sessions by id, each with the
 // place of the line it was decoded from (FileStore.archGen and the offset).
 // An entry counts only while the index points at that place. No line is ever
-// written to a place that held another one, so entries need no invalidation:
-// one that is out of date is not used, and is replaced or dropped in time.
+// written to a place that held another one, so an entry that is out of date
+// is never used. It still takes a place in the cache, so the store removes
+// the entry of a session whose archived record it deletes or replaces (drop,
+// reset): a full cache caches nothing new for List.
 type archCache struct {
 	mu  sync.Mutex
 	max int
@@ -225,6 +227,20 @@ func (c *archCache) put(id string, gen uint64, off int64, s Session, evict bool)
 		c.m = map[string]cachedSession{}
 	}
 	c.m[id] = cachedSession{gen, off, s}
+}
+
+// drop removes the entry of id, if there is one.
+func (c *archCache) drop(id string) {
+	c.mu.Lock()
+	delete(c.m, id)
+	c.mu.Unlock()
+}
+
+// reset removes every entry.
+func (c *archCache) reset() {
+	c.mu.Lock()
+	clear(c.m)
+	c.mu.Unlock()
 }
 
 // journalRecord is one line of the journal.
@@ -621,6 +637,7 @@ func (f *FileStore) removeArchive() {
 	ar := f.ar
 	f.ar = nil
 	f.archGen++ // the next archive file starts at offset 0 again
+	f.cache.reset()
 	f.amu.Unlock()
 	f.archSize, f.archiveUnsynced = 0, false
 	clear(f.stale)
@@ -823,7 +840,9 @@ func (f *FileStore) indexLines(moved []Session, ends []int, base int64, written 
 		ref := newArchRef(s, base+int64(start), min(ends[i]-1, written)-start)
 		f.arch[s.ID] = ref
 		if written >= ends[i]-1 { // whole
-			f.cache.put(s.ID, f.archGen, ref.off, s, true)
+			f.cache.put(s.ID, f.archGen, ref.off, s, true) // in place of the record it replaces
+		} else {
+			f.cache.drop(s.ID)
 		}
 		start = ends[i]
 	}
@@ -894,6 +913,7 @@ func (f *FileStore) Delete(id string) error {
 	if archived {
 		f.amu.Lock()
 		delete(f.arch, id) // first: readers must not be sent to a line that is being overwritten
+		f.cache.drop(id)   // under amu: list caches a line only while the index points at it
 		empty := len(f.arch) == 0
 		f.amu.Unlock()
 		if err := f.blankLines(append([]archRef{ref}, f.stale[id]...)...); err != nil {
@@ -1058,7 +1078,14 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 				s, err = decodeArchived(e.id, line)
 			}
 			if err == nil {
-				f.cache.put(e.id, gen, e.ref.off, s, false)
+				// Only while the index still points at this line: Delete and
+				// Evict have removed the entry of a line they replaced, and it
+				// must not come back.
+				f.amu.RLock()
+				if r, ok := f.arch[e.id]; ok && r.off == e.ref.off && f.archGen == gen {
+					f.cache.put(e.id, gen, e.ref.off, s, false)
+				}
+				f.amu.RUnlock()
 			} else if s, hot = f.MemStore.Get(e.id); !hot {
 				// Look it up again, under the lock: no error and no session
 				// means it was deleted meanwhile. An error means the store
