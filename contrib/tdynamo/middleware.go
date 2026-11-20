@@ -159,9 +159,60 @@ func mergeVals(ms ...map[string]any) map[string]any {
 
 func isSchemaOp(op string) bool { return op == "DescribeTable" || op == "CreateTable" }
 
+// beginUntraced is begin for a call that will not be recorded. It keeps the
+// two things later calls depend on, the operation name and the key schema
+// learned from requests that carry a key, and builds nothing: the input is
+// neither copied nor rendered.
+func (t *tracer) beginUntraced(p any) (op string) {
+	switch v := p.(type) {
+	case *dynamodb.DescribeTableInput:
+		return "DescribeTable"
+	case *dynamodb.CreateTableInput:
+		return "CreateTable"
+	case *dynamodb.GetItemInput:
+		t.learnKey(str(v.TableName), v.Key)
+		return "GetItem"
+	case *dynamodb.QueryInput:
+		return "Query"
+	case *dynamodb.ScanInput:
+		return "Scan"
+	case *dynamodb.BatchGetItemInput:
+		for tbl, ka := range v.RequestItems {
+			for _, k := range ka.Keys {
+				t.learnKey(tbl, k)
+			}
+		}
+		return "BatchGetItem"
+	case *dynamodb.TransactGetItemsInput:
+		for _, it := range v.TransactItems {
+			if it.Get != nil {
+				t.learnKey(str(it.Get.TableName), it.Get.Key)
+			}
+		}
+		return "TransactGetItems"
+	case *dynamodb.PutItemInput:
+		return "PutItem"
+	case *dynamodb.DeleteItemInput:
+		t.learnKey(str(v.TableName), v.Key)
+		return "DeleteItem"
+	case *dynamodb.UpdateItemInput:
+		t.learnKey(str(v.TableName), v.Key)
+		return "UpdateItem"
+	case *dynamodb.BatchWriteItemInput:
+		return "BatchWriteItem"
+	case *dynamodb.TransactWriteItemsInput:
+		return "TransactWriteItems"
+	}
+	return ""
+}
+
 // begin starts the span, copies the input if a ReturnValues injection is
-// needed, and returns the (possibly replaced) parameters.
+// needed, and returns the (possibly replaced) parameters. A call outside an
+// active session takes beginUntraced instead and pays for none of that.
 func (t *tracer) begin(ctx context.Context, p any) (op string, injected bool, params any, span *core.Span) {
+	if !core.Active(ctx) {
+		return t.beginUntraced(p), false, p, nil
+	}
 	orig := p
 	kind := core.KindDBRead
 	var table string
