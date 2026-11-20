@@ -52,6 +52,8 @@ session results (collector):
                                 what differs in b (candidate) from a (baseline): failures, mutations,
                                 events, first divergence; --fail-on-diff exits 3 when anything differs
 
+  kill on|off|status            the global kill switch: while on, no service records anything, for
+                                any session (kept in memory: a control plane restart turns it off)
   doctor [--json]               check that the control plane and collector answer and list the
                                 services connected to the control plane
   version                       print the tracectl version
@@ -99,6 +101,7 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"export":       (*cli).export,
 	"diff":         (*cli).diff,
 	"report":       (*cli).report,
+	"kill":         (*cli).kill,
 	"doctor":       (*cli).doctor,
 	"version":      (*cli).version,
 }

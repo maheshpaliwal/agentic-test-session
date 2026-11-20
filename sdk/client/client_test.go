@@ -174,3 +174,38 @@ func TestRenameAndAutoName(t *testing.T) {
 		t.Fatalf("%+v %v", s2.Info(), err)
 	}
 }
+
+func TestKillSwitch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	o := client.Options{BaseURL: setup(t)}
+	s, err := client.Start(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on, err := client.KillSwitch(ctx, o); err != nil || on {
+		t.Fatalf("a new control plane: on=%v %v", on, err)
+	}
+	for _, want := range []bool{true, true, false} { // setting it twice is not an error
+		if err := client.SetKill(ctx, o, want); err != nil {
+			t.Fatal(err)
+		}
+		if on, err := client.KillSwitch(ctx, o); err != nil || on != want {
+			t.Fatalf("after SetKill(%v): on=%v %v", want, on, err)
+		}
+	}
+	// The switch stops recording, not the session.
+	if info, err := s.Get(ctx); err != nil || info.State != "ACTIVE" {
+		t.Fatalf("%+v %v", info, err)
+	}
+
+	// Errors carry the control plane's status.
+	down := httptest.NewServer(http.NotFoundHandler())
+	defer down.Close()
+	if err := client.SetKill(ctx, client.Options{BaseURL: down.URL}, true); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("SetKill against a server without the endpoint: %v", err)
+	}
+	if on, err := client.KillSwitch(ctx, client.Options{BaseURL: down.URL}); err == nil || on {
+		t.Fatalf("KillSwitch against a server without the endpoint: on=%v %v", on, err)
+	}
+}

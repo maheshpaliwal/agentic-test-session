@@ -34,6 +34,11 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		} else {
 			rep.Notes = append(rep.Notes, "listing active sessions failed: "+err.Error())
 		}
+		if on, err := client.KillSwitch(ctx, c.opts); err == nil {
+			rep.KillSwitch = on
+		} else {
+			rep.Notes = append(rep.Notes, "reading the kill switch failed: "+err.Error())
+		}
 		subs, err := client.Subscribers(ctx, c.opts)
 		switch {
 		case err == nil:
@@ -66,11 +71,14 @@ type probeResult struct {
 }
 
 type doctorReport struct {
-	ControlPlane   probeResult         `json:"control_plane"`
-	Collector      probeResult         `json:"collector"`
-	ActiveSessions int                 `json:"active_sessions"`
-	Subscribers    []client.Subscriber `json:"subscribers"`
-	Notes          []string            `json:"notes,omitempty"`
+	ControlPlane   probeResult `json:"control_plane"`
+	Collector      probeResult `json:"collector"`
+	ActiveSessions int         `json:"active_sessions"`
+	// KillSwitch is true while the global kill switch is on: nothing is
+	// recorded for any session.
+	KillSwitch  bool                `json:"kill_switch"`
+	Subscribers []client.Subscriber `json:"subscribers"`
+	Notes       []string            `json:"notes,omitempty"`
 }
 
 // probe asks a service's /healthz.
@@ -108,6 +116,9 @@ func (r doctorReport) print(w io.Writer) {
 	line("collector", r.Collector)
 	if !r.ControlPlane.OK {
 		return
+	}
+	if r.KillSwitch {
+		fmt.Fprintln(w, "KILL SWITCH ON  nothing is recorded for any session; to resume recording run: tracectl kill off")
 	}
 	fmt.Fprintf(w, "active sessions  %d\n", r.ActiveSessions)
 	fmt.Fprintf(w, "connected services  %d\n", len(r.Subscribers))

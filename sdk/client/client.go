@@ -479,3 +479,20 @@ func List(ctx context.Context, o Options, state string) ([]Info, error) {
 	}
 	return out, nil
 }
+
+// SetKill turns the control plane's global kill switch on or off. While it
+// is on, every connected SDK records nothing, for any session; sessions keep
+// their state and record again once it is off. The switch is held in the
+// control plane's memory: a restart turns it off.
+func SetKill(ctx context.Context, o Options, on bool) error {
+	return newSession(o, Info{}).do(ctx, http.MethodPost, "/v1/kill", map[string]bool{"kill": on}, nil)
+}
+
+// KillSwitch reports whether the global kill switch is on (see SetKill).
+func KillSwitch(ctx context.Context, o Options) (bool, error) {
+	var active struct {
+		Kill bool `json:"kill"`
+	}
+	err := newSession(o, Info{}).do(ctx, http.MethodGet, "/v1/active", nil, &active)
+	return active.Kill, err
+}
