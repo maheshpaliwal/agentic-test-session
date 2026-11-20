@@ -103,9 +103,12 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   last changes (a session archived just before is then unarchived again, not lost) but not more: snapshots are
   fsynced before they replace the old one. One process per store file.
 - An archived session whose line in `<file>.archive` cannot be read (I/O error, file cut or changed by something
-  else) is not reported as unknown: `GET`, `PATCH`, `DELETE`, stop and abort of it answer `500` and can be repeated
-  (a `DELETE` does not reach the collector). It is missing from `GET /v1/sessions`, which has no way to say so; each
-  such session is logged and counted in `tsession_controlplane_store_read_errors_total`.
+  else) is not reported as unknown: `GET`, `PATCH`, stop and abort of it answer `500` and can be repeated. `DELETE`
+  still works, here and in the collector: an archived session is finished, and refusing would leave it
+  undeletable. It is missing from `GET /v1/sessions`, which has no way to say so. A failed read of one session is
+  logged, a list logs one line per call, and `tsession_controlplane_store_read_errors_total` counts failed reads
+  (not distinct sessions). At start, archive lines that do not parse are saved to `<file>.archive.corrupt`,
+  logged and counted, instead of being dropped when the archive is tidied.
 
 ## Collector (`:7071`)
 - `POST /v1/ingest` framed protobuf `Event` messages (`Content-Type: application/x-protobuf`, required; anything
@@ -214,8 +217,8 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
   time of the latest ingest request for the session, updated on arrival (before the window flushes), independent
   of SDK clocks. `pending` = events buffered in the reorder window + open async entries.
 - **Shutdown**: `Close` flushes every session's reorder window for at most `Config.ShutdownTimeout` (15s, not a
-  flag); events still unwritten then are dropped and logged; an ingest or seal that races with
-  it gets `503`. Stop the HTTP server first (the binary does).
+  flag); events still unwritten then are dropped and logged; an ingest or delete that races with
+  it gets `503`, a seal `500`. Stop the HTTP server first (the binary does).
 - **Slow store**: each store call made outside a request (window flush, catch-up, poison probe) is bounded by 30s.
   A timed-out append is retried and is never treated as a poison event. An actor whose session disappeared from the
   store (deleted by another process) rebuilds its state from the store instead of failing on Seq conflicts.
