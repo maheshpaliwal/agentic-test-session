@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,60 @@ func pjRedacted(v any) core.PayloadRef {
 }
 
 type m = map[string]any
+
+// httpMsg is the payload the HTTP wrapper records for a request or a response
+// (the message struct in thttp/capture.go). The demo's api.in and api.out
+// events use the same shape, so the dashboard shows them, and offers "Copy as
+// curl" on them, exactly as it does for recorded traffic.
+type httpMsg struct {
+	Method   string              `json:"method,omitempty"`
+	URL      string              `json:"url,omitempty"` // a path for api.in, a full URL for api.out
+	Status   int                 `json:"status,omitempty"`
+	Headers  map[string][]string `json:"headers,omitempty"`
+	Body     any                 `json:"body,omitempty"`
+	BodySize int                 `json:"body_size,omitempty"`
+}
+
+// hdr builds recorded headers from name, value pairs. Sensitive values are
+// given already masked, as the wrapper records them.
+func hdr(kv ...string) map[string][]string {
+	h := map[string][]string{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		h[kv[i]] = append(h[kv[i]], kv[i+1])
+	}
+	return h
+}
+
+// httpPayload renders msg with its body size filled in, marked redacted when
+// it holds a masked value.
+func httpPayload(msg httpMsg) core.PayloadRef {
+	if msg.Body != nil {
+		b, _ := json.Marshal(msg.Body)
+		msg.BodySize = len(b)
+	}
+	p := pj(msg)
+	p.Redacted = bytes.Contains(p.Inline, []byte(core.RedactedValue))
+	return p
+}
+
+func httpReq(method, url string, headers map[string][]string, body any) func(*core.Event) {
+	return func(e *core.Event) {
+		e.Req = httpPayload(httpMsg{Method: method, URL: url, Headers: headers, Body: body})
+	}
+}
+
+func httpResp(status int, headers map[string][]string, body any) func(*core.Event) {
+	return func(e *core.Event) { e.Resp = httpPayload(httpMsg{Status: status, Headers: headers, Body: body}) }
+}
+
+// reqHdr is the headers of a demo JSON request: the credential header named
+// secret, masked, and the content types.
+func reqHdr(secret string) map[string][]string {
+	return hdr("Accept", "application/json", secret, core.RedactedValue, "Content-Type", "application/json")
+}
+
+// respHdr is the headers of a demo JSON response.
+func respHdr() map[string][]string { return hdr("Content-Type", "application/json") }
 
 // add records a span; offsets are milliseconds from the session base.
 func (b *builder) add(key, trace, svc string, kind core.Kind, name, parent string, s, e int, f func(*core.Event)) {
@@ -106,14 +161,10 @@ func demoEvents(sid string, base time.Time) []core.Event {
 	order := m{"id": "ord_1001", "customer_id": "cus_synth_001", "status": "pending", "total_cents": 1895}
 
 	b.add("api", tr, api, core.KindAPIIn, "POST /orders", "", 0, 180, chain(
-		func(e *core.Event) {
-			e.Req = pjRedacted(m{"method": "POST", "path": "/orders",
-				"headers": m{"authorization": "[REDACTED]", "content-type": "application/json"},
-				"body": m{"customer_id": "cus_synth_001", "coupon": "WELCOME10",
-					"items":   []m{{"sku": "SKU-APPLE-1", "qty": 2}, {"sku": "SKU-MILK-2", "qty": 1}},
-					"payment": m{"card_number": "[REDACTED]", "token": "[REDACTED]"}}})
-		},
-		resp(m{"status": 201, "body": m{"order_id": "ord_1001", "status": "pending", "total_cents": 1895}}),
+		httpReq("POST", "/orders", reqHdr("Authorization"), m{"customer_id": "cus_synth_001", "coupon": "WELCOME10",
+			"items":   []m{{"sku": "SKU-APPLE-1", "qty": 2}, {"sku": "SKU-MILK-2", "qty": 1}},
+			"payment": m{"card_number": "[REDACTED]", "token": "[REDACTED]"}}),
+		httpResp(201, respHdr(), m{"order_id": "ord_1001", "status": "pending", "total_cents": 1895}),
 		attrs("http.route", "/orders", "http.status", "201"), flags("redacted")))
 	b.add("cart", tr, api, core.KindCacheRead, "GET cart:cus_synth_001", "api", 5, 8, chain(
 		req(m{"cmd": "GET", "key": "cart:cus_synth_001"}),
@@ -190,19 +241,22 @@ func demoEvents(sid string, base time.Time) []core.Event {
 			Before: pj(order), After: pj(m{"id": "ord_1001", "customer_id": "cus_synth_001", "status": "fulfilling", "total_cents": 1895}),
 			Diff: []core.FieldChange{{Field: "status", Old: "pending", New: "fulfilling"}}})))
 	b.add("w1b_api", tr, wk1, core.KindAPIOut, "POST https://shipping.example.invalid/v1/labels", "w1b", 830, 910, chain(
-		req(m{"order_id": "ord_1001", "service": "ground"}), resp(m{"status": 200, "body": m{"label_id": "lbl_synth_77"}}),
-		attrs("http.status", "200")))
+		httpReq("POST", "https://shipping.example.invalid/v1/labels", reqHdr("Authorization"), m{"order_id": "ord_1001", "service": "ground"}),
+		httpResp(200, respHdr(), m{"label_id": "lbl_synth_77"}),
+		attrs("http.status", "200", "host", "shipping.example.invalid")))
 	b.add("w1b_end", tr, wk1, core.KindWorkerEnd, "orders.fulfil", "w1b", 925, 928, chain(link("pub1"), attempt(2), resp(m{"result": "ok"})))
 
 	// notify worker: both attempts fail -> DLQ
+	mailCall := []func(*core.Event){
+		httpReq("POST", "https://mail.example.invalid/v1/send", reqHdr("X-Api-Key"), m{"template": "order_confirmation", "to": "[REDACTED]"}),
+		httpResp(503, hdr("Content-Type", "application/json", "Retry-After", "30"), m{"error": "service unavailable"}),
+		errs("503 Service Unavailable"), attrs("http.status", "503", "host", "mail.example.invalid")}
 	b.add("w2a", tr, wk2, core.KindWorkerStart, "orders.notify", "", 220, 301, chain(link("pub2"), attempt(1), errs("mail provider unavailable")))
-	b.add("w2a_api", tr, wk2, core.KindAPIOut, "POST https://mail.example.invalid/v1/send", "w2a", 225, 295, chain(
-		req(m{"template": "order_confirmation", "to": "[REDACTED]"}), resp(m{"status": 503}), errs("503 Service Unavailable"), attrs("http.status", "503")))
+	b.add("w2a_api", tr, wk2, core.KindAPIOut, "POST https://mail.example.invalid/v1/send", "w2a", 225, 295, chain(mailCall...))
 	b.add("w2a_end", tr, wk2, core.KindWorkerEnd, "orders.notify", "w2a", 298, 299, chain(attempt(1), errs("mail provider unavailable")))
 	b.add("w2a_retry", tr, wk2, core.KindWorkerRetry, "orders.notify", "w2a", 299, 300, chain(attempt(1), attrs("backoff_ms", "700", "next_attempt", "2")))
 	b.add("w2b", tr, wk2, core.KindWorkerStart, "orders.notify", "", 1000, 1090, chain(link("pub2"), attempt(2), errs("mail provider unavailable")))
-	b.add("w2b_api", tr, wk2, core.KindAPIOut, "POST https://mail.example.invalid/v1/send", "w2b", 1005, 1080, chain(
-		req(m{"template": "order_confirmation", "to": "[REDACTED]"}), resp(m{"status": 503}), errs("503 Service Unavailable"), attrs("http.status", "503")))
+	b.add("w2b_api", tr, wk2, core.KindAPIOut, "POST https://mail.example.invalid/v1/send", "w2b", 1005, 1080, chain(mailCall...))
 	b.add("w2b_end", tr, wk2, core.KindWorkerEnd, "orders.notify", "w2b", 1085, 1086, chain(link("pub2"), attempt(2), errs("mail provider unavailable")))
 	b.add("w2b_dlq", tr, wk2, core.KindWorkerDLQ, "orders.notify", "w2b", 1086, 1087, chain(link("pub2"),
 		attempt(2), attrs("dlq", "orders.notify.dlq", "reason", "max attempts exceeded")))
@@ -226,8 +280,8 @@ func activityEvents(sid string, base time.Time) []core.Event {
 
 	// 1. create
 	b.add("c_api", "tr_act1", api, core.KindAPIIn, "POST /api/activities", "", 0, 95, chain(
-		req(m{"method": "POST", "path": "/api/activities", "body": m{"title": "Spring cleanup", "owner": "usr_synth_042"}}),
-		resp(m{"status": 201, "body": m{"id": "act_1", "status": "created"}}), attrs("http.status", "201")))
+		httpReq("POST", "/api/activities", reqHdr("Authorization"), m{"title": "Spring cleanup", "owner": "usr_synth_042"}),
+		httpResp(201, respHdr(), m{"id": "act_1", "status": "created"}), attrs("http.status", "201")))
 	b.add("c_cache", "tr_act1", api, core.KindCacheRead, "GET owner:usr_synth_042:quota", "c_api", 3, 5, chain(resp(m{"hit": true, "value": 7})))
 	b.add("c_txb", "tr_act1", api, core.KindDBTxBegin, "BEGIN", "c_api", 8, 9, tx("tx_a1"))
 	b.add("c_ins", "tr_act1", api, core.KindDBWrite, "INSERT INTO activities (id, owner, status, title) VALUES ($1,$2,$3,$4)", "c_api", 10, 18, chain(
@@ -249,11 +303,13 @@ func activityEvents(sid string, base time.Time) []core.Event {
 
 	// 2. advance
 	b.add("a_api", "tr_act2", api, core.KindAPIIn, "POST /api/activities/act_1/advance", "", 1200, 1320, chain(
-		resp(m{"status": 200, "body": m{"id": "act_1", "status": "in_progress"}}), attrs("http.status", "200")))
+		httpReq("POST", "/api/activities/act_1/advance", hdr("Accept", "application/json", "Authorization", core.RedactedValue), nil),
+		httpResp(200, respHdr(), m{"id": "act_1", "status": "in_progress"}), attrs("http.status", "200")))
 	b.add("a_rd", "tr_act2", api, core.KindDBRead, "SELECT id, status FROM activities WHERE id = $1", "a_api", 1204, 1210, nil)
 	b.add("a_wr", "tr_act2", api, core.KindDBWrite, "UPDATE activities SET status = $1 WHERE id = $2", "a_api", 1212, 1222, chain(mut(upd("created", "in_progress"))))
 	b.add("a_out", "tr_act2", api, core.KindAPIOut, "POST https://notify.example.invalid/v1/push", "a_api", 1225, 1300, chain(
-		req(m{"to": "usr_synth_042", "template": "activity_started"}), resp(m{"status": 202}), attrs("http.status", "202")))
+		httpReq("POST", "https://notify.example.invalid/v1/push", reqHdr("X-Api-Key"), m{"to": "usr_synth_042", "template": "activity_started"}),
+		httpResp(202, respHdr(), m{"accepted": true}), attrs("http.status", "202", "host", "notify.example.invalid")))
 	b.add("a_cache", "tr_act2", api, core.KindCacheWrite, "DEL activity:act_1", "a_api", 1305, 1310, chain(
 		mut(core.Mutation{Store: "redis", Entity: "activity:*", PK: m{"key": "activity:act_1"}, Op: "delete", Source: "sdk", Before: pj(act), Diff: []core.FieldChange{{Field: "status", Old: "created"}}})))
 	// background cleanup with no API ancestor, overlapping the call above
@@ -264,7 +320,8 @@ func activityEvents(sid string, base time.Time) []core.Event {
 
 	// 3. complete (fails; transaction rolled back)
 	b.add("k_api", "tr_act3", api, core.KindAPIIn, "POST /api/activities/act_1/complete", "", 2400, 2500, chain(
-		resp(m{"status": 500, "body": m{"error": "internal"}}), attrs("http.status", "500"), errs("500 Internal Server Error: points ledger rejected the update")))
+		httpReq("POST", "/api/activities/act_1/complete", hdr("Accept", "application/json", "Authorization", core.RedactedValue), nil),
+		httpResp(500, respHdr(), m{"error": "internal"}), attrs("http.status", "500"), errs("500 Internal Server Error: points ledger rejected the update")))
 	b.add("k_rd", "tr_act3", api, core.KindDBRead, "SELECT id, status FROM activities WHERE id = $1", "k_api", 2404, 2410, nil)
 	b.add("k_txb", "tr_act3", api, core.KindDBTxBegin, "BEGIN", "k_api", 2415, 2416, tx("tx_a3"))
 	b.add("k_wr", "tr_act3", api, core.KindDBWrite, "UPDATE activities SET status = $1 WHERE id = $2", "k_api", 2418, 2428, chain(tx("tx_a3"), mut(upd("in_progress", "completed"))))

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -596,6 +597,103 @@ func TestJSHelpers(t *testing.T) {
 	}
 	if out, err := exec.Command(node, "--check", "web/app.js").CombinedOutput(); err != nil {
 		t.Fatalf("app.js syntax: %v\n%s", err, out)
+	}
+}
+
+// The demo's HTTP events carry what the HTTP wrapper records (thttp's message:
+// method, url, headers, body, body_size; status on the response), which is
+// also what curlFor in web/util.js needs to offer "Copy as curl".
+func TestDemoHTTPEventsHaveRecordedShape(t *testing.T) {
+	evs := append(demoEvents("ts_x", time.Now()), activityEvents("ts_y", time.Now())...)
+	decode := func(e core.Event, what string, p core.PayloadRef) (msg httpMsg) {
+		t.Helper()
+		dec := json.NewDecoder(strings.NewReader(string(p.Inline)))
+		dec.DisallowUnknownFields() // a field thttp does not record, such as the old "path"
+		if err := dec.Decode(&msg); err != nil {
+			t.Fatalf("%s %s: %s is not a recorded HTTP message: %v\n%s", e.Kind, e.Name, what, err, p.Inline)
+		}
+		if p.Redacted != strings.Contains(string(p.Inline), core.RedactedValue) {
+			t.Errorf("%s %s: %s redacted=%v does not match its content", e.Kind, e.Name, what, p.Redacted)
+		}
+		if msg.Body != nil {
+			if b, _ := json.Marshal(msg.Body); msg.BodySize != len(b) {
+				t.Errorf("%s %s: %s body_size %d, body is %d bytes", e.Kind, e.Name, what, msg.BodySize, len(b))
+			}
+		}
+		return msg
+	}
+	method := regexp.MustCompile(`^[A-Za-z]+$`) // as curlFor requires
+	var httpEvs []core.Event
+	for _, e := range evs {
+		if e.Kind != core.KindAPIIn && e.Kind != core.KindAPIOut {
+			continue
+		}
+		httpEvs = append(httpEvs, e)
+		req, resp := decode(e, "request", e.Req), decode(e, "response", e.Resp)
+		u, err := url.Parse(req.URL)
+		if err != nil || strings.ContainsFunc(req.URL, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			t.Errorf("%s %s: bad url %q: %v", e.Kind, e.Name, req.URL, err)
+			continue
+		}
+		if !method.MatchString(req.Method) || !strings.HasPrefix(e.Name, req.Method+" ") || !strings.HasSuffix(e.Name, u.Path) {
+			t.Errorf("%s %s: the request is %q %q", e.Kind, e.Name, req.Method, req.URL)
+		}
+		masked := false
+		for name, vs := range req.Headers {
+			masked = masked || (len(vs) == 1 && vs[0] == core.RedactedValue)
+			if http.CanonicalHeaderKey(name) != name || len(vs) == 0 {
+				t.Errorf("%s %s: header %q %v is not as net/http holds it", e.Kind, e.Name, name, vs)
+			}
+		}
+		if !masked {
+			t.Errorf("%s %s: no request header is redacted: %v", e.Kind, e.Name, req.Headers)
+		}
+		if e.Kind == core.KindAPIOut {
+			// An outbound call records the full URL, and the wrapper sets the host attribute.
+			if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || e.Attrs["host"] != u.Host || req.Body == nil {
+				t.Errorf("api.out %s: url %q, host attr %q, body %v", e.Name, req.URL, e.Attrs["host"], req.Body)
+			}
+		} else if u.IsAbs() || !strings.HasPrefix(req.URL, "/") {
+			t.Errorf("api.in %s: url %q, want a path", e.Name, req.URL) // a server sees no scheme or host
+		}
+		if resp.Status < 100 || e.Attrs["http.status"] != strconv.Itoa(resp.Status) || len(resp.Headers) == 0 || resp.Body == nil {
+			t.Errorf("%s %s: response status %d (attr %q), headers %v, body %v", e.Kind, e.Name, resp.Status, e.Attrs["http.status"], resp.Headers, resp.Body)
+		}
+		if resp.Method != "" || resp.URL != "" || req.Status != 0 {
+			t.Errorf("%s %s: request and response fields are mixed up", e.Kind, e.Name)
+		}
+	}
+	if len(httpEvs) != 8 {
+		t.Fatalf("the demo has %d api.in/api.out events, want 8", len(httpEvs))
+	}
+
+	// The real curlFor accepts every one of them.
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Log("node not installed: curlFor itself was not run")
+		return
+	}
+	const script = `
+const U = require('./web/util.js');
+const evs = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+for (const e of evs) {
+  const c = U.curlFor(e), p = e.req.inline;
+  const base = e.kind === 'api.out' ? '' : '"$BASE_URL"';
+  if (!c || !c.command.startsWith('curl -X ' + p.method + ' ' + base + "'" + p.url + "'")) {
+    console.error('curlFor(' + e.kind + ' ' + e.name + ') = ' + JSON.stringify(c));
+    process.exit(1);
+  }
+  if (!c.notes.some((n) => n.includes('[REDACTED]'))) {
+    console.error(e.kind + ' ' + e.name + ': no note about the redacted header: ' + JSON.stringify(c.notes));
+    process.exit(1);
+  }
+}
+console.log(evs.length);`
+	in, _ := json.Marshal(httpEvs)
+	cmd := exec.Command(node, "-e", script)
+	cmd.Stdin = strings.NewReader(string(in))
+	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "8" {
+		t.Fatalf("curlFor on the demo events: %v\n%s", err, out)
 	}
 }
 
