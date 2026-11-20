@@ -277,3 +277,67 @@ func TestFileStoreFailedArchiveAppend(t *testing.T) {
 		}
 	}
 }
+
+// What the comment on Delete says about a Delete that returns an error after
+// its journal record was written: the running store keeps the session, a
+// restart before the record is folded away finishes the delete, and a
+// compaction or a later Put before the restart keeps the session.
+func TestFileStoreFailedDeleteCanTakeEffectLater(t *testing.T) {
+	for _, hotToo := range []bool{false, true} {
+		for _, then := range []string{"restart", "compact, restart", "put, restart", "repeat"} {
+			t.Run(fmt.Sprintf("hotToo=%v/%s", hotToo, then), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "s.json")
+				fs := uncached(openStore(t, path))
+				keep, x := archiveSession(0, "keep", StateSealed), archiveSession(1, "x", StateAborted)
+				mustPut(t, fs, keep, x)
+				fs.Evict(keep.ID, x.ID)
+				if hotToo {
+					x.Name = "x, changed after its eviction"
+					mustPut(t, fs, x)
+				}
+				if err := fs.Compact(); err != nil {
+					t.Fatal(err)
+				}
+
+				faults := injectFaults(fs)
+				faults.failWrite = func(int, []byte) (int, bool) { return 0, true } // the line cannot be overwritten
+				if err := fs.Delete(x.ID); !errors.Is(err, errInjected) {
+					t.Fatalf("delete: %v, want the injected error", err)
+				}
+				faults.clear()
+				wantStore(t, "after the failed delete", fs, []Session{keep, x})
+				if _, hot := fs.MemStore.Get(x.ID); hot != hotToo {
+					t.Fatalf("hot copy after the failed delete: %v, want %v", hot, hotToo)
+				}
+				if j, _ := os.ReadFile(fs.journalPath()); !bytes.Contains(j, []byte(`"op":"delete"`)) {
+					t.Fatalf("no delete record in the journal: %q", j)
+				}
+
+				switch then {
+				case "restart": // the record is replayed
+					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep}, x.ID)
+				case "compact, restart": // the record is folded away first
+					if err := fs.Compact(); err != nil {
+						t.Fatal(err)
+					}
+					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep, x})
+				case "put, restart": // a later record of the session
+					x.Name = "x, stored after the failed delete"
+					mustPut(t, fs, x)
+					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep, x})
+				case "repeat":
+					if err := fs.Delete(x.ID); err != nil {
+						t.Fatal(err)
+					}
+					wantStore(t, "after the second delete", fs, []Session{keep}, x.ID)
+					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep}, x.ID)
+				}
+				if then != "compact, restart" && then != "put, restart" {
+					if raw, _ := os.ReadFile(path + ".archive"); bytes.Contains(raw, []byte(x.ID)) {
+						t.Fatalf("a line of the deleted session is left in the archive:\n%s", raw)
+					}
+				}
+			})
+		}
+	}
+}

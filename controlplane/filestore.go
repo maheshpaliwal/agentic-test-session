@@ -902,6 +902,25 @@ func (f *FileStore) undoAppend(ar *os.File, before int64, n, want int) (left boo
 // Delete implements Store: the session leaves the hot set and the archive
 // for good. The archive line of an archived session is overwritten in place,
 // which costs one small write and one fsync whatever the size of the archive.
+//
+// Errors. Delete works in this order: journal record, archive line, hot set.
+//
+//   - ErrStoreClosed, or the journal record cannot be written: nothing has
+//     changed and nothing will.
+//   - The record is written and the archive line cannot be overwritten: the
+//     error is returned and the running store still has the session, archived
+//     and (if it was) hot, so the call can be repeated. But the record stays
+//     in the journal, and a failed Delete can therefore still take effect:
+//     if the store is opened again before that record is folded away, the
+//     replay deletes the session (and opening fails if the line cannot be
+//     removed then either). The record is folded away, and the session then
+//     stays, by the next compaction: Compact, or the background one once the
+//     journal passes its threshold. A Put of the session after the failed
+//     Delete also keeps it: the replay sees the later record.
+//
+// So after an error the session is either still there or, after a restart,
+// deleted as asked; it never comes back in an older version. A caller that
+// must know repeats the Delete until it returns nil.
 func (f *FileStore) Delete(id string) error {
 	f.wmu.Lock()
 	defer f.wmu.Unlock()
