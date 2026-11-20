@@ -45,6 +45,9 @@ session results (collector):
                                 the call tree; ~> marks async work a span triggered
   show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
+  report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete]
+                                a CI report: Markdown for a job summary (default) or JUnit XML, with
+                                each failure traced to its root request; --fail-on flags as in summary
   diff <id|name a> <id|name b> [--json] [--fail-on-diff] [--ignore-counts]
                                 what differs in b (candidate) from a (baseline): failures, mutations,
                                 events, first divergence; --fail-on-diff exits 3 when anything differs
@@ -92,6 +95,7 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"show":         (*cli).show,
 	"export":       (*cli).export,
 	"diff":         (*cli).diff,
+	"report":       (*cli).report,
 	"doctor":       (*cli).doctor,
 	"version":      (*cli).version,
 }
