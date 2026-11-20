@@ -102,7 +102,7 @@ func publish(ctx context.Context, m Message, carrier core.Carrier, send func(ctx
 		span.AddFlag(f)
 	}
 	sctx = context.WithValue(sctx, pubKey{}, mk)
-	span.SetReq(m.Params)
+	span.SetReq(rendered(m.Params))
 	setAttrs(span, m.System, m.Queue, m.Options)
 	if m.Delay > 0 {
 		span.SetAttr("delay_ms", strconv.FormatInt(m.Delay.Milliseconds(), 10))
@@ -166,7 +166,7 @@ func Consume(ctx context.Context, carrier core.Carrier, d Delivery, handler func
 	if sc, ok := core.ExtractSpanContext(carrier); ok {
 		pub = sc.SpanID
 	}
-	start.SetReq(d.Params)
+	start.SetReq(rendered(d.Params))
 	start.SetAttempt(attempt)
 	setAttrs(start, d.System, d.Queue, nil)
 	if d.MessageID != "" {
@@ -248,11 +248,23 @@ func bodyParams(b []byte) any {
 	return lazyBody(b)
 }
 
-// lazyBody is a message body that renders itself when marshalled.
+// lazyBody is a message body that is rendered only when a span records it.
 type lazyBody []byte
 
-// MarshalJSON renders the body the way core.Payload can redact by key.
+// MarshalJSON renders the body; it covers a lazyBody nested inside a caller's
+// own Params value. A lazyBody that is the whole Params goes through rendered
+// instead, so that core.Payload sees the same Go value (a string for text) as
+// when the body was rendered eagerly and applies the same redaction, size and
+// flags.
 func (b lazyBody) MarshalJSON() ([]byte, error) { return json.Marshal(renderBody(b)) }
+
+// rendered resolves a lazyBody for recording; any other value is returned as is.
+func rendered(params any) any {
+	if b, ok := params.(lazyBody); ok {
+		return renderBody(b)
+	}
+	return params
+}
 
 // renderBody turns a raw message body into a value core.Payload can redact by
 // key: valid JSON is decoded to structured data and passed through

@@ -302,7 +302,11 @@ func (f *FileStore) Evict(ids ...string) {
 		}
 	}
 	f.amu.RUnlock()
+	before := fileSize(f.archivePath())
 	if err := appendFile(f.archivePath(), lines.Bytes(), rearchived); err != nil {
+		// Drop a partial line (disk full, I/O error): the next eviction's
+		// line would be glued to it and skipped when the archive is loaded.
+		_ = os.Truncate(f.archivePath(), before)
 		return // keep them in memory rather than lose them
 	}
 	f.archiveUnsynced = !rearchived
@@ -341,10 +345,12 @@ func (f *FileStore) Delete(id string) error {
 		delete(f.arch, id)
 		f.amu.Unlock()
 		if err := f.writeArchiveLocked(); err != nil {
+			// Still on disk: keep it readable and the delete repeatable. A
+			// hot copy stays too; dropping it would bring this older
+			// archived record back as the session's current state.
 			f.amu.Lock()
-			f.arch[id] = old // still on disk: keep it readable and the delete repeatable
+			f.arch[id] = old
 			f.amu.Unlock()
-			f.MemStore.Evict(id)
 			return err
 		}
 	}
@@ -614,6 +620,15 @@ func syncFile(path string) error {
 
 // appendFile appends data to path with one write, creating the file if
 // needed, and optionally fsyncs it.
+// fileSize is the size of the file at path, 0 when it does not exist.
+func fileSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
 func appendFile(path string, data []byte, sync bool) error {
 	fh, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {

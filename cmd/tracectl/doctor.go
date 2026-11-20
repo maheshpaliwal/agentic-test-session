@@ -26,16 +26,19 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	rep := doctorReport{ControlPlane: probe(ctx, cp), Collector: probe(ctx, col), Subscribers: []client.Subscriber{}}
+	hc := cmp.Or(c.opts.HTTPClient, http.DefaultClient)
+	rep := doctorReport{ControlPlane: probe(ctx, hc, cp), Collector: probe(ctx, hc, col), Subscribers: []client.Subscriber{}}
 	if rep.ControlPlane.OK {
 		if active, err := client.List(ctx, c.opts, "ACTIVE"); err == nil {
 			rep.ActiveSessions = len(active)
+		} else {
+			rep.Notes = append(rep.Notes, "listing active sessions failed: "+err.Error())
 		}
 		subs, err := client.Subscribers(ctx, c.opts)
 		switch {
 		case err == nil:
 			rep.Subscribers = append(rep.Subscribers, subs...)
-		case strings.Contains(err.Error(), "404"):
+		case strings.Contains(err.Error(), ": 404 "): // the status as the client reports it, not any "404" in the text
 			rep.Notes = append(rep.Notes, "this control plane is too old to list connected services")
 		default:
 			rep.Notes = append(rep.Notes, "listing connected services failed: "+err.Error())
@@ -71,14 +74,14 @@ type doctorReport struct {
 }
 
 // probe asks a service's /healthz.
-func probe(ctx context.Context, base string) probeResult {
+func probe(ctx context.Context, hc *http.Client, base string) probeResult {
 	res := probeResult{URL: base}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		res.Error = err.Error()
 		return res

@@ -33,16 +33,26 @@ import (
 // session of a failed test as a file in that directory (created if missing),
 // so the run can still be opened after the CI job and its collector are gone:
 //
-//	TSESSION_ARTIFACT_DIR=artifacts go test ./...   # then upload artifacts/ from CI
-//	dashboard -open artifacts/TestCheckout.ndjson
+//	TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...   # then upload artifacts/ from CI
+//	dashboard -open artifacts/TestCheckout.ts_....ndjson
+//
+// Use an absolute path: go test runs each package in its own directory, so a
+// relative one would create a directory per package.
 //
 // The files hold recorded payloads (redacted, but possibly still sensitive)
 // and are written with mode 0600. Whether they may be uploaded to CI storage
 // is a question for your own data-handling policy.
 const ArtifactDirEnv = "TSESSION_ARTIFACT_DIR"
 
-// saveArtifact exports s to dir/<test name>.ndjson and returns the path.
+// saveArtifact exports s to dir/<test name>.<session id>.ndjson and returns
+// the absolute path. The session id keeps tests whose names sanitise to the
+// same text, or that share a name across packages, from overwriting each
+// other; the file is created exclusively, so nothing existing (a symlink
+// included) is written through.
 func saveArtifact(ctx context.Context, s *client.Session, dir, test string) (path string, err error) {
+	if dir, err = filepath.Abs(dir); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -54,8 +64,8 @@ func saveArtifact(ctx context.Context, s *client.Session, dir, test string) (pat
 		}
 		return '_'
 	}, test)
-	path = filepath.Join(dir, strings.TrimLeft(name, ".")+".ndjson")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	path = filepath.Join(dir, strings.TrimLeft(name, ".")+"."+s.ID+".ndjson")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", err
 	}
@@ -100,9 +110,9 @@ func Run(t testing.TB, o client.Options) *client.Session {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 		defer cancel()
-		if err := stop(ctx, s); err != nil {
-			t.Logf("tsession: stop session %s: %v", s.ID, err)
-			return
+		stopErr := stop(ctx, s)
+		if stopErr != nil {
+			t.Logf("tsession: stop session %s: %v", s.ID, stopErr)
 		}
 		if !t.Failed() {
 			return

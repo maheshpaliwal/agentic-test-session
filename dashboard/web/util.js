@@ -334,10 +334,13 @@
   function shQuote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
   // bash/zsh $'...': backslash, quote and every control character are escaped (C1 controls as their UTF-8 bytes).
   // '!' is escaped too, because some shells run history expansion inside $'...'.
+  // A quote is written as \x27, never as \': a shell without $'...' (dash, POSIX sh) reads the text as one
+  // ordinary single-quoted word, and a literal quote character in it would end that word and let the rest run
+  // as a command.
   function shAnsi(s) {
     return "$'" + s.replace(/[\\'!\u0000-\u001f\u007f-\u009f]/g, (c) => {
       if (c === '\\') return '\\\\';
-      if (c === "'") return "\\'";
+      if (c === "'") return '\\x27';
       if (c === '\n') return '\\n';
       if (c === '\r') return '\\r';
       if (c === '\t') return '\\t';

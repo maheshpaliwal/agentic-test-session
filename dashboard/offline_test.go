@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 )
@@ -134,5 +135,42 @@ func TestOfflineRejectsBadFiles(t *testing.T) {
 	}
 	if _, err := New(Config{Open: []string{good, writeExport(t, "b.ndjson", other)}}); err != nil {
 		t.Fatalf("two different sessions: %v", err)
+	}
+}
+
+func TestOfflineToleratesATornLastLineOnly(t *testing.T) {
+	a := core.Event{SessionID: "ts_t", Seq: 1, Kind: core.KindAPIIn, StartNs: 5e9, EndNs: 6e9}
+	dropped := core.Event{SessionID: "ts_t", Seq: 2, Kind: core.KindSDKDropped, EndNs: 7e9, Attrs: map[string]string{"count": "-5"}}
+	good := writeExport(t, "cut.ndjson", a, dropped)
+	b, _ := os.ReadFile(good)
+	if err := os.WriteFile(good, append(b, []byte(`{"session_id":"ts_t","seq":3,"kind":"db.re`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewOffline([]string{good})
+	if err != nil {
+		t.Fatalf("an export cut mid-line must still open: %v", err)
+	}
+	s := d.sess[0]
+	if len(s.events) != 2 || !s.Incomplete || s.DroppedEvents != 0 || s.StartedAt != ts(time.Unix(5, 0)) {
+		t.Fatalf("session from a cut file: events=%d incomplete=%v dropped=%d started=%s", len(s.events), s.Incomplete, s.DroppedEvents, s.StartedAt)
+	}
+	// A bad line in the middle is corruption, not an interrupted write.
+	if err := os.WriteFile(good, append([]byte("{not json\n"), b...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewOffline([]string{good}); err == nil {
+		t.Fatal("a malformed line before the end must be rejected")
+	}
+}
+
+func TestOfflineRejectsDuplicateAndOutOfRangeSeq(t *testing.T) {
+	e := core.Event{SessionID: "ts_d", Seq: 5, Kind: core.KindAPIIn}
+	if _, err := NewOffline([]string{writeExport(t, "dup.ndjson", e, e)}); err == nil || !strings.Contains(err.Error(), "already used on line 1") {
+		t.Fatalf("duplicate seq: %v", err)
+	}
+	big := e
+	big.Seq = 1 << 63
+	if _, err := NewOffline([]string{writeExport(t, "big.ndjson", big)}); err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("seq beyond int64: %v", err)
 	}
 }

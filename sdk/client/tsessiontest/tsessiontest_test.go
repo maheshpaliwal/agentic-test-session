@@ -200,7 +200,11 @@ func TestFailedTestSavesAnArtifact(t *testing.T) {
 	out := run(true)
 	// The recorder reports the outer test's name, which contains no slash here;
 	// the sanitising is exercised through the file name below.
-	path := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".ndjson")
+	matches, _ := filepath.Glob(filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".ts_*.ndjson"))
+	if len(matches) != 1 {
+		t.Fatalf("artifacts in %s: %v", dir, matches)
+	}
+	path := matches[0]
 	if !strings.Contains(out, "dashboard -open "+path) {
 		t.Fatalf("log does not point at the artifact:\n%s", out)
 	}
@@ -210,6 +214,11 @@ func TestFailedTestSavesAnArtifact(t *testing.T) {
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("artifact mode %v, want 0600", fi.Mode().Perm())
+	}
+	// A second failing test with the same name gets its own file.
+	run(true)
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*.ndjson")); len(matches) != 2 {
+		t.Fatalf("two failed runs must leave two files, got %v", matches)
 	}
 }
 

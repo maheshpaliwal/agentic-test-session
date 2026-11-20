@@ -76,6 +76,10 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
   events still unwritten then are dropped and logged.
+- Control plane file store: a partial line left in the archive by a failed write (disk full) made the next
+  evicted session unreadable after a restart; a failed delete could bring an older archived record back.
+- `dashboard -open`: a file cut short mid-line still opens (marked incomplete); duplicate or out-of-range
+  sequence numbers are rejected instead of silently hiding events.
 - `thttp`: the request-body capture of the HTTP client wrapper raced with the transport when the server answered
   before the body was fully sent (data race, possible garbage in the recorded body).
 - Wrappers: recording code in `thttp`, `tgrpc` and the Redis wrappers now recovers from its own panics instead of

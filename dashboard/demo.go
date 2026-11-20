@@ -416,15 +416,15 @@ func (d *Demo) Collector() http.Handler {
 		if !ok {
 			return
 		}
-		from, _ := strconv.Atoi(r.URL.Query().Get("from_seq"))
+		from, _ := strconv.ParseUint(r.URL.Query().Get("from_seq"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if limit <= 0 || limit > 5000 {
 			limit = 1000
 		}
 		out := []core.Event{}
-		next := uint64(from)
+		next := from
 		for _, e := range evs { // events with Seq > from_seq
-			if int(e.Seq) > from && len(out) < limit {
+			if e.Seq > from && len(out) < limit {
 				out = append(out, e)
 				next = e.Seq
 			}

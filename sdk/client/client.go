@@ -426,7 +426,7 @@ func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
 			switch {
 			case ctx.Err() != nil:
 				return connected, ctx.Err()
-			case strings.Contains(err.Error(), "404"):
+			case strings.Contains(err.Error(), ": 404 "):
 				return 0, nil
 			}
 			return connected, err

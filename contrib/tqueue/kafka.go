@@ -101,7 +101,7 @@ func produceEach(ctx context.Context, w KafkaWriter, msgs []kafka.Message) (err 
 		if span == nil {
 			continue
 		}
-		span.SetReq(bodyParams(m.Value))
+		span.SetReq(rendered(bodyParams(m.Value)))
 		setAttrs(span, "kafka", m.Topic, nil)
 		core.Inject(sctx, kafkaCarrier{&cp[i].Headers})
 		spans[i] = span

@@ -301,7 +301,7 @@ const cAnsi = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.examp
 assert.strictEqual(cAnsi.command, [
   "curl -X POST 'http://h.example.invalid/' \\",
   "  -H 'Content-Type: text/plain' \\",
-  "  --data-raw $'it\\'s\\r\\n\\x1b[201~ \\\\ \\x21 \\xc2\\x85\\tend'"].join('\n'));
+  "  --data-raw $'it\\x27s\\r\\n\\x1b[201~ \\\\ \\x21 \\xc2\\x85\\tend'"].join('\n'));
 assert.deepStrictEqual(cAnsi.notes, ["The body has control characters, so it is quoted as $'...': run the command in bash or zsh."]);
 const cNul = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', body: 'a\u0000b' }));
 assert.strictEqual(cNul.command, "curl -X POST 'http://h.example.invalid/'");
@@ -319,6 +319,18 @@ assert.deepStrictEqual(cNul.notes, ['The body contains a NUL byte, which no shel
     '-H', 'X-Note: it\'s "q" `id` $(id); echo $HOME \\ !', '-H', 'X-Quote\'Name: v', '-H', 'X-Empty;', '--data-raw', hostile.req.inline.body]);
   assert.deepStrictEqual(argv(cAnsi.command), ['-X', 'POST', 'http://h.example.invalid/', '-H', 'Content-Type: text/plain', '--data-raw', 'it\'s\r\n\u001b[201~ \\ ! \u0085\tend']);
   assert.deepStrictEqual(argv(cIn.command).slice(0, 3), ['-X', 'POST', 'http://127.0.0.1:1/orders?expand=items']);
+})();
+// A shell without $'...' (dash, POSIX sh) must still see exactly one curl invocation: a body with a control
+// character and a quote once ended the quoted word there and ran the rest as a command.
+(function posixShellRunsOneCommand() {
+  const cp = require('child_process');
+  const evil = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', headers: { 'Content-Type': 'text/plain' }, body: '\u0001\' ; echo INJECTED #' }));
+  assert.ok(evil.command.indexOf("\\'") < 0, 'a backslash-quote must never be emitted: ' + evil.command);
+  for (const sh of ['/bin/dash', '/bin/sh']) {
+    const r = cp.spawnSync(sh, ['-c', 'curl() { echo CURL; }\n' + evil.command], { env: { PATH: process.env.PATH, HOME: '/nonexistent' }, encoding: 'utf8' });
+    if (r.error) { console.log(sh + ' not available: skipped'); continue; }
+    assert.strictEqual(r.stdout, 'CURL\n', sh + ' ran something other than one curl: ' + JSON.stringify(r.stdout));
+  }
 })();
 
 // truncated body: the recorded part stays, the note says how much is missing
