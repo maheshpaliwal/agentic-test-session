@@ -374,4 +374,87 @@ assert.strictEqual(U.fmtNs(999.96e6), '1.00 s');
 assert.strictEqual(U.fmtNs(999.6), '1 µs');
 assert.strictEqual(U.fmtNs(500), '500 ns');
 
+// ---------- the session list, a page at a time ----------
+assert.strictEqual(U.pageSize(null), 200);
+assert.strictEqual(U.pageSize('2'), 2);
+assert.strictEqual(U.pageSize('1000'), 1000);
+for (const bad of ['0', '1001', '-1', '2.5', 'x', '', '1e2']) assert.strictEqual(U.pageSize(bad), 200);
+assert.strictEqual(U.listQuery({ limit: 200 }), '?limit=200');
+assert.strictEqual(U.listQuery({ limit: 2, state: 'ACTIVE', before: 'a+b/c=' }), '?limit=2&state=ACTIVE&before=a%2Bb%2Fc%3D');
+assert.strictEqual(U.headerCount('12'), 12);
+assert.strictEqual(U.headerCount('0'), 0);
+for (const bad of [null, undefined, '', '-1', '1.5', 'x', '12abc']) assert.strictEqual(U.headerCount(bad), null);
+
+// order: newest first; fractions of a second of any length; the id decides a tie
+const row = (id, at, extra) => Object.assign({ id: id, created_at: at }, extra);
+const ordered = [
+  row('ts_c', '2026-07-08T09:00:01Z'),
+  row('ts_b', '2026-07-08T09:00:00.5Z'),
+  row('ts_a', '2026-07-08T09:00:00.25Z'),
+  row('ts_z', '2026-07-08T09:00:00.123456789Z'),
+  row('ts_y', '2026-07-08T09:00:00.123456788Z'),
+  row('ts_x', '2026-07-08T09:00:00Z'),
+  row('ts_w', '2026-07-08T09:00:00Z'),
+  row('ts_v', '2026-07-08T10:59:59+02:00'), // 08:59:59Z
+  row('ts_u', 'not a time'),
+];
+assert.deepStrictEqual(ordered.slice().reverse().sort(U.sessionOrder).map((s) => s.id), ordered.map((s) => s.id));
+assert.deepStrictEqual([ordered[5], ordered[0], ordered[8], ordered[3], ordered[6], ordered[1], ordered[7], ordered[4], ordered[2]].sort(U.sessionOrder).map((s) => s.id), ordered.map((s) => s.id));
+assert.strictEqual(U.sessionOrder(ordered[5], row('ts_x', '2026-07-08T09:00:00.000Z')), 0);
+
+{
+  const at = (i) => '2026-07-08T09:00:' + String(i).padStart(2, '0') + 'Z';
+  const mk = (i, extra) => row('ts_' + String(i).padStart(2, '0'), at(i), extra);
+  const ids = (rows) => rows.map((s) => s.id).join(' ');
+  // first load
+  let m = U.mergeFirstPage(null, [mk(8), mk(9), mk(7)], true);
+  assert.strictEqual(ids(m.rows), 'ts_09 ts_08 ts_07');
+  assert.strictEqual(m.older, 0);
+  // "Load more" appends the next page; a row that comes again replaces its earlier copy
+  let rows = U.mergeRows(m.rows, [mk(6), mk(5), mk(4), mk(7, { name: 'again' })]);
+  assert.strictEqual(ids(rows), 'ts_09 ts_08 ts_07 ts_06 ts_05 ts_04');
+  assert.strictEqual(rows[2].name, 'again');
+  // refresh: a new session arrived, 08 was deleted, 09 changed; the rows loaded below the page stay
+  m = U.mergeFirstPage(rows, [mk(10), mk(9, { state: 'SEALED' }), mk(7)], true);
+  assert.strictEqual(ids(m.rows), 'ts_10 ts_09 ts_07 ts_06 ts_05 ts_04');
+  assert.strictEqual(m.rows[1].state, 'SEALED');
+  assert.strictEqual(m.older, 3);
+  // refresh whose page reaches the newest loaded row: nothing can be missing in between
+  m = U.mergeFirstPage(rows, [mk(11), mk(10), mk(9)], true);
+  assert.strictEqual(ids(m.rows), 'ts_11 ts_10 ts_09 ts_08 ts_07 ts_06 ts_05 ts_04');
+  assert.strictEqual(m.older, 5);
+  // refresh whose page ends above the newest loaded row: sessions in between may be missing
+  // (here ts_10), so the list starts over from the page instead of keeping a hole
+  m = U.mergeFirstPage(rows, [mk(13), mk(12), mk(11)], true);
+  assert.strictEqual(ids(m.rows), 'ts_13 ts_12 ts_11');
+  assert.strictEqual(m.older, 0);
+  // refresh that returns everything there is: exactly that
+  m = U.mergeFirstPage(rows, [mk(9), mk(4)], false);
+  assert.strictEqual(ids(m.rows), 'ts_09 ts_04');
+  assert.strictEqual(m.older, 0);
+  assert.deepStrictEqual(U.mergeFirstPage(rows, [], false), { rows: [], older: 0 });
+  // an empty page with more behind it (sessions the server could not read) changes nothing
+  assert.strictEqual(U.mergeFirstPage(rows, [], true).rows, rows);
+  // sessions created in the same instant are split by id, like the server does
+  const same = [row('ts_b', at(1)), row('ts_a', at(1))];
+  m = U.mergeFirstPage([row('ts_c', at(1)), same[0], same[1], row('ts_0', at(1))], [row('ts_c', at(1)), same[0]], true);
+  assert.strictEqual(ids(m.rows), 'ts_c ts_b ts_a ts_0');
+  assert.strictEqual(m.older, 2);
+}
+
+assert.strictEqual(U.listSummary({ loaded: 1, shown: 1, total: 1, more: false, state: '' }), '1 session');
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, state: '' }), '5 sessions');
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 2, total: 5, more: false, state: '' }), '2 of 5 sessions');
+assert.strictEqual(U.listSummary({ loaded: 3, shown: 3, total: 3, more: false, state: 'SEALED' }), '3 SEALED sessions');
+assert.strictEqual(U.listSummary({ loaded: 1, shown: 1, total: 1, more: false, state: 'ACTIVE' }), '1 ACTIVE session');
+assert.strictEqual(U.listSummary({ loaded: 3, shown: 1, total: 3, more: false, state: 'SEALED' }), '1 of 3 SEALED sessions');
+assert.strictEqual(U.listSummary({ loaded: 200, shown: 200, total: 12345, more: true, state: '' }),
+  'Showing the newest 200 of 12345 sessions. Search looks only at the sessions that are loaded.');
+assert.strictEqual(U.listSummary({ loaded: 400, shown: 400, total: null, more: true, state: 'SEALED' }),
+  'Showing the newest 400 SEALED sessions. Search looks only at the sessions that are loaded.');
+assert.strictEqual(U.listSummary({ loaded: 200, shown: 3, total: 12345, more: true, state: '' }),
+  '3 match among the newest 200 of 12345 sessions. Search looks only at the sessions that are loaded: load more to search older ones.');
+assert.ok(U.unreadableText(1).startsWith('1 archived session could not be read by the control plane and is missing'));
+assert.ok(U.unreadableText(30).startsWith('30 archived sessions could not be read by the control plane and are missing'));
+
 console.log('util ok');

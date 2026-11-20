@@ -130,7 +130,8 @@
   }
 
   // ---------- api ----------
-  async function api(path, opts) {
+  /* request resolves to the decoded body and the response headers; api to the body alone. */
+  async function request(path, opts) {
     let r;
     try {
       r = await fetch(path, Object.assign({ cache: 'no-store', credentials: 'omit' }, opts || {}));
@@ -148,12 +149,22 @@
       err.status = r.status;
       throw err;
     }
-    return body;
+    return { body: body, headers: r.headers };
   }
+  async function api(path, opts) { return (await request(path, opts)).body; }
   const cp = (p, o) => api('/api/cp' + p, o);
   const col = (p, o) => api('/api/col' + p, o);
   const postJSON = (p, body) => cp(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   const asList = (b, key) => (Array.isArray(b) ? b : b && Array.isArray(b[key]) ? b[key] : []);
+  /* One page of the control plane's session list, newest first (docs/PROTOCOL.md): the sessions, the cursor of the
+     page after it ('' when there is none), how many sessions match in all (null when the server does not say) and
+     how many it could not read. A control plane without paging ignores the limit and answers with every session
+     and no headers, which reads here as one page with nothing after it. */
+  async function cpSessions(q) {
+    const r = await request('/api/cp/v1/sessions' + U.listQuery(q));
+    const hd = (k) => r.headers.get(k);
+    return { list: asList(r.body, 'sessions'), next: hd('X-Tsession-Next') || '', total: U.headerCount(hd('X-Tsession-Total')), unreadable: U.headerCount(hd('X-Tsession-Unreadable')) || 0 };
+  }
 
   // ---------- JSON viewer (DOM nodes only) ----------
   const TOK = /("(?:\\.|[^"\\])*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
@@ -509,7 +520,15 @@
   function viewSessions(main, token, query) {
     document.title = 'Sessions - tsession';
     const f = { state: STATES.indexOf(query.get('state')) >= 0 ? query.get('state') : '', q: (query.get('q') || '').toLowerCase(), auto: true };
-    let rows = null, loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
+    /* The list is loaded a page at a time. #/?page=N sets the page size (default 200).
+       rows: the sessions loaded so far, newest first. next: the cursor of the sessions older than the oldest
+       loaded one, '' when there are none. total: how many sessions match the state filter on the server, null
+       when it did not say. unreadNew/unreadOld: sessions the server could not read, on the newest page and on
+       the pages loaded below it. filterGen changes with the state filter: a reply to an earlier one is dropped. */
+    const PAGE = U.pageSize(query.get('page'));
+    let rows = null, next = '', total = null, unreadNew = 0, unreadOld = 0, loadingMore = false, filterGen = 0, liveBusy = false;
+    let counts = {}, svcs = {};
+    let loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
     const pendingNames = new Map();
     const q = h('input', { class: 'field', type: 'search', placeholder: 'Search id, name, binding, entry point', 'aria-label': 'Search sessions', value: query.get('q') || '', oninput: (e) => { f.q = e.target.value.toLowerCase(); paint(true); } });
     const chipsEl = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by state' });
@@ -528,11 +547,39 @@
 
     function paintChips() {
       clear(chipsEl);
-      const counts = {};
-      (rows || []).forEach((s) => { counts[s.state] = (counts[s.state] || 0) + 1; });
-      const mk = (val, label, n) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(f.state === val), onclick: () => { f.state = val; paintChips(); paint(true); } }, label, h('span', { class: 'n', text: n }));
-      chipsEl.appendChild(mk('', 'All', rows ? rows.length : 0));
-      STATES.forEach((st) => { if (counts[st] || f.state === st) chipsEl.appendChild(mk(st, st.charAt(0) + st.slice(1).toLowerCase(), counts[st] || 0)); });
+      const mk = (val, label, n) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(f.state === val), onclick: () => setState(val) }, label, n === null ? null : h('span', { class: 'n', text: n }));
+      const label = (st) => st.charAt(0) + st.slice(1).toLowerCase();
+      const loaded = rows ? rows.length : 0;
+      if (!next && !f.state) {
+        // Every session is loaded: the count of each state is known, and states nobody is in are left out.
+        const n = {};
+        (rows || []).forEach((s) => { n[s.state] = (n[s.state] || 0) + 1; });
+        chipsEl.appendChild(mk('', 'All', loaded));
+        STATES.forEach((st) => { if (n[st]) chipsEl.appendChild(mk(st, label(st), n[st])); });
+        return;
+      }
+      // Only part of the list is loaded, or one state of it: the server gives the size of the current selection, no more.
+      const sel = !rows ? null : total !== null ? total : loaded;
+      chipsEl.appendChild(mk('', 'All', f.state ? null : sel));
+      STATES.forEach((st) => chipsEl.appendChild(mk(st, label(st), f.state === st ? sel : null)));
+    }
+    /* The state filter is applied by the server, so that it covers the sessions that are not loaded too. */
+    function setState(val) {
+      if (f.state === val) return;
+      f.state = val; filterGen++;
+      rows = null; next = ''; total = null; unreadNew = unreadOld = 0; loadingMore = false; loadErr = null; lastSig = '';
+      paintChips();
+      sub.textContent = '';
+      clear(body).appendChild(skeletonRows(4));
+      load();
+    }
+    const decorate = (s) => { const pn = pendingNames.get(s.id); return Object.assign({}, s, { event_count: counts[s.id], service_count: svcs[s.id] }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); };
+    function moreBar() {
+      const left = total !== null ? Math.max(0, total - rows.length) : null;
+      return h('div', { class: 'list-more' },
+        // aria-disabled, not disabled: the button keeps the keyboard focus while the page loads (loadMore ignores a second click).
+        h('button', { type: 'button', class: 'btn', 'data-act': 'more', 'aria-disabled': loadingMore ? 'true' : null, onclick: () => loadMore() }, loadingMore ? 'Loading\u2026' : left ? 'Load ' + Math.min(PAGE, left) + ' more' : 'Load more'),
+        span('muted', (left ? left + ' older session' + (left === 1 ? ' is' : 's are') : 'Older sessions are') + ' not loaded. Auto-refresh updates the newest ' + PAGE + '.'));
     }
     function nameBlock(s) {
       const en = ENTRY.get(s.id), et = en && en.entry ? U.entryText(en.entry) : '';
@@ -555,7 +602,8 @@
       const dur = isNaN(start) ? '-' : fmtNs(Math.max(0, end - start) * 1e6);
       const stop = s.state === 'ACTIVE' ? h('button', { type: 'button', class: 'btn danger sm', 'data-act': 'stop', 'data-rw': '', onclick: async (e) => {
         e.stopPropagation();
-        try { await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); load(); } catch (er) { actionError('Stop failed: ' + er.message); }
+        // The refresh reloads the newest page only: a row below it is brought up to date from the reply.
+        try { const r = await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); if (r && r.id === s.id && rows) { rows = U.mergeRows(rows, [decorate(r)]); paint(true); } load(); } catch (er) { actionError('Stop failed: ' + er.message); }
       } }, icon('stop', 'sm'), 'Stop') : null;
       // Delete is two clicks: the first arms the button for a few seconds, the second deletes.
       const armed = confirming === s.id;
@@ -568,7 +616,12 @@
             return;
           }
           confirming = null;
-          try { await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' }); toast('Deleted ' + s.id, 'ok'); load(); } catch (er) { actionError('Delete failed: ' + er.message); paint(true); }
+          try {
+            await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' });
+            toast('Deleted ' + s.id, 'ok');
+            if (rows) { rows = rows.filter((x) => x.id !== s.id); if (total) total--; paint(true); }
+            load();
+          } catch (er) { actionError('Delete failed: ' + er.message); paint(true); }
         } }, armed ? 'Confirm delete' : 'Delete') : null;
       const bound = null;
       return h('tr', { class: 'row', tabindex: 0, 'data-id': s.id, onclick: open, onkeydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(); } },
@@ -587,10 +640,11 @@
     function paint(force) {
       const liveBucket = (rows || []).some(isLive) ? Math.floor(Date.now() / 5000) : 0;
       if (editing && !force) return;
-      const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing, confirming]);
+      const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing, confirming, next, total, unreadNew + unreadOld, loadingMore]);
       if (!force && sig === lastSig) return;
       lastSig = sig;
       const ae = document.activeElement;
+      const focusMore = !!(ae && ae.getAttribute && ae.getAttribute('data-act') === 'more');
       const focusId = ae && ae.getAttribute && ae.closest && ae.closest('tr.row') ? ae.closest('tr.row').getAttribute('data-id') : null;
       const focusAct = focusId ? ae.getAttribute('data-act') : null; // a button inside the row keeps the focus, not just the row
       clear(body);
@@ -602,22 +656,35 @@
       }
       if (!rows) return;
       paintChips();
+      // The search looks at the loaded sessions; the state filter was applied by the server (and is checked again here,
+      // for a control plane that does not page and for a session that changed state since).
       const vis = rows.filter((s) => (!f.state || s.state === f.state) && (!f.q || U.sessionHay(s, (ENTRY.get(s.id) || {}).entry).indexOf(f.q) >= 0));
-      sub.textContent = vis.length === rows.length ? rows.length + ' session' + (rows.length === 1 ? '' : 's') : vis.length + ' of ' + rows.length + ' sessions';
+      sub.textContent = U.listSummary({ loaded: rows.length, shown: vis.length, total: total, more: !!next, state: f.state });
+      const refocus = () => { if (focusMore) { const b = body.querySelector('[data-act="more"]'); if (b) b.focus(); } };
+      if (unreadNew + unreadOld) body.appendChild(h('div', { class: 'callout warn list-note', role: 'status' }, icon('warn'), h('div', { class: 'ct', text: U.unreadableText(unreadNew + unreadOld) })));
+      const clearFilters = () => { f.q = ''; q.value = ''; if (f.state) setState(''); else paint(true); };
       if (!rows.length) {
-        body.appendChild(emptyState('sessions', 'No sessions yet', 'A session captures every event produced by your test traffic. Start one, then send requests with the x-tsession-id header.',
+        if (f.state) body.appendChild(emptyState('sessions', 'No ' + f.state + ' sessions', 'No session is in this state.', h('button', { type: 'button', class: 'btn', onclick: clearFilters }, 'Show all sessions')));
+        else body.appendChild(emptyState('sessions', 'No sessions yet', 'A session captures every event produced by your test traffic. Start one, then send requests with the x-tsession-id header.',
           h('button', { type: 'button', class: 'btn primary', 'data-rw': '', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start your first session')));
+        if (next) body.appendChild(moreBar());
+        refocus();
         return;
       }
       if (!vis.length) {
-        body.appendChild(emptyState('sessions', 'No sessions match', 'Try a different search term or clear the state filter.',
-          h('button', { type: 'button', class: 'btn', onclick: () => { f.state = ''; f.q = ''; q.value = ''; paint(true); } }, 'Clear filters')));
+        body.appendChild(emptyState('sessions', next ? 'No loaded session matches' : 'No sessions match',
+          next ? 'Search looks only at the ' + rows.length + ' sessions that are loaded. Load more to search older ones, or try a different search term.' : 'Try a different search term or clear the state filter.',
+          h('button', { type: 'button', class: 'btn', onclick: clearFilters }, 'Clear filters')));
+        if (next) body.appendChild(moreBar());
+        refocus();
         return;
       }
       const now = Date.now();
       body.appendChild(h('div', { class: 'tablewrap' }, h('table', { class: 'stable' },
         h('thead', null, h('tr', null, [['State', ''], ['Session', ''], ['Mode', 'hide-sm'], ['Initiated by', 'hide-sm'], ['Started', ''], ['Activity', ''], ['Flags', ''], ['', '']].map((x) => h('th', { class: x[1], text: x[0] })))),
         h('tbody', null, vis.map((s) => sessionRow(s, now))))));
+      if (next) body.appendChild(moreBar());
+      refocus();
       if (focusId) {
         const el = body.querySelector('tr.row[data-id="' + focusId.replace(/["\\]/g, '') + '"]');
         const ctl = el && focusAct ? el.querySelector('[data-act="' + focusAct + '"]') : null;
@@ -633,20 +700,64 @@
     // An error from a row action stays visible for a while; the periodic refresh must not wipe it at once.
     let actionErrUntil = 0;
     function actionError(msg) { actionErrUntil = Date.now() + 10000; showError(msg); }
+    /* load fetches the newest page and merges it into the loaded rows: what the refresh costs does not grow with
+       the number of sessions recorded, nor with the number loaded here. */
     async function load() {
+      const gen = filterGen;
+      let fresh = null; // stays null when the load fails
       try {
-        const [a, b] = await Promise.all([cp('/v1/sessions'), col('/v1/sessions').catch(() => [])]);
-        if (token !== S.token) return;
-        const counts = {}, svcs = {};
+        const [p, b] = await Promise.all([cpSessions({ limit: PAGE, state: f.state }), col('/v1/sessions').catch(() => [])]);
+        if (token !== S.token || gen !== filterGen) return;
+        counts = {}; svcs = {};
         asList(b, 'sessions').forEach((x) => { counts[x.id] = x.event_count; if (x.service_count !== undefined) svcs[x.id] = x.service_count; });
-        rows = asList(a, 'sessions').map((s) => { const pn = pendingNames.get(s.id); return Object.assign({}, s, { event_count: counts[s.id], service_count: svcs[s.id] }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); });
+        fresh = p.list;
+        const m = U.mergeFirstPage(rows, fresh, !!p.next);
+        // With nothing loaded below this page, its cursor is where "Load more" goes on; otherwise that is still
+        // the cursor of the oldest page loaded.
+        if (!m.older) { next = p.next; unreadOld = 0; }
+        unreadNew = p.unreadable;
+        rows = m.rows.map(decorate);
+        total = p.total !== null ? p.total : next ? null : rows.length;
         pendingNames.forEach((v, k) => { const r = rows.find((x) => x.id === k); if (!r || r.name === v.n) pendingNames.delete(k); });
-        rows.sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)));
         loadErr = null; if (Date.now() > actionErrUntil) showError('');
         setLive(rows.some((s) => s.state === 'ACTIVE'));
-      } catch (e) { if (token !== S.token) return; loadErr = e.message; }
+      } catch (e) { if (token !== S.token || gen !== filterGen) return; loadErr = e.message; }
       paint();
       loadEntries();
+      refreshOlderLive(fresh);
+    }
+    /* The page after the oldest loaded one, appended. */
+    async function loadMore() {
+      if (loadingMore || !next || !rows) return;
+      const gen = filterGen;
+      loadingMore = true; paint(true);
+      try {
+        const p = await cpSessions({ limit: PAGE, state: f.state, before: next });
+        if (token !== S.token || gen !== filterGen) return;
+        rows = U.mergeRows(rows, p.list.map(decorate));
+        next = p.next; unreadOld += p.unreadable;
+        if (p.total !== null) total = p.total; else if (!next) total = rows.length;
+      } catch (e) { if (token === S.token && gen === filterGen) actionError('Could not load more sessions: ' + e.message); }
+      if (token !== S.token || gen !== filterGen) return;
+      loadingMore = false;
+      paint(true);
+      loadEntries();
+    }
+    /* A session that is still running and sits below the newest page is not covered by the refresh: it is
+       asked for by id, a few at a time, so that its state does not go stale. */
+    async function refreshOlderLive(fresh) {
+      if (liveBusy || !rows || !fresh) return;
+      const gen = filterGen, onPage = new Set(fresh.map((s) => s.id));
+      liveBusy = true;
+      try {
+        for (const s of rows.filter((x) => isLive(x) && !onPage.has(x.id)).slice(0, 10)) {
+          let cur = null;
+          try { cur = await cp('/v1/sessions/' + encodeURIComponent(s.id)); } catch (e) { if (e.status !== 404) continue; }
+          if (token !== S.token || gen !== filterGen || !rows) return;
+          rows = cur && (!f.state || cur.state === f.state) ? U.mergeRows(rows, [decorate(cur)]) : rows.filter((x) => x.id !== s.id);
+          paint();
+        }
+      } finally { liveBusy = false; }
     }
     /* Entry points are derived from each session's first events; only the first ~10 visible sessions, one at a time, never blocking the list. */
     async function loadEntries() {

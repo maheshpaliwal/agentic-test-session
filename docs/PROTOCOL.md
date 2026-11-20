@@ -264,6 +264,13 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
 Go service embedding a static UI (vanilla JS, no build step, no CDN/external requests). Proxies
 `/api/cp/*` -> control plane, `/api/col/*` -> collector (strips prefix). Shows per session: timeline,
 call tree (api -> db/cache/queue -> worker), entity mutation history with before/after diffs, summary.
+The session list asks the control plane for the newest 200 sessions (`limit=200`; `#/?page=N` sets another page size,
+1..1000) and loads older ones on request ("Load more", `before=<cursor>`). The state filter is sent to the control
+plane; the search box filters the sessions that are loaded, and the page says so while older ones are not. The
+auto-refresh (every 3 s) fetches the newest page only and merges it into what is loaded; if that page no longer
+reaches the newest loaded session (more new sessions than a page holds), the list starts over from it. A response
+with `X-Tsession-Unreadable` shows a notice. The proxy passes the query string and these response headers through;
+the demo backend (`--demo`, `--open`) implements the same parameters and headers.
 
 ## SDK runtime (in every service)
 Env: `TSESSION_ENABLED=true`, `TSESSION_SERVICE`, `TSESSION_CONTROLPLANE_URL` (default http://127.0.0.1:7070),

@@ -207,6 +207,9 @@ select.field{padding-right:8px}
 .cell-flags{display:flex;gap:4px;flex-wrap:wrap}
 .s-sub{color:var(--muted);font-size:12px}
 .tablewrap{overflow-x:auto}
+.list-more .btn[aria-disabled=true]{opacity:.5;cursor:default}
+.list-more{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--border)}
+.list-note{margin:12px 16px}
 
 /* ---------- dialogs ---------- */
 dialog{padding:0;border:1px solid var(--border-strong);border-radius:12px;background:var(--surface);color:var(--text);box-shadow:var(--shadow);width:min(600px,calc(100vw - 32px));max-height:calc(100vh - 48px)}

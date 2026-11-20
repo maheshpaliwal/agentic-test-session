@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"cmp"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -189,6 +190,46 @@ func (d *Demo) find(id string) *demoSess {
 	return nil
 }
 
+// The paging contract of GET /v1/sessions, as the control plane has it.
+const (
+	maxListLimit = 1000
+	headerNext   = "X-Tsession-Next"
+	headerTotal  = "X-Tsession-Total"
+)
+
+// listKey is the place of a session in the list order: creation time, then id.
+type listKey struct {
+	created int64 // unix nanoseconds; 0 when created_at does not parse
+	id      string
+}
+
+func listKeyOf(s Session) listKey {
+	k := listKey{id: s.ID}
+	if t, err := time.Parse(time.RFC3339Nano, s.CreatedAt); err == nil {
+		k.created = t.UnixNano()
+	}
+	return k
+}
+
+func (k listKey) compare(o listKey) int {
+	return cmp.Or(cmp.Compare(k.created, o.created), cmp.Compare(k.id, o.id))
+}
+
+// cursor is the opaque form of k: "return the sessions older than this one".
+func (k listKey) cursor() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(k.created, 10) + "." + k.id))
+}
+
+func decodeListCursor(c string) (listKey, bool) {
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err != nil {
+		return listKey{}, false
+	}
+	num, id, ok := strings.Cut(string(b), ".")
+	created, err := strconv.ParseInt(num, 10, 64)
+	return listKey{created, id}, ok && err == nil
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -207,16 +248,51 @@ func (d *Demo) ControlPlane() http.Handler {
 
 func (d *Demo) controlPlane() http.Handler {
 	mux := http.NewServeMux()
+	// The list takes the parameters of the control plane's (docs/PROTOCOL.md):
+	// state, name, limit and before, and answers a request with a limit with
+	// the newest sessions first and the X-Tsession-Next and X-Tsession-Total
+	// headers.
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, before := 0, q.Get("before")
+		if q.Has("limit") {
+			n, err := strconv.Atoi(q.Get("limit"))
+			if err != nil || n < 1 || n > maxListLimit {
+				writeJSON(w, 400, m{"error": fmt.Sprintf("invalid request: limit must be 1..%d", maxListLimit)})
+				return
+			}
+			limit = n
+		}
+		var cur listKey
+		if before != "" {
+			var ok bool
+			if cur, ok = decodeListCursor(before); !ok || limit == 0 {
+				writeJSON(w, 400, m{"error": "invalid request: before must be a cursor returned by this API, sent with a limit"})
+				return
+			}
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		want := r.URL.Query().Get("state")
+		wantState, wantName := q.Get("state"), q.Get("name")
 		out := []Session{}
 		for i := len(d.sess) - 1; i >= 0; i-- {
 			s, _ := d.view(d.sess[i])
-			if want == "" || s.State == want {
+			if (wantState == "" || s.State == wantState) && (wantName == "" || s.Name == wantName) {
 				out = append(out, s)
 			}
+		}
+		if limit == 0 {
+			writeJSON(w, 200, out)
+			return
+		}
+		w.Header().Set(headerTotal, strconv.Itoa(len(out)))
+		slices.SortFunc(out, func(a, b Session) int { return listKeyOf(b).compare(listKeyOf(a)) }) // newest first
+		if before != "" {
+			out = slices.DeleteFunc(out, func(s Session) bool { return listKeyOf(s).compare(cur) >= 0 })
+		}
+		if len(out) > limit {
+			out = out[:limit]
+			w.Header().Set(headerNext, listKeyOf(out[limit-1]).cursor())
 		}
 		writeJSON(w, 200, out)
 	})

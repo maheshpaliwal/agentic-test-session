@@ -433,7 +433,83 @@
     return 'Connected to the control plane: ' + shown.join(', ') + '.';
   }
 
-  const api = { entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
+  /* ---------- the session list, loaded a page at a time ----------
+     The control plane lists sessions newest first by creation time, then id (docs/PROTOCOL.md).
+     The page keeps the sessions it has loaded in that order and merges what it fetches into them. */
+  const PAGE_DEFAULT = 200, PAGE_MAX = 1000;
+  // Page size from the #/?page=N parameter; anything else gives the default.
+  function pageSize(v) {
+    const n = /^\d+$/.test(String(v || '')) ? Number(v) : 0;
+    return n >= 1 && n <= PAGE_MAX ? n : PAGE_DEFAULT;
+  }
+  // Query string of a list request. before is the cursor of the previous page.
+  function listQuery(o) {
+    const q = ['limit=' + o.limit];
+    if (o.state) q.push('state=' + encodeURIComponent(o.state));
+    if (o.before) q.push('before=' + encodeURIComponent(o.before));
+    return '?' + q.join('&');
+  }
+  // A count sent in a response header: a non-negative integer, or null when absent or malformed.
+  function headerCount(v) { return typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null; }
+  // created_at as [milliseconds, nanoseconds below the second]. The fraction is compared by itself:
+  // timestamps come with zero to nine fractional digits, which neither Date nor a string compare orders.
+  function createdParts(v) {
+    const m = /^(.*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(String(v || ''));
+    const ms = m ? Date.parse(m[1] + (m[3] || 'Z')) : NaN;
+    return [isNaN(ms) ? -Infinity : ms, m && m[2] ? Number((m[2] + '00000000').slice(0, 9)) : 0];
+  }
+  // Sort order of the list: newest first, the id deciding between sessions created at the same instant.
+  function sessionOrder(a, b) {
+    const x = createdParts(a.created_at), y = createdParts(b.created_at);
+    if (x[0] !== y[0]) return x[0] < y[0] ? 1 : -1;
+    if (x[1] !== y[1]) return x[1] < y[1] ? 1 : -1;
+    const i = String(a.id), j = String(b.id);
+    return i === j ? 0 : i < j ? 1 : -1;
+  }
+  // The loaded rows after a refresh of the first page. page is the newest sessions as the server
+  // has them now and more says whether it has older ones. Rows as new as the page are replaced by
+  // it (one that is not on it any more was deleted or left the filter); rows older than the page
+  // were loaded with "Load more" and stay as they are. older is how many of those there are.
+  // When the page ends above the newest loaded row (more sessions arrived than a page holds, as
+  // after the tab was in the background), sessions in between may not be loaded: the list would
+  // have a hole that "Load more" never fills, so it starts over from the page.
+  function mergeFirstPage(rows, page, more) {
+    const fresh = page.slice().sort(sessionOrder);
+    if (!more) return { rows: fresh, older: 0 };
+    if (!fresh.length) return { rows: rows || [], older: (rows || []).length };
+    const last = fresh[fresh.length - 1];
+    if (!rows || !rows.length || sessionOrder(last, rows[0]) < 0) return { rows: fresh, older: 0 };
+    const older = rows.filter((s) => sessionOrder(last, s) < 0);
+    return { rows: fresh.concat(older), older: older.length };
+  }
+  // The loaded rows with more sessions merged in by id (a later copy replaces an earlier one).
+  function mergeRows(rows, more) {
+    const byId = new Map();
+    (rows || []).concat(more).forEach((s) => byId.set(s.id, s));
+    return Array.from(byId.values()).sort(sessionOrder);
+  }
+  // The line under the page title. o: loaded (sessions loaded), shown (of those, passing the search),
+  // total (matching the state filter on the server; null if unknown), more (older ones not loaded),
+  // state (the state filter, '' for none). Search only ever looks at loaded sessions, and says so
+  // whenever that is not all of them.
+  function listSummary(o) {
+    const plural = (n) => n + ' session' + (n === 1 ? '' : 's');
+    const kind = o.state ? o.state + ' ' : '';
+    if (!o.more) {
+      if (o.shown === o.loaded) return o.state ? plural(o.loaded).replace(' ', ' ' + kind) : plural(o.loaded);
+      return o.shown + ' of ' + o.loaded + ' ' + kind + 'sessions';
+    }
+    const scope = 'the newest ' + o.loaded + (o.total !== null && o.total >= o.loaded ? ' of ' + o.total : '') + ' ' + kind + 'sessions';
+    if (o.shown === o.loaded) return 'Showing ' + scope + '. Search looks only at the sessions that are loaded.';
+    return o.shown + ' match among ' + scope + '. Search looks only at the sessions that are loaded: load more to search older ones.';
+  }
+  // The notice shown when the control plane left sessions out of a list because it could not read them.
+  function unreadableText(n) {
+    return n + ' archived session' + (n === 1 ? '' : 's') + ' could not be read by the control plane and ' + (n === 1 ? 'is' : 'are') +
+      ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
+  }
+
+  const api = { pageSize, listQuery, headerCount, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
     mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
