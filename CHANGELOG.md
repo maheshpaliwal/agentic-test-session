@@ -51,6 +51,10 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
   events still unwritten then are dropped and logged.
+- Control plane: a seal that failed past its 30s budget left the session `SEALED` with `seal_error` forever. It is
+  now retried in the background (backoff up to 1m, for up to 24h, across restarts). New session fields
+  `seal_pending` and `drain_timed_out`; new metrics `tsession_controlplane_seals_pending`,
+  `tsession_controlplane_seal_retries_total` and `tsession_controlplane_seals_abandoned_total`.
 - SDK exporter: a batch now stays in the ring until the collector accepts it. Connection errors, 5xx and 429 are
   retried with backoff instead of dropping events after about 300ms, so a collector restart no longer loses
   events, and `Flush` returns false while events are still buffered. `runtime.Stop` with an unreachable
