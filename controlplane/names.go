@@ -150,9 +150,9 @@ func resolveName(name string, bs []Binding, initiatedBy string, now time.Time) (
 func (m *Manager) Rename(id, name string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return Session{}, ErrNotFound
+	s, err := m.stored(id)
+	if err != nil {
+		return Session{}, err
 	}
 	n := SanitizeName(ExpandNameTemplate(name, s.Bindings, SanitizeName(s.InitiatedBy), time.Now()))
 	if n == "" {

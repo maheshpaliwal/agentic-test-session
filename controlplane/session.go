@@ -119,6 +119,10 @@ var (
 	// ErrCollector wraps a failed call to the collector made on behalf of an
 	// API request (HTTP 502).
 	ErrCollector = errors.New("collector request failed")
+	// ErrStore means the store has the session but could not read it (see
+	// CheckedStore). Unlike ErrNotFound it says nothing about the session:
+	// the request can be repeated (HTTP 500).
+	ErrStore = errors.New("session store read failed")
 )
 
 // Store persists sessions. Implementations must be goroutine-safe.
@@ -150,6 +154,20 @@ type SelectiveLister interface {
 	// those that were never evicted, and of the evicted ones those that are
 	// not terminal or have SealPending set.
 	ListPending() []Session
+}
+
+// CheckedStore is an optional Store capability, for stores whose reads can
+// fail (FileStore reads archived sessions from a file). Get and List have no
+// error result: in such a store a session that cannot be read is missing from
+// them, which a caller cannot tell from a session that does not exist. A
+// Manager uses GetErr wherever that difference decides what it does.
+type CheckedStore interface {
+	// GetErr is Get with a third result: a non-nil error means the store has
+	// a session with this id and could not read it.
+	GetErr(id string) (Session, bool, error)
+	// ReadErrors is the number of sessions the store has failed to read since
+	// it was opened, through Get, GetErr and the List methods.
+	ReadErrors() int64
 }
 
 // MemStore is the default in-memory Store.

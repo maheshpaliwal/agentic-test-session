@@ -112,4 +112,5 @@ value.
 | `tsession_controlplane_sessions_deleted_total` | counter | none | Sessions deleted through the API. |
 | `tsession_controlplane_sessions_finished_total` | counter | `state`: `SEALED`, `EXPIRED`, `ABORTED` | Sessions that reached a terminal state, by state. |
 | `tsession_controlplane_sessions_started_total` | counter | none | Sessions started. |
+| `tsession_controlplane_store_read_errors_total` | counter | none | Stored sessions that could not be read (I/O error or damaged archive file); they are missing from lists. |
 | `tsession_controlplane_subscribers` | gauge | none | Open active-set streams (one per connected SDK). |

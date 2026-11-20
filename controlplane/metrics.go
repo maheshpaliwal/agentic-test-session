@@ -59,6 +59,14 @@ func newTelemetry(m *Manager) *telemetry {
 			}
 			return 0
 		})
+	r.CounterFunc("tsession_controlplane_store_read_errors_total",
+		"Stored sessions that could not be read (I/O error or damaged archive file); they are missing from lists.",
+		func() float64 {
+			if cs, ok := m.cfg.Store.(CheckedStore); ok {
+				return float64(cs.ReadErrors())
+			}
+			return 0
+		})
 	return &telemetry{
 		reg:     r,
 		started: r.Counter("tsession_controlplane_sessions_started_total", "Sessions started."),

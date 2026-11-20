@@ -32,7 +32,7 @@ func main() {
 
 	var store controlplane.Store = controlplane.NewMemStore()
 	if *storeFile != "" {
-		fs, err := controlplane.NewFileStore(*storeFile)
+		fs, err := controlplane.NewFileStore(*storeFile, controlplane.WithStoreLogger(log))
 		if err != nil {
 			log.Error("open store", "err", err)
 			os.Exit(1)

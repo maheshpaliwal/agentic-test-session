@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -42,7 +43,9 @@ func (m *Manager) disarmSealRetryLocked(id string) <-chan struct{} {
 func (m *Manager) rearmSealRetry(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s, ok := m.cfg.Store.Get(id); ok && s.SealPending && m.pending[id] == nil {
+	// A session that cannot be read is armed as well: the next attempt finds
+	// out whether its seal is pending.
+	if s, err := m.stored(id); (err == nil && s.SealPending || errors.Is(err, ErrStore)) && m.pending[id] == nil {
 		m.armSealRetryLocked(id, time.Time{})
 	}
 }
@@ -88,12 +91,22 @@ func (m *Manager) retrySeal(ctx context.Context, id string, r *sealRetry) {
 	if m.pending[id] != r {
 		return // deleted meanwhile: Delete owns the session now
 	}
-	cur, ok := m.cfg.Store.Get(id)
-	if !ok || !cur.SealPending {
+	cur, gerr := m.stored(id)
+	now := time.Now()
+	if errors.Is(gerr, ErrStore) {
+		// The session is stored and cannot be read: the outcome of this
+		// attempt cannot be recorded, and neither can it be known when to
+		// give up. Keep the retry (the seal is idempotent) rather than drop
+		// it for the life of the process.
+		m.log.Error("seal retry: session could not be read, trying again", "id", id, "err", gerr, "next_in", r.delay)
+		r.next = now.Add(r.delay)
+		r.delay = min(r.delay*2, m.cfg.SealRetryMaxInterval)
+		return
+	}
+	if gerr != nil || !cur.SealPending {
 		delete(m.pending, id)
 		return
 	}
-	now := time.Now()
 	deadline := cur.EndedAt.Add(m.cfg.SealPendingBudget)
 	switch {
 	case err == nil:

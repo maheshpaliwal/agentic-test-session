@@ -102,6 +102,10 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   runs. A change is written without fsync: it survives a crash of the process, and a power failure can take back the
   last changes (a session archived just before is then unarchived again, not lost) but not more: snapshots are
   fsynced before they replace the old one. One process per store file.
+- An archived session whose line in `<file>.archive` cannot be read (I/O error, file cut or changed by something
+  else) is not reported as unknown: `GET`, `PATCH`, `DELETE`, stop and abort of it answer `500` and can be repeated
+  (a `DELETE` does not reach the collector). It is missing from `GET /v1/sessions`, which has no way to say so; each
+  such session is logged and counted in `tsession_controlplane_store_read_errors_total`.
 
 ## Collector (`:7071`)
 - `POST /v1/ingest` framed protobuf `Event` messages (`Content-Type: application/x-protobuf`, required; anything

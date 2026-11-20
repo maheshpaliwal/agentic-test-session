@@ -133,10 +133,21 @@ func NewManager(cfg Config) *Manager {
 	// store was last written. Archived sessions can have a seal pending; the
 	// finished ones need nothing, so a store that can leave them out does.
 	var stored []Session
+	cs, checked := cfg.Store.(CheckedStore)
+	failedBefore := int64(0)
+	if checked {
+		failedBefore = cs.ReadErrors()
+	}
 	if sl, ok := cfg.Store.(SelectiveLister); ok {
 		stored = sl.ListPending()
 	} else {
 		stored = cfg.Store.List()
+	}
+	if checked {
+		if n := cs.ReadErrors() - failedBefore; n > 0 {
+			log.Error("stored sessions could not be read at startup; a drain or a pending seal among them is not resumed until the next start",
+				"sessions", n)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -298,9 +309,9 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 func (m *Manager) Stop(id string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return Session{}, ErrNotFound
+	s, err := m.stored(id)
+	if err != nil {
+		return Session{}, err
 	}
 	if s.State == StateDraining || s.State == StateSealed {
 		return s, nil
@@ -322,9 +333,9 @@ func (m *Manager) Stop(id string) (Session, error) {
 func (m *Manager) Abort(id string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return Session{}, ErrNotFound
+	s, err := m.stored(id)
+	if err != nil {
+		return Session{}, err
 	}
 	if s.State == StateAborted {
 		return s, nil
@@ -356,10 +367,13 @@ func (m *Manager) Abort(id string) (Session, error) {
 // delete. If the collector delete then fails, the retries resume.
 func (m *Manager) Delete(ctx context.Context, id string) error {
 	m.mu.Lock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
+	s, err := m.stored(id)
+	if err != nil {
+		// ErrStore, not ErrNotFound, when the store has the session and
+		// cannot read it: the collector still holds its data, and "not found"
+		// would tell the caller that there is nothing left to delete.
 		m.mu.Unlock()
-		return ErrNotFound
+		return err
 	}
 	if !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
 		m.mu.Unlock()
@@ -422,6 +436,27 @@ func (m *Manager) Sweep(now time.Time) {
 
 // Get returns the session with the given id.
 func (m *Manager) Get(id string) (Session, bool) { return m.cfg.Store.Get(id) }
+
+// stored returns the session with the given id from the store: ErrNotFound if
+// the store has none, and an error wrapping ErrStore if it has one and could
+// not read it (only a CheckedStore can tell).
+func (m *Manager) stored(id string) (Session, error) {
+	cs, ok := m.cfg.Store.(CheckedStore)
+	if !ok {
+		if s, ok := m.cfg.Store.Get(id); ok {
+			return s, nil
+		}
+		return Session{}, ErrNotFound
+	}
+	s, ok, err := cs.GetErr(id)
+	switch {
+	case err != nil:
+		return Session{}, fmt.Errorf("%w: %v", ErrStore, err)
+	case !ok:
+		return Session{}, ErrNotFound
+	}
+	return s, nil
+}
 
 // List returns sessions, optionally filtered by state ("" = all).
 func (m *Manager) List(state State) []Session {

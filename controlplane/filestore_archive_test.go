@@ -119,7 +119,7 @@ func TestFileStoreArchiveReads(t *testing.T) {
 		t.Fatal("session changed after its eviction is not hot")
 	}
 	for id, r := range re.arch {
-		s, _ := re.getArchived(id)
+		s, _, _ := re.getArchived(id)
 		if archStates[r.state] != s.State && !(r.state == 0 && s.State == "PAUSED") || r.sealPending != s.SealPending {
 			t.Fatalf("index entry of %s: %+v, session %+v", id, r, s)
 		}

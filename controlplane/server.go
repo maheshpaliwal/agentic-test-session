@@ -70,6 +70,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		code = http.StatusBadRequest
 	case errors.Is(err, ErrCollector):
 		code = http.StatusBadGateway
+	case errors.Is(err, ErrStore):
+		code = http.StatusInternalServerError
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
@@ -94,9 +96,9 @@ func (m *Manager) hList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) hGet(w http.ResponseWriter, r *http.Request) {
-	s, ok := m.Get(r.PathValue("id"))
-	if !ok {
-		writeErr(w, ErrNotFound)
+	s, err := m.stored(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s)

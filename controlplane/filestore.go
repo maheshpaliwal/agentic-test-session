@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
@@ -58,11 +60,19 @@ const journalCompactBytes = 4 << 20
 // archive once per call, without holding a lock. ListState and ListPending
 // read only the lines of the sessions they return.
 //
+// Read errors: Get and the List methods have no error result. An archived
+// session whose line cannot be read (an I/O error, or a file that was cut or
+// changed behind the store's back) is missing from what they return. Every
+// such session is counted (ReadErrors) and logged, and GetErr tells it from a
+// session the store does not have.
+//
 // A FileStore is safe for concurrent use. One process may use a path at a
 // time.
 type FileStore struct {
 	*MemStore // the hot set
 	path      string
+	log       *slog.Logger
+	readErrs  atomic.Int64 // archived sessions that could not be read
 
 	// wmu serialises the writers and all file changes. It is held across the
 	// in-memory change and its journal append, so the journal order is the
@@ -226,13 +236,30 @@ type journalRecord struct {
 	IDs     []string `json:"ids,omitempty"`
 }
 
+// FileStoreOption configures a FileStore when it is opened.
+type FileStoreOption func(*FileStore)
+
+// WithStoreLogger sets the logger for what the store cannot report to its
+// caller: archived sessions it fails to read. The default is slog.Default().
+func WithStoreLogger(l *slog.Logger) FileStoreOption {
+	return func(f *FileStore) {
+		if l != nil {
+			f.log = l
+		}
+	}
+}
+
 // NewFileStore opens the store at path, creating it on the first change. It
 // reads the snapshot (the only file written by earlier versions besides the
 // archive), indexes the archive, replays the journal and folds it into a new
 // snapshot. Temp files left by a crash are removed, and so are the archive
 // lines that no longer count (see tidyArchive).
-func NewFileStore(path string) (*FileStore, error) {
+func NewFileStore(path string, opts ...FileStoreOption) (*FileStore, error) {
 	f := &FileStore{MemStore: NewMemStore(), path: path, arch: map[string]archRef{}, stale: map[string][]archRef{}, compactMin: journalCompactBytes}
+	f.log = slog.Default()
+	for _, o := range opts {
+		o(f)
+	}
 	f.cache.max = archCacheMax
 	f.ops = defaultArchOps()
 	f.removeTempFiles()
@@ -894,36 +921,58 @@ func (f *FileStore) Delete(id string) error {
 
 // Get implements Store, falling back to the archive for evicted sessions.
 // An archived session whose line cannot be read (an I/O error, or a file
-// changed behind the store's back) is reported as not found.
+// changed behind the store's back) is reported as not found here, counted
+// and logged; GetErr reports the error.
 func (f *FileStore) Get(id string) (Session, bool) {
-	if s, ok := f.MemStore.Get(id); ok {
-		return s, true
-	}
-	return f.getArchived(id)
+	s, ok, _ := f.GetErr(id)
+	return s, ok
 }
 
+// GetErr implements CheckedStore. The error is non-nil when the store has an
+// archived session with this id and could not read its line.
+func (f *FileStore) GetErr(id string) (Session, bool, error) {
+	if s, ok := f.MemStore.Get(id); ok {
+		return s, true, nil
+	}
+	s, ok, err := f.getArchived(id)
+	if err != nil {
+		f.readErrs.Add(1)
+		f.log.Error("file store: archived session could not be read", "id", id, "archive", f.archivePath(), "err", err)
+	}
+	return s, ok, err
+}
+
+// ReadErrors implements CheckedStore: the number of archived sessions that
+// Get, GetErr and the List methods could not read, counted once per call
+// that asked for them.
+func (f *FileStore) ReadErrors() int64 { return f.readErrs.Load() }
+
 // getArchived returns the archived record of id: from the cache, or from the
-// one line of the archive file that the index points at.
-func (f *FileStore) getArchived(id string) (Session, bool) {
+// one line of the archive file that the index points at. Without an index
+// entry there is no session and no error.
+func (f *FileStore) getArchived(id string) (Session, bool, error) {
 	f.amu.RLock()
 	defer f.amu.RUnlock()
 	ref, ok := f.arch[id]
-	if !ok || f.ar == nil {
-		return Session{}, false
+	if !ok {
+		return Session{}, false, nil
+	}
+	if f.ar == nil {
+		return Session{}, false, os.ErrClosed
 	}
 	if s, ok := f.cache.get(id, f.archGen, ref.off); ok {
-		return s, true
+		return s, true, nil
 	}
 	line := make([]byte, ref.n)
 	if _, err := f.ar.ReadAt(line, ref.off); err != nil {
-		return Session{}, false
+		return Session{}, false, err
 	}
 	s, err := decodeArchived(id, line)
 	if err != nil {
-		return Session{}, false
+		return Session{}, false, err
 	}
 	f.cache.put(id, f.archGen, ref.off, s, true)
-	return s, true
+	return s, true, nil
 }
 
 // List implements Store: the hot sessions plus the archived ones. A session
@@ -995,6 +1044,11 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 	// or it was archived again and is looked up once more.
 	slices.SortFunc(archived, func(a, b entry) int { return cmp.Compare(a.ref.off, b.ref.off) })
 	lr := lineReader{f: ar}
+	var (
+		failed   int
+		firstID  string
+		firstErr error
+	)
 	for _, e := range archived {
 		s, ok := f.cache.get(e.id, gen, e.ref.off)
 		hot := false
@@ -1006,7 +1060,15 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 			if err == nil {
 				f.cache.put(e.id, gen, e.ref.off, s, false)
 			} else if s, hot = f.MemStore.Get(e.id); !hot {
-				if s, ok = f.getArchived(e.id); !ok {
+				// Look it up again, under the lock: no error and no session
+				// means it was deleted meanwhile. An error means the store
+				// has it and cannot read it.
+				if s, ok, err = f.getArchived(e.id); !ok {
+					if err != nil {
+						if failed++; firstErr == nil {
+							firstID, firstErr = e.id, err
+						}
+					}
 					continue
 				}
 			}
@@ -1014,6 +1076,12 @@ func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bo
 		if keep(s, hot) {
 			out = append(out, s)
 		}
+	}
+	if failed > 0 {
+		// One line per call, not per session: a damaged archive can hold many.
+		f.readErrs.Add(int64(failed))
+		f.log.Error("file store: archived sessions could not be read and are missing from a list",
+			"sessions", failed, "first_id", firstID, "archive", f.archivePath(), "err", firstErr)
 	}
 	sortSessions(out)
 	return out
