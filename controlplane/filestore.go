@@ -76,7 +76,16 @@ type FileStore struct {
 	// archiveUnsynced is set by an archive append that was not fsynced. The
 	// next snapshot waits for that fsync: it no longer holds those sessions.
 	archiveUnsynced bool
-	archSize        int64 // bytes in the archive file; the next line is written at this offset
+	// archSize is the offset at which the next archive line is written. It is
+	// never below the size of the archive file (a line written below the end
+	// would leave the lines after it in place, to win over it when the archive
+	// is loaded), and equal to it except after a failed append whose bytes
+	// could not be found (see undoAppend).
+	archSize int64
+	// archTorn is set when the bytes before archSize may not end with a
+	// newline (a failed append that could neither be removed nor ended). The
+	// next append starts with a newline of its own.
+	archTorn bool
 	// stale holds, by id, the archive lines that a later line of the id
 	// replaced and that are still in the file. It is empty unless overwriting
 	// such a line failed. Delete overwrites them with the latest line, so that
@@ -95,9 +104,38 @@ type FileStore struct {
 
 	cache archCache
 
+	// ops are the calls that change the archive file through its handle.
+	// Tests replace them to make them fail.
+	ops archOps
+
 	// testHookListed, if set, runs in list between taking the entries from
 	// the index and reading their lines.
 	testHookListed func()
+}
+
+// archOps are the calls FileStore makes to change the archive file: the ones
+// whose failure it has to recover from. They are the methods of os.File
+// unless a test injects faults.
+type archOps struct {
+	writeAt  func(fh *os.File, b []byte, off int64) (int, error)
+	truncate func(fh *os.File, size int64) error
+	sync     func(fh *os.File) error
+	size     func(fh *os.File) (int64, error)
+}
+
+func defaultArchOps() archOps {
+	return archOps{
+		writeAt:  (*os.File).WriteAt,
+		truncate: (*os.File).Truncate,
+		sync:     (*os.File).Sync,
+		size: func(fh *os.File) (int64, error) {
+			st, err := fh.Stat()
+			if err != nil {
+				return 0, err
+			}
+			return st.Size(), nil
+		},
+	}
 }
 
 // archRef is the index entry of an archived session.
@@ -196,6 +234,7 @@ type journalRecord struct {
 func NewFileStore(path string) (*FileStore, error) {
 	f := &FileStore{MemStore: NewMemStore(), path: path, arch: map[string]archRef{}, stale: map[string][]archRef{}, compactMin: journalCompactBytes}
 	f.cache.max = archCacheMax
+	f.ops = defaultArchOps()
 	f.removeTempFiles()
 
 	b, err := os.ReadFile(path)
@@ -514,11 +553,11 @@ func (f *FileStore) blankLines(refs ...archRef) error {
 		if len(spaces) < int(r.n) {
 			spaces = bytes.Repeat([]byte{' '}, int(r.n))
 		}
-		if _, err := f.ar.WriteAt(spaces[:r.n], r.off); err != nil {
+		if _, err := f.ops.writeAt(f.ar, spaces[:r.n], r.off); err != nil {
 			return err
 		}
 	}
-	if err := f.ar.Sync(); err != nil {
+	if err := f.ops.sync(f.ar); err != nil {
 		return err
 	}
 	f.archiveUnsynced = false
@@ -690,42 +729,38 @@ func (f *FileStore) Evict(ids ...string) {
 		}
 	}
 	f.amu.RUnlock()
-	before := f.archSize // the store's own count of the file, never a guess
-	_, err = ar.WriteAt(lines.Bytes(), before)
+	// The offset is the store's own count of the file, never a guess. After
+	// an append that could not be ended (archTorn) the write starts with the
+	// newline that ends it.
+	before, data := f.archSize, lines.Bytes()
+	if f.archTorn {
+		data = append([]byte{'\n'}, data...)
+	}
+	lead := len(data) - lines.Len()
+	n, err := f.ops.writeAt(ar, data, before)
 	if err == nil && rearchived {
-		err = ar.Sync()
+		err = f.ops.sync(ar)
 	}
 	if err != nil {
-		// Drop a partial line (disk full, I/O error): it must not be taken
-		// for a session when the archive is loaded. If it cannot be removed,
-		// end it, so that the next line starts cleanly after it.
-		if ar.Truncate(before) != nil {
-			if st, serr := ar.Stat(); serr == nil && st.Size() > before {
-				f.archSize = st.Size()
-				if _, werr := ar.WriteAt([]byte{'\n'}, f.archSize); werr == nil {
-					f.archSize++
-				}
-			}
+		if f.undoAppend(ar, before, n, len(data)) {
+			// Bytes of this append are in the file, or may come back to it.
+			// The index has to know them, also the part of a line that was
+			// cut: a later delete must overwrite them and a later eviction
+			// must replace them. Their sessions stay in the hot set, like
+			// sessions changed after an eviction, so the index entries are
+			// never read.
+			f.indexLines(moved, ends, before+int64(lead), n-lead)
 		}
 		return // keep them in memory rather than lose them
 	}
-	f.archSize += int64(lines.Len())
+	f.archTorn = false
+	f.archSize += int64(len(data))
 	f.archiveUnsynced = !rearchived
 	gone := make([]string, len(moved))
-	var replaced []string // ids whose earlier line is in the file
-	f.amu.Lock()
-	start := 0
 	for i, s := range moved {
-		if old, ok := f.arch[s.ID]; ok {
-			f.stale[s.ID] = append(f.stale[s.ID], old)
-			replaced = append(replaced, s.ID)
-		}
-		ref := newArchRef(s, before+int64(start), ends[i]-start-1)
-		f.arch[s.ID], gone[i] = ref, s.ID
-		f.cache.put(s.ID, f.archGen, ref.off, s, true)
-		start = ends[i]
+		gone[i] = s.ID
 	}
-	f.amu.Unlock()
+	replaced := f.indexLines(moved, ends, before+int64(lead), lines.Len())
 	f.MemStore.Evict(gone...) // after the index has them: a reader finds them in one or the other
 	// If this fails the sessions are hot again after a restart, as well as
 	// archived; the hot copy wins and they are evicted once more.
@@ -738,6 +773,77 @@ func (f *FileStore) Evict(ids ...string) {
 			delete(f.stale, id)
 		}
 	}
+}
+
+// indexLines points the index at the lines of moved, which were written to
+// the archive file from offset base on (ends[i] is where the line of moved[i]
+// ends, newline included, relative to base). Only the first written bytes
+// count: a line that was cut there is indexed as far as it goes, the lines
+// after it are not. The line an id had before moves to f.stale; the ids that
+// had one are returned. Caller holds f.wmu.
+func (f *FileStore) indexLines(moved []Session, ends []int, base int64, written int) (replaced []string) {
+	f.amu.Lock()
+	defer f.amu.Unlock()
+	start := 0
+	for i, s := range moved {
+		if start >= written {
+			break
+		}
+		if old, ok := f.arch[s.ID]; ok {
+			f.stale[s.ID] = append(f.stale[s.ID], old)
+			replaced = append(replaced, s.ID)
+		}
+		ref := newArchRef(s, base+int64(start), min(ends[i]-1, written)-start)
+		f.arch[s.ID] = ref
+		if written >= ends[i]-1 { // whole
+			f.cache.put(s.ID, f.archGen, ref.off, s, true)
+		}
+		start = ends[i]
+	}
+	return replaced
+}
+
+// undoAppend cleans up after a failed append of want bytes at offset before,
+// of which n were written (all of them when only the fsync failed). It keeps
+// two things true: no line is ever written below the end of the file, and no
+// part of a line that the store does not know is taken for a session when the
+// archive is loaded. In order:
+//
+//  1. truncate the file back to before;
+//  2. if that fails, overwrite the n bytes with spaces and fsync: they are a
+//     blank line now, and the next line goes after them;
+//  3. if that fails too, leave the bytes, move archSize to the real end of
+//     the file and end the last line there with a newline. If the size of the
+//     file cannot be read, archSize moves past all want bytes; if the newline
+//     cannot be written, the next append starts with one (archTorn).
+//
+// It reports whether lines of the append are still in the file or may come
+// back to it (step 3, or a blanking that was not fsynced, which a power
+// failure can undo). The caller then indexes the complete ones.
+func (f *FileStore) undoAppend(ar *os.File, before int64, n, want int) (left bool) {
+	if f.ops.truncate(ar, before) == nil {
+		return false
+	}
+	if n > 0 {
+		if _, err := f.ops.writeAt(ar, bytes.Repeat([]byte{' '}, n), before); err == nil {
+			f.archSize = before + int64(n)
+			return f.ops.sync(ar) != nil
+		}
+	}
+	end := before + int64(want)
+	if size, err := f.ops.size(ar); err == nil {
+		end = max(size, before)
+	}
+	if end == before {
+		return false // nothing of the append reached the file
+	}
+	f.archSize = end
+	if _, err := f.ops.writeAt(ar, []byte{'\n'}, end); err == nil {
+		f.archSize++
+	} else {
+		f.archTorn = true
+	}
+	return true
 }
 
 // Delete implements Store: the session leaves the hot set and the archive
