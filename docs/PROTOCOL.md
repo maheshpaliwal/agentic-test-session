@@ -90,6 +90,14 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   cleared and `seal_error` stays.
 - Finished sessions leave the in-memory index after `--retention`/`TSESSION_CP_RETENTION` (default 24h); with `--store-file` they
   are archived to `<file>.archive` and stay readable via GET.
+- `--store-file` files: `<file>` is a snapshot of the unarchived sessions (a JSON array), `<file>.journal` holds the
+  changes since that snapshot (one JSON object per line: `{"op":"put","session":{...}}`, `{"op":"evict","ids":[...]}`,
+  `{"op":"delete","ids":[...]}`) and `<file>.archive` the archived sessions (one JSON session per line, last line of
+  an id wins). The journal is folded into the snapshot at startup, on a clean shutdown, and in the background when
+  it passes 4 MiB (or the snapshot size, if larger); read `<file>` together with the journal while the control plane
+  runs. A change is written without fsync: it survives a crash of the process, and a power failure can take back the
+  last changes (a session archived just before is then unarchived again, not lost) but not more: snapshots are
+  fsynced before they replace the old one. One process per store file.
 
 ## Collector (`:7071`)
 - `POST /v1/ingest` framed protobuf `Event` messages (`Content-Type: application/x-protobuf`, required; anything

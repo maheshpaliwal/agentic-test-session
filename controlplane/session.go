@@ -127,11 +127,13 @@ type Store interface {
 	Delete(id string) error
 }
 
-// Evictor is an optional Store capability: drop a terminal session from the
-// hot in-memory set. Stores with durable backing (FileStore) keep it readable
-// via Get/List; MemStore simply forgets it.
+// Evictor is an optional Store capability: drop terminal sessions from the
+// hot in-memory set, all ids of one call as one batch (a retention sweep
+// makes one call). Ids the store does not hold are ignored. Stores with
+// durable backing (FileStore) keep the sessions readable via Get/List;
+// MemStore simply forgets them.
 type Evictor interface {
-	Evict(id string)
+	Evict(ids ...string)
 }
 
 // MemStore is the default in-memory Store.
@@ -157,10 +159,13 @@ func (s *MemStore) Delete(id string) error {
 	return nil
 }
 
-// Evict forgets a session (in-memory stores have no archive).
-func (s *MemStore) Evict(id string) {
+// Evict implements Evictor by forgetting the sessions (in-memory stores have
+// no archive).
+func (s *MemStore) Evict(ids ...string) {
 	s.mu.Lock()
-	delete(s.m, id)
+	for _, id := range ids {
+		delete(s.m, id)
+	}
 	s.mu.Unlock()
 }
 

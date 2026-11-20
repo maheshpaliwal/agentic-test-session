@@ -176,19 +176,24 @@ func (m *Manager) putLocked(s Session) error {
 	return err
 }
 
-// pruneLocked evicts terminal sessions older than Retention from the hot set.
+// pruneLocked evicts terminal sessions older than Retention from the hot set,
+// all of them in one Store call.
 func (m *Manager) pruneLocked(now time.Time) {
-	ev, _ := m.cfg.Store.(Evictor)
 	n := 0
 	for n < len(m.terminal) && now.Sub(m.terminal[n].ended) > m.cfg.Retention {
-		if ev != nil {
-			ev.Evict(m.terminal[n].id)
-		}
 		n++
 	}
-	if n > 0 {
-		m.terminal = append(m.terminal[:0:0], m.terminal[n:]...)
+	if n == 0 {
+		return
 	}
+	if ev, ok := m.cfg.Store.(Evictor); ok {
+		ids := make([]string, n)
+		for i, e := range m.terminal[:n] {
+			ids[i] = e.id
+		}
+		ev.Evict(ids...)
+	}
+	m.terminal = append(m.terminal[:0:0], m.terminal[n:]...)
 }
 
 // Run executes the janitor (TTL expiry, retention, pending seal retries)

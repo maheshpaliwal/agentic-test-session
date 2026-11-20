@@ -37,6 +37,13 @@ func main() {
 			os.Exit(1)
 		}
 		store = fs
+		// Runs after m.Close below: fold the journal into the snapshot, so a
+		// clean shutdown leaves the whole hot set in the one JSON file.
+		defer func() {
+			if err := fs.Compact(); err != nil {
+				log.Warn("compact store", "err", err)
+			}
+		}()
 	}
 	m := controlplane.NewManager(controlplane.Config{
 		Store:      store,
