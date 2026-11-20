@@ -75,6 +75,12 @@ Rolling back:
   images are stamped with `git describe`. `tracectl kill on|off|status` for the control plane's kill switch. The
   services bind their port before logging that they listen, and name the flag to change when it is taken; the
   control plane accepts `--listen` as well as `--addr`.
+- **Paged session list.** `GET /v1/sessions` takes `limit` (1..1000), `before` (a cursor) and `name` (exact
+  match) next to `state`. With `limit` the newest sessions come first, with `X-Tsession-Next` and
+  `X-Tsession-Total` headers; without it the response is unchanged. `X-Tsession-Unreadable` says how many stored
+  sessions could not be read into a response. `client.ListPage`; `tracectl list --limit N`; `tracectl` resolves
+  a name with the filter instead of listing everything; the dashboard loads the newest 200 sessions with
+  "Load more", and its search covers the sessions that are loaded.
 - **Dashboard.** "Copy as curl" on HTTP events; a link from a mutation to its entity history; the call tree
   shows each trigger's status and summary; a "seal retrying" label.
 - **Control plane.** A seal that failed past its 30s budget is retried in the background (backoff up to 1m, for
@@ -110,8 +116,9 @@ Rolling back:
   overwrites its line in place. Snapshots are fsynced; torn lines and leftover temp files are tolerated; damaged
   archive lines are saved to `<file>.archive.corrupt` and reported at start; an archived session that cannot be
   read answers `500` instead of `404` and can still be deleted. Existing files load, and the first start
-  rewrites them. Beyond about 16,000 archived sessions an unfiltered session list reads the archive on every
-  call.
+  rewrites them. A paged list is picked from the index and reads only its own lines (about 2 ms for the newest
+  200 of 100,000 archived sessions); an unpaged list of more than about 16,000 archived sessions reads the
+  archive on every call (about 0.5 s at 100,000).
 - SQS: the compact single-attribute carrier is `x-tsession-ctx` (was `ts`, which collided with application
   attributes).
 - kafka-go: a traced batch is written with one `WriteMessages` call instead of one per message.

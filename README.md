@@ -96,6 +96,7 @@ tracectl history my-run postgres orders 42   # every change to one row, with dif
 tracectl trace my-run --errors               # call tree, only branches that failed
 tracectl show my-run 17                      # one event in full: request, response, mutations
 tracectl diff nightly-ok nightly-failed      # what differs between two runs
+tracectl list --limit 20                     # the newest sessions
 ```
 
 Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
