@@ -107,6 +107,9 @@
 - SDK exporter: `Close` waited out a request stuck on an unresponsive collector.
 
 ### Performance
+- `tsql`: statements outside an active session are no longer parsed or redacted; they go straight to the driver
+  with no added allocation (a 54 KB literal INSERT with no session active: about 3 ms and 8.6 MB down to about
+  1 µs, against a fake driver). Hand-written transaction control outside a session is still tracked.
 - `tqueue`: consumers no longer consult the side channel while no session is active, so a slow side-channel
   store no longer delays every job by the lookup bound (200 ms by default). `tdynamo`: calls outside a session
   no longer render the request and allocate nothing, while still learning table key schemas.
