@@ -341,7 +341,7 @@ func (f *FileStore) Delete(id string) error {
 	}
 	// Journal first: if the archive rewrite below does not happen (error or
 	// crash), opening the store finishes the delete.
-	if err := f.journalLocked(journalRecord{Op: "delete", IDs: []string{id}}); err != nil {
+	if err := f.appendJournalLocked(journalRecord{Op: "delete", IDs: []string{id}}); err != nil {
 		return err
 	}
 	if archived {
@@ -360,6 +360,10 @@ func (f *FileStore) Delete(id string) error {
 		}
 	}
 	f.MemStore.Evict(id)
+	// Only now: a compaction started by the record above, before the session
+	// left the hot set, would write it into the snapshot and cut the journal
+	// after the delete record, bringing it back at the next unclean start.
+	f.maybeCompactLocked()
 	return nil
 }
 
@@ -451,6 +455,16 @@ func marshalSnapshot(hot []Session) ([]byte, error) {
 // compaction when the journal has grown past the threshold. Caller holds
 // f.wmu.
 func (f *FileStore) journalLocked(rec journalRecord) error {
+	if err := f.appendJournalLocked(rec); err != nil {
+		return err
+	}
+	f.maybeCompactLocked()
+	return nil
+}
+
+// appendJournalLocked writes one record without considering compaction; for
+// callers that change the hot set only after the record is on disk.
+func (f *FileStore) appendJournalLocked(rec journalRecord) error {
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -463,6 +477,15 @@ func (f *FileStore) journalLocked(rec journalRecord) error {
 		return err
 	}
 	f.journalSize += int64(len(b))
+	return nil
+}
+
+// maybeCompactLocked starts a background compaction when the journal has
+// grown past the threshold. The hot set is copied here, so the caller must
+// already have applied to it everything the journal says: a snapshot taken
+// before a journalled change was applied would undo that change when the
+// journal is cut. Caller holds f.wmu.
+func (f *FileStore) maybeCompactLocked() {
 	if f.journalSize >= f.compactAt && f.compacting == nil {
 		// Copy the hot set now, in step with the journal; marshalling and
 		// writing it happens without the lock.
@@ -474,7 +497,6 @@ func (f *FileStore) journalLocked(rec journalRecord) error {
 		go f.compactInBackground(hot, f.journalSize, f.archiveUnsynced, done)
 		f.archiveUnsynced = false
 	}
-	return nil
 }
 
 // compactInBackground writes hot, the hot set as of journal offset upto, as

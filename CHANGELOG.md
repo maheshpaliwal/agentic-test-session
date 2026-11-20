@@ -95,6 +95,8 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts; it is bounded by `ShutdownTimeout` now, also when a request is still inside the hung store, and
   a retention sweep in flight ends when the collector closes.
+- Control plane file store: a delete whose journal record started a background compaction was undone by the next
+  unclean restart (the snapshot was taken while the session was still in memory).
 - Control plane file store: a partial line left in the archive by a failed write (disk full) made the next
   evicted session unreadable after a restart; a failed delete could bring an older archived record back.
 - `dashboard -open`: a file cut short mid-line still opens (marked incomplete); duplicate or out-of-range
