@@ -1441,7 +1441,9 @@
         }
       }
       const gg = D.events.length ? getGroups(D).byKey.get(id) : null;
-      if (gg && gg.trigger === e) {
+      // The tree's events and the timeline's come from different requests, so compare by identity of the span,
+      // not of the object: the object comparison was never true and the group tags never showed.
+      if (gg && gg.trigger && gg.trigger.span_id === e.span_id) {
         tags.push(gg.status === 'error' ? tag('group error', 't-err', 'a span in this trigger failed', 'err') : tag('group ok', 't-ok'));
         if (gg.chips.length) tags.push(h('span', { class: 'gsum', title: gg.mutText || '', text: U.chipsText(gg) }));
       }
