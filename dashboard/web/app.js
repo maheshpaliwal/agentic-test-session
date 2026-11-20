@@ -360,6 +360,25 @@
     return h('div', { class: 'empty' + (ill === 'error' ? ' err' : '') }, illustration(ill), h('h2', { text: title }), text ? h('p', null, text) : null, extra || null);
   }
 
+  // connectedNote is a paragraph naming the services connected to the control
+  // plane; it stays empty when the control plane cannot tell (older version,
+  // offline or demo-less modes). The answer is reused for a few seconds, since
+  // the empty state is repainted on every poll.
+  const connected = { at: 0, text: '', pending: null };
+  function connectedNote() {
+    const p = h('p', { class: 'muted', 'aria-live': 'polite' }, connected.text);
+    if (Date.now() - connected.at > 5000) {
+      if (!connected.pending) {
+        connected.pending = cp('/v1/subscribers').then((subs) => U.connectedText(subs), () => '').then((text) => {
+          connected.text = text; connected.at = Date.now(); connected.pending = null;
+          return text;
+        });
+      }
+      connected.pending.then((text) => { p.textContent = text; });
+    }
+    return p;
+  }
+
   // ---------- dialogs ----------
   function makeDialog(title, id) {
     const d = h('dialog', { id: id, 'aria-labelledby': id + '-t' });
@@ -1217,7 +1236,7 @@
       if (!items.length) {
         clear(emptyEl).appendChild(D.events.length
           ? emptyState('events', 'No events match the filters', 'Loosen the search or clear the filters to see all ' + D.events.length + ' events.')
-          : emptyState('events', 'No events recorded yet', 'Send traffic through the instrumented services with this session\'s x-tsession-id header and events will appear here.'));
+          : emptyState('events', 'No events recorded yet', 'Send traffic through the instrumented services with this session\'s x-tsession-id header and events will appear here.', connectedNote()));
       }
       D.paintGen = (D.paintGen || 0) + 1;
       if (reset) list.scrollTop = 0; else restoreAnchor(anchor);

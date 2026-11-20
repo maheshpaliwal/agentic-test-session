@@ -345,4 +345,13 @@ assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET -o /tmp/x', url: '/
 assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET', url: '-o /tmp/x' })), null);
 assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET', url: '/x\nrm -rf ~' })), null);
 
+// connectedText: which services are connected, for the empty-session state
+assert.strictEqual(U.connectedText(null), '');
+assert.strictEqual(U.connectedText({ error: 'not found' }), '');
+assert.ok(U.connectedText([]).startsWith('No instrumented service is connected'));
+assert.strictEqual(U.connectedText([{ service: 'worker' }, { service: 'api', instance: 'a1' }, { service: 'api', instance: 'a2' }, {}]),
+  'Connected to the control plane: api (2), worker, 1 unnamed.');
+assert.strictEqual(U.connectedText(Array.from({ length: 10 }, (_, i) => ({ service: 's' + i }))),
+  'Connected to the control plane: s0, s1, s2, s3, s4, s5, s6, s7, 2 more.');
+
 console.log('util ok');

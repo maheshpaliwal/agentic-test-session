@@ -407,8 +407,30 @@
     return { command: parts.join(' \\\n  '), notes: notes };
   }
 
+  // connectedText says which services are connected to the control plane, for
+  // the "no events yet" state: an empty session looks the same whether the
+  // service is not connected or simply got no traffic. subs is the reply of
+  // GET /v1/subscribers; anything that is not an array (endpoint missing,
+  // request failed) gives '' so nothing is claimed.
+  function connectedText(subs) {
+    if (!Array.isArray(subs)) return '';
+    if (!subs.length) return 'No instrumented service is connected to the control plane, so nothing can be recorded. Start the service with TSESSION_ENABLED=true and point its TSESSION_CONTROLPLANE_URL at the control plane.';
+    const counts = new Map();
+    let unnamed = 0;
+    for (const s of subs) {
+      const name = s && typeof s.service === 'string' ? s.service : '';
+      if (!name) unnamed++;
+      else counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const names = Array.from(counts.keys()).sort();
+    const shown = names.slice(0, 8).map((n) => (counts.get(n) > 1 ? n + ' (' + counts.get(n) + ')' : n));
+    if (names.length > shown.length) shown.push((names.length - shown.length) + ' more');
+    if (unnamed) shown.push(unnamed + ' unnamed');
+    return 'Connected to the control plane: ' + shown.join(', ') + '.';
+  }
+
   const api = { entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
-    mergeEvents, ndjson, sessionWarnings, curlFor };
+    mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -351,6 +351,16 @@ func (d *Demo) controlPlane() http.Handler {
 	}
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", stop)
 	mux.HandleFunc("POST /v1/sessions/{id}/abort", stop)
+	if !d.readOnly { // sessions opened from files have no services behind them
+		mux.HandleFunc("GET /v1/subscribers", func(w http.ResponseWriter, r *http.Request) {
+			since := ts(d.now().Add(-10 * time.Minute))
+			writeJSON(w, 200, []m{
+				{"service": "orders-api", "instance": "orders-api-1", "connected_at": since},
+				{"service": "orders-worker", "instance": "orders-worker-1", "connected_at": since},
+				{"service": "shipping-api", "instance": "shipping-api-1", "connected_at": since},
+			})
+		})
+	}
 	mux.HandleFunc("GET /v1/active", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
