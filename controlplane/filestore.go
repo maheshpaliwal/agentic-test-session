@@ -302,11 +302,16 @@ func (f *FileStore) Evict(ids ...string) {
 		}
 	}
 	f.amu.RUnlock()
-	before := fileSize(f.archivePath())
+	before, known := fileSize(f.archivePath())
 	if err := appendFile(f.archivePath(), lines.Bytes(), rearchived); err != nil {
 		// Drop a partial line (disk full, I/O error): the next eviction's
 		// line would be glued to it and skipped when the archive is loaded.
-		_ = os.Truncate(f.archivePath(), before)
+		// Only when the size before the append is known: truncating to a
+		// guessed size could cut away archived sessions. If the partial line
+		// cannot be removed, end it, so that the next line starts cleanly.
+		if !known || os.Truncate(f.archivePath(), before) != nil {
+			_ = appendFile(f.archivePath(), []byte("\n"), false)
+		}
 		return // keep them in memory rather than lose them
 	}
 	f.archiveUnsynced = !rearchived
@@ -620,13 +625,17 @@ func syncFile(path string) error {
 
 // appendFile appends data to path with one write, creating the file if
 // needed, and optionally fsyncs it.
-// fileSize is the size of the file at path, 0 when it does not exist.
-func fileSize(path string) int64 {
+// fileSize is the size of the file at path: 0 when it does not exist, and
+// not known when it cannot be determined.
+func fileSize(path string) (size int64, known bool) {
 	fi, err := os.Stat(path)
-	if err != nil {
-		return 0
+	switch {
+	case err == nil:
+		return fi.Size(), true
+	case errors.Is(err, os.ErrNotExist):
+		return 0, true
 	}
-	return fi.Size()
+	return 0, false
 }
 
 func appendFile(path string, data []byte, sync bool) error {
