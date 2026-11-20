@@ -140,6 +140,18 @@ type Evictor interface {
 	Evict(ids ...string)
 }
 
+// SelectiveLister is an optional Store capability, for stores where listing
+// every session is expensive (FileStore reads its archive for it). Both
+// methods return a subset of List, in the same order.
+type SelectiveLister interface {
+	// ListState returns the sessions in the given state.
+	ListState(State) []Session
+	// ListPending returns the sessions a Manager has work for when it starts:
+	// those that were never evicted, and of the evicted ones those that are
+	// not terminal or have SealPending set.
+	ListPending() []Session
+}
+
 // MemStore is the default in-memory Store.
 type MemStore struct {
 	mu sync.RWMutex

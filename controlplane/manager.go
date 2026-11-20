@@ -130,10 +130,17 @@ func NewManager(cfg Config) *Manager {
 	}
 	m.tel = newTelemetry(m)
 	// Resume drains and pending seals that were in flight when a persistent
-	// store was last written (List includes archived sessions).
+	// store was last written. Archived sessions can have a seal pending; the
+	// finished ones need nothing, so a store that can leave them out does.
+	var stored []Session
+	if sl, ok := cfg.Store.(SelectiveLister); ok {
+		stored = sl.ListPending()
+	} else {
+		stored = cfg.Store.List()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, s := range cfg.Store.List() {
+	for _, s := range stored {
 		m.indexLocked(s)
 		switch {
 		case s.State == StateDraining:
@@ -418,11 +425,13 @@ func (m *Manager) Get(id string) (Session, bool) { return m.cfg.Store.Get(id) }
 
 // List returns sessions, optionally filtered by state ("" = all).
 func (m *Manager) List(state State) []Session {
-	all := m.cfg.Store.List()
 	if state == "" {
-		return all
+		return m.cfg.Store.List()
 	}
-	return slicex.Filter(all, func(s Session) bool { return s.State == state })
+	if sl, ok := m.cfg.Store.(SelectiveLister); ok {
+		return sl.ListState(state)
+	}
+	return slicex.Filter(m.cfg.Store.List(), func(s Session) bool { return s.State == state })
 }
 
 // SetKill flips the global kill switch: while set, SDKs record nothing.

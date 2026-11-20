@@ -96,7 +96,8 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `--store-file` files: `<file>` is a snapshot of the unarchived sessions (a JSON array), `<file>.journal` holds the
   changes since that snapshot (one JSON object per line: `{"op":"put","session":{...}}`, `{"op":"evict","ids":[...]}`,
   `{"op":"delete","ids":[...]}`) and `<file>.archive` the archived sessions (one JSON session per line, last line of
-  an id wins). The journal is folded into the snapshot at startup, on a clean shutdown, and in the background when
+  an id wins; the line of a deleted session, and the old line of a session archived again, is overwritten with
+  spaces and fsynced, and such blank lines are dropped at startup). The journal is folded into the snapshot at startup, on a clean shutdown, and in the background when
   it passes 4 MiB (or the snapshot size, if larger); read `<file>` together with the journal while the control plane
   runs. A change is written without fsync: it survives a crash of the process, and a power failure can take back the
   last changes (a session archived just before is then unarchived again, not lost) but not more: snapshots are
