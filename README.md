@@ -29,7 +29,7 @@ Instrument a service:
 
 ```go
 import (
-    "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit" // configures itself from TSESSION_* env vars
+    _ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit" // starts the SDK from TSESSION_* env vars
     "github.com/maheshpaliwal/agentic-test-session/thttp"
 )
 
@@ -37,10 +37,29 @@ handler := thttp.Handler(mux)               // inbound: attribution + capture
 client  := thttp.Client(http.DefaultClient) // outbound: propagation
 ```
 
-`tracectl doctor` shows whether the service is connected. Then start a session (dashboard, `tracectl start`, or `POST /v1/sessions`) and send traffic with
+```bash
+TSESSION_ENABLED=true \
+TSESSION_SERVICE=orders-api \
+TSESSION_CONTROLPLANE_URL=http://127.0.0.1:7070 \
+TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
+  ./orders-api
+```
+
+Then start a session (dashboard, `tracectl start`, or `POST /v1/sessions`) and send traffic with
 `x-tsession-id: <id>`, or with an attribute bound to the session (user-id header, JWT claim, cookie, query
 param; see [`docs/BINDING.md`](docs/BINDING.md)). Only the first instrumented hop needs it; the session
 propagates downstream, including through message queues.
+
+**The session is empty?** Check, in this order:
+
+1. `tracectl doctor` lists the service as connected. If not: `TSESSION_ENABLED` must be exactly `true`, and the
+   service logs `tsession: enabled ...` at start when it is.
+2. The SDK was started before the handlers were wrapped. `thttp.Handler` and the other wrappers decide once,
+   when called, whether the SDK is on; with `autoinit` that means importing it in `main`.
+3. In containers, the control plane and collector accept loopback Host names only. Add the service names with
+   `--allowed-hosts` (the 403 response names the rejected host).
+4. The request carried `x-tsession-id` or a bound attribute, and was sent after the session started; a request
+   in the same instant can be missed.
 
 ## How it works
 

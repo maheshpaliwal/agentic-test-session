@@ -11,6 +11,9 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- The SDK says whether it records: `sdk/autoinit` logs one line at start (enabled with its URLs, or why it is
+  disabled), and a request rejected by the Host guard now gets a 403 that names the host and the setting to
+  change. The README quick start gained the environment block and an "empty session" checklist.
 - `tracectl doctor` checks that the control plane and collector answer and lists the services connected to the
   control plane (`GET /v1/subscribers`); the SDK now reports its service and instance name when it connects.
   An empty session no longer looks the same whether the service is unconnected or simply got no traffic.

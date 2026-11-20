@@ -90,7 +90,9 @@ func secure(cfg Config, next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostAllowed(r.Host, allowed) {
-			http.Error(w, "forbidden host", http.StatusForbidden)
+			// Name the host and the remedy: a client in another container
+			// otherwise sees a bare 403 and an empty session.
+			http.Error(w, fmt.Sprintf("forbidden host %q: this server accepts loopback names only; add the host to its allowed hosts (--allowed-hosts)", r.Host), http.StatusForbidden)
 			return
 		}
 		h := w.Header()

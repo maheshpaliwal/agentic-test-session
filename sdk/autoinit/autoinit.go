@@ -1,11 +1,19 @@
 // Package autoinit enables the tsession SDK when imported for side effects:
 //
-//	import _ "tsession/sdk/autoinit"
+//	import _ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"
 //
-// It does nothing unless TSESSION_ENABLED=true.
+// It does nothing unless TSESSION_ENABLED is exactly "true". The settings are
+// read from TSESSION_SERVICE, TSESSION_INSTANCE, TSESSION_CONTROLPLANE_URL and
+// TSESSION_COLLECTOR_URL (see docs/PROTOCOL.md for the rest). Import it before
+// the packages that build handlers and clients: the wrappers (thttp.Handler,
+// tsql.Register, ...) decide once, when they are called, whether the SDK is on.
+//
+// It logs one line at start so a service's log shows whether it records.
 package autoinit
 
 import (
+	"cmp"
+	"log"
 	"os"
 	"strings"
 
@@ -14,11 +22,20 @@ import (
 )
 
 func init() {
-	if os.Getenv("TSESSION_ENABLED") != "true" {
+	switch v := os.Getenv("TSESSION_ENABLED"); {
+	case v == "true":
+	case v == "":
+		return
+	default:
+		log.Printf("tsession: disabled: TSESSION_ENABLED is %q, and only \"true\" enables the SDK", v)
 		return
 	}
-	_ = runtime.Start(runtime.Config{
-		Service:               os.Getenv("TSESSION_SERVICE"),
+	service := os.Getenv("TSESSION_SERVICE")
+	if service == "" {
+		log.Print("tsession: TSESSION_SERVICE is not set; this service's events will carry no service name")
+	}
+	err := runtime.Start(runtime.Config{
+		Service:               service,
 		Instance:              os.Getenv("TSESSION_INSTANCE"),
 		ControlPlaneURL:       os.Getenv("TSESSION_CONTROLPLANE_URL"),
 		CollectorURL:          os.Getenv("TSESSION_COLLECTOR_URL"),
@@ -27,6 +44,12 @@ func init() {
 		BindPriority:          core.ParseBindPriority(os.Getenv("TSESSION_BIND_PRIORITY")),
 		NoPropagate:           splitList(os.Getenv("TSESSION_NO_PROPAGATE_HOSTS")),
 	})
+	if err != nil {
+		log.Printf("tsession: disabled: %v", err)
+		return
+	}
+	log.Printf("tsession: enabled for service %q (control plane %s, collector %s)", service,
+		cmp.Or(os.Getenv("TSESSION_CONTROLPLANE_URL"), "http://127.0.0.1:7070"), cmp.Or(os.Getenv("TSESSION_COLLECTOR_URL"), "http://127.0.0.1:7071"))
 }
 
 func splitList(s string) []string {
