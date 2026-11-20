@@ -153,7 +153,8 @@ named after the file.
 | **Dashboard** (`dashboard/`) | Timeline, call tree, entity history with diffs. No build step, no external requests. |
 | **tracectl** (`cmd/tracectl`) | CLI for sessions and results. |
 
-Wire contract, endpoints and hardening rules: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+Every setting and its default: [`docs/CONFIG.md`](docs/CONFIG.md). Wire contract, endpoints and hardening rules:
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ## Storage and retention
 
