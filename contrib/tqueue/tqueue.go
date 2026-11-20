@@ -256,12 +256,12 @@ type lazyBody []byte
 // instead, so that core.Payload sees the same Go value (a string for text) as
 // when the body was rendered eagerly and applies the same redaction, size and
 // flags.
-func (b lazyBody) MarshalJSON() ([]byte, error) { return json.Marshal(renderBody(b)) }
+func (b lazyBody) MarshalJSON() ([]byte, error) { return json.Marshal(renderBody(b, true)) }
 
 // rendered resolves a lazyBody for recording; any other value is returned as is.
 func rendered(params any) any {
 	if b, ok := params.(lazyBody); ok {
-		return renderBody(b)
+		return renderBody(b, false)
 	}
 	return params
 }
@@ -269,16 +269,30 @@ func rendered(params any) any {
 // renderBody turns a raw message body into a value core.Payload can redact by
 // key: valid JSON is decoded to structured data and passed through
 // core.RedactAny; anything else is scrubbed with core.RedactText.
-func renderBody(b []byte) any {
+//
+// Text (a non-JSON body, or a body that is one JSON string) is returned as it
+// is when it will be the whole payload: core.Payload scrubs a string itself,
+// and scrubbing it here too would make the recorded size describe the wrong
+// text. Nested inside a larger value (a batch) nothing scrubs strings later,
+// so there it is scrubbed here.
+func renderBody(b []byte, nested bool) any {
+	text := string(b)
 	if json.Valid(b) {
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()
 		var v any
 		if dec.Decode(&v) == nil {
-			return core.RedactAny(v)
+			s, isString := v.(string)
+			if !isString {
+				return core.RedactAny(v)
+			}
+			text = s
 		}
 	}
-	return core.RedactText(string(b))
+	if nested {
+		return core.RedactText(text)
+	}
+	return text
 }
 
 func flag(s *core.Span, f string) {

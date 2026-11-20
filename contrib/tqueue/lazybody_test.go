@@ -45,6 +45,17 @@ func TestLazyBodyRecordsLikeAnEagerOne(t *testing.T) {
 	if e.Req.Size != len(body) || e.Req.Truncated {
 		t.Errorf("3011-byte text body: Size=%d Truncated=%v", e.Req.Size, e.Req.Truncated)
 	}
+	// Scrubbed exactly once: a second pass used to leave "[REDACTED]]" behind.
+	if e := pub(`password=hunter2&a=1`); string(e.Req.Inline) != `"password=[REDACTED]\u0026a=1"` {
+		t.Errorf("form body recorded as %s", e.Req.Inline)
+	}
+	// Bodies nested in a batch are scrubbed too, including one that is a JSON string literal.
+	_ = Publish(ctx, Message{Queue: "batch", Params: []any{bodyParams([]byte(`"password=hunter2"`)), bodyParams([]byte(`note password=hunter2`)),
+		bodyParams([]byte(`{"password":"hunter2","ok":1}`))}}, core.MapCarrier{}, func(context.Context) error { return nil })
+	evs := byKind(rec.Events(), core.KindQueuePub)
+	if batch := string(evs[len(evs)-1].Req.Inline); strings.Contains(batch, "hunter2") || !strings.Contains(batch, `"ok":1`) {
+		t.Errorf("batch recorded as %s", batch)
+	}
 	if e := pub(""); !e.Req.IsZero() {
 		t.Errorf("empty body recorded a payload: %+v", e.Req)
 	}

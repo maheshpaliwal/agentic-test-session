@@ -410,20 +410,33 @@ func Subscribers(ctx context.Context, o Options) ([]Subscriber, error) {
 //
 // "Sent" means written to the service's connection; the service applies it a
 // moment later, so this narrows the window to network latency rather than
-// closing it. It returns ctx's error when ctx ends first, and (0, nil) at
-// once against a control plane too old to report delivery.
+// closing it. It returns ctx's error when ctx ends first (a context without
+// a deadline is given one of 30s), and (0, nil) at once against a control
+// plane too old to report delivery. A count of 0 means no service is
+// connected, so nothing was told about the session.
 func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
-	var active struct {
-		Generation uint64 `json:"generation"`
-	}
-	if err := s.do(ctx, http.MethodGet, "/v1/active", nil, &active); err != nil {
-		return 0, err
-	}
-	if active.Generation == 0 {
-		return 0, nil
+	if _, bounded := ctx.Deadline(); !bounded {
+		// A follower that never catches up must not hold a caller forever.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, maxPropagationWait)
+		defer cancel()
 	}
 	connected := 0
 	for {
+		// Read the target again on every pass: a control plane that restarted
+		// counts from zero, and waiting for the old number would never end.
+		var active struct {
+			Generation uint64 `json:"generation"`
+		}
+		if err := s.do(ctx, http.MethodGet, "/v1/active", nil, &active); err != nil {
+			if ctx.Err() != nil {
+				return connected, ctx.Err()
+			}
+			return connected, err
+		}
+		if active.Generation == 0 {
+			return 0, nil
+		}
 		var subs []Subscriber
 		if err := s.do(ctx, http.MethodGet, "/v1/subscribers", nil, &subs); err != nil {
 			switch {
@@ -440,15 +453,18 @@ func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
 			behind = behind || sub.Generation < active.Generation
 		}
 		if !behind {
-			return len(subs), nil
+			return connected, nil
 		}
 		select {
 		case <-ctx.Done():
-			return len(subs), ctx.Err()
+			return connected, ctx.Err()
 		case <-time.After(min(s.poll, 20*time.Millisecond)):
 		}
 	}
 }
+
+// maxPropagationWait bounds WaitPropagated when its context has no deadline.
+const maxPropagationWait = 30 * time.Second
 
 // List returns sessions known to the control plane, optionally filtered by state.
 func List(ctx context.Context, o Options, state string) ([]Info, error) {

@@ -84,6 +84,9 @@
   evicted session unreadable after a restart; a failed delete could bring an older archived record back.
 - `dashboard -open`: a file cut short mid-line still opens (marked incomplete); duplicate or out-of-range
   sequence numbers are rejected instead of silently hiding events.
+- Redaction: scrubbing text that was already scrubbed left `[REDACTED]]` behind and changed the recorded size;
+  `core.RedactText` is idempotent now. Queue message bodies are scrubbed exactly once, and bodies nested in a
+  Kafka batch that are JSON string literals are scrubbed too.
 - `thttp`: the request-body capture of the HTTP client wrapper raced with the transport when the server answered
   before the body was fully sent (data race, possible garbage in the recorded body).
 - Wrappers: recording code in `thttp`, `tgrpc` and the Redis wrappers now recovers from its own panics instead of

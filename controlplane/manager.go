@@ -480,6 +480,10 @@ type Subscriber struct {
 	// connection. A follower at or past the generation in which a session
 	// became active has been sent that session (sent, not necessarily applied).
 	Generation uint64 `json:"generation"`
+	// stream marks a follower served over HTTP, whose deliveries are recorded
+	// as they are written. An in-process follower (Subscribe) receives every
+	// version through its channel and is reported as up to date.
+	stream bool
 }
 
 // Subscribers lists the current followers of the active set, by service and
@@ -488,6 +492,9 @@ func (m *Manager) Subscribers() []Subscriber {
 	m.mu.Lock()
 	out := make([]Subscriber, 0, len(m.subs))
 	for _, s := range m.subs {
+		if !s.stream {
+			s.Generation = m.gen
+		}
 		out = append(out, s)
 	}
 	m.mu.Unlock()
@@ -505,13 +512,13 @@ func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
 
 // SubscribeAs is Subscribe for a follower that identified itself.
 func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func()) {
-	return m.subscribe(service, instance)
+	return m.subscribe(service, instance, false)
 }
 
-func (m *Manager) subscribe(service, instance string) (chan ActiveSet, func()) {
+func (m *Manager) subscribe(service, instance string, stream bool) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
 	m.mu.Lock()
-	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC()}
+	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC(), stream: stream}
 	ch <- m.activeLocked()
 	m.mu.Unlock()
 	return ch, func() {

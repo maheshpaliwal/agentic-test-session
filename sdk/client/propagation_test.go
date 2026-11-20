@@ -2,7 +2,6 @@ package client_test
 
 import (
 	"context"
-	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -56,17 +55,18 @@ func TestWaitPropagated(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	// A follower that has not been sent the newest version keeps the wait open until ctx ends.
-	_, leave := m.SubscribeAs("stuck", "stuck-1") // registered, but nothing ever marks a delivery
+	// An in-process follower (Manager.Subscribe) receives every version through its channel and
+	// must not hold the wait open.
+	_, leave := m.SubscribeAs("embedded", "embedded-1")
 	defer leave()
 	s3, err := client.Start(ctx, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wctx, cancel = context.WithTimeout(ctx, 150*time.Millisecond)
+	wctx, cancel = context.WithTimeout(ctx, 5*time.Second)
 	n, err = s3.WaitPropagated(wctx)
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) || n != 2 {
-		t.Fatalf("follower behind: %d %v, want 2 and a deadline error", n, err)
+	if err != nil || n != 2 {
+		t.Fatalf("with an in-process follower: %d %v, want 2 and no error", n, err)
 	}
 }

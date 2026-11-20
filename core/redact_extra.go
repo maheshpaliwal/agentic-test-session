@@ -86,7 +86,10 @@ func RedactURL(u *url.URL) string {
 var (
 	// reJSONish finds key=value / "key": "value" fragments. Quoted values may
 	// contain escaped quotes; keys may be nested form names (user[password]).
-	reJSONish = regexp.MustCompile(`(?i)("?([a-z0-9_.\-\[\]]+)"?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,&;}\]]+)`)
+	// The marker itself is a value alternative, so text that was already
+	// scrubbed comes out unchanged (the bare-value alternative stops at "]"
+	// and would otherwise leave a second one behind).
+	reJSONish = regexp.MustCompile(`(?i)("?([a-z0-9_.\-\[\]]+)"?\s*[:=]\s*)(\[REDACTED\]|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,&;}\]]+)`)
 	reBearer  = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[a-z0-9._~+/=\-]+`)
 	// reXMLText finds <tag ...>text</ with character data directly inside.
 	reXMLText = regexp.MustCompile(`(?i)(<([a-z0-9_.:\-]+)(?:\s[^<>]*)?>)([^<]+)(</)`)

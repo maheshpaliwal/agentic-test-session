@@ -364,17 +364,19 @@
   // plane; it stays empty when the control plane cannot tell (older version,
   // offline or demo-less modes). The answer is reused for a few seconds, since
   // the empty state is repainted on every poll.
-  const connected = { at: 0, text: '', pending: null };
+  // Only the newest paragraph is updated, and the request is given up after a few seconds, so repaints while
+  // a request hangs neither pile up callbacks on discarded nodes nor leave the note stuck.
+  const connected = { at: 0, text: '', pending: false, node: null };
   function connectedNote() {
     const p = h('p', { class: 'muted', 'aria-live': 'polite' }, connected.text);
-    if (Date.now() - connected.at > 5000) {
-      if (!connected.pending) {
-        connected.pending = cp('/v1/subscribers').then((subs) => U.connectedText(subs), () => '').then((text) => {
-          connected.text = text; connected.at = Date.now(); connected.pending = null;
-          return text;
-        });
-      }
-      connected.pending.then((text) => { p.textContent = text; });
+    connected.node = p;
+    if (Date.now() - connected.at > 5000 && !connected.pending) {
+      connected.pending = true;
+      const opts = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(5000) } : undefined;
+      cp('/v1/subscribers', opts).then((subs) => U.connectedText(subs), () => '').then((text) => {
+        connected.text = text; connected.at = Date.now(); connected.pending = false;
+        if (connected.node) connected.node.textContent = text;
+      });
     }
     return p;
   }

@@ -20,6 +20,7 @@ package tsessiontest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,15 +57,21 @@ func saveArtifact(ctx context.Context, s *client.Session, dir, test string) (pat
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	// Subtest names contain slashes; keep the file inside dir.
-	name := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			return r
-		}
-		return '_'
-	}, test)
-	path = filepath.Join(dir, strings.TrimLeft(name, ".")+"."+s.ID+".ndjson")
+	// Subtest names contain slashes, and the session id is whatever the
+	// control plane answered: neither may move the file out of dir.
+	safe := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+				return r
+			}
+			return '_'
+		}, s)
+	}
+	path = filepath.Join(dir, strings.TrimLeft(safe(test), ".")+"."+strings.Trim(safe(s.ID), ".")+".ndjson")
+	if filepath.Dir(path) != dir {
+		return "", fmt.Errorf("artifact path %q leaves %q", path, dir)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", err
@@ -102,9 +109,12 @@ func Run(t testing.TB, o client.Options) *client.Session {
 	}
 	// Give the connected services the session before the test's first request.
 	pctx, pcancel := context.WithTimeout(ctx, PropagationTimeout)
-	if _, err := s.WaitPropagated(pctx); err != nil {
+	switch n, err := s.WaitPropagated(pctx); {
+	case err != nil:
 		t.Logf("tsession: not every connected service was sent session %s within %v (%v); its first requests may go unrecorded",
 			s.ID, PropagationTimeout, err)
+	case n == 0:
+		t.Logf("tsession: no service is connected to the control plane, so nothing will record session %s (see tracectl doctor)", s.ID)
 	}
 	pcancel()
 	t.Cleanup(func() {
