@@ -118,8 +118,11 @@ func (a *sessionActor) shutdown() {
 		return
 	}
 	if err := a.flushNow(); err != nil {
-		a.seqr.log.Error("events lost at shutdown: store rejected the final flush",
-			"session", a.id, "events", len(a.buf), "err", err)
+		msg := "events lost at shutdown: store rejected the final flush"
+		if a.seqr.bg.Err() != nil {
+			msg = "events lost at shutdown: the final flush did not finish within the shutdown timeout"
+		}
+		a.seqr.log.Error(msg, "session", a.id, "events", len(a.buf), "err", err)
 	}
 }
 
@@ -140,9 +143,10 @@ func (a *sessionActor) run(f func(*sessionActor)) bool {
 }
 
 // opCtx bounds one background store operation, so a hung store cannot wedge
-// the actor (and with it every request for the session) forever.
+// the actor (and with it every request for the session) forever. It also ends
+// when the sequencer's shutdown timeout runs out.
 func (a *sessionActor) opCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), a.seqr.storeTimeout)
+	return context.WithTimeout(a.seqr.bg, a.seqr.storeTimeout)
 }
 
 func (a *sessionActor) arm(d time.Duration) {
@@ -283,6 +287,9 @@ func (a *sessionActor) flushNow() (err error) {
 	for i := 0; i <= isolateAfter; i++ {
 		if err = a.flush(); err == nil {
 			return nil
+		}
+		if a.seqr.bg.Err() != nil {
+			return err // shutdown timeout: a retry could not reach the store
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

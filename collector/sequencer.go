@@ -19,8 +19,15 @@ type Sequencer struct {
 	maxBuf int
 	// storeTimeout bounds each background store call made by an actor.
 	storeTimeout time.Duration
-	log          *slog.Logger
-	tel          *telemetry
+	// shutdownTimeout is how long Close lets the actors flush before bg is
+	// cancelled.
+	shutdownTimeout time.Duration
+	// bg is the parent of every background store call; cancelling it ends
+	// them all at once.
+	bg     context.Context
+	cancel context.CancelFunc
+	log    *slog.Logger
+	tel    *telemetry
 
 	mu     sync.Mutex
 	actors map[string]*sessionActor
@@ -36,9 +43,10 @@ type Sequencer struct {
 // newSequencer expects cfg to have been normalised by New.
 func newSequencer(st store.Store, cfg Config, tel *telemetry) *Sequencer {
 	s := &Sequencer{st: st, window: cfg.Window, idle: cfg.IdleEvict, maxBuf: cfg.MaxBufferedEvents,
-		storeTimeout: cfg.StoreTimeout, log: cfg.Logger, tel: tel,
+		storeTimeout: cfg.StoreTimeout, shutdownTimeout: cfg.ShutdownTimeout, log: cfg.Logger, tel: tel,
 		actors: map[string]*sessionActor{}, quar: map[string]int{},
 		stop: make(chan struct{}), jd: make(chan struct{})}
+	s.bg, s.cancel = context.WithCancel(context.Background())
 	if s.idle > 0 {
 		go s.janitor()
 	} else {
@@ -224,7 +232,9 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 
 // Close stops the janitor and every actor. Each actor first flushes what is
 // still in its reorder window, so a graceful stop loses nothing the store
-// accepts.
+// accepts within the shutdown timeout. The actors flush concurrently and
+// share that one deadline, so Close returns shortly after it at the latest
+// and a session whose store calls hang takes no time from the others.
 func (s *Sequencer) Close() {
 	s.mu.Lock()
 	already := s.closed
@@ -232,6 +242,11 @@ func (s *Sequencer) Close() {
 	s.mu.Unlock()
 	if !already {
 		close(s.stop)
+		// The deadline also ends a window flush that was already hanging in
+		// the store when Close was called.
+		t := time.AfterFunc(s.shutdownTimeout, s.cancel)
+		defer s.cancel()
+		defer t.Stop()
 		<-s.jd
 	}
 	s.evictAll()

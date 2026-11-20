@@ -46,6 +46,12 @@ type Config struct {
 	// StoreTimeout bounds each store call the sequencer makes outside a
 	// request (window flushes, catch-up, poison-event probes); default 30s.
 	StoreTimeout time.Duration
+	// ShutdownTimeout bounds, in total, the flushing of reorder windows that
+	// Close does: store calls still running that long after Close began are
+	// cancelled and the events they carried are lost (and logged). Sessions
+	// flush concurrently, so a session whose store calls hang does not use up
+	// the time of the others. Default 15s.
+	ShutdownTimeout time.Duration
 	// AllowedHosts are extra Host header values accepted besides loopback
 	// (e.g. docker service names).
 	AllowedHosts []string
@@ -65,7 +71,8 @@ type Config struct {
 // later). Anything shorter regularly inverts parent/child Seq order.
 func DefaultConfig() Config {
 	return Config{Window: 500 * time.Millisecond, MaxBodyBytes: 32 << 20, MaxMessageBytes: 4 << 20,
-		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000, StoreTimeout: 30 * time.Second}
+		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000, StoreTimeout: 30 * time.Second,
+		ShutdownTimeout: 15 * time.Second}
 }
 
 // Collector wires the store, sequencer and HTTP handlers together.
@@ -101,6 +108,9 @@ func New(st store.Store, cfg Config) *Collector {
 	}
 	if cfg.StoreTimeout <= 0 {
 		cfg.StoreTimeout = d.StoreTimeout
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = d.ShutdownTimeout
 	}
 	if cfg.Window < 0 {
 		cfg.Window = 0
@@ -149,8 +159,9 @@ func ParseCIDR(s string) (*net.IPNet, error) {
 }
 
 // Close stops the sequencer goroutines after flushing every session's reorder
-// window. Stop the HTTP server first: an ingest that races with Close fails
-// with a storage error (which the SDK retries).
+// window, for at most Config.ShutdownTimeout in total. Stop the HTTP server
+// first: an ingest that races with Close fails with a storage error (which
+// the SDK retries).
 func (c *Collector) Close() {
 	c.stopOnce.Do(func() { close(c.stop) })
 	<-c.retention

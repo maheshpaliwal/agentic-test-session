@@ -48,6 +48,9 @@
 - Collector: an ingest or seal racing with shutdown could panic (send on a closed channel); it now gets `503`.
 - Collector: a store call that timed out could get an event quarantined as "poison"; timeouts are retried instead,
   and background store calls are bounded (30s).
+- Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
+  store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
+  events still unwritten then are dropped and logged.
 - Collector: a session removed from the store behind the collector's back no longer wedges on Seq conflicts.
 - Redaction: a secret after an escaped quote in truncated JSON survived; DynamoDB expression values inside
   function calls, `IN` lists and reused placeholders leaked; Redis member arguments of read commands on sensitive
