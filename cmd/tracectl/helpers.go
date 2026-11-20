@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
@@ -58,23 +59,70 @@ func resolve(ctx context.Context, o client.Options, ref string) (*client.Session
 		}
 		return s, err
 	}
-	list, err := client.List(ctx, o, "")
+	best, err := latestNamed(ctx, o, ref)
 	if err != nil {
 		return nil, err
-	}
-	var best *client.Info
-	for i := range list { // ascending by creation
-		if list[i].Name != ref {
-			continue
-		}
-		if best == nil || !list[i].Done() || best.Done() {
-			best = &list[i]
-		}
 	}
 	if best == nil {
 		return nil, fmt.Errorf("no session named %q", ref)
 	}
 	return client.Attach(ctx, o, best.ID)
+}
+
+// namePage is how many sessions with one name latestNamed asks for at a time.
+const namePage = 100
+
+// latestNamed returns the latest session named name that has not finished,
+// or else the latest one with that name; nil if there is none. It asks the
+// control plane for the sessions with that name, newest first, instead of
+// listing all sessions.
+func latestNamed(ctx context.Context, o client.Options, name string) (*client.Info, error) {
+	var best *client.Info
+	for before := ""; best == nil; {
+		list, next, err := client.ListPage(ctx, o, client.ListOptions{Name: name, Limit: namePage, Before: before})
+		if err != nil {
+			return nil, err
+		}
+		// A control plane that does not know the name filter answers with
+		// all sessions, oldest first: pickNamed takes neither the names nor
+		// the order of the reply on trust, so that reply serves as well.
+		best = pickNamed(list, name)
+		if next == "" || best != nil && !best.Done() {
+			return best, nil
+		}
+		before = next
+	}
+	// The newest sessions with this name have all finished and there are
+	// older ones. One that is still running may be among those: ask for it.
+	for _, state := range []string{"ACTIVE", "DRAINING", "CREATED"} {
+		list, _, err := client.ListPage(ctx, o, client.ListOptions{Name: name, State: state, Limit: 1})
+		if err != nil {
+			return nil, err
+		}
+		if c := pickNamed(list, name); c != nil && !c.Done() && (best.Done() || byCreation(*c, *best) > 0) {
+			best = c
+		}
+	}
+	return best, nil
+}
+
+// byCreation orders sessions as the control plane lists them: by creation
+// time, then id.
+func byCreation(a, b client.Info) int {
+	return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+}
+
+// pickNamed returns, of the sessions in list that are named name, the latest
+// one that has not finished, or else the latest one; nil if there is none.
+func pickNamed(list []client.Info, name string) *client.Info {
+	var best *client.Info
+	for i := range list {
+		if c := &list[i]; c.Name == name &&
+			(best == nil || (!c.Done() && best.Done()) || (c.Done() == best.Done() && byCreation(*c, *best) > 0)) {
+			best = c
+		}
+	}
+	return best
 }
 
 // displayName renders the name with an "(auto)" marker for generated names.

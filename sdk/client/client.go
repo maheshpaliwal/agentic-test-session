@@ -344,24 +344,30 @@ func (s *Session) do(ctx context.Context, method, path string, in, out any) erro
 // (skipped when out is nil). Non-2xx replies become errors carrying the
 // server's message.
 func (s *Session) call(ctx context.Context, base, method, path string, in, out any) error {
+	_, err := s.callHeader(ctx, base, method, path, in, out)
+	return err
+}
+
+// callHeader is call, and returns the headers of a 2xx reply as well.
+func (s *Session) callHeader(ctx context.Context, base, method, path string, in, out any) (http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := s.hc.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -383,15 +389,15 @@ func (s *Session) call(ctx context.Context, base, method, path string, in, out a
 			e.Error += " binding " + e.Binding.Source + ":" + e.Binding.Name
 		}
 		if resp.StatusCode == http.StatusConflict && method == http.MethodPost && path == "/v1/sessions" {
-			return fmt.Errorf("%w: %s", ErrConflict, e.Error)
+			return nil, fmt.Errorf("%w: %s", ErrConflict, e.Error)
 		}
-		return fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
+		return nil, fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
-		return nil
+		return resp.Header, nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp.Header, json.NewDecoder(resp.Body).Decode(out)
 }
 
 // Subscriber is one process following the control plane's active set,
@@ -475,7 +481,63 @@ func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
 // maxPropagationWait bounds WaitPropagated when its context has no deadline.
 const maxPropagationWait = 30 * time.Second
 
-// List returns sessions known to the control plane, optionally filtered by state.
+// ListOptions selects the sessions ListPage returns.
+type ListOptions struct {
+	// State and Name keep only the sessions in that state and with exactly
+	// that name; empty means any.
+	State string
+	Name  string
+	// Limit is the page size, 1..1000: the newest matching sessions are
+	// returned, newest first. Zero asks for every matching session, oldest
+	// first, like List.
+	Limit int
+	// Before is the next value ListPage returned for the previous page.
+	Before string
+}
+
+// ListPage returns one page of the sessions known to the control plane:
+// the newest lo.Limit sessions matching lo, newest first, and next, the
+// value to pass as lo.Before for the page after it (empty when there are no
+// older sessions). Unlike List its cost does not grow with the number of
+// sessions the control plane has ever recorded.
+//
+// Paging until next is empty returns no session twice, and every session
+// that exists and matches during the whole run exactly once; a page can hold
+// fewer sessions than lo.Limit while next is set.
+//
+// A control plane older than this call ignores Name, Limit and Before: it
+// returns every session (in lo.State), oldest first, and next is empty. A
+// caller that may talk to one should check the names it gets, and expect
+// more than lo.Limit sessions.
+func ListPage(ctx context.Context, o Options, lo ListOptions) (infos []Info, next string, err error) {
+	q := url.Values{}
+	if lo.State != "" {
+		q.Set("state", lo.State)
+	}
+	if lo.Name != "" {
+		q.Set("name", lo.Name)
+	}
+	if lo.Limit != 0 {
+		q.Set("limit", strconv.Itoa(lo.Limit))
+	}
+	if lo.Before != "" {
+		q.Set("before", lo.Before)
+	}
+	path := "/v1/sessions"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	s := newSession(o, Info{})
+	h, err := s.callHeader(ctx, s.base, http.MethodGet, path, nil, &infos)
+	if err != nil {
+		return nil, "", err
+	}
+	return infos, h.Get("X-Tsession-Next"), nil
+}
+
+// List returns the sessions known to the control plane, oldest first,
+// optionally filtered by state. It returns all of them, which can be many:
+// see ListPage for the newest ones or for the sessions with a given name.
 func List(ctx context.Context, o Options, state string) ([]Info, error) {
 	s := newSession(o, Info{})
 	path := "/v1/sessions"

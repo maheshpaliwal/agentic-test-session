@@ -28,7 +28,7 @@ session lifecycle (control plane):
   abort <id|name>               end now, without draining or sealing
   delete <id|name>              remove a finished session and everything recorded for it
   status <id|name>
-  list [--state STATE]
+  list [--state STATE] [--limit N]   all sessions, oldest first; with --limit the newest N
   wait <id|name> [--timeout D]
   watch-docker [--docker BIN]   start/stop sessions from containers labelled tsession.id=<name>
                                 (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)

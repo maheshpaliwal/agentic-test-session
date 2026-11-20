@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -119,10 +120,14 @@ func (c *cli) status(ctx context.Context, args []string) error {
 func (c *cli) list(ctx context.Context, args []string) error {
 	fs := c.flags("list")
 	state := fs.String("state", "", "filter by state")
+	limit := fs.Int("limit", 0, "list only the newest N sessions (default: all)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	list, err := client.List(ctx, c.opts, *state)
+	if *limit < 0 {
+		return errors.New("--limit must be a positive number")
+	}
+	list, more, err := listNewest(ctx, c.opts, *state, *limit)
 	if err != nil {
 		return err
 	}
@@ -133,7 +138,38 @@ func (c *cli) list(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintln(c.stdout, line)
 	}
+	if more {
+		fmt.Fprintf(c.stderr, "tracectl: these are the newest %d sessions; there are older ones (raise --limit, or leave it out to list all)\n", len(list))
+	}
 	return nil
+}
+
+// listNewest returns the newest limit sessions (in state, if set), oldest
+// first, and whether there are older ones; with limit 0, all sessions.
+func listNewest(ctx context.Context, o client.Options, state string, limit int) (list []client.Info, more bool, err error) {
+	if limit == 0 {
+		list, err = client.List(ctx, o, state)
+		return list, false, err
+	}
+	const maxPage = 1000 // the most the control plane returns per request
+	for before := ""; len(list) < limit; {
+		page, next, err := client.ListPage(ctx, o, client.ListOptions{State: state, Limit: min(limit-len(list), maxPage), Before: before})
+		if err != nil {
+			return nil, false, err
+		}
+		list = append(list, page...)
+		if before, more = next, next != ""; !more {
+			break
+		}
+	}
+	// Oldest first, like the list without a limit. Sorting here, not relying
+	// on the order of the reply, also serves a control plane that does not
+	// know the limit and answers with all sessions.
+	slices.SortFunc(list, byCreation)
+	if len(list) > limit {
+		list, more = list[len(list)-limit:], true
+	}
+	return list, more, nil
 }
 
 func (c *cli) wait(ctx context.Context, args []string) error {
