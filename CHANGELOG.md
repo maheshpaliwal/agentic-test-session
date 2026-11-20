@@ -11,6 +11,9 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- **Assertions for Go tests.** `sdk/client/tsessiontest` ties a session to a test (`Run`) and asserts on what it
+  recorded (`RequireNoFailures`, `RequireMutation`, `RequireNoMutation`); `Session.Mutations` returns a session's
+  mutations as a flat, filterable list.
 - `tracectl trace` prints the call tree (`--errors`, `--depth`), and `tracectl show <session> <seq>` prints one
   event in full, so a failed run can be read from a CI log or over SSH without the dashboard.
 - The dashboard can delete finished sessions (two-click Delete in the session list).

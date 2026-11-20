@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 )
@@ -145,6 +146,50 @@ func (s *Session) Events(ctx context.Context) ([]core.Event, error) {
 		}
 		from = p.NextSeq
 	}
+}
+
+// MutationFilter selects mutations. Empty fields match everything.
+type MutationFilter struct {
+	Store  string // "postgres", "redis", ...
+	Entity string // table, collection or key pattern
+	Op     string // "insert", "update", "delete", ...; compared case-insensitively
+	// ExcludeRolledBack drops writes whose transaction rolled back.
+	ExcludeRolledBack bool
+}
+
+func (f MutationFilter) match(m *core.Mutation) bool {
+	return (f.Store == "" || f.Store == m.Store) && (f.Entity == "" || f.Entity == m.Entity) &&
+		(f.Op == "" || strings.EqualFold(f.Op, m.Op)) &&
+		!(f.ExcludeRolledBack && m.Effective != nil && !*m.Effective)
+}
+
+// Mutation is one recorded mutation together with the event that made it.
+type Mutation struct {
+	Seq     uint64 // of the event
+	Service string
+	Kind    core.Kind
+	TxID    string
+	core.Mutation
+}
+
+// Mutations returns the session's mutations matching f, in Seq order. It is the flat form of
+// Entities + History for assertions such as "exactly one orders row was inserted". Stop the session
+// first (StopAndWait): transaction outcomes and asynchronous work are only complete after the seal.
+func (s *Session) Mutations(ctx context.Context, f MutationFilter) ([]Mutation, error) {
+	evs, err := s.Events(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []Mutation
+	for i := range evs {
+		e := &evs[i]
+		for j := range e.Mutations {
+			if f.match(&e.Mutations[j]) {
+				out = append(out, Mutation{Seq: e.Seq, Service: e.Service, Kind: e.Kind, TxID: e.TxID, Mutation: e.Mutations[j]})
+			}
+		}
+	}
+	return out, nil
 }
 
 // Entities lists the entities the session mutated.

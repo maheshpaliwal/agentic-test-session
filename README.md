@@ -98,6 +98,15 @@ sum, _ := sess.Summary(ctx)
 if len(sum.Failures) > 0 { t.Fatalf("failures: %+v", sum.Failures) }
 ```
 
+Or let `sdk/client/tsessiontest` manage the session and assert for you:
+
+```go
+sess := tsessiontest.Run(t, client.Options{})   // stopped when the test ends
+// ... drive the system ...
+tsessiontest.RequireNoFailures(t, sess)
+tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", Entity: "orders", Op: "insert"})
+```
+
 ## Storage
 
 Choose the collector's backend with `--store` (or `TSESSION_COLLECTOR_STORE`):
