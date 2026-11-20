@@ -119,8 +119,8 @@ Stopping a session waits for it to go quiet (3s by default), so each such test t
 `Trace`).
 
 ```bash
-# gate: exit 3 on failed events or an incomplete session, including a failed seal or a drain that timed out
-tracectl report my-run --fail-on-error --fail-on-incomplete >> "$GITHUB_STEP_SUMMARY"
+# gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included), or no events at all
+tracectl report my-run --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
 tracectl report my-run --format junit -o tsession-junit.xml
 
 # keep a run after the job is gone: export it, then open the file without the services

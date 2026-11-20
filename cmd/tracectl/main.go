@@ -34,7 +34,7 @@ session lifecycle (control plane):
                                 (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)
 
 session results (collector):
-  summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete]
+  summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
                                 counts, failures and flags; the --fail-on flags exit 3 for CI gates
   events <id|name> [--kind K[,K]] [--service S] [--errors] [--limit N] [--json]
                                 K is a kind (db.write) or a prefix ending in * (db.*)

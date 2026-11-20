@@ -21,6 +21,7 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "print the raw summary as JSON")
 	failErr := fs.Bool("fail-on-error", false, "exit 3 when the session recorded failed events")
 	failInc := fs.Bool("fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work)")
+	failEmpty := fs.Bool("fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -43,11 +44,20 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	if info := s.Info(); *failInc && (sum.Incomplete || info.Incomplete || info.SealError != "") {
 		failed = append(failed, "session is incomplete")
 	}
+	if *failEmpty && sum.EventCount == 0 {
+		failed = append(failed, emptySession)
+	}
 	if len(failed) > 0 {
 		return checkError{msg: "check failed: " + strings.Join(failed, "; ")}
 	}
 	return nil
 }
+
+// emptySession is the --fail-on-empty verdict. A session with no events
+// passes every other check, although it usually means that nothing recorded:
+// the service was not connected, could not reach the collector, or the
+// requests did not carry the session.
+const emptySession = "session recorded no events (see tracectl doctor)"
 
 func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	state := info.State

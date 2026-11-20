@@ -146,6 +146,22 @@ func TestCLIResults(t *testing.T) {
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-incomplete"); code != exitCheckFailed || !strings.Contains(e, "incomplete") {
 		t.Fatalf("--fail-on-incomplete: %d %s", code, e)
 	}
+	// A session that recorded nothing passes the other gates; --fail-on-empty catches it.
+	if code, _, e := env.tc("summary", "run-1", "--fail-on-empty"); code != 0 {
+		t.Fatalf("--fail-on-empty with events: %d %s", code, e)
+	}
+	full := env.sum
+	env.sum = client.Summary{Sealed: true}
+	if code, _, e := env.tc("summary", "run-1", "--fail-on-error", "--fail-on-incomplete"); code != 0 {
+		t.Fatalf("an empty session passes the other gates: %d %s", code, e)
+	}
+	if code, _, e := env.tc("summary", "run-1", "--fail-on-empty"); code != exitCheckFailed || !strings.Contains(e, "recorded no events") {
+		t.Fatalf("--fail-on-empty: %d %s", code, e)
+	}
+	if code, _, e := env.tc("report", "run-1", "--fail-on-empty"); code != exitCheckFailed || !strings.Contains(e, "recorded no events") {
+		t.Fatalf("report --fail-on-empty: %d %s", code, e)
+	}
+	env.sum = full
 
 	code, out, _ = env.tc("events", "run-1")
 	if code != 0 || !strings.Contains(out, "4 of 4 events") || !strings.Contains(out, "+10ms") ||

@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	reportArgs = "<id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete]"
+	reportArgs = "<id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]"
 
 	reportMaxRows     = 50   // rows of a Markdown table
 	junitMaxCases     = 1000 // test cases made from trace roots
@@ -36,6 +36,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	path := fs.String("o", "", "write to this file instead of stdout")
 	failErr := fs.Bool("fail-on-error", false, "exit 3 when the session recorded failed events")
 	failInc := fs.Bool("fail-on-incomplete", false, "exit 3 when the session is incomplete")
+	failEmpty := fs.Bool("fail-on-empty", false, "exit 3 when the session recorded no events")
 	pos, err := parseArgs(fs, args, 1, reportArgs)
 	if err != nil {
 		return err
@@ -87,6 +88,9 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	}
 	if *failInc && rep.incomplete {
 		failed = append(failed, "session is incomplete")
+	}
+	if *failEmpty && rep.sum.EventCount == 0 {
+		failed = append(failed, emptySession)
 	}
 	if len(failed) > 0 {
 		return checkError{msg: "check failed: " + strings.Join(failed, "; ")}
