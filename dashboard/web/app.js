@@ -1146,7 +1146,7 @@
       (e.flags || []).forEach((x) => tags.push(tag(x, FLAG_CLS[x] || 't-warn', FLAG_HELP[x])));
       if (g && G2 && e.kind === 'queue.publish') {
         const ws = G2.pubWorkers.get(e.span_id);
-        if (ws && ws.length) tags.push(h('button', { type: 'button', class: 'linkbtn jump', tabindex: -1, 'data-jump': 'g:' + ws[0], title: 'Scroll to the worker group that processed this message' + (ws.length > 1 ? ' (first of ' + ws.length + ' attempts)' : '') }, icon('async', 'sm'), 'jump to worker group' + (ws.length > 1 ? ' (' + ws.length + ')' : '')));
+        if (ws && ws.length) tags.push(h('button', { type: 'button', class: 'linkbtn jump', 'data-jump': 'g:' + ws[0], title: 'Scroll to the worker group that processed this message' + (ws.length > 1 ? ' (first of ' + ws.length + ' attempts)' : '') }, icon('async', 'sm'), 'jump to worker group' + (ws.length > 1 ? ' (' + ws.length + ')' : '')));
       }
       const pct = Math.max(3, Math.round(Math.sqrt(Math.max(0, evDur(e)) / maxDur) * 100));
       const bar = h('i'); bar.style.width = pct + '%';
@@ -1180,7 +1180,7 @@
         h('span', { class: 'grow' }), meta);
       const line2 = h('div', { class: 'gl2' },
         g.asyncLabel ? h('span', { class: 'gasync', title: g.asyncLabel }, icon('async', 'sm'), g.asyncLabel) : null,
-        g.triggeredBy ? h('button', { type: 'button', class: 'linkbtn jump', tabindex: -1, 'data-jump': 'e:' + g.triggeredBy.seq, title: 'Scroll to the queue.publish that started this job' }, 'go to publisher') : null,
+        g.triggeredBy ? h('button', { type: 'button', class: 'linkbtn jump', 'data-jump': 'e:' + g.triggeredBy.seq, title: 'Scroll to the queue.publish that started this job' }, 'go to publisher') : null,
         g.chips.map((c) => h('span', { class: 'gchip kg-' + (c.k === 'cache' ? 'cache' : c.k === 'err' ? 'dlq' : U.kindGroup(c.k)) }, h('b', { text: c.n }), ' ' + c.label)),
         g.mutText ? h('span', { class: 'gmut', title: g.mutText, text: g.mutText }) : null,
         h('span', { class: 'grow' }),
@@ -1191,7 +1191,9 @@
       return el;
     }
     function moreEl(it) {
-      const b = h('div', { class: 'vmore', 'data-more': it.g.key, role: 'presentation' }, it.revealed ? '− hide ' + it.n + ' non-matching events' : '+' + it.n + ' hidden by filters · show');
+      // Reachable and operable from the keyboard: it is the only way to see rows the filters hid.
+      const b = h('div', { class: 'vmore', 'data-more': it.g.key, role: 'button', tabindex: 0,
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); e.currentTarget.click(); } } }, it.revealed ? '− hide ' + it.n + ' non-matching events' : '+' + it.n + ' hidden by filters · show');
       b.style.top = it.top + 'px'; b.style.height = it.h + 'px';
       return b;
     }

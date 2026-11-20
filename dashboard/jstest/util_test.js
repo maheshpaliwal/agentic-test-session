@@ -366,4 +366,12 @@ assert.strictEqual(U.connectedText([{ service: 'worker' }, { service: 'api', ins
 assert.strictEqual(U.connectedText(Array.from({ length: 10 }, (_, i) => ({ service: 's' + i }))),
   'Connected to the control plane: s0, s1, s2, s3, s4, s5, s6, s7, 2 more.');
 
+// fmtNs: a value that rounds up to 1000 of a unit is shown in the next unit
+assert.strictEqual(U.fmtNs(1e6), '1.0 ms');
+assert.strictEqual(U.fmtNs(999600), '1.0 ms');
+assert.strictEqual(U.fmtNs(999400), '999 µs');
+assert.strictEqual(U.fmtNs(999.96e6), '1.00 s');
+assert.strictEqual(U.fmtNs(999.6), '1 µs');
+assert.strictEqual(U.fmtNs(500), '500 ns');
+
 console.log('util ok');

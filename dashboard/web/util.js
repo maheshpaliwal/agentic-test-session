@@ -24,9 +24,10 @@
   function fmtNs(ns) {
     if (typeof ns !== 'number' || !isFinite(ns)) return '-';
     const a = Math.abs(ns);
-    if (a >= 1e9) return (ns / 1e9).toFixed(2) + ' s';
-    if (a >= 1e6) return (ns / 1e6).toFixed(1) + ' ms';
-    if (a >= 1e3) return (ns / 1e3).toFixed(0) + ' µs';
+    // The thresholds sit where the smaller unit would round up to 1000, so 1 ms never reads "1000 µs".
+    if (a >= 999.95e6) return (ns / 1e9).toFixed(2) + ' s';
+    if (a >= 999.5e3) return (ns / 1e6).toFixed(1) + ' ms';
+    if (a >= 999.5) return (ns / 1e3).toFixed(0) + ' µs';
     return Math.round(ns) + ' ns';
   }
   // Relative time computed from ms values (difference of two large ns doubles loses less than a ms).
