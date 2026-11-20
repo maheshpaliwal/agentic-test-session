@@ -11,6 +11,9 @@
   `summary --fail-on-error` / `--fail-on-incomplete` (exit status 3) for CI gates, plus `tracectl abort` and
   `tracectl version`. `sdk/client` gained `Session.Summary`, `Events`, `EventsPage`, `Entities`, `History`, `Trace`
   and `Delete`, and `Info.Reason` / `Info.SealError`.
+- `tracectl diff <a> <b>` compares two sessions: failures in one run only, mutation and event counts, and the
+  first point where a service's event sequence diverges, with ids and literals in names normalised.
+  `--fail-on-diff` exits 3; `--ignore-counts` tolerates retries; `--json`.
 - **Open a run offline.** `dashboard -open run.ndjson` (repeatable) serves sessions written by `tracectl export`,
   read-only and without the control plane or collector, so a failed CI run can be attached as a file and opened
   locally.

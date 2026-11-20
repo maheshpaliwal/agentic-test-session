@@ -84,6 +84,8 @@ tracectl history my-run postgres orders 42   # every change to one row, with dif
 tracectl trace my-run --errors               # call tree, only branches that failed
 tracectl show my-run 17                      # one event in full: request, response, mutations
 
+tracectl diff nightly-ok nightly-failed      # what differs between two runs
+
 # Share a run: export it, then open the file anywhere without the services
 tracectl export my-run -o run.ndjson
 go run ./cmd/dashboard -open run.ndjson
