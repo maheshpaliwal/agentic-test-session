@@ -291,6 +291,7 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	}
 	c.seq.drop(id)
 	c.seq.forgetQuarantine(id)
+	c.seq.forgetStatus(id)
 	c.vmu.Lock()
 	delete(c.views, id)
 	c.vmu.Unlock()

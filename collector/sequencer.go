@@ -36,6 +36,12 @@ type Sequencer struct {
 	qmu  sync.Mutex
 	quar map[string]int
 
+	// memo holds the status of sessions without a live actor, valid while the
+	// store's head Seq is unchanged, so polling an evicted session does not
+	// read all of its events every time.
+	memoMu sync.Mutex
+	memo   map[string]statusMemo
+
 	stop chan struct{}
 	jd   chan struct{}
 }
@@ -171,6 +177,20 @@ func (s *Sequencer) forgetQuarantine(id string) {
 	s.qmu.Unlock()
 }
 
+// maxStatusMemo bounds the status memo; it is simply emptied when full.
+const maxStatusMemo = 256
+
+type statusMemo struct {
+	head uint64
+	st   Status
+}
+
+func (s *Sequencer) forgetStatus(id string) {
+	s.memoMu.Lock()
+	delete(s.memo, id)
+	s.memoMu.Unlock()
+}
+
 // has reports whether the session currently has a live actor.
 func (s *Sequencer) has(id string) bool {
 	s.mu.Lock()
@@ -223,11 +243,31 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 	if ok {
 		return
 	}
+	head, err := s.st.Head(ctx, id)
+	if err != nil {
+		return Status{}, err
+	}
+	s.memoMu.Lock()
+	m, hit := s.memo[id]
+	s.memoMu.Unlock()
+	if hit && m.head == head {
+		m.st.Quarantined = s.quarantined(id)
+		return m.st, nil
+	}
 	t := &sessionActor{id: id, seqr: s, st: s.st}
 	if err = t.load(ctx); err != nil {
 		return Status{}, err
 	}
-	return t.status(), nil
+	st = t.status()
+	if t.next == head+1 { // the load saw exactly the head it is filed under
+		s.memoMu.Lock()
+		if s.memo == nil || len(s.memo) >= maxStatusMemo {
+			s.memo = map[string]statusMemo{}
+		}
+		s.memo[id] = statusMemo{head: head, st: st}
+		s.memoMu.Unlock()
+	}
+	return st, nil
 }
 
 // Close stops the janitor and every actor. Each actor first flushes what is

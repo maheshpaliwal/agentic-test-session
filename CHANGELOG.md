@@ -51,6 +51,10 @@
 - Collector: `Close` could take minutes when the store hung, because every session's final flush waited out several
   store timeouts. Shutdown flushing is now bounded in total by the new `Config.ShutdownTimeout` (default 15s);
   events still unwritten then are dropped and logged.
+- SDK exporter: a batch now stays in the ring until the collector accepts it. Connection errors, 5xx and 429 are
+  retried with backoff instead of dropping events after about 300ms, so a collector restart no longer loses
+  events, and `Flush` returns false while events are still buffered. `runtime.Stop` with an unreachable
+  collector now uses its full timeout (2s).
 - Collector: the reorder window applied to a whole flush instead of to each event, so an event could be sequenced
   a moment after it arrived and ahead of a straggler that sorts before it. Each event now gets a full window.
 - Collector: a session removed from the store behind the collector's back no longer wedges on Seq conflicts.
@@ -64,6 +68,9 @@
 - SDK exporter: `Close` waited out a request stuck on an unresponsive collector.
 
 ### Performance
+- Collector: a cached session view is extended with the events stored since, instead of re-reading the whole
+  session whenever it grows, and the status of a session with no live actor is remembered while the store is
+  unchanged. Polling a live session reads each event about once rather than once per poll.
 - Sensitive-key matching no longer builds a `strings.Replacer` per call and memoises verdicts: redacting an 8 KB
   JSON payload went from about 590 µs / 3.7 MB to 148 µs / 143 KB, a traced 100-byte request through `thttp` from
   about 51 µs / 240 KB to 20 µs / 14 KB (`go test -bench` in `core/` and `thttp/` on the development machine).

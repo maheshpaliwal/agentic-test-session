@@ -261,6 +261,27 @@ func (c *Collector) summary(ctx context.Context, id string, base Summary) (Summa
 	return s, nil
 }
 
+// extend returns the session's stored events up to at least head, reusing
+// the events of a cached view when the store only grew since (or only the
+// seal changed). Anything else, including a store that went backwards, reads
+// the session from the start.
+func (c *Collector) extend(ctx context.Context, id string, old *viewEntry, head uint64) ([]core.Event, error) {
+	if old != nil && old.head > 0 && head >= old.head {
+		if head == old.head {
+			return old.raw, nil
+		}
+		more, err := c.st.Events(ctx, id, old.head+1, 0)
+		if err != nil {
+			return nil, err
+		}
+		if len(more) > 0 && more[0].Seq == old.head+1 {
+			// The full slice expression forces a copy: old.raw stays as it is.
+			return append(old.raw[:len(old.raw):len(old.raw)], more...), nil
+		}
+	}
+	return c.st.Events(ctx, id, 0, 0)
+}
+
 // maxViews bounds the per-session view cache.
 const maxViews = 16
 
@@ -269,7 +290,8 @@ const maxViews = 16
 type viewEntry struct {
 	head     uint64
 	sealedNs int64
-	evs      []core.Event
+	raw      []core.Event // as stored; never modified, so a newer entry can extend it
+	evs      []core.Event // raw with transaction outcomes and orphans resolved
 	used     uint64
 
 	mu    sync.Mutex
@@ -308,8 +330,10 @@ func (v *viewEntry) getSummary(id string) Summary {
 }
 
 // viewOf returns the session's resolved events, recomputing only when a new
-// Seq was stored or the seal changed since the cached copy. Reads never touch
-// the sequencer.
+// Seq was stored or the seal changed since the cached copy. A cached copy is
+// extended with the events stored since, instead of reading the session
+// again, so polling a live session costs one read of each event in total.
+// Reads never touch the sequencer.
 func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	head, err := c.st.Head(ctx, id)
 	if err != nil {
@@ -324,15 +348,16 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 		sealedNs = si.SealedAt.UnixNano() | 1
 	}
 	c.vmu.Lock()
-	if e := c.views[id]; e != nil && e.head == head && e.sealedNs == sealedNs {
+	old := c.views[id]
+	if old != nil && old.head == head && old.sealedNs == sealedNs {
 		c.vtick++
-		e.used = c.vtick
+		old.used = c.vtick
 		c.vmu.Unlock()
-		return e, nil
+		return old, nil
 	}
 	c.vmu.Unlock()
 
-	evs, err := c.st.Events(ctx, id, 0, 0)
+	evs, err := c.extend(ctx, id, old, head)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +365,7 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	if si != nil {
 		orph = setOf(si.Orphaned)
 	}
-	e := &viewEntry{head: head, sealedNs: sealedNs, evs: resolve(evs, nil, si != nil, orph)}
+	e := &viewEntry{head: head, sealedNs: sealedNs, raw: evs, evs: resolve(evs, nil, si != nil, orph)}
 	if n := len(e.evs); n > 0 {
 		e.head = e.evs[n-1].Seq // never label the entry newer than its content
 	} else {
