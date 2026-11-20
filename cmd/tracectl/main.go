@@ -45,6 +45,9 @@ session results (collector):
                                 the call tree; ~> marks async work a span triggered
   show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
+  diff <id|name a> <id|name b> [--json] [--fail-on-diff] [--ignore-counts]
+                                what differs in b (candidate) from a (baseline): failures, mutations,
+                                events, first divergence; --fail-on-diff exits 3 when anything differs
 
   version                       print the tracectl version
 
@@ -86,6 +89,7 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"trace":        (*cli).trace,
 	"show":         (*cli).show,
 	"export":       (*cli).export,
+	"diff":         (*cli).diff,
 	"version":      (*cli).version,
 }
 

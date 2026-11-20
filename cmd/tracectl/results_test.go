@@ -22,6 +22,9 @@ type resultsEnv struct {
 	cp, col string
 	sum     client.Summary
 	deleted []string
+	// events overrides, per session name, the events the collector serves;
+	// a session without an entry gets the default ones.
+	events map[string][]core.Event
 }
 
 func newResultsEnv(t *testing.T) *resultsEnv {
@@ -43,7 +46,18 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		from, _ := strconv.ParseUint(r.URL.Query().Get("from_seq"), 10, 64)
-		page := slicex.Filter(evs, func(e core.Event) bool { return e.Seq >= from })
+		all := evs
+		if len(env.events) > 0 {
+			s, err := client.Attach(r.Context(), client.Options{BaseURL: env.cp}, r.PathValue("id"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			if over, ok := env.events[s.Info().Name]; ok {
+				all = over
+			}
+		}
+		page := slicex.Filter(all, func(e core.Event) bool { return e.Seq >= from })
 		if n, _ := strconv.Atoi(r.URL.Query().Get("limit")); n > 0 && len(page) > n {
 			page = page[:n]
 		}
