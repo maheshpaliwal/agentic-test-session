@@ -80,17 +80,19 @@ TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
 ## Record a session
 
 ```bash
-go build -o tracectl ./cmd/tracectl      # or: go run ./cmd/tracectl <command>
+go install ./cmd/tracectl                # puts tracectl on your PATH; or: go run ./cmd/tracectl <command>
 
 tracectl doctor                          # both services answer; which services are connected
-                                         # (CI preflight: --require-services N exits 3 with fewer)
+                                         # (CI preflight: --require-services N exits 3 with fewer than N
+                                         #  connected SDK instances; replicas count one each)
 ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
 curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
 tracectl stop my-run --wait              # drains async work, then seals
 ```
 
-`stop`, `abort`, `rename`, `wait` and `status` print the session as JSON; with `--short` they print one line,
-`<id> <STATE>`, followed by ` incomplete` when the session is.
+`stop`, `abort`, `rename` and `wait` print the session as JSON; `status` adds `name:` and `bindings:` lines after
+it, so it is not pure JSON. With `--short` all five print one line, `<id> <STATE>`, followed by ` incomplete`
+when the session is.
 
 A request joins a session through `x-tsession-id: <id>`, or through an attribute bound to the session (user-id
 header, JWT claim, cookie, query parameter; see [`docs/BINDING.md`](docs/BINDING.md)). Only the first
@@ -141,7 +143,8 @@ tracectl run --name my-run --fail-on-error --fail-on-incomplete --fail-on-empty 
 # The command runs in its own process group, so it cannot read from the terminal; give --ttl more than its runtime.
 
 # or step by step, on a session that has been stopped
-# gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included), or no events at all
+# gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included, or a session
+# the control plane no longer knows), or no events at all
 tracectl report my-run --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
 tracectl report my-run --format junit -o tsession-junit.xml
 # Limit: the gates see what reached the collector. A service that could not deliver its events (wrong
@@ -208,7 +211,9 @@ The collector's backend is chosen with `--store` (or `TSESSION_COLLECTOR_STORE`)
 | `dynamodb` | AWS | `--dynamo-table`, `--dynamo-region`, `--dynamo-endpoint`, `--dynamo-create-table` |
 
 Prefer the `TSESSION_COLLECTOR_*` environment variables for connection strings; flag values show up in the
-process list. The `dynamodb` backend has only been tested against an in-process fake, not a real DynamoDB.
+process list. The `dynamodb` backend has only been tested against an in-process fake, not a real DynamoDB. `make it` and CI
+run Postgres and Redis only: the `mongo` store and `tsql` on MySQL are not exercised there, and the MySQL
+primary-key lookup has never run against a live server.
 
 - **Collector events** are kept until removed. `--retention 168h` (`TSESSION_COLLECTOR_RETENTION`) deletes
   sessions that long after their seal; the default `0` keeps everything.

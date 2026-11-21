@@ -14,6 +14,14 @@ Before deploying:
   `controlplane.Evictor.Evict` is now `Evict(ids ...string)`. A store that keeps the old `Evict(id string)` still
   compiles, because the interface is optional, but is then silently not used for eviction.
 - `collector.Config` and `controlplane.Config` gained fields; unkeyed struct literals no longer compile.
+- `tsql` records rows under the primary key the database catalog names, where it used `id`, and records no diff
+  for an `UPDATE` whose row cannot be read back. Tests that assert on recorded keys or diffs of tables keyed by
+  something other than `id` will see different values, and the database user needs to read the catalog
+  (`pg_index`, `information_schema`); `WithPKLookup(false)` restores the old key choice.
+- `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
+  both were ignored.
+- A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
+  retention by listing every session.
 - Collector on Postgres: the first start of this version builds two indexes on `sessions`
   (`sessions_sealed_at`, `sessions_unsealed`), not `CONCURRENTLY`. A session's first event waits while they
   build; measured at 0.84 s for 2 million sessions. An older collector keeps working against the new schema.
@@ -50,7 +58,8 @@ once, so `tsessiontest.Run` cannot guarantee that a test's first request is reco
 
 Rolling back:
 
-- Collector, SDKs, dashboard: no data format changed (no schema change in any store, no protobuf change).
+- Collector, SDKs, dashboard: no data format changed (no table, column or protobuf change; Postgres gains two indexes that an
+  older collector ignores).
   Sessions deleted by the API or by retention stay deleted.
 - Control plane with `--store-file`: stop it cleanly first. A clean stop folds `<file>.journal` into `<file>`,
   which the old binary reads. After an unclean stop the old binary ignores the journal: changes since the last
@@ -102,7 +111,8 @@ Rolling back:
   control plane accepts `--listen` as well as `--addr`.
 - **Paged session list.** `GET /v1/sessions` takes `limit` (1..1000), `before` (a cursor) and `name` (exact
   match) next to `state`. With `limit` the newest sessions come first, with `X-Tsession-Next` and
-  `X-Tsession-Total` headers; without it the response is unchanged. `X-Tsession-Unreadable` says how many stored
+  `X-Tsession-Total` headers. Without it the response is as before, except that `name` now filters (it was
+  ignored) and `before` is refused with `400` (it was ignored). `X-Tsession-Unreadable` says how many stored
   sessions could not be read into a response. `client.ListPage`; `tracectl list --limit N`; `tracectl` resolves
   a name with the filter instead of listing everything; the dashboard loads the newest 200 sessions with
   "Load more", and its search covers the sessions that are loaded.
@@ -171,7 +181,7 @@ Rolling back:
   reach the dashboard can delete finished sessions. The kill switch and the collector's internal API stay
   blocked.
 - The collector has a read timeout of one minute per request and the servers close idle connections after two
-  minutes.
+  minutes (the dashboard after one).
 
 ### Fixed
 
@@ -189,7 +199,8 @@ Rolling back:
   `-> ∅`, no key). Primary keys are now read from the database catalog (Postgres, MySQL; the MySQL query has not
   been run against a live server), once per table per handle and again after 30 seconds. `WithPKColumns` still
   wins; `WithPKLookup(false)` turns the lookup off. Cost: three more round trips on the first traced write to a
-  table, and such tables now take 7 round trips per `UPDATE` instead of 4, because the row is read back.
+  table, and a table whose key is not `id` now takes the same 7 round trips per `UPDATE` as any other, because its row
+  is read back (before, it was not).
 - `tsql`: an `UPDATE` whose row cannot be read back records no diff and reads "after image unavailable" in
   `tracectl` and the dashboard; a key that matches more rows than were written is flagged `pk_not_unique`
   instead of recording another row's values. New flag `pk_lookup_failed`.

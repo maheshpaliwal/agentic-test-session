@@ -117,7 +117,8 @@
 // "ROLLBACK"), which also puts statement_timeout back to what the application
 // had. An UPDATE reads the rows before and after (7 round trips in all), a
 // DELETE before and an INSERT with its key in VALUES after (4 each); an INSERT
-// whose key the database generates is not re-read (1). Sending two statements
+// whose key the database generates is not re-read (1). These counts were
+// measured with pgx on Postgres 14 only. Sending two statements
 // in one text needs a driver that uses the simple query protocol for an Exec
 // without arguments (pgx and lib/pq do). tsql finds out per connection, where a
 // refusal cannot hurt, so the first capture on a connection costs one or two

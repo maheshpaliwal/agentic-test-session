@@ -30,8 +30,9 @@ session lifecycle (control plane):
   status <id|name> [--short]
   list [--state STATE] [--limit N]   all sessions, oldest first; with --limit the newest N
   wait <id|name> [--timeout D] [--short]
-  (rename, stop, abort, status and wait print the session as JSON; with --short one line for
-   scripts: "<id> <STATE>", followed by " incomplete" when the session is)
+  (rename, stop, abort and wait print the session as JSON, status adds "name:" and "bindings:" lines
+   after it; with --short all five print one line for scripts: "<id> <STATE>", followed by
+   " incomplete" when the session is)
   watch-docker [--docker BIN]   start/stop sessions from containers labelled tsession.id=<name>
                                 (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)
 
@@ -75,7 +76,7 @@ session results (collector):
                                 the call tree; ~> marks async work a span triggered
   show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
-  report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete]
+  report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
                                 a CI report: Markdown for a job summary (default) or JUnit XML, with
                                 each failure traced to its root request; --fail-on flags as in summary
   diff <id|name a> <id|name b> [--json] [--fail-on-diff] [--ignore-counts]

@@ -211,8 +211,8 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   `Mutation.Effective` (true/false) on all that tx's mutations at seal/read time. No TxID => effective.
 - Postgres store: tables live in a dedicated schema (`--pg-schema` / `TSESSION_COLLECTOR_PG_SCHEMA`, default `tsession`;
   `[a-z_][a-z0-9_]{0,62}` only), created if missing and set as the pool `search_path`.
-- Storage interface (collector/store): in-memory impl (default, tests), Postgres (pgx), MongoDB (`store/mongostore`) and DynamoDB (`store/dynamostore`) impls, selected with `--store mem|pg|mongo|dynamodb`. The Postgres impl uses pgx with the
-  large payloads are truncated inline; there is no blob store.
+- Storage interface (collector/store): in-memory impl (default, tests), Postgres (pgx), MongoDB (`store/mongostore`) and DynamoDB (`store/dynamostore`) impls, selected with `--store mem|pg|mongo|dynamodb`.
+  Large payloads are truncated inline; there is no blob store.
 
 ### Protobuf ingest
 Mandatory: `POST /v1/ingest` requires `Content-Type: application/x-protobuf` (parameters ignored); any other or missing
