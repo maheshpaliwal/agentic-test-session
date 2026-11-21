@@ -14,6 +14,9 @@ Before deploying:
   `controlplane.Evictor.Evict` is now `Evict(ids ...string)`. A store that keeps the old `Evict(id string)` still
   compiles, because the interface is optional, but is then silently not used for eviction.
 - `collector.Config` and `controlplane.Config` gained fields; unkeyed struct literals no longer compile.
+- Collector on Postgres: the first start of this version builds two indexes on `sessions`
+  (`sessions_sealed_at`, `sessions_unsealed`), not `CONCURRENTLY`. A session's first event waits while they
+  build; measured at 0.84 s for 2 million sessions. An older collector keeps working against the new schema.
 - `client.ErrConflict` has a new message (`errors.Is` still works). `thttp`'s `Hijack` on a writer that does not
   support it returns an error that wraps `http.ErrNotSupported` instead of the bare value.
 - Scripts: `tracectl` exits 2 for an unknown command (was 1) and 0 for `-h`; `--fail-on-*` gates exit 3. The 403
@@ -157,6 +160,8 @@ Rolling back:
 
 ### Fixed
 
+- Collector: a retention sweep that runs out of time resumes where it stopped, so sessions that cannot be
+  deleted no longer block the ones after them.
 - `tsql` on Postgres: a capture that ran longer than a second left its `statement_timeout` and savepoint in
   the application's transaction, or in autocommit a read-only transaction that made the application's write
   fail. The fence is now closed under its own deadline.
@@ -190,6 +195,10 @@ Rolling back:
 
 ### Performance
 
+- Collector retention sweep on the in-memory and Postgres stores reads only the sealed sessions that may be
+  due instead of listing every session and reading every seal. With 10,000 sealed sessions and nothing due, a
+  Postgres sweep went from about 0.4–1 s to about 1 ms. Its cost still grows with the number of never-sealed
+  sessions, and the MongoDB and DynamoDB stores still list every session per sweep.
 - `tsql` on Postgres: fewer round trips per traced write. The capture fence is closed by rolling back to its
   savepoint, and its opening and closing statement pairs go out as one text each where the driver allows it
   (detected per connection). Measured on Postgres 14 with pgx: a traced `UPDATE` takes 7 round trips instead of
