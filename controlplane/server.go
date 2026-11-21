@@ -140,10 +140,16 @@ func (m *Manager) hList(w http.ResponseWriter, r *http.Request) {
 	if p.Unreadable > 0 {
 		h.Set(HeaderUnreadable, strconv.Itoa(p.Unreadable))
 	}
-	if p.Sessions == nil {
-		p.Sessions = []Session{}
+	// A list carries the verdict of every session (incomplete_reasons,
+	// delivery_unconfirmed) and leaves the reports behind it to GET
+	// /v1/sessions/{id}: up to MaxDeliveryInstances of them per session are too
+	// much for a page of sessions.
+	out := make([]Session, len(p.Sessions))
+	for i, s := range p.Sessions {
+		s.Delivery = nil
+		out[i] = s
 	}
-	writeJSON(w, http.StatusOK, p.Sessions)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (m *Manager) hGet(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +235,8 @@ func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	ch, cancel := m.subscribe(identity(r.Header.Get(core.HeaderService)), identity(r.Header.Get(core.HeaderInstance)), true)
+	ch, cancel := m.subscribe(Subscriber{Service: identity(r.Header.Get(core.HeaderService)), Instance: identity(r.Header.Get(core.HeaderInstance)),
+		DeliveryInstance: identity(r.Header.Get(core.HeaderDeliveryInstance)), stream: true})
 	defer cancel()
 	sent := uint64(0) // generation written but not yet flushed
 	hb := time.NewTicker(m.cfg.HeartbeatPeriod)

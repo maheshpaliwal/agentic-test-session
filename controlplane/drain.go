@@ -23,7 +23,8 @@ func (m *Manager) startDrainLocked(id string) {
 
 // drain polls the collector until the session is quiet or max_drain elapses,
 // seals it, and records the outcome. Quiet also means that no SDK instance
-// that sent delivery reports still holds events it may yet deliver (see
+// that sent delivery reports still owes the collector events it may yet
+// deliver, and that every connected instance has reported (see
 // deliverySettled). A seal that still fails when
 // SealRetryBudget is spent ends the session SEALED with SealError and
 // SealPending, and is retried in the background (see sealretry.go).
@@ -64,13 +65,15 @@ func (m *Manager) drain(ctx context.Context, id string) {
 			// The reports are looked at last, and only once the collector is
 			// quiet: a delivery it has just seen restarts the quiet window, so
 			// the instance has that long to say so before the reports close.
-			if st.Pending == 0 && time.Since(changedAt) >= quiet && m.deliverySettled(id, begin, false) {
+			if st.Pending == 0 && time.Since(changedAt) >= quiet && m.deliverySettled(id, begin, countsOf(st, true), false) {
 				break
 			}
 		}
 		if !time.Now().Before(deadline) {
+			// The reports close here too: one that arrived during the seal
+			// would be stored and never judged.
 			timedOut = true
-			m.deliverySettled(id, begin, true)
+			m.deliverySettled(id, begin, countsOf(last, haveStatus), true)
 			break
 		}
 		select {
@@ -80,6 +83,16 @@ func (m *Manager) drain(ctx context.Context, id string) {
 		}
 	}
 
+	// The reports are closed. The collector is asked once more, so that the
+	// verdict holds them against counts that are no older than they are: an
+	// event that was delivered and reported between the last look and the
+	// close must not read as missing.
+	if st, err := m.cfg.Collector.DrainStatus(ctx, id); err == nil {
+		last, haveStatus = st, true
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	res, err := m.sealWithRetry(ctx, id)
 	if ctx.Err() != nil {
 		return
@@ -103,7 +116,7 @@ func (m *Manager) drain(ctx context.Context, id string) {
 	}
 	m.tel.finished.With(string(cur.State)).Inc()
 	cur.DrainTimedOut = timedOut
-	short := m.judgeDeliveryLocked(&cur)
+	short := m.judgeDeliveryLocked(&cur, countsOf(last, haveStatus))
 	cur.Incomplete = timedOut || err != nil || res.Incomplete || short
 	cur.DroppedEvents = last.DroppedEvents
 	cur.BundleURI = res.BundleURI

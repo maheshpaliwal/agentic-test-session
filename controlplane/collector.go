@@ -20,6 +20,20 @@ type DrainStatus struct {
 	ReceivedUnixNs  int64 `json:"received_unix_ns,omitempty"`
 	EventCount      int64 `json:"event_count"`
 	DroppedEvents   int64 `json:"dropped_events"`
+	// Instances is how many events of the session the collector has from
+	// every SDK instance, stored or still in its reorder window; the delivery
+	// reports are held against it (see deliveryVerdict). Nil from a collector
+	// that does not send it. With InstancesTruncated the list is not complete:
+	// an instance it does not name may have sent events.
+	Instances          []InstanceCount `json:"instances"`
+	InstancesTruncated bool            `json:"instances_truncated,omitempty"`
+}
+
+// InstanceCount is one entry of DrainStatus.Instances.
+type InstanceCount struct {
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance"`
+	Events   int64  `json:"events"`
 }
 
 // SealResult mirrors the collector's seal response.

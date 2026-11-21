@@ -134,16 +134,20 @@ type Info struct {
 	Bindings      []Binding `json:"bindings,omitempty"`
 	// Delivery is the last delivery report of every SDK instance that sent
 	// one: what it recorded for the session and what became of it. Services
-	// with an older SDK, or that were never connected, are not listed.
+	// with an older SDK, or that were never connected, are not listed. It is
+	// filled by Get and the calls that end a session, not by List: a list of
+	// sessions carries the verdict below without the reports behind it.
 	Delivery []Delivery `json:"delivery,omitempty"`
 	// IncompleteReasons says why the control plane marked the session
 	// incomplete: one line per instance whose events did not all reach the
-	// collector. Such a session is Incomplete even when the collector's
+	// collector, by the collector's own count of what it has from that
+	// instance. Such a session is Incomplete even when the collector's
 	// summary is not: the missing events never got there.
 	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
-	// DeliveryUnconfirmed names instances that went silent while they held
-	// undelivered events, without evidence that these were lost. A warning:
-	// the session is not Incomplete because of it.
+	// DeliveryUnconfirmed names instances of which the control plane cannot
+	// say whether all their events arrived: one that recorded more after its
+	// last report and then stopped reporting, say. A warning: the session is
+	// not Incomplete because of it, and it is not known to be complete.
 	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
 
@@ -153,9 +157,12 @@ type Delivery struct {
 	Service   string `json:"service,omitempty"`
 	Instance  string `json:"instance"`
 	Recorded  int64  `json:"recorded"`
-	Delivered int64  `json:"delivered"` // accepted by the collector
-	Dropped   int64  `json:"dropped"`   // lost for good
+	Delivered int64  `json:"delivered"` // accepted by the collector, as far as the instance saw
+	Dropped   int64  `json:"dropped"`   // given up by the instance
 	Buffered  int64  `json:"buffered"`  // still held by the instance when it last reported
+	// DeliveredTotal is what the instance had delivered for all its sessions
+	// together when it reported.
+	DeliveredTotal int64 `json:"delivered_total,omitempty"`
 	// LastError is why the instance's last request to the collector failed.
 	LastError string `json:"last_error,omitempty"`
 	// Final is set when the instance reported after it had seen the session
@@ -511,9 +518,13 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 // normally the SDK inside an instrumented service. Service and Instance are
 // empty for SDKs that do not report them.
 type Subscriber struct {
-	Service     string    `json:"service,omitempty"`
-	Instance    string    `json:"instance,omitempty"`
-	ConnectedAt time.Time `json:"connected_at"`
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	// DeliveryInstance is the instance name the process sends its delivery
+	// reports under (the one its events carry); empty for an SDK that sends
+	// none.
+	DeliveryInstance string    `json:"delivery_instance,omitempty"`
+	ConnectedAt      time.Time `json:"connected_at"`
 	// Generation is the newest version of the active set sent to it.
 	Generation uint64 `json:"generation"`
 }

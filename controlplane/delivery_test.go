@@ -42,6 +42,31 @@ func (c *scriptCollector) arrived() {
 	c.mu.Unlock()
 }
 
+// has makes the collector count n events of an instance, as a collector that
+// reports per-instance counts does (see DrainStatus.Instances). Until the
+// first call, or counting, the collector is one that gives no counts.
+func (c *scriptCollector) has(service, instance string, n int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	list := make([]InstanceCount, 0, len(c.st.Instances)+1) // never changed in place: answers share it
+	for _, i := range c.st.Instances {
+		if i.Service != service || i.Instance != instance {
+			list = append(list, i)
+		}
+	}
+	c.st.Instances = append(list, InstanceCount{Service: service, Instance: instance, Events: n})
+	c.st.EventCount++
+}
+
+// counting makes the collector one that reports per-instance counts, with
+// none so far.
+func (c *scriptCollector) counting() *scriptCollector {
+	c.mu.Lock()
+	c.st.Instances = []InstanceCount{}
+	c.mu.Unlock()
+	return c
+}
+
 func (c *scriptCollector) setPending(n int) {
 	c.mu.Lock()
 	c.st.Pending = n
@@ -169,11 +194,13 @@ func TestDeliveryVerdict(t *testing.T) {
 		{"final, nothing delivered", failing(final(rep("a", "i", 5, 0, 0)), "connection refused"), "incomplete"},
 		{"dropped events", final(rep("a", "i", 5, 4, 1)), "incomplete"},
 		{"dropped events, periodic report", rep("a", "i", 5, 4, 1), "incomplete"},
-		{"went silent failing, never delivered", failing(rep("a", "i", 5, 0, 0), "connection refused"), "incomplete"},
+		// Its own word is not enough to condemn it: it may have delivered
+		// everything after that report and been killed before the next.
+		{"went silent failing, never delivered", failing(rep("a", "i", 5, 0, 0), "connection refused"), "unconfirmed"},
 		{"went silent holding events after delivering some", failing(rep("a", "i", 5, 3, 0), "timeout"), "unconfirmed"},
 		{"went silent holding events, no error seen", rep("a", "i", 5, 0, 0), "unconfirmed"},
 	} {
-		short, unc := deliveryVerdict([]Delivery{tc.d})
+		short, unc := deliveryVerdict([]Delivery{tc.d}, collectorCounts{})
 		got := ""
 		switch {
 		case len(short) == 1 && len(unc) == 0:
@@ -192,10 +219,10 @@ func TestDeliveryVerdict(t *testing.T) {
 		failing(final(rep("orders-api", "host-1-ab12cd", 7, 0, 0)), "Post http://127.0.0.1:1/v1/ingest: connection refused"),
 		final(rep("inventory", "host-2-ef34ab", 3, 3, 0)),
 		final(rep("", "bare", 4, 2, 1)),
-	})
+	}, collectorCounts{})
 	want := []string{
-		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events reached the collector, 7 still undelivered (last error: Post http://127.0.0.1:1/v1/ingest: connection refused)",
-		"instance bare: 2 of 4 recorded events reached the collector, 1 still undelivered, 1 dropped",
+		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events were delivered by the instance's own count (the collector gave none), 7 still undelivered (last error: Post http://127.0.0.1:1/v1/ingest: connection refused)",
+		"instance bare: 2 of 4 recorded events were delivered by the instance's own count (the collector gave none), 1 still undelivered, 1 dropped by the SDK",
 	}
 	if !reflect.DeepEqual(short, want) || len(unc) != 0 {
 		t.Fatalf("reasons\n got %q\nwant %q\nunconfirmed %q", short, want, unc)
@@ -206,7 +233,7 @@ func TestDeliveryVerdict(t *testing.T) {
 	for i := range 40 {
 		many = append(many, final(rep("svc", fmt.Sprintf("i%02d", i), 1, 0, 0)))
 	}
-	if short, _ := deliveryVerdict(many); len(short) != maxDeliveryReasons+1 || short[maxDeliveryReasons] != "and 24 more instance(s)" {
+	if short, _ := deliveryVerdict(many, collectorCounts{}); len(short) != maxDeliveryReasons+1 || short[maxDeliveryReasons] != "and 24 more instance(s)" {
 		t.Fatalf("%d reasons, last %q", len(short), short[len(short)-1])
 	}
 }
@@ -390,10 +417,16 @@ func TestDrainJudgesVanishedInstanceOnItsLastReport(t *testing.T) {
 		t.Fatalf("sealed after %v: the instance might still have delivered", took)
 	}
 
+	// Failing when it last reported, and never heard of again: with a
+	// collector that gives no counts that is all there is to go on, and it
+	// is not enough to call the events lost.
 	e = newDeliveryEnv(t, 100*time.Millisecond, nil)
 	e.report(failing(rep("gone", "g", 5, 0, 0), "no route to host"))
 	s, _ = e.stop()
-	wantShortfall(t, s, "service gone (instance g): 0 of 5", "no route to host")
+	if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "service gone (instance g): 0 of 5") ||
+		!strings.Contains(s.DeliveryUnconfirmed[0], "no route to host") {
+		t.Fatalf("a failing instance that went silent: incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+	}
 }
 
 // Dropped events are lost for good: nothing to wait for.

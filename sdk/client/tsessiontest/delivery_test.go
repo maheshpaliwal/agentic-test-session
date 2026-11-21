@@ -37,7 +37,7 @@ func TestRequireNoFailuresWithUndeliveredEvents(t *testing.T) {
 	if !info.Incomplete || len(info.IncompleteReasons) != 1 || len(info.Delivery) != 2 {
 		t.Fatalf("test setup: expected a delivery shortfall, got %+v", info)
 	}
-	if !failed || !strings.Contains(out, "is incomplete: service orders-api (instance o-1): 0 of 7 recorded events reached the collector") ||
+	if !failed || !strings.Contains(out, "is incomplete: service orders-api (instance o-1): 0 of 7 recorded events") || !strings.Contains(out, "7 dropped") ||
 		strings.Contains(out, "inventory") {
 		t.Fatalf("RequireNoFailures: failed=%v output %q", failed, out)
 	}

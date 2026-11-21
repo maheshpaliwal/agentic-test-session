@@ -72,6 +72,9 @@ type Manager struct {
 	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
 	// delivery holds what is not stored of the delivery reports of live sessions.
 	delivery map[string]*deliveryState
+	// progress is, per reporting instance, when it was last seen to deliver
+	// events of any session (see noteProgressLocked).
+	progress map[string]instanceProgress
 
 	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
 	// O(all sessions ever). terminal queues finished sessions for eviction.
@@ -139,7 +142,7 @@ func NewManager(cfg Config) *Manager {
 		subs:    map[chan ActiveSet]Subscriber{},
 		cancels: map[string]context.CancelFunc{},
 		pending: map[string]*sealRetry{},
-		live:    map[string]Session{}, delivery: map[string]*deliveryState{},
+		live:    map[string]Session{}, delivery: map[string]*deliveryState{}, progress: map[string]instanceProgress{},
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
@@ -445,6 +448,7 @@ func (m *Manager) Sweep(now time.Time) {
 		}
 	}
 	m.pruneLocked(now)
+	m.pruneProgressLocked(time.Now()) // on the clock the progress was noted with
 	m.retrySealsLocked(now)
 	if changed {
 		m.broadcastLocked()
@@ -538,9 +542,14 @@ func (m *Manager) activeLocked() ActiveSet {
 type Subscriber struct {
 	// Service and Instance are what the SDK reported about itself; both are
 	// empty for SDKs that do not send them and for other clients.
-	Service     string    `json:"service,omitempty"`
-	Instance    string    `json:"instance,omitempty"`
-	ConnectedAt time.Time `json:"connected_at"`
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	// DeliveryInstance is the instance name the follower sends its delivery
+	// reports under (the one its events carry, unique to its process); empty
+	// for an SDK that sends no reports. A follower that names it reports every
+	// draining session, also one it recorded nothing for.
+	DeliveryInstance string    `json:"delivery_instance,omitempty"`
+	ConnectedAt      time.Time `json:"connected_at"`
 	// Generation is the newest ActiveSet.Generation written to this follower's
 	// connection. A follower at or past the generation in which a session
 	// became active has been sent that session (sent, not necessarily applied).
@@ -577,13 +586,14 @@ func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
 
 // SubscribeAs is Subscribe for a follower that identified itself.
 func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func()) {
-	return m.subscribe(service, instance, false)
+	return m.subscribe(Subscriber{Service: service, Instance: instance})
 }
 
-func (m *Manager) subscribe(service, instance string, stream bool) (chan ActiveSet, func()) {
+func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
+	sub.ConnectedAt = time.Now().UTC()
 	m.mu.Lock()
-	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC(), stream: stream}
+	m.subs[ch] = sub
 	ch <- m.activeLocked()
 	m.mu.Unlock()
 	return ch, func() {
