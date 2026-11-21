@@ -75,6 +75,22 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		}
 	}
 
+	// warned is a session that ran while the service did not record and that
+	// nothing ties to the service, no delivery report and no events at the
+	// collector: whether the service missed events of it cannot be known, so it
+	// is a warning (delivery_unconfirmed), which the strict gate fails on.
+	warned := func(t *testing.T, r deliveryRun, service, how string) {
+		t.Helper()
+		if r.err != nil || len(r.info.IncompleteReasons) != 0 || len(r.info.DeliveryUnconfirmed) != 1 {
+			panic(fmt.Sprintf("a session that ran while the service did not record, and has nothing of it: %s", r))
+		}
+		if why := r.info.DeliveryUnconfirmed[0]; !strings.HasPrefix(why, "service "+service+" (instance ") ||
+			!strings.Contains(why, "stopped recording after an internal error") || !strings.Contains(why, how) ||
+			!strings.Contains(why, "it may have missed events it should have recorded") {
+			panic("the warning: " + why)
+		}
+	}
+
 	// The subscriber panics once: recording stops until the subscriber, started
 	// again a second later, has the active sessions anew. The host answers
 	// throughout; the events of that second are missing, and the session says so.
@@ -121,10 +137,8 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		if r.got >= 102 {
 			panic(fmt.Sprintf("the events sent while the subscriber was down were recorded: %s", r))
 		}
-		if o := e.finish(other, 0); !o.info.Incomplete || len(o.info.IncompleteReasons) != 1 ||
-			!strings.Contains(o.info.IncompleteReasons[0], "stopped recording after an internal error") {
-			panic(fmt.Sprintf("the other session that ran meanwhile: %s", o))
-		}
+		// The service recorded nothing for the other session that ran meanwhile.
+		warned(t, e.finish(other, 0), "orders-api", "its subscriber had panicked and it recorded nothing for a time; it records again now")
 		if out := a.log(); strings.Count(out, "the subscriber goroutine panicked") != 1 || strings.Contains(out, "stays stopped") ||
 			!strings.Contains(out, "the application is not affected") {
 			t.Errorf("the service's log:\n%s", out)
@@ -158,8 +172,10 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		if err := a.burst(s, 50); err != nil || !a.alive() {
 			panic(fmt.Sprintf("the host after the subscriber gave up: %v, alive %v", err, a.alive()))
 		}
+		// It recorded nothing for the session, from its first request on: the
+		// session has no report and no events of it, and says what it was told.
 		r := e.finish(s, 102)
-		stopped(t, r, "orders-api", "its subscriber panicked repeatedly and stays stopped")
+		warned(t, r, "orders-api", "its subscriber panicked repeatedly and stays stopped")
 		if r.got != 0 {
 			panic(fmt.Sprintf("events were recorded without an active set: %s", r))
 		}

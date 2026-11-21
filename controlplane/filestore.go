@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
@@ -132,6 +133,9 @@ type FileStore struct {
 	// panicCount counts the panics of the store's goroutines, nil until a
 	// Manager sets it (see countPanics).
 	panicCount atomic.Pointer[func(goroutine string)]
+	// watch is told while a compaction has panicked and none went through
+	// since; nil (which watches nothing) until a Manager sets it.
+	watch atomic.Pointer[gosafe.Watch]
 
 	// testHookListed, if set, runs in list between taking the entries from
 	// the index and reading their lines.
@@ -1486,6 +1490,7 @@ func (f *FileStore) compactLocked() error {
 	}
 	f.journalSize = 0
 	f.compactAt = max(f.compactMin, f.snapSize)
+	f.watch.Load().Release("compaction") // one went through
 	return nil
 }
 
@@ -1543,8 +1548,17 @@ func (f *FileStore) maybeCompactLocked() {
 		// One compaction: not run again by the helper, the journal growing
 		// starts the next. After a panic the bookkeeping comes first: a
 		// logger that panics must not leave Close waiting for the compaction.
+		//
+		// It has no Watch for the same reason: the helper never waits for its
+		// restart. Its OnPanic says that the service is degraded instead (see
+		// compactionDegraded). Its panics do not count against the panic
+		// budget, which ends the service: a compaction that fails loses
+		// nothing (the journal is whole, and only longer), and the store
+		// compacts when it is opened, so a service ended for it would meet the
+		// same panic before it could serve at all.
 		gosafe.Go(gosafe.Options{Name: "compaction", OnPanic: func(p gosafe.Panic) {
 			defer gosafe.Slog(f.log, f.countPanic)(p)
+			defer f.watch.Load().Hold("compaction", time.Now().Add(compactionDegraded))
 			f.compactionPanicked(done, syncArchive)
 		}}, func() { f.compactInBackground(hot, upto, syncArchive, done) })
 		f.archiveUnsynced = false
@@ -1553,7 +1567,17 @@ func (f *FileStore) maybeCompactLocked() {
 
 // countPanics implements panicCounter: the Manager counts the panics of a
 // compaction in tsession_controlplane_goroutine_panics_total.
-func (f *FileStore) countPanics(count func(goroutine string)) { f.panicCount.Store(&count) }
+func (f *FileStore) countPanics(count func(goroutine string), watch *gosafe.Watch) {
+	f.panicCount.Store(&count)
+	f.watch.Store(watch)
+}
+
+// compactionDegraded is how long a control plane is degraded after a
+// compaction panicked, unless one goes through before: the longest a loop
+// waits for its restart. The next compaction has no time of its own, it
+// waits for the journal to grow, and a store that is written seldom must not
+// leave the service degraded for good: the journal is whole, and only longer.
+const compactionDegraded = gosafe.DefaultMaxBackoff
 
 func (f *FileStore) countPanic(goroutine string) {
 	if count := f.panicCount.Load(); count != nil {
@@ -1636,6 +1660,7 @@ func (f *FileStore) compactInBackground(hot []Session, upto int64, syncArchive b
 	}
 	f.journalSize = int64(len(rest))
 	f.compactAt = f.journalSize + max(f.compactMin, f.snapSize)
+	f.watch.Load().Release("compaction") // one went through
 }
 
 // writeTemp writes data to a new temp file next to the store, fsyncs it and

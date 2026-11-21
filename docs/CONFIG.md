@@ -132,12 +132,24 @@ Run the services under something that restarts them (`restart: on-failure` in Co
 
 The drain of one session is not part of that budget: after 3 panics it is given up, and the session ends `SEALED` and
 incomplete with an `incomplete_reasons` entry that says that the control plane failed. A pending seal whose attempts
-panic is retried with backoff until the 24 h after which a failing seal is given up.
+panic is retried with backoff until the 24 h after which a failing seal is given up. A compaction of the session
+store that panics is replaced by the next one, when the journal has grown again.
+
+Seal retries and compactions are one goroutine per attempt, so none of them waits for a restart. `/healthz` is
+degraded for them all the same (`seal_retry`, `compaction`): after a seal attempt panicked, until the next attempt is
+due (its backoff, up to a minute); after a compaction panicked, until a compaction goes through, 30 s at most (a
+store that is seldom written must not stay degraded: nothing is lost, the journal is only longer). Their panics do
+not count against the panic budget. That budget ends the service so that it starts with clean state; a seal retry
+is the work of one finished session, which says itself that its seal failed (`seal_error`), and a store that could
+not compact compacts when it is opened, so a service ended for it would meet the same panic before it could serve.
 
 The SDK inside an instrumented service restarts each of its three loops at most 5 times and then leaves it stopped;
 the application is never ended. When its subscriber panics it stops recording at once and tells the control plane,
-again every second while the subscriber is being restarted and once more when recording has resumed; the control
-plane marks the sessions that run when it is told incomplete (`stopped recording after an internal error`). A
+again every second while the subscriber is being restarted and once more when recording has resumed. The control
+plane notes that on the sessions that run when it is told (stored with them, so its own restart does not lose it),
+and when such a session ends it is incomplete (`stopped recording after an internal error`) if the service took
+part in it, by a delivery report or by events at the collector; a session that has nothing of the service says so
+under `delivery_unconfirmed`, a warning: the service may have missed events it should have recorded. A
 subscriber that stays stopped says so once. From then on the service records nothing and is no longer listed by
 `tracectl doctor`, like a service that is not running; sessions started later do not name it, so use
 `tracectl doctor --require-services N` before a run to notice it.

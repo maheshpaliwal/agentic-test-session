@@ -151,10 +151,10 @@ func (m *Manager) hList(w http.ResponseWriter, r *http.Request) {
 	// A list carries the verdict of every session (incomplete_reasons,
 	// delivery_unconfirmed) and leaves the reports behind it to GET
 	// /v1/sessions/{id}: up to MaxDeliveryInstances of them per session are too
-	// much for a page of sessions.
+	// much for a page of sessions. So are the notes of stopped instances.
 	out := make([]Session, len(p.Sessions))
 	for i, s := range p.Sessions {
-		s.Delivery = nil
+		s.Delivery, s.StoppedInstances = nil, nil
 		out[i] = s
 	}
 	writeJSON(w, http.StatusOK, out)

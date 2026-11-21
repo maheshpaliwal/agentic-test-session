@@ -139,11 +139,35 @@ go install ./cmd/tracectl                # puts tracectl on your PATH; or: go ru
 
 tracectl doctor                          # both services answer; which services are connected
                                          # (CI preflight: --require-services N exits 3 with fewer than N
-                                         #  connected SDK instances; replicas count one each)
+                                         #  connected SDK instances; replicas count one each.
+                                         #  --require-delivery exits 3 when a connected service says that it
+                                         #  cannot reach its collector: see below)
 ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
 curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders   # a request to YOUR service from step 2
 tracectl stop my-run --wait              # drains async work, then seals
 ```
+
+`doctor` lists every connected service. "Connected" means that the service follows the control plane; whether it
+can also deliver is a second question, and a service with a wrong `TSESSION_COLLECTOR_URL` used to look healthy
+until a session ran and its events were missing. Each service now asks its collector's `/healthz` when it starts
+and from time to time while it has nothing to send, and tells the control plane what it found, with no session
+running:
+
+```
+connected services  2
+  inventory                inventory-1                  connected 12s
+  orders-api               orders-api-1                 connected 12s  CANNOT REACH COLLECTOR: Get http://collector:7071/healthz: dial tcp: lookup collector: no such host
+note: orders-api cannot reach its collector, so nothing it records would arrive: check TSESSION_COLLECTOR_URL of orders-api (it must be the collector's address as seen from that service)
+```
+
+`tracectl doctor --require-services N --require-delivery` is the preflight for CI: exit 3 when fewer than N services
+are connected, or when one of them says that it cannot reach its collector. A service says so within a few seconds of
+starting (at once when the connection is refused, after its 2 s timeout when nothing answers), and takes it back
+about 5 s after the collector answers. During a run the same flag also fails on a
+service that holds events it cannot deliver (`CANNOT DELIVER`) or whose reports do not arrive
+(`NO DELIVERY REPORTS`). What the check cannot see: a service built with an SDK from before it says nothing about
+its collector and passes (not known is not a failure), and a URL at which something other than a collector answers
+HTTP counts as reached. Credentials in a collector URL are never shown.
 
 No service wired yet? The repository has one that needs no database. Start it with the four variables of step 2
 and send it a request in place of the `curl` above:

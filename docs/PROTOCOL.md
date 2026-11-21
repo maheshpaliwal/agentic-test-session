@@ -42,6 +42,12 @@ Extra optional fields (omitted when empty/false):
   line each (at most 16, then "and N more"; see the verdict in "Delivery accounting"). A warning: the session is
   not `incomplete` because of it, and it is not known to be complete. `--fail-on-unconfirmed` and
   `tsessiontest.RequireDeliveryConfirmed` fail on it.
+- `stopped_instances`: `[{"service","instance","why","at","connected"}]`, the SDK instances that said while the
+  session ran that they stopped recording after an internal error (`stopped` of `POST /v1/delivery`): what each
+  said last, when the control plane was first told, and whether an instance of that name followed the stream then.
+  At most 64; `stopped_instances_more` is `true` when more said so. The two lists above say what the control plane
+  made of it. Omitted when there are none, by a control plane before this field, and (the list, not the flag) by
+  `GET /v1/sessions`, like `delivery`.
 
 TTL expiry is not a shortcut: an ACTIVE session past `ttl_seconds` moves to DRAINING (reason=ttl) and goes through
 the normal drain + seal path. A clean seal records `EXPIRED`; if the seal call keeps failing (retried with
@@ -92,14 +98,44 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   without `instance` or with more than 256 reports, and `413` over 1 MiB. `reports` may be empty: the request then
   says only that the instance's reports arrive.
   An optional `stopped` (text, at most 256 bytes are kept) says that the instance stopped recording after an internal
-  error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. Every session that
-  is `ACTIVE` or `DRAINING` when the request arrives is then `incomplete`, with an `incomplete_reasons` entry that
-  names the service and the instance (`... stopped recording after an internal error (...)`), whether the instance
-  had recorded events for it or not: what it would have recorded since is what is missing. The SDK sends it at the
-  panic, every second while its subscriber is being restarted, and once when recording has resumed; when the
-  subscriber stays stopped it sends it once. Sessions started after the last such request are not marked. A control plane that does not know the field ignores it. Like the reports it is the caller's own
-  word: anyone who can reach the control plane can make every running session incomplete with it, as with reports
-  they can one by one.
+  error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. It is noted on
+  every session that is `ACTIVE` or `DRAINING` when the request arrives (`stopped_instances` of the session, stored
+  with it, so a restart of the control plane does not lose it). What the note means for a session is decided when
+  the session ends:
+  - something ties the instance to the session, a delivery report of it for the session or events of it in the
+    collector's counts: the session is `incomplete`, with an `incomplete_reasons` entry that names the service and
+    the instance (`... stopped recording after an internal error (...), so events of this session it would have
+    recorded since are missing`);
+  - nothing does: one line under `delivery_unconfirmed` (`... stopped recording after an internal error (...) while
+    this session ran; ... whether it took part is unknown: it may have missed events it should have recorded`). An
+    environment has many services that take no part in a given session, and the note is the caller's own word, so
+    it alone does not fail a session; the price is that a service that stopped before it recorded its first event
+    of a session is a warning there, which only the strict gate fails on (see "Which gate").
+
+  The SDK sends it at the panic, every second while its subscriber is being restarted, and once when recording has
+  resumed; when the subscriber stays stopped it sends it once. Sessions started after the last such request are not
+  marked. A session keeps the notes of at most 64 instances (what an instance said last replaces what it said
+  before); the note of an instance that follows the stream or has a report for the session takes the place of one
+  that does neither, and that notes were left out is one more `delivery_unconfirmed` line. A control plane that does
+  not know the field ignores it. Like the reports it is the caller's own word: anyone who can reach the control
+  plane can put such a line into `delivery_unconfirmed` of every running session (at most the 16 lines the list
+  holds, after the lines the control plane found itself), and cannot make a session `incomplete` with it that a
+  report in the same name would not.
+  An optional `collector` `{"reachable":true|false,"error":"..."}` says whether the instance could reach its
+  collector when it last looked. The SDK looks while it has nothing to send: `GET /healthz` on its collector URL
+  when it starts, every 30 s after an answer and every 5 s after none, one request at a time with the timeout of
+  its ingest requests (2 s), from a goroutine that lives for that one request; never while events wait (the
+  requests that carry them say the same) and never on the path of a request of the application. The collector
+  counts as reached when anything answers that is not a server's failure: `200`, a `503` whose body starts with
+  `degraded:` (a collector that is there and says so), and any `3xx`/`4xx` (a proxy that passes only the ingest).
+  No answer, another `5xx`, or a failed request with events counts as not reached, with the error (the URL
+  without userinfo, query and fragment). So it finds an address where nothing listens, a name that does not
+  resolve and a gateway without its upstream; it does **not** find an address where something else answers HTTP.
+  The SDK sends the field with every batch once it has looked, and sends a batch without reports when what it
+  found changes, also while no session runs (not while the control plane refuses the requests of an idle
+  instance). The control plane keeps it with the instance's connection to the stream (`collector` of
+  `GET /v1/subscribers`) and judges no session by it. A control plane that does not know the field ignores it; an
+  SDK that does not send it is not known to reach its collector, nor known not to.
 - `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,delivered_total,last_error,final} ->
   `{"accepted":true|false}`: one report, for clients that send one session at a time (SDKs use the batch).
   `400` for a body that is not such a report, `413` for one over 4 KiB, `404` unknown session, `409` when the
@@ -123,7 +159,7 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
   The SDK sends `X-Tsession-Service` and `X-Tsession-Instance` with the request (optional; shown to operators, not trusted),
   and `X-Tsession-Delivery-Instance` when it sends delivery reports: the instance name of those reports.
-- `GET /v1/subscribers` -> `[{"service","instance","delivery_instance","connected_at","last_delivery_report","delivery_unheard","generation"}]`:
+- `GET /v1/subscribers` -> `[{"service","instance","delivery_instance","connected_at","last_delivery_report","delivery_unheard","delivery_pending","collector","generation"}]`:
   the current followers of the stream, i.e. the connected SDKs. `service`/`instance`/`delivery_instance` are
   omitted for followers that did not send them. `last_delivery_report` is when a request with delivery reports
   of the follower last arrived (for any session, or one without reports: its heartbeat), omitted when none has
@@ -140,10 +176,21 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   `TSESSION_COLLECTOR_URL`, typically), which `tracectl doctor` shows and `doctor --require-delivery` fails on
   (exit 3, as for `delivery_unheard`). What it cannot say: anything about a follower that sends no reports (no
   `delivery_instance`) or whose reports are refused (`delivery_unheard` covers the latter), anything while no
-  session runs (an SDK reports only sessions it recorded events for, so a wrong URL shows once the first
-  event of a running session was recorded and the next periodic report arrived), and nothing of sessions
-  that have ended (their verdict is `incomplete_reasons`). It is the follower's word, as unauthenticated as
-  every delivery report (see "Limits"). A reader that does not know the field ignores it.
+  session runs (an SDK reports only sessions it recorded events for; `collector` below is what shows a wrong
+  URL then), and nothing of sessions that have ended (their verdict is `incomplete_reasons`). It is the
+  follower's word, as unauthenticated as every delivery report (see "Limits"). A reader that does not know the
+  field ignores it.
+  `collector` (optional) is `{"reachable","error","at"}`: what the follower last said, on this connection, about
+  whether it can reach its collector (`collector` of `POST /v1/delivery`), `error` why not (omitted when it can;
+  cleaned, at most 256 bytes) and `at` when the control plane was told. It is there with no session running,
+  which is how a wrong `TSESSION_COLLECTOR_URL` shows before a run: `tracectl doctor` prints
+  `CANNOT REACH COLLECTOR: <error>` and `doctor --require-delivery` fails on it (exit 3). **Omitted means not
+  known, not unreachable**: an SDK from before the field, one that has not looked yet (it looks when it starts and
+  says what it found within a few seconds), or a control plane from before it; none of those fails a check. It goes with the
+  connection: a follower that connects anew says it again. What it cannot say: that what answers at the URL is a
+  tsession collector (see the SDK's check below), and anything about a follower without a `delivery_instance`.
+  No session's verdict looks at it, and like `delivery_pending` it is the follower's own word: whoever reaches the
+  control plane can say it in a connected instance's name, and so fail or pass that check.
   `generation` is the newest active-set `generation` (also on `GET /v1/active` and in every stream message)
   written to that follower: a follower at or past the generation in which a session became active has been sent
   it (sent, not necessarily applied yet).
@@ -380,6 +427,11 @@ whoever can reach the control plane can make a session unconfirmed (see the limi
 | collector without `instances` in drain-status | every session with reports says so under `delivery_unconfirmed` (see above); a report that itself states a loss still makes the session `incomplete`. Upgrade the collector with, or before, the control plane |
 | collector without `instance-counts` | matters only for a session with more than 512 instances: see above |
 | control plane that does not know `instances` | ignores it |
+| SDK that does not send `collector` (before the check of the collector) | `GET /v1/subscribers` lists it without `collector`: not known. `tracectl doctor` shows it as connected and `--require-delivery` does not fail on it before a session runs |
+| control plane that does not know `collector` | ignores it; `tracectl doctor` shows what it showed before |
+| `tracectl` before `collector` | ignores it: connected, as before |
+| control plane that does not know `stopped` | ignores it: a session during which a service stopped recording seals as if nothing had happened |
+| `--store-file` with `stopped_instances`, read by an older control plane and written back | the notes are dropped from what it rewrites; a session that ends after that does not name the instance |
 | `--store-file` read by an older control plane and written back | the session stays `incomplete`; `incomplete_reasons`, `delivery_unconfirmed` and `delivery` are dropped from what it rewrites |
 
 **Limits.** What the verdict does not see:

@@ -177,6 +177,26 @@ type Info struct {
 	// (tsessiontest.RequireDeliveryConfirmed and tracectl's
 	// --fail-on-unconfirmed fail on it).
 	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+	// StoppedInstances are the SDK instances that said, while the session
+	// ran, that they stopped recording after an internal error; at most 64,
+	// StoppedInstancesMore when more said so. What that means for the session
+	// is in IncompleteReasons (the instance took part) or DeliveryUnconfirmed
+	// (nothing ties it to the session). A list of sessions leaves the
+	// instances out, like Delivery.
+	StoppedInstances     []StoppedInstance `json:"stopped_instances,omitempty"`
+	StoppedInstancesMore bool              `json:"stopped_instances_more,omitempty"`
+}
+
+// StoppedInstance is the word of one SDK instance that it stopped recording
+// after an internal error while a session ran.
+type StoppedInstance struct {
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance"`
+	Why      string `json:"why"` // what it said last
+	// At is when the control plane was first told. Connected: an instance of
+	// that name followed the control plane then.
+	At        time.Time `json:"at"`
+	Connected bool      `json:"connected,omitempty"`
 }
 
 // Delivery is one SDK instance's account of the events it recorded for a
@@ -575,9 +595,28 @@ type Subscriber struct {
 	// or its last request to it failed. Nil otherwise: all delivered, no
 	// running session, or a control plane that does not send it.
 	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
+	// Collector is what the process last told the control plane about
+	// whether it can reach its collector; it looks while it has nothing to
+	// send, also when no session runs. Nil when that is not known: an SDK or
+	// a control plane from before this field, or a process that has not
+	// looked yet.
+	Collector *CollectorReach `json:"collector,omitempty"`
 	// Generation is the newest version of the active set sent to it.
 	Generation uint64 `json:"generation"`
 }
+
+// CollectorReach is a connected process's own word on whether it can reach
+// its collector, as old as At.
+type CollectorReach struct {
+	Reachable bool `json:"reachable"`
+	// Error is why not; empty when it can.
+	Error string    `json:"error,omitempty"`
+	At    time.Time `json:"at"`
+}
+
+// Unreachable reports whether the process said that it cannot reach its
+// collector. False when it said nothing: not known is not unreachable.
+func (c *CollectorReach) Unreachable() bool { return c != nil && !c.Reachable }
 
 // PendingDelivery is the events of running sessions that a connected process
 // reported as not delivered: its own word, as old as its newest report (At).

@@ -165,7 +165,7 @@ func NewManager(cfg Config) *Manager {
 	m.tel = newTelemetry(m)
 	m.watch = gosafe.NewWatch(m.budgetSpent)
 	if pc, ok := cfg.Store.(panicCounter); ok {
-		pc.countPanics(m.countPanic)
+		pc.countPanics(m.countPanic, m.watch)
 	}
 	// Resume drains and pending seals that were in flight when a persistent
 	// store was last written. Archived sessions can have a seal pending; the
@@ -203,9 +203,10 @@ func NewManager(cfg Config) *Manager {
 }
 
 // panicCounter is a Store with goroutines of its own (FileStore's
-// compaction): it is given what counts their panics.
+// compaction): it is given what counts their panics, and the Watch that
+// says while one of them has panicked and was not repeated yet (see Health).
 type panicCounter interface {
-	countPanics(count func(goroutine string))
+	countPanics(count func(goroutine string), watch *gosafe.Watch)
 }
 
 // MaxDurationSeconds bounds ttl/quiesce/max_drain (7 days); it also keeps
@@ -626,6 +627,12 @@ type Subscriber struct {
 	// request to it failed; nil otherwise. It is how an operator sees, during
 	// a run, a service that follows and reports and cannot deliver.
 	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
+	// Collector is what the follower last said, on this connection, about
+	// whether it can reach its collector; nil when it has not said (an SDK
+	// that does not look, or one that has not looked yet): not known, which
+	// is not the same as not reachable. It is how an operator sees a wrong
+	// collector URL before any session runs.
+	Collector *CollectorReach `json:"collector,omitempty"`
 	// since and heard are ConnectedAt and LastDeliveryReport as the drain
 	// counts from them: with the monotonic clock reading, which a step of the
 	// wall clock does not move. reported is when a request that carried a

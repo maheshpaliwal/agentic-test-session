@@ -74,7 +74,16 @@ func (m *Manager) retrySealsLocked(now time.Time) {
 		r.cancel, r.done = cancel, make(chan struct{})
 		m.wg.Add(1)
 		// One attempt: not run again by the helper, the next sweep that finds
-		// it due starts another.
+		// it due starts another. So it has no Watch: the helper never waits
+		// for its restart. sealRetryPanicked says that the control plane is
+		// degraded while the attempt after a panic is not due yet.
+		//
+		// Its panics do not count against the panic budget (Budget), which
+		// ends the service so that it starts again with clean state. That is
+		// for the loops the service cannot do without. A seal retry is the
+		// work of one finished session: it is bounded by SealPendingBudget,
+		// the session says that its seal failed (seal_error), and ending the
+		// service for it would cut short the drains of the sessions that run.
 		gosafe.Go(gosafe.Options{Name: "seal_retry", Done: m.wg.Done, OnPanic: m.onPanic(func(gosafe.Panic) { m.sealRetryPanicked(id, r) })},
 			func() { m.retrySeal(ctx, id, r) })
 	}
@@ -103,6 +112,12 @@ func (m *Manager) sealRetryPanicked(id string, r *sealRetry) {
 	r.next = now.Add(r.delay)
 	r.delay = min(r.delay*2, m.cfg.SealRetryMaxInterval)
 	cur, err := m.stored(id)
+	if errors.Is(err, ErrStore) || err == nil && cur.SealPending && m.rootCtx.Err() == nil && now.Before(cur.EndedAt.Add(m.cfg.SealPendingBudget)) {
+		// It is tried again, after the backoff: degraded until then, like a
+		// loop that waits for its restart (see Health). Not for an attempt
+		// that is not repeated.
+		m.watch.Hold("seal_retry", r.next)
+	}
 	switch {
 	case errors.Is(err, ErrStore): // stored and unreadable: keep trying, as retrySeal does
 	case err != nil || !cur.SealPending:

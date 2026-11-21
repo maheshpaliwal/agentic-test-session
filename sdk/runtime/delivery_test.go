@@ -177,6 +177,10 @@ type reportCP struct {
 	// stopped is what the accepted batches said about recording having
 	// stopped (deliveryBatch.Stopped), in order.
 	stopped []string
+	// reach is what the accepted batches said about reaching the collector
+	// (deliveryBatch.Collector), in order; bare counts those that said nothing.
+	reach []collectorNote
+	bare  int
 }
 
 func newReportCP(t *testing.T, state string) *reportCP {
@@ -249,6 +253,11 @@ func (cp *reportCP) batch(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Stopped != "" {
 		cp.stopped = append(cp.stopped, b.Stopped)
+	}
+	if b.Collector != nil {
+		cp.reach = append(cp.reach, *b.Collector)
+	} else {
+		cp.bare++
 	}
 	cp.sizes = append(cp.sizes, len(b.Reports))
 	results := make([]map[string]string, len(b.Reports))

@@ -53,6 +53,28 @@ func TestGiveUpShutsDownOnceAndExitsWith1(t *testing.T) {
 	}
 }
 
+// Once the shutdown is done the process is not ended behind the back of what
+// still runs: ExitCode stops the timer that would. A main that does something
+// after it (a deferred close, a last log line), or a test that runs a service
+// in its own process, would otherwise be cut off up to GiveUpGrace later.
+func TestExitCodeStopsTheTimerThatEndsAHungShutdown(t *testing.T) {
+	var logs lockedBuffer
+	var exits atomic.Int32
+	g := NewGiveUp(slog.New(slog.NewTextHandler(&logs, nil)), func() {})
+	g.grace, g.exit = time.Hour, func(int) { exits.Add(1) }
+	g.Now("the panic budget is spent")
+	if g.ExitCode() != 1 {
+		panic("status 0 after the service gave up")
+	}
+	// Stop reports whether the timer was still running.
+	if g.timer.Stop() {
+		panic("ExitCode left the timer running: the process would be ended after the grace although its shutdown finished")
+	}
+	if exits.Load() != 0 || strings.Contains(logs.String(), "did not finish in time") {
+		panic(fmt.Sprintf("the process was ended: %d\n%s", exits.Load(), logs.String()))
+	}
+}
+
 // A shutdown that does not finish in time does not keep the process: it is
 // ended as it is.
 func TestGiveUpEndsAProcessWhoseShutdownHangs(t *testing.T) {

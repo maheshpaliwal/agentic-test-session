@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/scrub"
 	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
@@ -31,6 +33,25 @@ type ExporterConfig struct {
 	MaxCooldown   time.Duration // cap on the pause between passes while the collector is failing (default 5s)
 	HTTPTimeout   time.Duration // per request (default 2s)
 	Encoder       BatchEncoder  // wire format (default ProtobufEncoder)
+	// ReachCheck is how often an exporter that has nothing to send asks the
+	// collector whether it is there (GET /healthz), so that a CollectorURL
+	// that leads nowhere shows before the first event of the first session
+	// (see checkCollector). Zero: never, which is what an Exporter made with
+	// NewExporter does; Start sets 30s. While the last check failed it is
+	// asked again every reachRetry at the latest.
+	ReachCheck time.Duration
+}
+
+// reachRetry is the longest time between two checks of a collector that the
+// last one could not reach: a collector that comes up after the service (the
+// usual order in a compose file) is seen within seconds.
+const reachRetry = 5 * time.Second
+
+// collectorReach is what the exporter last learned about whether its
+// collector can be reached: from a check, or from a request with events.
+type collectorReach struct {
+	ok  bool
+	err string // why not; without URL credentials, at most maxReportError bytes
 }
 
 // Exporter ships batches from a Recorder to the collector from a single
@@ -61,11 +82,20 @@ type Exporter struct {
 	lastErr atomic.Pointer[string]
 	// urgent are the sessions whose events go first (see setUrgent).
 	urgent atomic.Pointer[map[string]struct{}]
+	// reach is whether the collector could be reached when that was last
+	// seen; nil while it is not known. The delivery reporter reads it.
+	reach atomic.Pointer[collectorReach]
+	// checking is set while a check of the collector runs; checks is what
+	// Close waits for. checkLogged: a panic of a check was logged.
+	checking    atomic.Bool
+	checks      sync.WaitGroup
+	checkLogged atomic.Bool
 
 	// Everything below is touched by the export goroutine only.
 
 	failures int
 	nextTry  time.Time
+	checked  time.Time // when the last check of the collector was started
 	// down and refusalLogged make the exporter say once when delivery stops,
 	// once when it resumes, and once when the collector refuses events.
 	down          bool
@@ -175,6 +205,7 @@ func (e *Exporter) loop() {
 			if time.Now().After(e.nextTry) {
 				e.drain(false)
 			}
+			e.maybeCheck()
 		case <-e.rec.wake:
 			// The ring is half full. When part of that is events of failing
 			// sessions, which a pass cannot send, every new event wakes the
@@ -185,6 +216,80 @@ func (e *Exporter) loop() {
 		case ack := <-e.flushReq:
 			ack <- e.drain(true) // buffered: never blocks on a caller that gave up
 		}
+	}
+}
+
+// maybeCheck starts a check of the collector when one is due: the exporter
+// has nothing to send (a request with events says more than a check, and
+// says it in its own time), none is running, and the last one was started
+// ReachCheck ago, or reachRetry when it failed.
+//
+// The check runs on a goroutine of its own, one at a time, and this loop
+// does not wait for it: a collector that takes the whole timeout to not
+// answer must not hold up a Flush, or the events recorded meanwhile. That
+// goroutine is all the check adds to an SDK that cannot reach its collector;
+// nothing on the path of a request looks at the result.
+func (e *Exporter) maybeCheck() {
+	if e.cfg.ReachCheck <= 0 || e.rec.Len() > 0 || e.checking.Load() {
+		return
+	}
+	every := e.cfg.ReachCheck
+	if r := e.reach.Load(); r != nil && !r.ok {
+		every = min(every, reachRetry)
+	}
+	now := time.Now()
+	if !e.checked.IsZero() && now.Sub(e.checked) < every {
+		return
+	}
+	e.checked = now
+	e.checking.Store(true)
+	e.checks.Add(1)
+	gosafe.Go(gosafe.Options{Name: "collector check", Done: func() { e.checking.Store(false); e.checks.Done() },
+		OnPanic: func(p gosafe.Panic) {
+			if e.checkLogged.Swap(true) {
+				return // once: the next check is seconds away
+			}
+			log.Printf("tsession: error: the check of the collector panicked (%s); the application is not affected. "+
+				"This is a bug in tsession, please report it with this stack:\n%s", p.Type, p.Stack)
+		}}, e.checkCollector)
+}
+
+// checkCollector asks the collector's /healthz once, within HTTPTimeout, and
+// notes whether the collector can be reached. It can when anything answers
+// that is not the failure of a server: a collector that says it is degraded
+// is there, and so is whatever answers 404 because a proxy in front of the
+// collector passes only the ingest. So the check finds an address where
+// nothing listens, a name that does not resolve and a gateway whose upstream
+// is gone; it does not find an address where something else serves HTTP.
+func (e *Exporter) checkCollector() {
+	faultpoint.Hit("exporter.check")
+	ctx, cancel := context.WithTimeout(e.ctx, e.cfg.HTTPTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.cfg.CollectorURL+"/healthz", nil)
+	if err != nil {
+		e.setReach(false, "the collector URL is malformed")
+		return
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		e.setReach(false, scrubError(err))
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	resp.Body.Close()
+	degraded := resp.StatusCode == http.StatusServiceUnavailable && strings.HasPrefix(strings.TrimSpace(string(body)), "degraded:")
+	if resp.StatusCode >= 500 && !degraded {
+		e.setReach(false, fmt.Sprintf("GET %s/healthz answered HTTP %d", DisplayURL(e.cfg.CollectorURL), resp.StatusCode))
+		return
+	}
+	e.setReach(true, "")
+}
+
+// setReach notes whether the collector could be reached. A request cut short
+// by Close says nothing about the collector.
+func (e *Exporter) setReach(ok bool, why string) {
+	if ok || e.ctx.Err() == nil {
+		e.reach.Store(&collectorReach{ok: ok, err: why})
 	}
 }
 
@@ -683,6 +788,7 @@ func (e *Exporter) post(batch []core.Event) answer {
 		resp, err := e.client.Do(req)
 		if err != nil {
 			e.noteErr(scrubError(err))
+			e.setReach(false, scrubError(err))
 			continue
 		}
 		rb, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
@@ -692,6 +798,7 @@ func (e *Exporter) post(batch []core.Event) answer {
 		switch {
 		case resp.StatusCode/100 == 2:
 			e.lastErr.Store(nil)
+			e.setReach(true, "")
 			a := answer{result: postOK}
 			if parsed {
 				a.rejected = e.countRejected(batch, ir.Rejected, nil)
@@ -850,5 +957,6 @@ func (e *Exporter) Close(timeout time.Duration) {
 		close(e.stop)
 		e.cancel()
 		<-e.done
+		e.checks.Wait() // none is started any more, and one that runs was cancelled
 	})
 }

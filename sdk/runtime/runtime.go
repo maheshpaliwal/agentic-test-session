@@ -81,6 +81,11 @@ func Start(cfg Config) error {
 	cfg.ControlPlaneURL = cmp.Or(cfg.ControlPlaneURL, "http://127.0.0.1:7070")
 	cfg.CollectorURL = cmp.Or(cfg.CollectorURL, "http://127.0.0.1:7071")
 	cfg.Exporter.CollectorURL = cfg.CollectorURL
+	if cfg.Exporter.ReachCheck == 0 {
+		// A collector URL that leads nowhere is seen before the first event:
+		// the reporter tells the control plane, and `tracectl doctor` shows it.
+		cfg.Exporter.ReachCheck = 30 * time.Second
+	}
 	if cfg.Encoder != nil {
 		cfg.Exporter.Encoder = cfg.Encoder
 	}
