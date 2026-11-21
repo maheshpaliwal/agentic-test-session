@@ -651,8 +651,9 @@ func startDashboard(t *testing.T, bin string, args ...string) backend {
 }
 
 // drainTimedOut matches the "Drain timed out" reason as report and digest
-// print it: a Markdown list item, a line of a JUnit message, a JSON string.
-var drainTimedOut = regexp.MustCompile(`(?m)(^- (incomplete: )?|,")?Drain timed out: asynchronous work was still outstanding after the \d+s drain limit\.("|&#xA;|\n)?`)
+// print it: a Markdown list item, a JUnit property, a line of a JUnit
+// message, a JSON string.
+var drainTimedOut = regexp.MustCompile(`(?m)(^- (incomplete: )?|,"|^ *<property name="incomplete_reason" value=")?Drain timed out: asynchronous work was still outstanding after the \d+s drain limit\.("></property>\n|"|&#xA;|\n)?`)
 
 // The binaries, as a person or an agent uses them: `tracectl export`, then
 // `dashboard -open` on the file, then the same tracectl commands with the
