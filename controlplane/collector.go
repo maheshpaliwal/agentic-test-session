@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // DrainStatus mirrors the collector's drain-status response.
@@ -56,15 +57,31 @@ type Collector interface {
 // HTTPCollector talks to a collector over HTTP.
 type HTTPCollector struct {
 	BaseURL string
-	Client  *http.Client
+	// Client is the client to use; nil for one that keeps its connections
+	// (see NewCollectorClient).
+	Client *http.Client
 }
+
+// NewCollectorClient returns an HTTP client for the control plane's requests
+// to the collector. A drain asks the collector about its session several
+// times a second, and hundreds of sessions drain at once when a test run
+// ends. http.DefaultTransport keeps two idle connections per host, so most of
+// those requests would open a connection of their own: a thousand a second,
+// and the machine runs out of local ports. This one keeps as many as it used.
+func NewCollectorClient(timeout time.Duration) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns, t.MaxIdleConnsPerHost = 1024, 1024
+	return &http.Client{Timeout: timeout, Transport: t}
+}
+
+var defaultCollectorClient = NewCollectorClient(30 * time.Second)
 
 // do calls /v1/internal/sessions/{id}[/suffix] and decodes the JSON reply
 // into out (skipped when out is nil). in, when not nil, is sent as JSON.
 func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, in, out any) error {
 	cl := c.Client
 	if cl == nil {
-		cl = http.DefaultClient
+		cl = defaultCollectorClient
 	}
 	u := strings.TrimRight(c.BaseURL, "/") + "/v1/internal/sessions/" + url.PathEscape(id)
 	if suffix != "" {

@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -457,5 +459,48 @@ func TestDeliveryNamesCompareCleaned(t *testing.T) {
 	}
 	if subs := e.m.Subscribers(); len(subs) != 1 || subs[0].LastDeliveryReport.IsZero() {
 		t.Fatalf("the report was not taken for one of the connected instance: %+v", subs)
+	}
+}
+
+// Hundreds of sessions drain at once when a test run ends, and each drain
+// asks the collector several times a second. The requests share connections:
+// with the two idle connections per host of http.DefaultTransport most of
+// them opened one of their own, and a machine ran out of local ports (found
+// with 500 sessions stopping together, four times in a row).
+func TestCollectorClientKeepsItsConnections(t *testing.T) {
+	var opened atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"pending":0,"instances":[]}`)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+	for name, c := range map[string]*HTTPCollector{
+		"the default client":     {BaseURL: srv.URL},
+		"the client of the main": {BaseURL: srv.URL, Client: NewCollectorClient(30 * time.Second)},
+	} {
+		opened.Store(0)
+		const drains, polls = 64, 40
+		var wg sync.WaitGroup
+		for range drains {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range polls {
+					if _, err := c.DrainStatus(context.Background(), "ts_1"); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		if n := opened.Load(); n > 2*drains {
+			t.Errorf("%s: %d connections for %d requests of %d concurrent drains, want about one per drain", name, n, drains*polls, drains)
+		}
 	}
 }

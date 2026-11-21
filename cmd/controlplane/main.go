@@ -54,7 +54,7 @@ func main() {
 	}
 	m := controlplane.NewManager(controlplane.Config{
 		Store:      store,
-		Collector:  &controlplane.HTTPCollector{BaseURL: *collector, Client: &http.Client{Timeout: 30 * time.Second}},
+		Collector:  &controlplane.HTTPCollector{BaseURL: *collector, Client: controlplane.NewCollectorClient(30 * time.Second)},
 		Logger:     log,
 		DefaultTTL: *ttl,
 		Retention:  *retention,
