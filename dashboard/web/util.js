@@ -64,6 +64,16 @@
     return String(pk);
   }
 
+  // "image_skipped:deadline" is the flag image_skipped with a reason.
+  const flagBase = (f) => String(f).split(':')[0];
+  /* Event flags that say the recorded key or row image of the event's mutations is incomplete or uncertain.
+     Mirrors core.UncertainFlag (the collector counts the same flags in an entity's `uncertain`). */
+  const UNCERTAIN = { pk_unknown: 1, pk_not_unique: 1, pk_lookup_failed: 1, after_unavailable: 1, after_from_args: 1, after_failed: 1,
+    returning_partial: 1, image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1 };
+  const uncertainFlag = (f) => UNCERTAIN[flagBase(f)] === 1;
+  // How many entries of an entity history carry such a flag (entries of an older collector have no flags: 0).
+  const uncertainCount = (ms) => (ms || []).filter((m) => m && Array.isArray(m.flags) && m.flags.some(uncertainFlag)).length;
+
   const unresolvedMut = (e) => !!e && (e.mutations || []).some((m) => m.effective === null || m.effective === undefined);
   const hasUnresolved = (events) => events.some(unresolvedMut);
   const effSig = (e) => (e.mutations || []).map((m) => m.effective === true ? 'T' : m.effective === false ? 'F' : 'N').join('') + '|' + (e.flags || []).join(',');
@@ -547,7 +557,7 @@
       ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
   }
 
-  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, unresolvedMut, hasUnresolved,
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
     mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;

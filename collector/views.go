@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -74,9 +75,15 @@ type Entity struct {
 	Entity        string `json:"entity"`
 	PK            string `json:"pk"`
 	MutationCount int    `json:"mutation_count"`
+	// Uncertain counts the mutations whose event carries a flag saying the
+	// recorded row image is incomplete or uncertain (core.UncertainFlag);
+	// omitted when there are none.
+	Uncertain int `json:"uncertain,omitempty"`
 }
 
-// EntityMutation is one entry of an entity's history.
+// EntityMutation is one entry of an entity's history. Flags are the flags of
+// the event that made the change (they describe the event, so every mutation
+// of a multi-row statement carries the same ones).
 type EntityMutation struct {
 	Seq       uint64             `json:"seq"`
 	SpanID    string             `json:"span_id"`
@@ -90,6 +97,7 @@ type EntityMutation struct {
 	Diff      []core.FieldChange `json:"diff,omitempty"`
 	Source    string             `json:"source,omitempty"`
 	Effective *bool              `json:"effective,omitempty"`
+	Flags     []string           `json:"flags,omitempty"`
 }
 
 // EntityHistory is the history response.
@@ -116,7 +124,13 @@ func pkMatches(pk map[string]any, want string) bool {
 	}
 	if len(pk) == 1 {
 		for _, v := range pk {
-			return fmt.Sprint(v) == want
+			if fmt.Sprint(v) == want {
+				return true
+			}
+			// A number decoded from JSON is a float64, which prints as 1e+06
+			// from a million on: accept the plain digits as well.
+			f, ok := v.(float64)
+			return ok && strconv.FormatFloat(f, 'f', -1, 64) == want
 		}
 	}
 	return false
@@ -126,15 +140,22 @@ func pkMatches(pk map[string]any, want string) bool {
 // sorted by store, entity and primary key.
 func ListEntities(evs []core.Event) []Entity {
 	type k struct{ s, e, p string }
-	cnt := map[k]int{}
+	type n struct{ all, uncertain int }
+	cnt := map[k]n{}
 	for i := range evs {
+		uncertain := 0
+		if core.HasUncertainFlag(evs[i].Flags) {
+			uncertain = 1
+		}
 		for _, m := range evs[i].Mutations {
-			cnt[k{m.Store, m.Entity, pkString(m.PK)}]++
+			key := k{m.Store, m.Entity, pkString(m.PK)}
+			c := cnt[key]
+			cnt[key] = n{c.all + 1, c.uncertain + uncertain}
 		}
 	}
 	out := make([]Entity, 0, len(cnt))
-	for key, n := range cnt {
-		out = append(out, Entity{key.s, key.e, key.p, n})
+	for key, c := range cnt {
+		out = append(out, Entity{key.s, key.e, key.p, c.all, c.uncertain})
 	}
 	slices.SortFunc(out, func(a, b Entity) int {
 		return cmp.Or(cmp.Compare(a.Store, b.Store), cmp.Compare(a.Entity, b.Entity), cmp.Compare(a.PK, b.PK))
@@ -156,6 +177,7 @@ func History(evs []core.Event, store, entity, pk string) EntityHistory {
 			h.Mutations = append(h.Mutations, EntityMutation{
 				Seq: e.Seq, SpanID: e.SpanID, Service: e.Service, Kind: e.Kind, TxID: e.TxID, EndNs: e.EndNs,
 				Op: m.Op, Before: m.Before, After: m.After, Diff: m.Diff, Source: m.Source, Effective: m.Effective,
+				Flags: e.Flags,
 			})
 		}
 	}

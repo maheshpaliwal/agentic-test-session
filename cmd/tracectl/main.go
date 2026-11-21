@@ -23,13 +23,15 @@ session lifecycle (control plane):
   start [--name N] [--mode header|exclusive] [--ttl S] [--quiesce S] [--max-drain S] [--id-only]
         [--bind source:name=value]...   source header|jwt|jwt_claim|cookie|query (repeatable;
         not with --mode exclusive). jwt reads an UNVERIFIED token: spoofable, test envs only.
-  rename <id|name> <new name>   (works on sealed sessions; templates allowed)
-  stop <id|name> [--wait] [--timeout D]
-  abort <id|name>               end now, without draining or sealing
+  rename [--short] <id|name> <new name>   (works on sealed sessions; templates allowed)
+  stop <id|name> [--wait] [--timeout D] [--short]
+  abort <id|name> [--short]     end now, without draining or sealing
   delete <id|name>              remove a finished session and everything recorded for it
-  status <id|name>
+  status <id|name> [--short]
   list [--state STATE] [--limit N]   all sessions, oldest first; with --limit the newest N
-  wait <id|name> [--timeout D]
+  wait <id|name> [--timeout D] [--short]
+  (rename, stop, abort, status and wait print the session as JSON; with --short one line for
+   scripts: "<id> <STATE>", followed by " incomplete" when the session is)
   watch-docker [--docker BIN]   start/stop sessions from containers labelled tsession.id=<name>
                                 (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)
 
@@ -53,9 +55,19 @@ session results (collector):
                                 counts, failures and flags; the --fail-on flags exit 3 for CI gates
   events <id|name> [--kind K[,K]] [--service S] [--errors] [--limit N] [--json]
                                 K is a kind (db.write) or a prefix ending in * (db.*)
-  entities <id|name> [--json]   rows/documents/keys the session changed
+  entities <id|name> [--json]   rows/documents/keys the session changed; "N uncertain" counts the
+                                changes whose key or row image is incomplete (history shows the flags)
   history <id|name> <store> <entity> <pk> [--json]
-                                every change to one entity, with diffs and tx outcome
+  history <id|name> <store> <entity> --unknown-key [--json]
+                                every change to one entity, with diffs, tx outcome and the flags of
+                                the event (pk_not_unique, after_unavailable, ...: the recorded key or
+                                row image is incomplete or uncertain).
+                                <pk> is a key that entities lists, typed as the JSON it prints
+                                ('{"order_id":7,"sku":"a"}', keys in any order), as order_id=7,sku=a,
+                                or for a one-column key as the bare value (42). A value holding a
+                                comma or = needs the JSON form; put -- before a pk that starts with -.
+                                --unknown-key (or '' or '{}' as <pk>) reads the changes recorded
+                                without a key.
   trace <id|name> [--errors] [--depth N] [--json]
                                 the call tree; ~> marks async work a span triggered
   show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs

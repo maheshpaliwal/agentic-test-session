@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -246,23 +247,50 @@ func printEntities(w io.Writer, ents []client.Entity) {
 		if pk == "{}" || pk == "" { // "{}" is still the value to pass to "history"
 			pk = "{} " + unknownKey
 		}
-		fmt.Fprintf(w, "%-10s %-28s %-30s %d mutation(s)\n", e.Store, clip(e.Entity, 28), clip(pk, 30), e.MutationCount)
+		line := fmt.Sprintf("%-10s %-28s %-30s %d mutation(s)", e.Store, clip(e.Entity, 28), clip(pk, 30), e.MutationCount)
+		if e.Uncertain > 0 { // the key or row image of that many is incomplete: "history" shows the flags
+			line += fmt.Sprintf(", %d uncertain", e.Uncertain)
+		}
+		fmt.Fprintln(w, line)
 	}
 	fmt.Fprintf(w, "%d entities\n", len(ents))
 }
 
+const historyUsage = "usage: tracectl history <id|name> <store> <entity> <pk>   (or --unknown-key in place of <pk>)\n" +
+	"  <pk> as `tracectl entities` lists it ('{\"id\":42}'), as id=42 (a composite key: a=1,b=2) or, for a one-column key, 42"
+
 func (c *cli) history(ctx context.Context, args []string) error {
 	fs := c.flags("history")
 	asJSON := fs.Bool("json", false, "print as JSON")
-	pos, err := parseArgs(fs, args, 4, "<id|name> <store> <entity> <pk>")
+	unknown := fs.Bool("unknown-key", false, "the changes recorded without a key, in place of <pk> (the same as '' or '{}')")
+	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
+	}
+	switch {
+	case len(pos) == 3 && *unknown:
+		pos = append(pos, noKey)
+	case len(pos) == 4 && *unknown && strings.TrimSpace(pos[3]) != "" && pos[3] != noKey:
+		return errors.New("--unknown-key stands in place of <pk>: pass one or the other\n" + historyUsage)
+	case len(pos) != 4:
+		return errors.New(historyUsage)
 	}
 	s, err := resolve(ctx, c.opts, pos[0])
 	if err != nil {
 		return err
 	}
-	h, err := s.History(ctx, pos[1], pos[2], pos[3])
+	// The key is looked up among the session's entities: what was typed may be
+	// a looser spelling than the collector matches, and an entity that is not
+	// there is an error, not an empty history.
+	ents, err := s.Entities(ctx)
+	if err != nil {
+		return err
+	}
+	key, err := resolveKey(ents, pos[1], pos[2], pos[3])
+	if err != nil {
+		return fmt.Errorf("%w\n  `tracectl entities %s` lists what the session changed", err, pos[0])
+	}
+	h, err := s.History(ctx, pos[1], pos[2], key)
 	if err != nil {
 		return err
 	}
@@ -275,7 +303,11 @@ func (c *cli) history(ctx context.Context, args []string) error {
 }
 
 func printHistory(w io.Writer, h client.EntityHistory) {
-	fmt.Fprintf(w, "%s/%s %s: %d mutation(s)\n", h.Store, h.Entity, h.PK, len(h.Mutations))
+	head := fmt.Sprintf("%s/%s %s: %d mutation(s)", h.Store, h.Entity, h.PK, len(h.Mutations))
+	if n := uncertainCount(h.Mutations); n > 0 {
+		head += fmt.Sprintf(", %d uncertain (see the flags)", n)
+	}
+	fmt.Fprintln(w, head)
 	for _, m := range h.Mutations {
 		outcome := "tx open"
 		switch {
@@ -286,6 +318,9 @@ func printHistory(w io.Writer, h client.EntityHistory) {
 			outcome = "ROLLED BACK"
 		}
 		fmt.Fprintf(w, "#%-5d %-8s %-12s %-12s %s\n", m.Seq, m.Op, outcome, clip(m.Service, 12), m.Kind)
+		if len(m.Flags) > 0 { // of the event, as "show" prints them
+			fmt.Fprintf(w, "       flags: %s\n", clip(strings.Join(m.Flags, ", "), 200))
+		}
 		if m.AfterUnavailable() {
 			// No diff, even one an older SDK sent: it lists every field as removed.
 			fmt.Fprintf(w, "       %s\n", afterUnavailable)

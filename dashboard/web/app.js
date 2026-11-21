@@ -68,7 +68,14 @@
     after_from_args: 'the new values were taken from the statement, not read back from the database',
     returning_partial: 'the statement returned only some of the row\'s columns',
     oversize_dropped: 'payload dropped for exceeding size limits',
+    after_failed: 'reading the row back after the write failed; its new values are not known',
+    image_timeout: 'reading the row images took too long and was abandoned', image_failed: 'reading the row images failed',
+    image_truncated: 'the statement changed more rows than are captured; only some have images', diff_truncated: 'the list of changed fields was cut short',
     propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };
+  // A flag with a reason ("image_skipped:deadline") is styled and explained as its base flag.
+  const flagHelp = (x) => FLAG_HELP[x] || FLAG_HELP[U.flagBase(x)] || '';
+  const flagTag = (x) => tag(x, FLAG_CLS[x] || FLAG_CLS[U.flagBase(x)] || 't-warn', flagHelp(x));
+  const UNCERTAIN_HELP = 'the key or row image recorded for these changes is incomplete or uncertain; the flags on each change say how';
   function tag(text, tone, title, ic) { return h('span', { class: 'tag' + (tone ? ' ' + tone : ''), title: title }, ic ? icon(ic) : null, text); }
   function redChip() { return h('span', { class: 'redchip', title: 'value masked by the SDK' }, icon('lock'), '[REDACTED]'); }
   const ST_CLS = { ACTIVE: 'st-active', DRAINING: 'st-draining', SEALED: 'st-sealed', ABORTED: 'st-dead', EXPIRED: 'st-dead', CREATED: 'st-created' };
@@ -330,6 +337,8 @@
       mu.source ? tag('src: ' + mu.source) : null, mu.attrs && mu.attrs.commit_failed ? tag('commit failed', 't-err') : null));
     const body = h('div', { class: 'mut-body' });
     if (rolled) body.appendChild(h('div', { class: 'note', text: 'Rolled back: the values below were never applied.' }));
+    // Entity history: the flags of the event that made the change (they qualify how far the images below can be trusted).
+    (mu.flags || []).forEach((x) => body.appendChild(h('div', { class: 'flag-row' }, flagTag(x), flagHelp(x))));
     body.appendChild(diffView(mu));
     const b = payloadBlock('before', mu.before), a = payloadBlock('after', mu.after);
     const raw = h('details', { class: 'more' }, h('summary', { text: 'Raw before / after' }));
@@ -1148,7 +1157,7 @@
     if (e.attrs) Object.keys(e.attrs).sort().forEach((k) => row('attr ' + k, span('mono', typeof e.attrs[k] === 'object' ? JSON.stringify(e.attrs[k]) : String(e.attrs[k]))));
     pane.appendChild(kv);
     if (e.flags && e.flags.length) {
-      pane.appendChild(h('div', { class: 'sec' }, h('h3', { text: 'Flags' }), e.flags.map((x) => h('div', { class: 'flag-row' }, tag(x, FLAG_CLS[x] || 't-warn'), FLAG_HELP[x] || ''))));
+      pane.appendChild(h('div', { class: 'sec' }, h('h3', { text: 'Flags' }), e.flags.map((x) => h('div', { class: 'flag-row' }, flagTag(x), flagHelp(x)))));
     }
   }
   function drPayload(label, p, pane) {
@@ -1336,7 +1345,7 @@
       if (e.attempt > 1) tags.push(tag('attempt ' + e.attempt, 't-retry'));
       if (e.attrs && e.attrs.retry_pending) tags.push(tag('retry pending', 't-retry'));
       if (e.attrs && e.attrs.commit_failed) tags.push(tag('commit failed', 't-err'));
-      (e.flags || []).forEach((x) => tags.push(tag(x, FLAG_CLS[x] || 't-warn', FLAG_HELP[x])));
+      (e.flags || []).forEach((x) => tags.push(flagTag(x)));
       if (g && G2 && e.kind === 'queue.publish') {
         const ws = G2.pubWorkers.get(e.span_id);
         if (ws && ws.length) tags.push(h('button', { type: 'button', class: 'linkbtn jump', 'data-jump': 'g:' + ws[0], title: 'Scroll to the worker group that processed this message' + (ws.length > 1 ? ' (first of ' + ws.length + ' attempts)' : '') }, icon('async', 'sm'), 'jump to worker group' + (ws.length > 1 ? ' (' + ws.length + ')' : '')));
@@ -1624,7 +1633,7 @@
       if (e.err) tags.push(tag('error', 't-err', e.err, 'err'));
       if (rolledBack(e)) tags.push(tag('rolled back', 't-warn', null, 'retry'));
       if (e.attrs && e.attrs.commit_failed) tags.push(tag('commit failed', 't-err'));
-      (e.flags || []).forEach((x) => tags.push(tag(x, FLAG_CLS[x] || 't-warn', FLAG_HELP[x])));
+      (e.flags || []).forEach((x) => tags.push(flagTag(x)));
       if (e.kind === 'queue.publish') {
         const workers = n.linked.filter((x) => x.event.kind === 'worker.start');
         if (!n.linked.length) tags.push(isLive(D.sess) ? tag('pending async', 't-warn', 'no worker has consumed this message yet', 'clock') : tag('orphaned async', 't-err', 'no worker ever processed this message', 'warn'));
@@ -1744,7 +1753,8 @@
       vis.forEach((x) => {
         const b = h('button', { type: 'button', class: 'elist-item', role: 'option', 'aria-current': D.entSel === keyOf(x) ? 'true' : null, onclick: () => selectEnt(x) },
           h('div', { class: 'l1' }, tag(x.store), h('strong', { text: x.entity })),
-          h('div', { class: 'l2' }, span('mono', U.pkLabel(x.pk)), span('note', x.mutation_count + (x.mutation_count === 1 ? ' mutation' : ' mutations'))));
+          h('div', { class: 'l2' }, span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }), x.uncertain > 0 ? tag(x.uncertain + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null,
+            span('note', x.mutation_count + (x.mutation_count === 1 ? ' mutation' : ' mutations'))));
         b._x = x; items.push(b); list.appendChild(b);
       });
     }
@@ -1762,8 +1772,9 @@
         clear(detail);
         const ms = asList(r, 'mutations');
         const rbN = ms.filter((it) => (it.effective !== undefined ? it.effective : (it.mutation || {}).effective) === false).length;
+        const unN = U.uncertainCount(ms);
         detail.appendChild(h('div', { class: 'edetail-head' }, tag(x.store), h('h2', { text: x.entity }), span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }),
-          tag(ms.length + (ms.length === 1 ? ' mutation' : ' mutations')), rbN ? tag(rbN + ' rolled back', 't-warn', null, 'retry') : null));
+          tag(ms.length + (ms.length === 1 ? ' mutation' : ' mutations')), rbN ? tag(rbN + ' rolled back', 't-warn', null, 'retry') : null, unN ? tag(unN + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null));
         if (!ms.length) detail.appendChild(emptyState('events', 'No mutations', 'Nothing recorded for this entity.'));
         const rail = h('ol', { class: 'rail', 'aria-label': 'Mutation history, oldest first' });
         ms.forEach((it) => {

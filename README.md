@@ -89,6 +89,9 @@ curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
 tracectl stop my-run --wait              # drains async work, then seals
 ```
 
+`stop`, `abort`, `rename`, `wait` and `status` print the session as JSON; with `--short` they print one line,
+`<id> <STATE>`, followed by ` incomplete` when the session is.
+
 A request joins a session through `x-tsession-id: <id>`, or through an attribute bound to the session (user-id
 header, JWT claim, cookie, query parameter; see [`docs/BINDING.md`](docs/BINDING.md)). Only the first
 instrumented hop needs it; the session propagates downstream, including through message queues. A session
@@ -99,8 +102,10 @@ started with `--mode exclusive` records every request while it runs.
 ```bash
 tracectl summary my-run                      # counts, mutations, failures
 tracectl events my-run --kind 'db.*' --errors
-tracectl entities my-run                     # what the session changed
-tracectl history my-run postgres orders 42   # every change to one row, with diffs
+tracectl entities my-run                     # what the session changed; "N uncertain" = incomplete key or image
+tracectl history my-run postgres orders 42   # every change to one row, with diffs and the event's flags
+tracectl history my-run postgres items order_id=7,sku=a   # composite key; or the JSON that entities prints
+tracectl history my-run postgres orders --unknown-key     # changes recorded without a key
 tracectl trace my-run --errors               # call tree, only branches that failed
 tracectl show my-run 17                      # one event in full: request, response, mutations
 tracectl diff nightly-ok nightly-failed      # what differs between two runs

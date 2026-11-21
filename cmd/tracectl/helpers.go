@@ -24,6 +24,19 @@ func printJSON(w io.Writer, v any) {
 // appear before, between or after them. what names the positionals in the
 // error message.
 func parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, error) {
+	pos, err := positionals(fs, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(pos) != n {
+		return nil, fmt.Errorf("usage: tracectl %s %s", fs.Name(), what)
+	}
+	return pos, nil
+}
+
+// positionals parses fs and returns the positional arguments, which flags may
+// precede, separate or follow.
+func positionals(fs *flag.FlagSet, args []string) ([]string, error) {
 	var pos []string
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
@@ -34,9 +47,6 @@ func parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, e
 			pos = append(pos, args[0])
 			args = args[1:]
 		}
-	}
-	if len(pos) != n {
-		return nil, fmt.Errorf("usage: tracectl %s %s", fs.Name(), what)
 	}
 	return pos, nil
 }

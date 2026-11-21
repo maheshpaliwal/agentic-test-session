@@ -450,9 +450,13 @@ type EntityRef struct {
 	Entity        string `json:"entity"`
 	PK            string `json:"pk"`
 	MutationCount int    `json:"mutation_count"`
+	// Uncertain mirrors the collector: mutations whose event carries a
+	// core.UncertainFlag; omitted when there are none.
+	Uncertain int `json:"uncertain,omitempty"`
 }
 
-// EntityMutation is one history row for an entity.
+// EntityMutation is one history row for an entity. Flags are those of the
+// event that made the change, as the collector returns them.
 type EntityMutation struct {
 	Seq      uint64             `json:"seq"`
 	SpanID   string             `json:"span_id"`
@@ -465,6 +469,7 @@ type EntityMutation struct {
 	Before   core.PayloadRef    `json:"before,omitempty"`
 	After    core.PayloadRef    `json:"after,omitempty"`
 	Diff     []core.FieldChange `json:"diff,omitempty"`
+	Flags    []string           `json:"flags,omitempty"`
 }
 
 func entityList(evs []core.Event) []EntityRef {
@@ -478,6 +483,9 @@ func entityList(evs []core.Event) []EntityRef {
 				order = append(order, k)
 			}
 			idx[k].MutationCount++
+			if core.HasUncertainFlag(e.Flags) {
+				idx[k].Uncertain++
+			}
 		}
 	}
 	out := make([]EntityRef, 0, len(order))
@@ -493,7 +501,7 @@ func entityHistory(evs []core.Event, store, entity, pk string) []EntityMutation 
 		for _, mu := range e.Mutations {
 			if mu.Store == store && mu.Entity == entity && (pkJSON(mu.PK) == pk || pkString(mu.PK) == pk) {
 				out = append(out, EntityMutation{Seq: e.Seq, SpanID: e.SpanID, Service: e.Service, TimeNs: e.EndNs,
-					TxID: e.TxID, Mutation: mu, Op: mu.Op, Effect: mu.Effective, Before: mu.Before, After: mu.After, Diff: mu.Diff})
+					TxID: e.TxID, Mutation: mu, Op: mu.Op, Effect: mu.Effective, Before: mu.Before, After: mu.After, Diff: mu.Diff, Flags: e.Flags})
 			}
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"slices"
 	"strings"
@@ -48,13 +49,34 @@ func sessionFlags(fs *flag.FlagSet, opts *client.Options) *bindFlags {
 	return binds
 }
 
+// shortFlag registers --short, the same on every command that prints a
+// session: one line "<id> <STATE>" instead of the session as JSON.
+func shortFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("short", false, `print one line "<id> <STATE>" (then " incomplete" if so) instead of the session as JSON`)
+}
+
+// printInfo prints a session as JSON or, when short, as one line for scripts:
+// the id and the state, followed by "incomplete" when the session is.
+func printInfo(w io.Writer, info client.Info, short bool) {
+	if !short {
+		printJSON(w, info)
+		return
+	}
+	line := info.ID + " " + info.State
+	if info.Incomplete {
+		line += " incomplete"
+	}
+	fmt.Fprintln(w, line)
+}
+
 func (c *cli) rename(ctx context.Context, args []string) error {
 	fs := c.flags("rename")
+	short := shortFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return errors.New("usage: tracectl rename <id|name> <new name>")
+		return errors.New("usage: tracectl rename [--short] <id|name> <new name>")
 	}
 	s, err := resolve(ctx, c.opts, fs.Arg(0))
 	if err != nil {
@@ -64,7 +86,7 @@ func (c *cli) rename(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 
@@ -72,6 +94,7 @@ func (c *cli) stop(ctx context.Context, args []string) error {
 	fs := c.flags("stop")
 	wait := fs.Bool("wait", false, "wait until sealed")
 	timeout := fs.Duration("timeout", 2*time.Minute, "wait timeout")
+	short := shortFlag(fs)
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -87,12 +110,14 @@ func (c *cli) stop(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 
 func (c *cli) abort(ctx context.Context, args []string) error {
-	s, err := c.session(ctx, c.flags("abort"), args)
+	fs := c.flags("abort")
+	short := shortFlag(fs)
+	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
 	}
@@ -100,7 +125,7 @@ func (c *cli) abort(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 
@@ -117,11 +142,17 @@ func (c *cli) delete(ctx context.Context, args []string) error {
 }
 
 func (c *cli) status(ctx context.Context, args []string) error {
-	s, err := c.session(ctx, c.flags("status"), args)
+	fs := c.flags("status")
+	short := shortFlag(fs)
+	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
 	}
 	info := s.Info()
+	if *short {
+		printInfo(c.stdout, info, true)
+		return nil
+	}
 	printJSON(c.stdout, info)
 	fmt.Fprintln(c.stdout, "name:", displayName(info))
 	if b := formatBindings(info.Bindings); b != "" {
@@ -188,6 +219,7 @@ func listNewest(ctx context.Context, o client.Options, state string, limit int) 
 func (c *cli) wait(ctx context.Context, args []string) error {
 	fs := c.flags("wait")
 	timeout := fs.Duration("timeout", 2*time.Minute, "wait timeout")
+	short := shortFlag(fs)
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -198,7 +230,7 @@ func (c *cli) wait(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 

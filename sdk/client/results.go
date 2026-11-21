@@ -67,6 +67,11 @@ type Entity struct {
 	Entity        string `json:"entity"`
 	PK            string `json:"pk"`
 	MutationCount int    `json:"mutation_count"`
+	// Uncertain counts the mutations recorded with an incomplete or uncertain
+	// row image (their event carries a core.UncertainFlag such as
+	// "pk_not_unique"); History shows which. Zero also from a collector that
+	// predates the field.
+	Uncertain int `json:"uncertain,omitempty"`
 }
 
 // EntityMutation is one change to an entity.
@@ -85,7 +90,16 @@ type EntityMutation struct {
 	// Effective is false for a write whose transaction rolled back, true for
 	// one that took effect, and nil while the transaction is still open.
 	Effective *bool `json:"effective,omitempty"`
+	// Flags are the flags of the event that made the change. Some say the
+	// recorded images are incomplete or uncertain (see Uncertain). Empty also
+	// from a collector that predates the field.
+	Flags []string `json:"flags,omitempty"`
 }
+
+// Uncertain reports a change whose recorded key or row image is incomplete or
+// uncertain: for example the key matched several rows ("pk_not_unique", so
+// this history may mix rows) or the new values were not read back.
+func (m EntityMutation) Uncertain() bool { return core.HasUncertainFlag(m.Flags) }
 
 // AfterUnavailable reports an update whose new values were not captured; see
 // core.Mutation.AfterUnavailable. Its Diff is not to be read.
@@ -230,9 +244,13 @@ func (s *Session) Entities(ctx context.Context) ([]Entity, error) {
 
 // History returns the changes to one entity. pk is the canonical JSON form
 // from Entities (`{"id":42}`) or, for a single-column key, the bare value
-// ("42").
+// ("42"). An empty pk reads the mutations whose key is not known (listed by
+// Entities as "{}").
 func (s *Session) History(ctx context.Context, store, entity, pk string) (EntityHistory, error) {
 	var out EntityHistory
+	if pk == "" {
+		pk = "{}" // an empty path segment is not a route of the collector
+	}
 	suffix := "/entities/" + url.PathEscape(store) + "/" + url.PathEscape(entity) + "/" + url.PathEscape(pk)
 	return out, s.read(ctx, suffix, &out)
 }

@@ -190,3 +190,47 @@ func TestOfflineKeepsSubSecondTimes(t *testing.T) {
 		t.Fatalf("started %s ended %s (%v %v), want 122ms apart", s.StartedAt, s.EndedAt, err1, err2)
 	}
 }
+
+// The demo and offline backends answer the entities endpoints themselves:
+// they carry the same optional uncertainty fields as the collector, and an
+// export written before events had such flags reads as nothing uncertain.
+func TestOfflineEntitiesCarryUncertainty(t *testing.T) {
+	stock := []core.Mutation{{Store: "postgres", Entity: "stock", Op: "update", PK: map[string]any{"sku": "w"}}}
+	file := writeExport(t, "stock.ndjson",
+		core.Event{SessionID: "ts_run2", Seq: 1, SpanID: "a", Service: "api", Kind: core.KindDBWrite, StartNs: 1e9, EndNs: 2e9,
+			Flags: []string{"pk_not_unique", "after_unavailable"}, Mutations: stock},
+		core.Event{SessionID: "ts_run2", Seq: 2, SpanID: "b", Service: "api", Kind: core.KindDBWrite, StartNs: 2e9, EndNs: 3e9, Mutations: stock},
+		core.Event{SessionID: "ts_run2", Seq: 3, SpanID: "c", Service: "api", Kind: core.KindDBWrite, StartNs: 3e9, EndNs: 4e9,
+			Flags: []string{"redacted"}, Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", PK: map[string]any{"id": 7}}}},
+	)
+	h, err := New(Config{Open: []string{file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	_, b := get(t, srv.URL, "/api/col/v1/sessions/ts_run2/entities")
+	var ents []map[string]any
+	if err := json.Unmarshal(b, &ents); err != nil || len(ents) != 2 {
+		t.Fatalf("entities: %s %v", b, err)
+	}
+	if ents[0]["entity"] != "stock" || ents[0]["mutation_count"] != 2.0 || ents[0]["uncertain"] != 1.0 {
+		t.Fatalf("stock: %s", b)
+	}
+	if _, has := ents[1]["uncertain"]; has {
+		t.Fatalf("an entity with nothing uncertain must not carry the field: %s", b)
+	}
+
+	_, b = get(t, srv.URL, "/api/col/v1/sessions/ts_run2/entities/postgres/stock/%7B%22sku%22%3A%22w%22%7D")
+	var hist []map[string]any
+	if err := json.Unmarshal(b, &hist); err != nil || len(hist) != 2 {
+		t.Fatalf("history: %s %v", b, err)
+	}
+	if f, _ := hist[0]["flags"].([]any); len(f) != 2 || f[0] != "pk_not_unique" || f[1] != "after_unavailable" {
+		t.Fatalf("flags of the first change: %s", b)
+	}
+	if _, has := hist[1]["flags"]; has {
+		t.Fatalf("a change without flags must not carry the field: %s", b)
+	}
+}

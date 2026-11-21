@@ -155,10 +155,19 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
     (`from_seq` is inclusive; `limit` is at most 10000)
   - `GET /v1/sessions/{id}/trace` -> tree: `{"session_id","roots":[Node]}` where
     `Node={"event":Event,"children":[Node],"linked":[Node]}` (`linked` = worker spans whose LinkIDs contain this span)
-  - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count}`
+  - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count,uncertain}`; `pk` is the key as
+    canonical JSON (`{}` when it is not known). `uncertain` (optional, omitted when 0) counts the mutations whose
+    event carries a flag saying the recorded key or row image is incomplete or uncertain: `pk_unknown`,
+    `pk_not_unique`, `pk_lookup_failed`, `after_unavailable`, `after_from_args`, `after_failed`, `returning_partial`,
+    `image_skipped`, `image_timeout`, `image_failed`, `image_truncated`, `diff_truncated` (a flag with a reason,
+    `image_skipped:deadline`, counts as its base name; `core.UncertainFlag`)
   - `GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}` ->
-    `{"store","entity","pk","mutations":[{seq,span_id,service,kind,tx_id,end_ns,op,before,after,diff,source,effective}]}`
-    in Seq order; `{pk}` is the canonical JSON key or, for a single-column key, the bare value
+    `{"store","entity","pk","mutations":[{seq,span_id,service,kind,tx_id,end_ns,op,before,after,diff,source,effective,flags}]}`
+    in Seq order; `{pk}` is the canonical JSON key (`{}` for the unknown key; an empty segment is not a route) or,
+    for a single-column key, the bare value. `flags` (optional, omitted when empty) are the flags of the event that
+    made the change, so a history that merges rows under a non-unique key says so. An entity that is not there
+    answers `200` with no mutations. Both fields are additive: older collectors and exports written before them
+    omit them, and readers treat a missing field as none
   - `GET /v1/sessions/{id}/summary` -> `{session_id,event_count,by_kind,by_service,mutations,failures,pending_async,
     pending_async_ids,dropped_events,flags,duration_ns,sealed,incomplete,quarantined}`
   - `GET /v1/sessions` -> sessions the collector holds events for `[{id,event_count,first_ns,last_ns,sealed}]`,

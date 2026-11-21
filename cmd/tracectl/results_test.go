@@ -25,6 +25,11 @@ type resultsEnv struct {
 	// events overrides, per session name, the events the collector serves;
 	// a session without an entry gets the default ones.
 	events map[string][]core.Event
+	// ents and hist, when set, replace the canned entities list and the
+	// mutations of a history; histPKs are the keys history was asked for.
+	ents    []client.Entity
+	hist    []client.EntityMutation
+	histPKs []string
 }
 
 func newResultsEnv(t *testing.T) *resultsEnv {
@@ -74,16 +79,25 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 		}})
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/entities", func(w http.ResponseWriter, r *http.Request) {
+		if env.ents != nil {
+			json.NewEncoder(w).Encode(env.ents)
+			return
+		}
 		json.NewEncoder(w).Encode([]client.Entity{{Store: "postgres", Entity: "orders", PK: `{"id":42}`, MutationCount: 2}})
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(client.EntityHistory{Store: r.PathValue("store"), Entity: r.PathValue("entity"), PK: `{"id":42}`,
+		env.histPKs = append(env.histPKs, r.PathValue("pk"))
+		h := client.EntityHistory{Store: r.PathValue("store"), Entity: r.PathValue("entity"), PK: r.PathValue("pk"),
 			Mutations: []client.EntityMutation{
 				{Seq: 2, Op: "insert", Service: "api", Kind: core.KindDBWrite, Effective: &yes,
 					Diff: []core.FieldChange{{Field: "status", New: "new"}}},
 				{Seq: 9, Op: "update", Service: "worker", Kind: core.KindDBWrite, Effective: &no,
 					Diff: []core.FieldChange{{Field: "status", Old: "new", New: "shipped"}}},
-			}})
+			}}
+		if env.hist != nil {
+			h.Mutations = env.hist
+		}
+		json.NewEncoder(w).Encode(h)
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	// internal API used by the control plane

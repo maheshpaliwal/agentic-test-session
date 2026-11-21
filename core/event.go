@@ -2,7 +2,11 @@
 // propagation, spans and the recorder seam. It is stdlib-only.
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+	"strings"
+)
 
 // Kind classifies an Event: what sort of step it records.
 type Kind string
@@ -93,6 +97,28 @@ func (m *Mutation) AfterUnavailable() bool {
 // another shape (an entity history entry).
 func AfterUnavailable(op string, before, after PayloadRef) bool {
 	return op == "update" && !before.IsZero() && after.IsZero()
+}
+
+// uncertainFlags are the event flags that say the row images of the event's
+// mutations are incomplete or uncertain: the key was not found or not unique,
+// the new values were not read back from the store, or only part was captured.
+var uncertainFlags = map[string]bool{
+	"pk_unknown": true, "pk_not_unique": true, "pk_lookup_failed": true,
+	"after_unavailable": true, "after_from_args": true, "after_failed": true, "returning_partial": true,
+	"image_skipped": true, "image_timeout": true, "image_failed": true, "image_truncated": true, "diff_truncated": true,
+}
+
+// UncertainFlag reports whether an event flag marks the event's mutations as
+// recorded with an incomplete or uncertain row image (see contrib/tsql). A
+// flag with a reason ("image_skipped:deadline") counts as its base name.
+func UncertainFlag(flag string) bool {
+	base, _, _ := strings.Cut(flag, ":")
+	return uncertainFlags[base]
+}
+
+// HasUncertainFlag reports whether any of an event's flags is an UncertainFlag.
+func HasUncertainFlag(flags []string) bool {
+	return slices.ContainsFunc(flags, UncertainFlag)
 }
 
 // Event is one recorded step. The SDK leaves Seq zero; the collector assigns it.

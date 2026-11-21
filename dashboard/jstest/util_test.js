@@ -519,4 +519,16 @@ assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, s
 assert.ok(U.listSummary({ loaded: 400, shown: 400, total: 900, more: true, state: '', below: 200 }).endsWith('reload the page to update them.'));
 assert.ok(!/not refreshed/.test(U.listSummary({ loaded: 200, shown: 200, total: 900, more: true, state: '', below: 0 })));
 
+// Entity history: which event flags mean an uncertain key or row image (mirrors core.UncertainFlag).
+for (const f of ['pk_unknown', 'pk_not_unique', 'pk_lookup_failed', 'after_unavailable', 'after_from_args', 'after_failed', 'returning_partial',
+  'image_skipped', 'image_skipped:deadline', 'image_timeout', 'image_failed', 'image_truncated', 'diff_truncated']) assert.strictEqual(U.uncertainFlag(f), true, f);
+for (const f of ['redacted', 'tx_unresolved', 'orphaned', 'returning_appended', '', ':pk_unknown', 'PK_UNKNOWN', 'constructor', '__proto__', 'toString', undefined, null, 7])
+  assert.strictEqual(U.uncertainFlag(f), false, String(f));
+assert.strictEqual(U.flagBase('image_skipped:deadline'), 'image_skipped');
+assert.strictEqual(U.flagBase('orphaned'), 'orphaned');
+assert.strictEqual(U.uncertainCount([{ flags: ['pk_not_unique', 'after_unavailable'] }, { flags: ['redacted'] }, { flags: ['image_skipped:serializable'] }, {}]), 2);
+// Entries of a collector that predates the field, and anything malformed, count as not uncertain.
+assert.strictEqual(U.uncertainCount([{ seq: 1 }, { flags: null }, { flags: 'pk_unknown' }, null, undefined]), 0);
+assert.strictEqual(U.uncertainCount(undefined), 0);
+
 console.log('util ok');
