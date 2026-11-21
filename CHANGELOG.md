@@ -164,9 +164,10 @@ Rolling back:
     endpoint, idle services frozen or half-open); healthy drain time unchanged.
   - Not detected: a service killed before it ever reports, a service on an older SDK, and a session that ends
     sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off), or less
-    than about 10 s after the control plane's first session following a time without any began.
+    than about 10 s after the control plane's first session following a time without any began; a process cut
+    off from both its reports and its stream.
   - Reported as `incomplete` although nothing is missing: a service whose reports are blocked while its events
-    all arrived, and one frozen for longer than the grace after delivering and before reporting. The control
+    all arrived, and one frozen until the grace after the stop is over, after delivering and before reporting. The control
     plane cannot know that without the report, and the reason says so.
   - The endpoint is unauthenticated, like stop and abort. `docs/PROTOCOL.md` lists what a caller who can reach
     the control plane or the collector can do: make a session incomplete, hold a drain up to `max_drain`, and,
@@ -371,6 +372,11 @@ Rolling back:
 
 ### Fixed
 
+- Delivery accounting, from its fourth review: a connected service that was heard of and is merely silent (frozen,
+  or the report endpoint briefly down) is no longer named under `delivery_unconfirmed` in sessions it left no
+  report and no events in (46 to 80 of 200 sessions in the reviewer's runs, now 0); an SDK whose reports fail for
+  the grace reopens its stream and is named. A refused delivery report is not retried while no session runs.
+  Reports that begin to fail during a run are named after about 12 s, where it was 10.
 - Panic recovery, from its review: a session that a panicking sweep left DRAINING is announced to the SDKs when
   the next sweep starts its drain (they were not told, so they did not flush or send their last delivery
   report); the restart backoff of a background loop starts over after a run longer than ten minutes, so a panic
@@ -483,6 +489,9 @@ Rolling back:
 
 ### Performance
 
+- The control plane indexes a session's delivery reports once per judgement, not once per unheard instance: with
+  1,000 streams and 1,280 reports a judgement takes 2.6 ms and 1.1 MB where it took 407 ms and 430 MB (the
+  developer's benchmark, `BenchmarkJudgeDelivery`), and no longer stalls the API while it holds the lock.
 - Collector retention sweep on the in-memory and Postgres stores reads only the sealed sessions that may be
   due instead of listing every session and reading every seal. With 10,000 sealed sessions and nothing due, a
   Postgres sweep went from about 0.4–1 s to about 1 ms. Its cost still grows with the number of never-sealed
