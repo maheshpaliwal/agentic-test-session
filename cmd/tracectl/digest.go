@@ -271,8 +271,8 @@ type dNode struct {
 	MaxDurationNs int64  `json:"max_duration_ns,omitempty"`
 	Mutations     int    `json:"mutations,omitempty"`
 	Error         string `json:"error,omitempty"`
-	// Code is an outcome that is not an error: a gRPC status such as
-	// NotFound, which the call's line would otherwise not show.
+	// Code is an outcome that the line would otherwise not show: a gRPC
+	// status such as NotFound, or an HTTP status of 400 and above.
 	Code string `json:"code,omitempty"`
 	// Flags are the event's flags (the first few), so that a count under
 	// "flags" in the verdict can be traced to its events.
@@ -350,11 +350,22 @@ func (src *digestSource) buildTree(tr client.Trace) {
 	}
 }
 
-// outcomeCode is what a call returned when that is not in its error: a gRPC
-// status other than OK.
+// outcomeCode is what a call returned when that is not in its error, or is
+// lost from it when errors are merged: a gRPC status other than OK, or an
+// HTTP status of 400 and above ("HTTP 404"). A 4xx is not a failed event, so
+// without the code a request the test was refused reads like one that went
+// well.
 func outcomeCode(e *core.Event) string {
 	if c := e.Attrs["grpc.code"]; c != "" && c != "OK" {
 		return c
+	}
+	if (e.Kind == core.KindAPIIn || e.Kind == core.KindAPIOut) && len(e.Resp.Inline) > 0 {
+		var r struct {
+			Status int `json:"status"`
+		}
+		if json.Unmarshal(e.Resp.Inline, &r) == nil && r.Status >= 400 {
+			return "HTTP " + strconv.Itoa(r.Status)
+		}
 	}
 	return ""
 }

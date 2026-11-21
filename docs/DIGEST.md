@@ -116,12 +116,13 @@ merges them the same way, by its own rule (consecutive siblings).
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
 `changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`), `uncertain`,
-`flags`, `after_unavailable`, `fields`, `fields_omitted`. A field: `field`, `before`, `after`; the values are
+`flags`, `after_unavailable`, `fields`, `fields_omitted`. A field: `field`, `before`, `after`, `hidden` (true when
+the column is masked and changed: `before` and `after` then read the same); the values are
 compact JSON text, clipped, or `null` for no value.
 
 A tree line: `depth` (0 for a root; a line's parent is the nearest line above it with a smaller depth), `seq`,
-`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome that is not an
-error: a gRPC status other than `OK`), `flags` (the event's flags), `hidden` (lines below it that were left
+`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome the line would
+otherwise not show: a gRPC status other than `OK`, or an HTTP status of 400 and above as `HTTP 404`), `flags` (the event's flags), `hidden` (lines below it that were left
 out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`; its `duration_ns` and
 `mutations` are totals and its `name` is normalised.
 

@@ -268,6 +268,12 @@ Rolling back:
 
 ### Changed
 
+- `tracectl digest` shows an HTTP status of 400 and above on a request's line (`code HTTP 404`, `"code"` in
+  JSON). A 4xx is not a failed event, so a request the test was refused read like one that went well.
+  Requests with different statuses are no longer merged into one line.
+- `--fail-on-incomplete` on a session that is still running prints a note on standard error that it can only
+  judge what has arrived so far; the exit status is unchanged. `docs/DIGEST.md` documents `hidden` of a changed
+  field.
 - A panic in a background goroutine of the SDK, the collector or the control plane no longer ends the process
   (for the SDK, the host application): the goroutine restarts with a backoff, and what was lost is reported. A
   drain that panics three times ends its session SEALED and incomplete; `max_drain` counts from the stop, also

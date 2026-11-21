@@ -71,6 +71,12 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
 		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+	case !info.Done():
+		// Still running: what its services hold has not all arrived, and the
+		// verdict on it is given when it ends. The gate judges what there is
+		// and says so; the exit status stays what it was for scripts that
+		// look at a session while it runs.
+		fmt.Fprintf(os.Stderr, "tracectl: note: the session is still running (%s): --fail-on-incomplete can only judge what has arrived so far; stop it first for a verdict (tracectl stop %s --wait)\n", info.State, info.ID)
 	}
 	if g.onUnconfirmed && !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != "") {
 		// The stricter gate on its own: a session known to have lost events

@@ -878,3 +878,25 @@ func TestDigestTreeOutcomes(t *testing.T) {
 		t.Errorf("JSON tree: %d lines with code NotFound, %d with the flag; want one each", codes, flags)
 	}
 }
+
+func TestOutcomeCode(t *testing.T) {
+	resp := func(s string) core.PayloadRef { return core.PayloadRef{Inline: json.RawMessage(s)} }
+	for _, tc := range []struct {
+		name string
+		ev   core.Event
+		want string
+	}{
+		{"http ok", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":200}`)}, ""},
+		{"http refused", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":404}`)}, "HTTP 404"},
+		{"http failed downstream", core.Event{Kind: core.KindAPIOut, Resp: resp(`{"status":503}`)}, "HTTP 503"},
+		{"no response", core.Event{Kind: core.KindAPIOut}, ""},
+		{"a status that is data of another kind", core.Event{Kind: core.KindDBRead, Resp: resp(`{"status":404}`)}, ""},
+		{"a response that is not an object", core.Event{Kind: core.KindAPIIn, Resp: resp(`"x"`)}, ""},
+		{"grpc", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "NotFound"}}, "NotFound"},
+		{"grpc ok", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}}, ""},
+	} {
+		if got := outcomeCode(&tc.ev); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
