@@ -3,6 +3,7 @@ package tqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,31 +62,31 @@ func TestRoundTripSameTraceAndLinks(t *testing.T) {
 				})
 		})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs := rec.Events()
 	pub, st, en := byKind(evs, core.KindQueuePub), byKind(evs, core.KindWorkerStart), byKind(evs, core.KindWorkerEnd)
 	if len(pub) != 1 || len(st) != 1 || len(en) != 1 {
-		t.Fatalf("want 1/1/1 got %d/%d/%d", len(pub), len(st), len(en))
+		panic(fmt.Sprintf("want 1/1/1 got %d/%d/%d", len(pub), len(st), len(en)))
 	}
 	if pub[0].ParentID != root.SpanID || pub[0].Req.IsZero() {
-		t.Fatalf("publish parent/req wrong: %+v", pub[0])
+		panic(fmt.Sprintf("publish parent/req wrong: %+v", pub[0]))
 	}
 	for _, e := range evs {
 		if e.TraceID != root.TraceID {
-			t.Fatalf("trace mismatch on %s", e.Kind)
+			panic(fmt.Sprintf("trace mismatch on %s", e.Kind))
 		}
 	}
 	if len(st[0].LinkIDs) != 1 || st[0].LinkIDs[0] != pub[0].SpanID {
-		t.Fatalf("start link: %v", st[0].LinkIDs)
+		panic(fmt.Sprintf("start link: %v", st[0].LinkIDs))
 	}
 	if !contains(en[0].LinkIDs, pub[0].SpanID) || en[0].ParentID != st[0].SpanID || en[0].Attempt != 1 {
-		t.Fatalf("end wrong: %+v", en[0])
+		panic(fmt.Sprintf("end wrong: %+v", en[0]))
 	}
 	for _, k := range []core.Kind{core.KindAPIOut, core.KindDBRead} {
 		e := byKind(evs, k)
 		if len(e) != 1 || e[0].ParentID != st[0].SpanID {
-			t.Fatalf("%s not nested under worker.start", k)
+			panic(fmt.Sprintf("%s not nested under worker.start", k))
 		}
 	}
 }
@@ -99,29 +100,29 @@ func TestRetryThenDLQ(t *testing.T) {
 		err := Consume(context.Background(), carrier, Delivery{Queue: "q", JobName: "j", Attempt: a, MaxAttempts: 3},
 			func(context.Context) error { return boom })
 		if err != boom {
-			t.Fatalf("error not propagated: %v", err)
+			panic(fmt.Sprintf("error not propagated: %v", err))
 		}
 	}
 	evs := rec.Events()
 	st, en := byKind(evs, core.KindWorkerStart), byKind(evs, core.KindWorkerEnd)
 	if len(st) != 3 || len(en) != 3 {
-		t.Fatalf("start/end = %d/%d", len(st), len(en))
+		panic(fmt.Sprintf("start/end = %d/%d", len(st), len(en)))
 	}
 	seen := map[string]bool{}
 	for i := range st {
 		if st[i].Attempt != i+1 || en[i].Attempt != i+1 || en[i].Err != "boom" || seen[st[i].SpanID] {
-			t.Fatalf("attempt %d bad: %+v %+v", i+1, st[i], en[i])
+			panic(fmt.Sprintf("attempt %d bad: %+v %+v", i+1, st[i], en[i]))
 		}
 		seen[st[i].SpanID] = true
 	}
 	for i, e := range en {
 		want := i < 2
 		if (e.Attrs["retry_pending"] == "true") != want {
-			t.Fatalf("attempt %d retry_pending=%q want %v", i+1, e.Attrs["retry_pending"], want)
+			panic(fmt.Sprintf("attempt %d retry_pending=%q want %v", i+1, e.Attrs["retry_pending"], want))
 		}
 	}
 	if r, d := byKind(evs, core.KindWorkerRetry), byKind(evs, core.KindWorkerDLQ); len(r) != 2 || len(d) != 1 || d[0].Attempt != 3 {
-		t.Fatalf("retry/dlq = %d/%d", len(r), len(d))
+		panic(fmt.Sprintf("retry/dlq = %d/%d", len(r), len(d)))
 	}
 }
 
@@ -134,25 +135,25 @@ func TestFanOut(t *testing.T) {
 		return Publish(h, Message{Queue: "b", JobName: "b"}, c2, func(context.Context) error { return nil })
 	})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := Consume(context.Background(), c2, Delivery{Queue: "b", JobName: "b"}, func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs := rec.Events()
 	pubs, st := byKind(evs, core.KindQueuePub), byKind(evs, core.KindWorkerStart)
 	if len(pubs) != 2 || len(st) != 2 {
-		t.Fatalf("pubs/starts %d/%d", len(pubs), len(st))
+		panic(fmt.Sprintf("pubs/starts %d/%d", len(pubs), len(st)))
 	}
 	if pubs[1].ParentID != st[0].SpanID {
-		t.Fatal("second publish should be child of first worker.start")
+		panic("second publish should be child of first worker.start")
 	}
 	if st[1].LinkIDs[0] != pubs[1].SpanID {
-		t.Fatal("second worker should link second publish")
+		panic("second worker should link second publish")
 	}
 	for _, e := range evs {
 		if e.TraceID != root.TraceID {
-			t.Fatal("trace changed across fan-out")
+			panic("trace changed across fan-out")
 		}
 	}
 }
@@ -163,22 +164,22 @@ func TestSideChannelHitMissTTL(t *testing.T) {
 	sc := &MemSideChannel{Now: func() time.Time { return now }}
 	_ = PublishVia(ctx, sc, "m1", Message{Queue: "q", JobName: "j", Params: "x"}, func(context.Context) error { return nil })
 	if _, err := sc.Get(ctx, "ts:ctx:m1"); err != nil {
-		t.Fatalf("carrier not stored: %v", err)
+		panic(fmt.Sprintf("carrier not stored: %v", err))
 	}
 	ran := 0
 	h := func(context.Context) error { ran++; return nil }
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m1"}, h)
 	if n := len(byKind(rec.Events(), core.KindWorkerStart)); n != 1 {
-		t.Fatalf("hit should trace, starts=%d", n)
+		panic(fmt.Sprintf("hit should trace, starts=%d", n))
 	}
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "nope"}, h)
 	now = now.Add(2 * DefaultTTL)
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m1"}, h)
 	if ran != 3 {
-		t.Fatalf("handler must always run, ran=%d", ran)
+		panic(fmt.Sprintf("handler must always run, ran=%d", ran))
 	}
 	if n := len(byKind(rec.Events(), core.KindWorkerStart)); n != 1 {
-		t.Fatalf("miss/expired must be untraced, starts=%d", n)
+		panic(fmt.Sprintf("miss/expired must be untraced, starts=%d", n))
 	}
 }
 
@@ -199,12 +200,12 @@ func (f *fakeRedis) Get(_ context.Context, k string) (string, bool, error) {
 func TestRedisSideChannel(t *testing.T) {
 	r := RedisSideChannel{Client: &fakeRedis{m: map[string]string{}}}
 	if _, err := r.Get(context.Background(), "x"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
+		panic(fmt.Sprintf("want ErrNotFound, got %v", err))
 	}
 	_ = r.Put(context.Background(), "k", map[string]string{"a": "b"}, time.Minute)
 	m, err := r.Get(context.Background(), "k")
 	if err != nil || m["a"] != "b" || r.Client.(*fakeRedis).ttl != time.Minute {
-		t.Fatalf("roundtrip failed: %v %v", m, err)
+		panic(fmt.Sprintf("roundtrip failed: %v %v", m, err))
 	}
 }
 
@@ -215,7 +216,7 @@ func TestWrapHandlerAsynqStyle(t *testing.T) {
 	h := WrapHandler(sc, "asynq", "q", "j", 0, func(context.Context, string, int, []byte) error { return nil })
 	_ = h(context.Background(), "id1", 1, []byte(`{"a":1}`))
 	if len(byKind(rec.Events(), core.KindWorkerEnd)) != 1 {
-		t.Fatal("expected worker.end")
+		panic("expected worker.end")
 	}
 }
 
@@ -226,7 +227,7 @@ func TestDisabledPassthrough(t *testing.T) {
 	_ = Publish(context.Background(), Message{Queue: "q"}, c, func(context.Context) error { sent = true; return nil })
 	_ = Consume(context.Background(), c, Delivery{Queue: "q"}, func(context.Context) error { handled = true; return nil })
 	if !sent || !handled || len(rec.Events()) != 0 || len(c) != 0 {
-		t.Fatal("disabled must be a pure passthrough")
+		panic("disabled must be a pure passthrough")
 	}
 }
 
@@ -237,7 +238,7 @@ func TestNoSessionRunsUntraced(t *testing.T) {
 	_ = Publish(context.Background(), Message{Queue: "q"}, c, func(context.Context) error { sent = true; return nil })
 	_ = Consume(context.Background(), c, Delivery{Queue: "q"}, func(context.Context) error { handled = true; return nil })
 	if !sent || !handled || len(rec.Events()) != 0 {
-		t.Fatal("no session => untraced but still runs")
+		panic("no session => untraced but still runs")
 	}
 }
 
@@ -249,14 +250,14 @@ func TestIdempotentDoubleWrap(t *testing.T) {
 		return Publish(sctx, m, c, func(context.Context) error { return nil })
 	})
 	if n := len(byKind(rec.Events(), core.KindQueuePub)); n != 1 {
-		t.Fatalf("double publish wrap emitted %d spans", n)
+		panic(fmt.Sprintf("double publish wrap emitted %d spans", n))
 	}
 	d := Delivery{Queue: "q", JobName: "j", MessageID: "x", Attempt: 1}
 	_ = Consume(context.Background(), c, d, func(h context.Context) error {
 		return Consume(h, c, d, func(context.Context) error { return nil })
 	})
 	if n := len(byKind(rec.Events(), core.KindWorkerStart)); n != 1 {
-		t.Fatalf("double consume wrap emitted %d starts", n)
+		panic(fmt.Sprintf("double consume wrap emitted %d starts", n))
 	}
 }
 
@@ -267,14 +268,14 @@ func TestPanicRecordedAndRepanicked(t *testing.T) {
 	func() {
 		defer func() {
 			if recover() == nil {
-				t.Fatal("panic swallowed")
+				panic("panic swallowed")
 			}
 		}()
 		_ = Consume(context.Background(), c, Delivery{Queue: "q"}, func(context.Context) error { panic("kaboom") })
 	}()
 	en := byKind(rec.Events(), core.KindWorkerEnd)
 	if len(en) != 1 || en[0].Err == "" {
-		t.Fatalf("panic not recorded: %+v", en)
+		panic(fmt.Sprintf("panic not recorded: %+v", en))
 	}
 }
 
@@ -282,10 +283,10 @@ func TestPublishSendErrorRecorded(t *testing.T) {
 	rec, ctx := setup(t, true)
 	boom := errors.New("down")
 	if err := Publish(ctx, Message{Queue: "q"}, core.MapCarrier{}, func(context.Context) error { return boom }); err != boom {
-		t.Fatal("error lost")
+		panic("error lost")
 	}
 	if p := byKind(rec.Events(), core.KindQueuePub); len(p) != 1 || p[0].Err != "down" {
-		t.Fatal("send error not on span")
+		panic("send error not on span")
 	}
 }
 
@@ -298,11 +299,11 @@ func TestSuccessAndUnknownPolicyCloseEachAttempt(t *testing.T) {
 	_ = Consume(context.Background(), c, Delivery{Queue: "q", JobName: "j", Attempt: 2, MaxAttempts: 3}, func(context.Context) error { return nil })
 	for _, e := range byKind(rec.Events(), core.KindWorkerEnd) {
 		if e.Attrs["retry_pending"] != "" {
-			t.Fatalf("unexpected retry_pending: %+v", e)
+			panic(fmt.Sprintf("unexpected retry_pending: %+v", e))
 		}
 	}
 	if n := len(byKind(rec.Events(), core.KindWorkerRetry)) + len(byKind(rec.Events(), core.KindWorkerDLQ)); n != 0 {
-		t.Fatalf("retry/dlq = %d", n)
+		panic(fmt.Sprintf("retry/dlq = %d", n))
 	}
 }
 
@@ -318,10 +319,10 @@ func TestRetryExpectedCallback(t *testing.T) {
 	}
 	en := byKind(rec.Events(), core.KindWorkerEnd)
 	if en[0].Attrs["retry_pending"] != "true" || en[1].Attrs["retry_pending"] != "" {
-		t.Fatalf("retry_pending wrong: %v %v", en[0].Attrs, en[1].Attrs)
+		panic(fmt.Sprintf("retry_pending wrong: %v %v", en[0].Attrs, en[1].Attrs))
 	}
 	if len(byKind(rec.Events(), core.KindWorkerRetry)) != 1 {
-		t.Fatal("want one worker.retry")
+		panic("want one worker.retry")
 	}
 }
 
@@ -346,7 +347,7 @@ func TestFanOutRetryOutOfOrder(t *testing.T) {
 	}
 	for _, p := range pubs {
 		if closing[p.SpanID] != 1 {
-			t.Fatalf("publish %s closed %d times, want exactly 1", p.Name, closing[p.SpanID])
+			panic(fmt.Sprintf("publish %s closed %d times, want exactly 1", p.Name, closing[p.SpanID]))
 		}
 	}
 }
@@ -359,7 +360,7 @@ func TestBodyRedaction(t *testing.T) {
 	_ = Publish(ctx, Message{Queue: "q2", Params: bodyParams([]byte(`password=hunter2&a=1`))}, core.MapCarrier{}, func(context.Context) error { return nil })
 	for _, e := range byKind(rec.Events(), core.KindQueuePub) {
 		if strings.Contains(string(e.Req.Inline), "hunter2") {
-			t.Fatalf("secret leaked: %s", e.Req.Inline)
+			panic(fmt.Sprintf("secret leaked: %s", e.Req.Inline))
 		}
 	}
 }
@@ -380,10 +381,10 @@ func TestPublishViaTimeoutDoesNotBlock(t *testing.T) {
 	start := time.Now()
 	err := PublishVia(ctx, sc, "m1", Message{Queue: "q", JobName: "j"}, func(context.Context) error { sent = true; return nil }, WithSideTimeout(30*time.Millisecond))
 	if err != nil || !sent || time.Since(start) > 2*time.Second {
-		t.Fatalf("send blocked/failed: %v %v %v", err, sent, time.Since(start))
+		panic(fmt.Sprintf("send blocked/failed: %v %v %v", err, sent, time.Since(start)))
 	}
 	if p := byKind(rec.Events(), core.KindQueuePub); len(p) != 1 || !contains(p[0].Flags, FlagSideChannel) {
-		t.Fatalf("flag missing: %+v", p)
+		panic(fmt.Sprintf("flag missing: %+v", p))
 	}
 }
 
@@ -396,13 +397,13 @@ func TestMemSideChannelSweepAndCap(t *testing.T) {
 	now = now.Add(5 * time.Second)
 	_ = sc.Put(bg, "c", map[string]string{"x": "1"}, time.Hour)
 	if sc.Len() != 1 {
-		t.Fatalf("expired not swept on Put: len=%d", sc.Len())
+		panic(fmt.Sprintf("expired not swept on Put: len=%d", sc.Len()))
 	}
 	for _, k := range []string{"d", "e", "f", "g"} {
 		_ = sc.Put(bg, k, map[string]string{"x": "1"}, time.Hour)
 	}
 	if sc.Len() > 3 {
-		t.Fatalf("cap exceeded: %d", sc.Len())
+		panic(fmt.Sprintf("cap exceeded: %d", sc.Len()))
 	}
 }
 
@@ -419,20 +420,20 @@ func TestMemSideChannelEvictsInBatches(t *testing.T) {
 		_ = sc.Put(bg, "k"+strconv.Itoa(i), c, time.Duration(i)*time.Minute)
 	}
 	if sc.Len() != 100 {
-		t.Fatalf("len = %d", sc.Len())
+		panic(fmt.Sprintf("len = %d", sc.Len()))
 	}
 	_ = sc.Put(bg, "new", c, time.Hour)
 	if got, want := sc.Len(), 100-100/memEvictFraction+1; got != want {
-		t.Fatalf("len after Put into a full channel = %d, want %d (batch eviction)", got, want)
+		panic(fmt.Sprintf("len after Put into a full channel = %d, want %d (batch eviction)", got, want))
 	}
 	for i := 1; i <= 10; i++ {
 		if _, err := sc.Get(bg, "k"+strconv.Itoa(i)); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("k%d (closest to expiry) survived", i)
+			panic(fmt.Sprintf("k%d (closest to expiry) survived", i))
 		}
 	}
 	for _, k := range []string{"k11", "k99", "forever", "new"} {
 		if _, err := sc.Get(bg, k); err != nil {
-			t.Fatalf("%s evicted: %v", k, err)
+			panic(fmt.Sprintf("%s evicted: %v", k, err))
 		}
 	}
 	// Replacing an existing key never evicts.
@@ -441,7 +442,7 @@ func TestMemSideChannelEvictsInBatches(t *testing.T) {
 	}
 	_ = sc.Put(bg, "new", c, time.Hour)
 	if sc.Len() != 100 {
-		t.Fatalf("replace evicted: len = %d", sc.Len())
+		panic(fmt.Sprintf("replace evicted: len = %d", sc.Len()))
 	}
 }
 

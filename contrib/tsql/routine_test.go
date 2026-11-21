@@ -24,7 +24,7 @@ func TestRoutineIsAWriteWithUnknownEffects(t *testing.T) {
 			args = append(args, 1)
 		}
 		if _, err := db.ExecContext(ctx, stmt, args...); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if reads := byKind(rec.Events(), core.KindDBRead); len(reads) != 0 {
 			t.Errorf("%s: recorded as a read: %+v", stmt, reads)
@@ -38,7 +38,7 @@ func TestRoutineIsAWriteWithUnknownEffects(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, &fakeDB{}, "postgres")
 	if _, err := db.ExecContext(ctx, "SELECT 1"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, e := range rec.Events() {
 		if hasFlag(e, "effects_unknown") || e.Kind == core.KindDBWrite {

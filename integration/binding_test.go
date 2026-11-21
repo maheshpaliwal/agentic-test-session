@@ -90,7 +90,7 @@ func TestE2E_Binding(t *testing.T) {
 		s, err := client.Start(ctx, client.Options{BaseURL: in.cpSrv.URL, Name: name, TTLSeconds: 600,
 			QuiesceSeconds: 8, MaxDrainSeconds: 100, PollInterval: 100 * time.Millisecond, Bindings: b})
 		if err != nil {
-			t.Fatalf("start %s: %v", name, err)
+			panic(fmt.Sprintf("start %s: %v", name, err))
 		}
 		return s
 	}
@@ -130,7 +130,7 @@ func TestE2E_Binding(t *testing.T) {
 	t.Run("dashboard_proxy_lists_bindings", func(t *testing.T) {
 		dh, err := dashboard.New(dashboard.Config{ControlPlaneURL: in.cpSrv.URL, CollectorURL: in.colSrv.URL})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		ds := httptest.NewServer(dh)
 		defer ds.Close()
@@ -159,7 +159,7 @@ func TestE2E_Binding(t *testing.T) {
 		_, err := client.Start(ctx, client.Options{BaseURL: in.cpSrv.URL, Name: "dup",
 			Bindings: []client.Binding{client.BindHeader("X-User-Id", idA)}}) // header names are case-insensitive
 		if !errors.Is(err, client.ErrConflict) {
-			t.Fatalf("second session binding same value: err=%v, want ErrConflict", err)
+			panic(fmt.Sprintf("second session binding same value: err=%v, want ErrConflict", err))
 		}
 		if !strings.Contains(err.Error(), sA.ID) {
 			t.Errorf("conflict message %q does not name session %s", err, sA.ID)
@@ -176,14 +176,14 @@ func TestE2E_Binding(t *testing.T) {
 		go func() { defer wg.Done(); orders(&rb, "cust-b", bearer(tokB), []string{"flaky_job"}, perUser) }()
 		wg.Wait()
 		if len(ra.ids) != perUser || len(rb.ids) != perUser {
-			t.Fatalf("orders created a=%d b=%d", len(ra.ids), len(rb.ids))
+			panic(fmt.Sprintf("orders created a=%d b=%d", len(ra.ids), len(rb.ids)))
 		}
 	})
 
 	t.Run("alg_none_jwt_binds", func(t *testing.T) {
 		code, _ := ae.createOrder(t, bearer(tokC), orderBody{SKU: "widget", Qty: 1, Customer: "cust-c-0"})
 		if code != 201 {
-			t.Fatalf("alg:none order: %d", code)
+			panic(fmt.Sprintf("alg:none order: %d", code))
 		}
 	})
 
@@ -194,10 +194,10 @@ func TestE2E_Binding(t *testing.T) {
 	)
 	t.Run("no_attribute_and_wrong_value_untraced", func(t *testing.T) {
 		if code, _ := ae.createOrder(t, nil, orderBody{SKU: "widget", Qty: 1, Customer: noAttrCust, Jobs: []string{"flaky_job"}}); code != 201 {
-			t.Fatalf("no-attr order: %d", code)
+			panic(fmt.Sprintf("no-attr order: %d", code))
 		}
 		if code, _ := ae.createOrder(t, userHdr("someone-else"), orderBody{SKU: "widget", Qty: 1, Customer: wrongCust}); code != 201 {
-			t.Fatalf("wrong-attr order: %d", code)
+			panic(fmt.Sprintf("wrong-attr order: %d", code))
 		}
 	})
 
@@ -205,7 +205,7 @@ func TestE2E_Binding(t *testing.T) {
 		h := sPlain.Header() // x-tsession-id of the plain session
 		h.Set("X-User-Id", idA)
 		if code, _ := ae.createOrder(t, h, orderBody{SKU: "widget", Qty: 1, Customer: hdrWinCust}); code != 201 {
-			t.Fatalf("order: %d", code)
+			panic(fmt.Sprintf("order: %d", code))
 		}
 	})
 
@@ -215,11 +215,11 @@ func TestE2E_Binding(t *testing.T) {
 	t.Run("stop_semantics", func(t *testing.T) {
 		code, o := ae.createOrder(t, userHdr(idA), orderBody{SKU: "widget", Qty: 1, Customer: inflightCust, Jobs: []string{"flaky_job"}})
 		if code != 201 {
-			t.Fatalf("order: %d", code)
+			panic(fmt.Sprintf("order: %d", code))
 		}
 		ra.ids, ra.custs = append(ra.ids, o.ID), append(ra.custs, inflightCust)
 		if _, err := sA.Stop(ctx); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		waitFor(t, 5*time.Second, "A's binding left the active set", func() bool {
 			for _, b := range cpActive(t, in.cpSrv.URL).Bindings {
@@ -231,7 +231,7 @@ func TestE2E_Binding(t *testing.T) {
 		})
 		time.Sleep(500 * time.Millisecond) // SSE push to this process' SDK
 		if code, _ := ae.createOrder(t, userHdr(idA), orderBody{SKU: "widget", Qty: 1, Customer: afterStopCust}); code != 201 {
-			t.Fatalf("post-stop order: %d", code)
+			panic(fmt.Sprintf("post-stop order: %d", code))
 		}
 		// the attribute is free again
 		again := start("tester-a-again", client.BindHeader("x-user-id", idA))
@@ -245,7 +245,7 @@ func TestE2E_Binding(t *testing.T) {
 	defer wcancel()
 	iA, err := sA.Wait(wctx)
 	if err != nil {
-		t.Fatalf("wait A: %v", err)
+		panic(fmt.Sprintf("wait A: %v", err))
 	}
 	iB := in.seal(t, sB)
 	iC := in.seal(t, sC)

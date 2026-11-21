@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,9 +18,9 @@ func TestGuardNamesTheRejectedHost(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"controlplane:7070"`) ||
 		!strings.Contains(rec.Body.String(), "--allowed-hosts") {
-		t.Fatalf("%d %q", rec.Code, rec.Body.String())
+		panic(fmt.Sprintf("%d %q", rec.Code, rec.Body.String()))
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("the echoed host must be served as plain text, got %q", ct)
+		panic(fmt.Sprintf("the echoed host must be served as plain text, got %q", ct))
 	}
 }

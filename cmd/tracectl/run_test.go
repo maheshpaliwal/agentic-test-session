@@ -172,8 +172,8 @@ func (env *runEnv) wantSession(started int, state string) {
 	env.mu.Lock()
 	defer env.mu.Unlock()
 	if len(env.started) != started || env.stops != started || env.state != state {
-		env.t.Fatalf("sessions: %d started, %d stop(s), state %q; want %d started and stopped, state %q",
-			len(env.started), env.stops, env.state, started, state)
+		panic(fmt.Sprintf("sessions: %d started, %d stop(s), state %q; want %d started and stopped, state %q",
+			len(env.started), env.stops, env.state, started, state))
 	}
 }
 
@@ -193,12 +193,12 @@ func TestCLIRun(t *testing.T) {
 	code, out, e := env.run("ok", []string{"--name", "ci", "--ttl", "600", "--bind", "header:x-user-id=u_1", "--fail-on-error", "--fail-on-incomplete", "--fail-on-empty"},
 		"-x", "a b", "--name")
 	if code != 0 {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	// Standard output is the command's alone; it saw the session id and got
 	// its arguments as they were given.
 	if want := "id=" + runID + ` args=["-x" "a b" "--name"]` + "\n"; out != want {
-		t.Fatalf("stdout %q, want %q", out, want)
+		panic(fmt.Sprintf("stdout %q, want %q", out, want))
 	}
 	for _, want := range []string{
 		"tracectl: session " + runID + " (ci) started\n",
@@ -213,7 +213,7 @@ func TestCLIRun(t *testing.T) {
 	}
 	env.wantSession(1, "SEALED")
 	if o := env.started[0]; o.Name != "ci" || o.Mode != "header" || o.TTLSeconds != 600 || formatBindings(o.Bindings) != "header:x-user-id=u_1" {
-		t.Fatalf("session options: %+v", o)
+		panic(fmt.Sprintf("session options: %+v", o))
 	}
 }
 
@@ -240,7 +240,7 @@ func TestCLIRunExitStatus(t *testing.T) {
 			env := newRunEnv(t, tc.evs...)
 			code, out, e := env.run(tc.helper, tc.flags)
 			if code != tc.code {
-				t.Fatalf("exit %d, want %d\n%s", code, tc.code, e)
+				panic(fmt.Sprintf("exit %d, want %d\n%s", code, tc.code, e))
 			}
 			for _, want := range tc.stderr {
 				if !strings.Contains(e, want) {
@@ -262,24 +262,24 @@ func TestCLIRunReport(t *testing.T) {
 
 	code, out, e := env.run("ok", []string{"--name", "ci", "--report", md})
 	if code != 0 || !strings.HasPrefix(out, "id=") || strings.Count(out, "\n") != 1 || !strings.Contains(e, "wrote markdown report to "+md) {
-		t.Fatalf("markdown: %d\n%s\n%s", code, out, e)
+		panic(fmt.Sprintf("markdown: %d\n%s\n%s", code, out, e))
 	}
 	if b, err := os.ReadFile(md); err != nil || !strings.Contains(string(b), "GET /orders/42") || !strings.Contains(string(b), "HTTP 500") {
-		t.Fatalf("markdown report: %v\n%s", err, b)
+		panic(fmt.Sprintf("markdown report: %v\n%s", err, b))
 	}
 
 	// The report is written for a command that failed as well, and the gate
 	// counts what the report shows.
 	code, _, e = env.run("exit7", []string{"--report", junit, "--format", "junit", "--fail-on-error"})
 	if code != 7 || !strings.Contains(e, "check failed: 1 failed event(s)") {
-		t.Fatalf("junit: %d\n%s", code, e)
+		panic(fmt.Sprintf("junit: %d\n%s", code, e))
 	}
 	b, err := os.ReadFile(junit)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if s := parseJUnit(t, string(b)); s.Tests != 3 || s.Failures != 1 {
-		t.Fatalf("junit report: %d tests, %d failures\n%s", s.Tests, s.Failures, b)
+		panic(fmt.Sprintf("junit report: %d tests, %d failures\n%s", s.Tests, s.Failures, b))
 	}
 	env.wantSession(2, "SEALED")
 }
@@ -291,17 +291,17 @@ func TestCLIRunNotSealed(t *testing.T) {
 	env.neverSeal = true
 	code, _, e := env.run("ok", []string{"--timeout", "250ms", "--fail-on-error"})
 	if code != 1 || !strings.Contains(e, "tracectl: session "+runID+" was not stopped and sealed: not done within 250ms (state DRAINING)") {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	// The summary is still printed, as far as the session can be read.
 	if !strings.Contains(e, "session    "+runID) || !strings.Contains(e, "(DRAINING)") {
-		t.Fatalf("no summary:\n%s", e)
+		panic(fmt.Sprintf("no summary:\n%s", e))
 	}
 	env.wantSession(1, "DRAINING")
 
 	// The command's own failure still wins.
 	if code, _, e := env.run("exit7", []string{"--timeout", "250ms"}); code != 7 || !strings.Contains(e, "was not stopped and sealed") {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 }
 
@@ -310,21 +310,21 @@ func TestCLIRunCannotStart(t *testing.T) {
 	env := newRunEnv(t)
 	env.failStart = true
 	if code, out, e := env.run("ok", nil); code != 1 || out != "" || !strings.Contains(e, "no sessions today") {
-		t.Fatalf("start fails: %d %q\n%s", code, out, e)
+		panic(fmt.Sprintf("start fails: %d %q\n%s", code, out, e))
 	}
 
 	// Without a command no session is started.
 	env = newRunEnv(t)
 	missing := filepath.Join(t.TempDir(), "no-such-command")
 	if code, _, e := env.tc("run", "--", missing, "x"); code != exitNotFound || !strings.Contains(e, "tracectl: cannot run the command: ") {
-		t.Fatalf("missing command: %d\n%s", code, e)
+		panic(fmt.Sprintf("missing command: %d\n%s", code, e))
 	}
 	notExecutable := filepath.Join(t.TempDir(), "data")
 	if err := os.WriteFile(notExecutable, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if code, _, e := env.tc("run", "--", notExecutable); code != exitCannotRun && code != exitNotFound {
-		t.Fatalf("not executable: %d\n%s", code, e)
+		panic(fmt.Sprintf("not executable: %d\n%s", code, e))
 	}
 	env.wantSession(0, "")
 }
@@ -370,7 +370,7 @@ func TestCLIRunExportsTheServiceURLs(t *testing.T) {
 	t.Setenv("TSESSION_CONTROLPLANE_URL", "http://127.0.0.1:1")
 	code, out, e := env.run("env", nil)
 	if want := "cp=" + env.url + " col=" + env.url + "\n"; code != 0 || out != want {
-		t.Fatalf("exit %d, stdout %q, want %q\n%s", code, out, want, e)
+		panic(fmt.Sprintf("exit %d, stdout %q, want %q\n%s", code, out, want, e))
 	}
 }
 
@@ -384,7 +384,7 @@ func TestCLIRunRetriesTheStop(t *testing.T) {
 	env.dropStops = 3
 	code, _, e := env.run("ok", []string{"--fail-on-error"})
 	if code != 0 || !strings.Contains(e, "(SEALED)") {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	env.wantSession(1, "SEALED")
 }

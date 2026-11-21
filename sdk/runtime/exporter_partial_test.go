@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"log"
 	"slices"
 	"strings"
@@ -47,7 +48,7 @@ func (e *partialEnv) eventually(what string, cond func() bool) {
 	e.t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
-			e.t.Fatalf("timed out waiting until %s", what)
+			panic(fmt.Sprintf("timed out waiting until %s", what))
 		}
 	}
 }
@@ -62,7 +63,7 @@ func (e *partialEnv) delivered(sid string) int {
 func (e *partialEnv) complete(sid string) {
 	e.t.Helper()
 	if n, dropped := e.col.count(e.t, sid); n != len(e.want[sid]) || dropped != 0 {
-		e.t.Fatalf("session %s: recorded %d, delivered %d, reported dropped %d", sid, len(e.want[sid]), n, dropped)
+		panic(fmt.Sprintf("session %s: recorded %d, delivered %d, reported dropped %d", sid, len(e.want[sid]), n, dropped))
 	}
 }
 
@@ -95,15 +96,15 @@ func TestFailingSessionDoesNotBlockOthers(t *testing.T) {
 	env.eventually("the healthy session is delivered", func() bool { return env.delivered("ok") == 200 })
 	env.complete("ok")
 	if env.exp.Flush(20 * time.Millisecond) {
-		t.Fatal("Flush returned true with a failing session's events still buffered")
+		panic("Flush returned true with a failing session's events still buffered")
 	}
 	if n := env.delivered("bad"); n != 0 || env.rec.Len() != 250 {
-		t.Fatalf("failing session: %d delivered, ring holds %d events, want 0 and 250", n, env.rec.Len())
+		panic(fmt.Sprintf("failing session: %d delivered, ring holds %d events, want 0 and 250", n, env.rec.Len()))
 	}
 
 	env.col.setFail(nil)
 	if !env.exp.Flush(5 * time.Second) {
-		t.Fatal("Flush did not empty the ring after the session recovered")
+		panic("Flush did not empty the ring after the session recovered")
 	}
 	env.complete("bad")
 	env.complete("ok")
@@ -126,14 +127,14 @@ func TestFailureWithoutNamesIsResentWhole(t *testing.T) {
 	// Like the collector, the fake stored the healthy events of the request
 	// it failed. Only the first batch was ever sent.
 	if n := env.delivered("ok"); n != 2 {
-		t.Fatalf("%d events of the healthy session were delivered during the outage, want the 2 of the first batch", n)
+		panic(fmt.Sprintf("%d events of the healthy session were delivered during the outage, want the 2 of the first batch", n))
 	}
 	if h := env.held(); len(h) != 0 {
-		t.Fatalf("sessions %v are held although the collector named none", h)
+		panic(fmt.Sprintf("sessions %v are held although the collector named none", h))
 	}
 	env.col.setFail(nil)
 	if !env.exp.Flush(5 * time.Second) {
-		t.Fatal("Flush did not empty the ring after the outage")
+		panic("Flush did not empty the ring after the outage")
 	}
 	env.complete("bad")
 	env.complete("ok")
@@ -165,7 +166,7 @@ func TestSessionNotNamedIsNotAssumedAccepted(t *testing.T) {
 			})
 			env.col.setFail(nil)
 			if !env.exp.Flush(5 * time.Second) {
-				t.Fatal("Flush did not empty the ring")
+				panic("Flush did not empty the ring")
 			}
 			for _, sid := range []string{"bad", "lost", "ok"} {
 				env.complete(sid)
@@ -183,12 +184,12 @@ func TestSessionIsHeldOnlyWhileOthersAreAccepted(t *testing.T) {
 		start := time.Now()
 		env.hold("bad", "ok")
 		if d := time.Since(start); d < cooldown {
-			t.Fatalf("held after %v, before the others were accepted for %v", d, cooldown)
+			panic(fmt.Sprintf("held after %v, before the others were accepted for %v", d, cooldown))
 		}
 		env.col.setFail(nil)
 		env.eventually("the session is released", func() bool { return len(env.held()) == 0 })
 		if !env.exp.Flush(5 * time.Second) {
-			t.Fatal("Flush did not empty the ring")
+			panic("Flush did not empty the ring")
 		}
 		env.complete("bad")
 		env.complete("ok")
@@ -202,11 +203,11 @@ func TestSessionIsHeldOnlyWhileOthersAreAccepted(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 		if h := env.held(); len(h) != 0 {
-			t.Fatalf("sessions %v are held in an outage", h)
+			panic(fmt.Sprintf("sessions %v are held in an outage", h))
 		}
 		env.col.setFail(nil)
 		if !env.exp.Flush(5 * time.Second) {
-			t.Fatal("Flush did not empty the ring")
+			panic("Flush did not empty the ring")
 		}
 		env.complete("a")
 		env.complete("b")
@@ -230,11 +231,11 @@ func TestSessionIsHeldOnlyWhileOthersAreAccepted(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 		if h := env.held(); len(h) != 0 {
-			t.Fatalf("sessions %v are held after one accepted request", h)
+			panic(fmt.Sprintf("sessions %v are held after one accepted request", h))
 		}
 		env.col.setFail(nil)
 		if !env.exp.Flush(5 * time.Second) {
-			t.Fatal("Flush did not empty the ring")
+			panic("Flush did not empty the ring")
 		}
 		for _, sid := range []string{"a", "b", "c"} {
 			env.complete(sid)
@@ -265,16 +266,16 @@ func TestFullRingDropsHeldSessionFirst(t *testing.T) {
 
 	env.col.setFail(nil)
 	if !env.exp.Flush(5 * time.Second) {
-		t.Fatal("Flush did not empty the ring")
+		panic("Flush did not empty the ring")
 	}
 	n, dropped := env.col.count(t, "bad")
 	if n+int(dropped) != len(env.want["bad"]) || dropped != 50 || n < 50 {
-		t.Fatalf("held session: recorded %d, delivered %d, reported dropped %d", len(env.want["bad"]), n, dropped)
+		panic(fmt.Sprintf("held session: recorded %d, delivered %d, reported dropped %d", len(env.want["bad"]), n, dropped))
 	}
 	env.col.mu.Lock()
 	defer env.col.mu.Unlock()
 	if !slices.Equal(env.col.delivered["bad"][:50], env.want["bad"][:50]) {
-		t.Fatal("the held session did not keep its oldest events")
+		panic("the held session did not keep its oldest events")
 	}
 }
 
@@ -304,11 +305,11 @@ func TestSentEventIsNotDroppedForRoom(t *testing.T) {
 	env.col.mu.Unlock()
 	env.col.setFail(nil)
 	if !env.exp.Flush(5 * time.Second) {
-		t.Fatal("Flush did not empty the ring")
+		panic("Flush did not empty the ring")
 	}
 	env.complete("bad")
 	if n, dropped := env.col.count(t, "ok"); n+int(dropped) != len(env.want["ok"]) || dropped == 0 {
-		t.Fatalf("healthy session: recorded %d, delivered %d, reported dropped %d", len(env.want["ok"]), n, dropped)
+		panic(fmt.Sprintf("healthy session: recorded %d, delivered %d, reported dropped %d", len(env.want["ok"]), n, dropped))
 	}
 }
 
@@ -330,11 +331,11 @@ func TestHeldSessionsAreLoggedOnce(t *testing.T) {
 			return len(env.held()) == 0 && strings.Contains(out.String(), "accepts all sessions again")
 		})
 		if h, r := strings.Count(out.String(), "keeps failing some sessions"), strings.Count(out.String(), "accepts all sessions again"); h != 1 || r != 1 {
-			t.Fatalf("round %d: %d hold and %d release lines, want one each:\n%s", round, h, r, out.String())
+			panic(fmt.Sprintf("round %d: %d hold and %d release lines, want one each:\n%s", round, h, r, out.String()))
 		}
 	}
 	if s := out.String(); strings.Contains(s, "bad-session") || strings.Contains(s, "SECRET") {
-		t.Fatalf("log carries a session id or event content:\n%s", s)
+		panic(fmt.Sprintf("log carries a session id or event content:\n%s", s))
 	}
 }
 
@@ -348,16 +349,16 @@ func TestFlushAndCloseWithFailingSession(t *testing.T) {
 	env.record("ok", 10)
 	start := time.Now()
 	if env.exp.Flush(50 * time.Millisecond) {
-		t.Fatal("Flush returned true with a failing session's events buffered")
+		panic("Flush returned true with a failing session's events buffered")
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Fatalf("Flush(50ms) took %v", d)
+		panic(fmt.Sprintf("Flush(50ms) took %v", d))
 	}
 	env.complete("ok")
 	start = time.Now()
 	env.exp.Close(50 * time.Millisecond)
 	if d := time.Since(start); d > time.Second {
-		t.Fatalf("Close(50ms) took %v", d)
+		panic(fmt.Sprintf("Close(50ms) took %v", d))
 	}
 }
 
@@ -376,7 +377,7 @@ func TestBisectKeepsFailingSessionInOrder(t *testing.T) {
 	env.record("a", 4)
 	env.record("b", 4)
 	if !env.exp.Flush(5 * time.Second) {
-		t.Fatal("Flush did not empty the ring")
+		panic("Flush did not empty the ring")
 	}
 	env.complete("a") // count fails the test if events arrived out of order
 	env.complete("b")

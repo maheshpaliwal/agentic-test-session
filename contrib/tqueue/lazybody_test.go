@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestLazyBodyRecordsLikeAnEagerOne(t *testing.T) {
 		_ = Publish(ctx, Message{Queue: "q", Params: bodyParams([]byte(body))}, core.MapCarrier{}, func(context.Context) error { return nil })
 		evs := byKind(rec.Events(), core.KindQueuePub)
 		if len(evs) != before+1 {
-			t.Fatalf("publish of %q recorded %d events", body, len(evs)-before)
+			panic(fmt.Sprintf("publish of %q recorded %d events", body, len(evs)-before))
 		}
 		return evs[len(evs)-1]
 	}

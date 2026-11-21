@@ -67,7 +67,7 @@ func archiveBytes(t *testing.T, fs *FileStore) []byte {
 	t.Helper()
 	b, err := os.ReadFile(fs.archivePath())
 	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
+		panic(err)
 	}
 	return b
 }
@@ -77,7 +77,7 @@ func archiveBytes(t *testing.T, fs *FileStore) []byte {
 func wantArchEnd(t *testing.T, what string, fs *FileStore) {
 	t.Helper()
 	if size := int64(len(archiveBytes(t, fs))); fs.archSize < size {
-		t.Fatalf("%s: the next line would be written at %d, inside a file of %d bytes", what, fs.archSize, size)
+		panic(fmt.Sprintf("%s: the next line would be written at %d, inside a file of %d bytes", what, fs.archSize, size))
 	}
 }
 
@@ -188,7 +188,7 @@ func TestFileStoreFailedArchiveAppend(t *testing.T) {
 					mustPut(t, fs, a, b, d)
 				}
 				if err := fs.Compact(); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				sizeBefore := fs.archSize
 				if keep == nil {
@@ -204,7 +204,7 @@ func TestFileStoreFailedArchiveAppend(t *testing.T) {
 
 				for _, s := range []Session{a, b, d} {
 					if _, hot := fs.MemStore.Get(s.ID); !hot {
-						t.Fatalf("%s left the hot set although its archive line was not written", s.ID)
+						panic(fmt.Sprintf("%s left the hot set although its archive line was not written", s.ID))
 					}
 				}
 				wantArchEnd(t, "after the failed append", fs)
@@ -217,29 +217,29 @@ func TestFileStoreFailedArchiveAppend(t *testing.T) {
 				switch want {
 				case truncated:
 					if len(tail) != 0 || fs.archSize != sizeBefore {
-						t.Fatalf("file has %d bytes after the old end, next line at %d, want 0 and %d", len(tail), fs.archSize, sizeBefore)
+						panic(fmt.Sprintf("file has %d bytes after the old end, next line at %d, want 0 and %d", len(tail), fs.archSize, sizeBefore))
 					}
 				case blanked:
 					if len(tail) != written || len(bytes.TrimSpace(tail)) != 0 {
-						t.Fatalf("after the old end: %q, want %d spaces", tail, written)
+						panic(fmt.Sprintf("after the old end: %q, want %d spaces", tail, written))
 					}
 				case left:
 					if len(tail) != written+1 || tail[len(tail)-1] != '\n' || fs.archTorn {
-						t.Fatalf("after the old end: %d bytes ending in %q (torn=%v), want the %d written and a newline", len(tail), tail[len(tail)-1:], fs.archTorn, written)
+						panic(fmt.Sprintf("after the old end: %d bytes ending in %q (torn=%v), want the %d written and a newline", len(tail), tail[len(tail)-1:], fs.archTorn, written))
 					}
 				case leftHole:
 					if written == 0 { // no blanking was tried: the injected fault hit the newline
 						if len(tail) != 0 || !fs.archTorn || fs.archSize != sizeBefore+int64(total) {
-							t.Fatalf("after the old end: %d bytes, next line at %d (torn=%v)", len(tail), fs.archSize, fs.archTorn)
+							panic(fmt.Sprintf("after the old end: %d bytes, next line at %d (torn=%v)", len(tail), fs.archSize, fs.archTorn))
 						}
 						break
 					}
 					if len(tail) != total+1 || tail[len(tail)-1] != '\n' || fs.archSize != sizeBefore+int64(total)+1 {
-						t.Fatalf("after the old end: %d bytes, next line at %d, want a newline after the %d bytes of the append", len(tail), fs.archSize, total)
+						panic(fmt.Sprintf("after the old end: %d bytes, next line at %d, want a newline after the %d bytes of the append", len(tail), fs.archSize, total))
 					}
 				case leftTorn:
 					if len(tail) != written || !fs.archTorn {
-						t.Fatalf("after the old end: %d bytes (torn=%v), want the %d written and the torn mark", len(tail), fs.archTorn, written)
+						panic(fmt.Sprintf("after the old end: %d bytes (torn=%v), want the %d written and the torn mark", len(tail), fs.archTorn, written))
 					}
 				}
 				wantStore(t, "after the failed append", fs, []Session{k0, k1, a, b, d})
@@ -251,26 +251,26 @@ func TestFileStoreFailedArchiveAppend(t *testing.T) {
 				fs.Evict(b.ID)
 				wantArchEnd(t, "after the next append", fs)
 				if _, hot := fs.MemStore.Get(b.ID); hot {
-					t.Fatal("the append after the failed one did not work")
+					panic("the append after the failed one did not work")
 				}
 				if err := fs.Delete(d.ID); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				if raw := archiveBytes(t, fs); bytes.Contains(raw, []byte(d.ID)) {
-					t.Fatalf("a line of the deleted session is left in the archive:\n%s", raw)
+					panic(fmt.Sprintf("a line of the deleted session is left in the archive:\n%s", raw))
 				}
 				wantStore(t, "after the next append", fs, []Session{k0, k1, a, b}, d.ID)
 				if err := fs.Compact(); err != nil { // no journal: the files alone decide
-					t.Fatal(err)
+					panic(err)
 				}
 				re := uncached(openStore(t, path))
 				wantStore(t, "reopened", re, []Session{k0, k1, a, b}, d.ID)
 				if _, hot := re.MemStore.Get(b.ID); hot {
-					t.Fatal("b is hot after the restart: its archive line was not found")
+					panic("b is hot after the restart: its archive line was not found")
 				}
 				for _, s := range []Session{k0, k1, a, b} {
 					if n := bytes.Count(archiveBytes(t, re), []byte(fmt.Sprintf("%q", s.ID))); n > 1 {
-						t.Fatalf("%d lines of %s in the archive after a restart", n, s.ID)
+						panic(fmt.Sprintf("%d lines of %s in the archive after a restart", n, s.ID))
 					}
 				}
 			})
@@ -296,21 +296,21 @@ func TestFileStoreFailedDeleteCanTakeEffectLater(t *testing.T) {
 					mustPut(t, fs, x)
 				}
 				if err := fs.Compact(); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 
 				faults := injectFaults(fs)
 				faults.failWrite = func(int, []byte) (int, bool) { return 0, true } // the line cannot be overwritten
 				if err := fs.Delete(x.ID); !errors.Is(err, errInjected) {
-					t.Fatalf("delete: %v, want the injected error", err)
+					panic(fmt.Sprintf("delete: %v, want the injected error", err))
 				}
 				faults.clear()
 				wantStore(t, "after the failed delete", fs, []Session{keep, x})
 				if _, hot := fs.MemStore.Get(x.ID); hot != hotToo {
-					t.Fatalf("hot copy after the failed delete: %v, want %v", hot, hotToo)
+					panic(fmt.Sprintf("hot copy after the failed delete: %v, want %v", hot, hotToo))
 				}
 				if j, _ := os.ReadFile(fs.journalPath()); !bytes.Contains(j, []byte(`"op":"delete"`)) {
-					t.Fatalf("no delete record in the journal: %q", j)
+					panic(fmt.Sprintf("no delete record in the journal: %q", j))
 				}
 
 				switch then {
@@ -318,7 +318,7 @@ func TestFileStoreFailedDeleteCanTakeEffectLater(t *testing.T) {
 					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep}, x.ID)
 				case "compact, restart": // the record is folded away first
 					if err := fs.Compact(); err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep, x})
 				case "put, restart": // a later record of the session
@@ -327,14 +327,14 @@ func TestFileStoreFailedDeleteCanTakeEffectLater(t *testing.T) {
 					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep, x})
 				case "repeat":
 					if err := fs.Delete(x.ID); err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					wantStore(t, "after the second delete", fs, []Session{keep}, x.ID)
 					wantStore(t, "reopened", uncached(openStore(t, path)), []Session{keep}, x.ID)
 				}
 				if then != "compact, restart" && then != "put, restart" {
 					if raw, _ := os.ReadFile(path + ".archive"); bytes.Contains(raw, []byte(x.ID)) {
-						t.Fatalf("a line of the deleted session is left in the archive:\n%s", raw)
+						panic(fmt.Sprintf("a line of the deleted session is left in the archive:\n%s", raw))
 					}
 				}
 			})

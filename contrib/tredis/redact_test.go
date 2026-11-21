@@ -2,6 +2,7 @@ package tredis
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -59,10 +60,10 @@ func TestValueCaptureOff(t *testing.T) {
 	c.Set(ctx, "k", "plain-val", 0)
 	c.Get(ctx, "k")
 	if strings.Contains(allText(rec), "plain-val") {
-		t.Fatal(allText(rec))
+		panic(allText(rec))
 	}
 	if !strings.Contains(allText(rec), "SET k") {
-		t.Fatal("name must remain")
+		panic("name must remain")
 	}
 }
 
@@ -71,7 +72,7 @@ func TestRedactKeysGlob(t *testing.T) {
 	c.Set(ctx, "pii:1", "john-doe", 0)
 	c.Get(ctx, "pii:1")
 	if strings.Contains(allText(rec), "john-doe") {
-		t.Fatal(allText(rec))
+		panic(allText(rec))
 	}
 }
 
@@ -81,11 +82,11 @@ func TestIgnoreCtxKeys(t *testing.T) {
 	c.Get(ctx, "ts:ctx:abc")
 	c.Pipelined(ctx, func(p redis.Pipeliner) error { p.Set(ctx, "ts:ctx:z", "1", 0); return nil })
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("ignored keys traced: %d", n)
+		panic(fmt.Sprintf("ignored keys traced: %d", n))
 	}
 	c.Set(ctx, "ts:other", "v", 0)
 	if len(rec.Events()) != 1 {
-		t.Fatal("non-matching key must be traced")
+		panic("non-matching key must be traced")
 	}
 }
 
@@ -104,17 +105,17 @@ func TestPipelineImageCap(t *testing.T) {
 		}
 	}
 	if skipped != 3 {
-		t.Fatalf("skipped=%d", skipped)
+		panic(fmt.Sprintf("skipped=%d", skipped))
 	}
 }
 
 func TestImageTimeout(t *testing.T) {
 	c, rec, ctx := setup(t, WithBeforeImage("k"), WithImageTimeout(time.Nanosecond))
 	if err := c.Set(ctx, "k", "v", 0).Err(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if rec.Events()[0].Attrs["image_skipped"] != "error" {
-		t.Fatalf("%+v", rec.Events()[0])
+		panic(fmt.Sprintf("%+v", rec.Events()[0]))
 	}
 }
 

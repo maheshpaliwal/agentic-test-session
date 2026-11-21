@@ -3,6 +3,7 @@ package tsessiontest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,13 +28,13 @@ func TestArtifactStaysInsideItsDirectory(t *testing.T) {
 	defer srv.Close()
 	s, err := client.Start(context.Background(), client.Options{BaseURL: srv.URL, CollectorURL: srv.URL})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	p, err := saveArtifact(context.Background(), s, dir, "TestX")
 	if _, serr := os.Stat(filepath.Join(root, "outside.ndjson")); serr == nil {
-		t.Fatalf("artifact written outside %s: %s", dir, p)
+		panic(fmt.Sprintf("artifact written outside %s: %s", dir, p))
 	}
 	if err == nil && filepath.Dir(p) != dir {
-		t.Fatalf("artifact path %s is not inside %s", p, dir)
+		panic(fmt.Sprintf("artifact path %s is not inside %s", p, dir))
 	}
 }

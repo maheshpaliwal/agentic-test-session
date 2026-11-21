@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -33,7 +34,7 @@ func runSuite(t *testing.T, kind string) {
 	if kind == "pg" {
 		p, err := store.OpenPGConfig(context.Background(), store.PGConfig{DSN: pgDSN, Schema: "col_it"})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		st = p
 		t.Cleanup(func() { p.Close() })
@@ -62,18 +63,18 @@ func runSuite(t *testing.T, kind string) {
 		code, o := ae.createOrder(t, h, orderBody{SKU: "widget", Qty: 2, Customer: "alice-it", Password: pwSecret,
 			Jobs: []string{"flaky_job", "poison_job"}})
 		if code != 201 || o.ID == 0 {
-			t.Fatalf("POST /orders: %d %+v", code, o)
+			panic(fmt.Sprintf("POST /orders: %d %+v", code, o))
 		}
 		okOrder = o.ID
 		code, raw := doReq(t, "POST", ae.base+"/orders/fail", nil, s1.Header())
 		if code != 422 {
-			t.Fatalf("POST /orders/fail: %d %s", code, raw)
+			panic(fmt.Sprintf("POST /orders/fail: %d %s", code, raw))
 		}
 		if i := strings.Index(string(raw), `"id":`); i >= 0 {
 			failID, _ = strconv.ParseInt(strings.TrimRight(strings.SplitN(string(raw[i+5:]), "}", 2)[0], " \n"), 10, 64)
 		}
 		if code, _ := doReq(t, "GET", ae.base+"/orders/"+strconv.FormatInt(okOrder, 10), nil, s1.Header()); code != 200 {
-			t.Fatalf("GET /orders/{id}: %d", code)
+			panic(fmt.Sprintf("GET /orders/{id}: %d", code))
 		}
 		info := in.seal(t, s1)
 		// ledger drained -> not incomplete
@@ -105,7 +106,7 @@ func runSuite(t *testing.T, kind string) {
 	t.Run("seq_gapless_and_from_seq", func(t *testing.T) {
 		for i, e := range evs {
 			if e.Seq != uint64(i+1) {
-				t.Fatalf("seq gap at index %d: got %d want %d", i, e.Seq, i+1)
+				panic(fmt.Sprintf("seq gap at index %d: got %d want %d", i, e.Seq, i+1))
 			}
 			if e.SessionID != s1.ID {
 				t.Errorf("event from other session: %+v", e.SessionID)
@@ -126,7 +127,7 @@ func runSuite(t *testing.T, kind string) {
 	t.Run("worker_link_params_trace", func(t *testing.T) {
 		ws := named(evs, core.KindWorkerStart, "send_receipt")
 		if len(ws) != 1 {
-			t.Fatalf("worker.start send_receipt = %d", len(ws))
+			panic(fmt.Sprintf("worker.start send_receipt = %d", len(ws)))
 		}
 		w := ws[0]
 		pub := pubIDs["send_receipt"]
@@ -144,7 +145,7 @@ func runSuite(t *testing.T, kind string) {
 			}
 		}
 		if apiIn.SpanID == "" {
-			t.Fatal("no api.in POST /orders")
+			panic("no api.in POST /orders")
 		}
 		if w.TraceID != apiIn.TraceID {
 			t.Errorf("worker.start trace %s != api.in trace %s", w.TraceID, apiIn.TraceID)
@@ -233,7 +234,7 @@ func runSuite(t *testing.T, kind string) {
 		flakyEnds := named(evs, core.KindWorkerEnd, "flaky_job")
 		retries := named(evs, core.KindWorkerRetry, "flaky_job")
 		if len(flakyEnds) != 3 || len(retries) != 2 {
-			t.Fatalf("flaky: worker.end=%d worker.retry=%d (want 3,2)", len(flakyEnds), len(retries))
+			panic(fmt.Sprintf("flaky: worker.end=%d worker.retry=%d (want 3,2)", len(flakyEnds), len(retries)))
 		}
 		last := flakyEnds[len(flakyEnds)-1]
 		if last.Attempt != 3 || last.Err != "" {
@@ -280,7 +281,7 @@ func runSuite(t *testing.T, kind string) {
 			for _, e := range ofKind(evs, core.KindDBRead) {
 				t.Logf("db.read seq=%d tx=%q %q flags=%v", e.Seq, e.TxID, e.Name, e.Flags)
 			}
-			t.Fatal("no orders insert mutation for the committed order")
+			panic("no orders insert mutation for the committed order")
 		}
 		if insert.Effective == nil || !*insert.Effective {
 			t.Errorf("committed insert effective=%v", insert.Effective)
@@ -289,14 +290,14 @@ func runSuite(t *testing.T, kind string) {
 			t.Errorf("insert mutation: store=%s after.zero=%v", insert.Store, insert.After.IsZero())
 		}
 		if invUpdate == nil {
-			t.Fatal("no inventory update mutation")
+			panic("no inventory update mutation")
 		}
 		b, a := inline(invUpdate.Before), inline(invUpdate.After)
 		if b["stock"] == nil || a["stock"] == nil || toF(b["stock"])-toF(a["stock"]) != 2 {
 			t.Errorf("inventory before/after: %v -> %v (diff=%v)", b, a, invUpdate.Diff)
 		}
 		if rolled == nil {
-			t.Fatalf("no mutation for rolled-back insert (failID=%d)", failID)
+			panic(fmt.Sprintf("no mutation for rolled-back insert (failID=%d)", failID))
 		}
 		if rolled.Effective == nil || *rolled.Effective {
 			t.Errorf("rolled back mutation effective=%v want false", rolled.Effective)
@@ -339,7 +340,7 @@ func runSuite(t *testing.T, kind string) {
 	t.Run("entity_history", func(t *testing.T) {
 		h := col.history(t, s1.ID, "postgres", "orders", strconv.FormatInt(okOrder, 10))
 		if len(h.Mutations) < 3 {
-			t.Fatalf("history = %d mutations, want >=3 (insert + 2 updates): %+v", len(h.Mutations), h)
+			panic(fmt.Sprintf("history = %d mutations, want >=3 (insert + 2 updates): %+v", len(h.Mutations), h))
 		}
 		if h.Mutations[0].Op != "insert" {
 			t.Errorf("first op %s", h.Mutations[0].Op)
@@ -393,7 +394,7 @@ func runSuite(t *testing.T, kind string) {
 	t.Run("dashboard_proxy", func(t *testing.T) {
 		dh, err := dashboard.New(dashboard.Config{ControlPlaneURL: in.cpSrv.URL, CollectorURL: in.colSrv.URL})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		ds := httptest.NewServer(dh)
 		defer ds.Close()
@@ -413,12 +414,12 @@ func runSuite(t *testing.T, kind string) {
 		t.Run("pg_store_really_used", func(t *testing.T) {
 			p, err := pgxpool.New(context.Background(), pgDSN)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer p.Close()
 			var n, m int
 			if err := p.QueryRow(context.Background(), "SELECT count(*) FROM col_it.session_events WHERE session_id=$1", s1.ID).Scan(&n); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			_ = p.QueryRow(context.Background(), "SELECT count(*) FROM col_it.entity_mutations WHERE session_id=$1", s1.ID).Scan(&m)
 			if n != len(evs) || m == 0 {
@@ -465,7 +466,7 @@ func runSuite(t *testing.T, kind string) {
 			own, foreign string
 		}{"A": {ea, eb, "cust-AAA", "cust-BBB"}, "B": {eb, ea, "cust-BBB", "cust-AAA"}} {
 			if len(c.mine) == 0 {
-				t.Fatalf("session %s: no events", name)
+				panic(fmt.Sprintf("session %s: no events", name))
 			}
 			if anyContains(c.mine, c.foreign) {
 				t.Errorf("session %s contains foreign customer %s", name, c.foreign)
@@ -500,7 +501,7 @@ func runSuite(t *testing.T, kind string) {
 		})
 		code, o := ae.createOrder(t, nil, orderBody{SKU: "widget", Qty: 1, Customer: "cust-XXX"})
 		if code != 201 {
-			t.Fatalf("exclusive order %d", code)
+			panic(fmt.Sprintf("exclusive order %d", code))
 		}
 		if code, _ := doReq(t, "GET", ae.base+"/orders/"+strconv.FormatInt(o.ID, 10), nil, nil); code != 200 {
 			t.Errorf("GET %d", code)
@@ -520,7 +521,7 @@ func runSuite(t *testing.T, kind string) {
 		before := col.sessions(t)
 		code, o := ae.createOrder(t, nil, orderBody{SKU: "widget", Qty: 1, Customer: "cust-NONE"})
 		if code != 201 {
-			t.Fatalf("order %d", code)
+			panic(fmt.Sprintf("order %d", code))
 		}
 		// inactive/unknown session header
 		bogus := http.Header{}

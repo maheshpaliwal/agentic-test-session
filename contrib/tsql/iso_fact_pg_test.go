@@ -5,6 +5,7 @@ package tsql_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -34,25 +35,25 @@ func TestPGFactAskingTheLevelWhileSettingTheTimeout(t *testing.T) {
 			}
 			res, err := c.ExecContext(context.Background(), text)
 			if err != nil {
-				t.Fatalf("%s: %v", tc.begin, err)
+				panic(fmt.Sprintf("%s: %v", tc.begin, err))
 			}
 			if n, err := res.RowsAffected(); err != nil || n != tc.rows {
-				t.Fatalf("%s: %q reported %d rows (%v), want %d", tc.begin, text, n, err, tc.rows)
+				panic(fmt.Sprintf("%s: %q reported %d rows (%v), want %d", tc.begin, text, n, err, tc.rows))
 			}
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != tc.set {
-				t.Fatalf("%s: statement_timeout inside the fence = %s, want %s", tc.begin, got, tc.set)
+				panic(fmt.Sprintf("%s: statement_timeout inside the fence = %s, want %s", tc.begin, got, tc.set))
 			}
 			if tc.rows == 1 {
 				if _, err := c.ExecContext(context.Background(), "SELECT pg_sleep(2)"); err == nil || !strings.Contains(err.Error(), "57014") {
-					t.Fatalf("%s: the timeout is not in force: %v", tc.begin, err)
+					panic(fmt.Sprintf("%s: the timeout is not in force: %v", tc.begin, err))
 				}
 			}
 			rtMustExec(t, c, "ROLLBACK TO SAVEPOINT s; RELEASE SAVEPOINT s")
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != "7s" {
-				t.Fatalf("%s: statement_timeout after the fence = %s, want 7s", tc.begin, got)
+				panic(fmt.Sprintf("%s: statement_timeout after the fence = %s, want 7s", tc.begin, got))
 			}
 			if got := rtShow(t, c, "SELECT count(*) FROM pg_locks WHERE mode = 'SIReadLock' AND pid = pg_backend_pid()"); got != "0" {
-				t.Fatalf("%s: %s predicate locks", tc.begin, got)
+				panic(fmt.Sprintf("%s: %s predicate locks", tc.begin, got))
 			}
 			rtMustExec(t, c, "COMMIT")
 		}

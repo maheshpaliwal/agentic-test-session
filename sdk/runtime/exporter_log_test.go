@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -64,7 +65,7 @@ func TestExporterLogsOutageAndRecovery(t *testing.T) {
 		deadline := time.Now().Add(5 * time.Second)
 		for !strings.Contains(out.String(), want) {
 			if time.Now().After(deadline) {
-				t.Fatalf("log never said %q:\n%s", want, out.String())
+				panic(fmt.Sprintf("log never said %q:\n%s", want, out.String()))
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -72,7 +73,7 @@ func TestExporterLogsOutageAndRecovery(t *testing.T) {
 	waitLog("cannot deliver events to the collector at " + srv.URL)
 	time.Sleep(60 * time.Millisecond) // several more failed passes
 	if n := strings.Count(out.String(), "cannot deliver"); n != 1 {
-		t.Fatalf("the outage was logged %d times, want once:\n%s", n, out.String())
+		panic(fmt.Sprintf("the outage was logged %d times, want once:\n%s", n, out.String()))
 	}
 	down.Store(false)
 	waitLog("delivering events to the collector at " + srv.URL + " again")

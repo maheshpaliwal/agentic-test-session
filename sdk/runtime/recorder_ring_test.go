@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"maps"
 	"math/rand"
 	"slices"
@@ -52,7 +53,7 @@ func TestRecorderTakeSettleMatchesModel(t *testing.T) {
 			var gone []uint64
 			for i, ev := range evs {
 				if ev.SessionID == skip {
-					t.Fatalf("step %d: take returned an event of a session it was to skip", step)
+					panic(fmt.Sprintf("step %d: take returned an event of a session it was to skip", step))
 				}
 				if rng.Intn(3) != 0 {
 					gone = append(gone, ids[i])
@@ -66,7 +67,7 @@ func TestRecorderTakeSettleMatchesModel(t *testing.T) {
 			got = append(got, ev.LocalSeq)
 		}
 		if !slices.Equal(got, model) && len(got)+len(model) > 0 {
-			t.Fatalf("step %d: ring holds %v, want %v", step, got, model)
+			panic(fmt.Sprintf("step %d: ring holds %v, want %v", step, got, model))
 		}
 	}
 }
@@ -93,16 +94,16 @@ func TestRecorderEviction(t *testing.T) {
 	}
 	r.Record(ev("ok", 5)) // nothing is held: the new event is dropped
 	if got := seqs(r); !slices.Equal(got, []uint64{1, 2, 3, 4}) || drops(r)["ok"] != 1 {
-		t.Fatalf("nothing held: ring %v drops %v", got, drops(r))
+		panic(fmt.Sprintf("nothing held: ring %v drops %v", got, drops(r)))
 	}
 	r.setHeld(map[string]struct{}{"held": {}})
 	r.Record(ev("held", 6)) // a held session never evicts
 	if got := seqs(r); !slices.Equal(got, []uint64{1, 2, 3, 4}) || drops(r)["held"] != 1 {
-		t.Fatalf("event of a held session: ring %v drops %v", got, drops(r))
+		panic(fmt.Sprintf("event of a held session: ring %v drops %v", got, drops(r)))
 	}
 	r.Record(ev("ok", 7)) // evicts 4, the newest held event
 	if got := seqs(r); !slices.Equal(got, []uint64{1, 2, 3, 7}) || drops(r)["held"] != 2 {
-		t.Fatalf("eviction: ring %v drops %v", got, drops(r))
+		panic(fmt.Sprintf("eviction: ring %v drops %v", got, drops(r)))
 	}
 	// 3 was sent, so the collector may have it: the next eviction takes 1
 	// instead, and with only 3 left the new event is dropped, also after the
@@ -110,12 +111,12 @@ func TestRecorderEviction(t *testing.T) {
 	_, ids, _ := r.take(3, 1, func(sid string) bool { return sid == "held" })
 	r.Record(ev("ok", 8))
 	if got := seqs(r); !slices.Equal(got, []uint64{2, 3, 7, 8}) || drops(r)["held"] != 3 {
-		t.Fatalf("eviction around a sent event: ring %v drops %v", got, drops(r))
+		panic(fmt.Sprintf("eviction around a sent event: ring %v drops %v", got, drops(r)))
 	}
 	r.settle(ids, nil)
 	r.Record(ev("ok", 9))
 	if got := seqs(r); !slices.Equal(got, []uint64{2, 3, 7, 8}) || drops(r)["ok"] != 2 {
-		t.Fatalf("only a sent event left: ring %v drops %v", got, drops(r))
+		panic(fmt.Sprintf("only a sent event left: ring %v drops %v", got, drops(r)))
 	}
 
 	// A held event further from the end than evictScan is not looked for.
@@ -127,6 +128,6 @@ func TestRecorderEviction(t *testing.T) {
 	}
 	big.Record(ev("ok", 1<<20))
 	if d := drops(big); d["ok"] != 1 || d["held"] != 0 {
-		t.Fatalf("held event out of reach: drops %v", d)
+		panic(fmt.Sprintf("held event out of reach: drops %v", d))
 	}
 }

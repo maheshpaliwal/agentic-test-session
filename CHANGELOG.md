@@ -45,6 +45,10 @@ Before deploying:
   `ResourceExhausted`, `Canceled`) are no longer failed events: a session whose only "failures" were such calls
   now passes `--fail-on-error` and `RequireNoFailures`. Assert on the attribute `grpc.code` if a test relied on
   them failing.
+- `sdk/client/tsessiontest` panics where it called `t.Fatalf` (a session that cannot be started or stopped, a
+  failed `RequireMutation`, `RequireNoMutation` or `Ambient`): the message is the same, but a panic ends the
+  whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped.
+  `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -385,6 +389,8 @@ Rolling back:
 
 ### Internal
 
+- No code calls `Fatal` or `Fatalf`: program code and all tests panic with the same message. A failing
+  assertion therefore stops its package's test binary at once; the other packages still run.
 - `internal/slicex`, `internal/mapx`, `internal/set`; hand-written loops and `sort.Slice` calls replaced by them
   or by the standard `slices` / `maps` / `cmp` packages.
 - The go-redis v8 and v9 wrappers share one implementation (`internal/redisx.Tracer`).

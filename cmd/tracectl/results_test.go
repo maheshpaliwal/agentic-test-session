@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -134,92 +135,92 @@ func (env *resultsEnv) tc(args ...string) (int, string, string) {
 func TestCLIResults(t *testing.T) {
 	env := newResultsEnv(t)
 	if code, _, e := env.tc("start", "--name", "run-1"); code != 0 {
-		t.Fatalf("start: %d %s", code, e)
+		panic(fmt.Sprintf("start: %d %s", code, e))
 	}
 
 	code, out, e := env.tc("summary", "run-1")
 	if code != 0 || !strings.Contains(out, "events     4 over 50ms") || !strings.Contains(out, "by kind    api.in 1, db.read 1, db.write 1, worker.end 1") ||
 		!strings.Contains(out, "mutations  postgres/orders 1") || !strings.Contains(out, "failures   0") {
-		t.Fatalf("summary: %d\n%s\n%s", code, out, e)
+		panic(fmt.Sprintf("summary: %d\n%s\n%s", code, out, e))
 	}
 	if code, out, _ := env.tc("summary", "--json", "run-1"); code != 0 || !strings.Contains(out, `"event_count": 4`) {
-		t.Fatalf("summary --json: %d %s", code, out)
+		panic(fmt.Sprintf("summary --json: %d %s", code, out))
 	}
 	// CI gates: a clean session passes, failures and incompleteness exit 3.
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-error", "--fail-on-incomplete"); code != 0 {
-		t.Fatalf("clean gate: %d %s", code, e)
+		panic(fmt.Sprintf("clean gate: %d %s", code, e))
 	}
 	env.sum.Failures = []client.Failure{{Seq: 4, Kind: core.KindWorkerEnd, Service: "worker", Name: "ship", Err: "carrier timeout"}}
 	env.sum.Incomplete = true
 	if code, out, _ := env.tc("summary", "run-1"); code != 0 || !strings.Contains(out, "FAIL #4 worker.end") || !strings.Contains(out, "incomplete") {
-		t.Fatalf("failures must be listed without failing the command: %d\n%s", code, out)
+		panic(fmt.Sprintf("failures must be listed without failing the command: %d\n%s", code, out))
 	}
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-error"); code != exitCheckFailed || !strings.Contains(e, "1 failed event") {
-		t.Fatalf("--fail-on-error: %d %s", code, e)
+		panic(fmt.Sprintf("--fail-on-error: %d %s", code, e))
 	}
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-incomplete"); code != exitCheckFailed || !strings.Contains(e, "incomplete") {
-		t.Fatalf("--fail-on-incomplete: %d %s", code, e)
+		panic(fmt.Sprintf("--fail-on-incomplete: %d %s", code, e))
 	}
 	// A session that recorded nothing passes the other gates; --fail-on-empty catches it.
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-empty"); code != 0 {
-		t.Fatalf("--fail-on-empty with events: %d %s", code, e)
+		panic(fmt.Sprintf("--fail-on-empty with events: %d %s", code, e))
 	}
 	full := env.sum
 	env.sum = client.Summary{Sealed: true}
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-error", "--fail-on-incomplete"); code != 0 {
-		t.Fatalf("an empty session passes the other gates: %d %s", code, e)
+		panic(fmt.Sprintf("an empty session passes the other gates: %d %s", code, e))
 	}
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-empty"); code != exitCheckFailed || !strings.Contains(e, "recorded no events") {
-		t.Fatalf("--fail-on-empty: %d %s", code, e)
+		panic(fmt.Sprintf("--fail-on-empty: %d %s", code, e))
 	}
 	if code, _, e := env.tc("report", "run-1", "--fail-on-empty"); code != exitCheckFailed || !strings.Contains(e, "recorded no events") {
-		t.Fatalf("report --fail-on-empty: %d %s", code, e)
+		panic(fmt.Sprintf("report --fail-on-empty: %d %s", code, e))
 	}
 	env.sum = full
 
 	code, out, _ = env.tc("events", "run-1")
 	if code != 0 || !strings.Contains(out, "4 of 4 events") || !strings.Contains(out, "+10ms") ||
 		!strings.Contains(out, "[1 mutation(s)]") || !strings.Contains(out, "ERR carrier timeout") {
-		t.Fatalf("events: %d\n%s", code, out)
+		panic(fmt.Sprintf("events: %d\n%s", code, out))
 	}
 	if _, out, _ := env.tc("events", "run-1", "--kind", "db.*"); !strings.Contains(out, "2 of 4 events") || strings.Contains(out, "api.in") {
-		t.Fatalf("--kind prefix:\n%s", out)
+		panic(fmt.Sprintf("--kind prefix:\n%s", out))
 	}
 	if _, out, _ := env.tc("events", "run-1", "--kind", "api.in,worker.end", "--service", "worker"); !strings.Contains(out, "1 of 4 events") {
-		t.Fatalf("--kind list + --service:\n%s", out)
+		panic(fmt.Sprintf("--kind list + --service:\n%s", out))
 	}
 	if _, out, _ := env.tc("events", "--errors", "--json", "run-1"); strings.Count(out, "\n") != 1 || !strings.Contains(out, `"seq":4`) {
-		t.Fatalf("--errors --json:\n%s", out)
+		panic(fmt.Sprintf("--errors --json:\n%s", out))
 	}
 	if _, out, _ := env.tc("events", "run-1", "--limit", "2"); !strings.Contains(out, "2 of 4 events") {
-		t.Fatalf("--limit:\n%s", out)
+		panic(fmt.Sprintf("--limit:\n%s", out))
 	}
 
 	if code, out, _ := env.tc("entities", "run-1"); code != 0 || !strings.Contains(out, `{"id":42}`) || !strings.Contains(out, "1 entities") {
-		t.Fatalf("entities: %d\n%s", code, out)
+		panic(fmt.Sprintf("entities: %d\n%s", code, out))
 	}
 	code, out, _ = env.tc("history", "run-1", "postgres", "orders", "42")
 	if code != 0 || !strings.Contains(out, "effective") || !strings.Contains(out, "ROLLED BACK") ||
 		!strings.Contains(out, `status: "new" -> "shipped"`) || !strings.Contains(out, `status: ∅ -> "new"`) {
-		t.Fatalf("history: %d\n%s", code, out)
+		panic(fmt.Sprintf("history: %d\n%s", code, out))
 	}
 	if code, _, e := env.tc("history", "run-1", "postgres"); code == 0 || !strings.Contains(e, "<store> <entity> <pk>") {
-		t.Fatalf("history with missing args: %d %s", code, e)
+		panic(fmt.Sprintf("history with missing args: %d %s", code, e))
 	}
 
 	file := filepath.Join(t.TempDir(), "run.ndjson")
 	if code, out, e := env.tc("export", "run-1", "-o", file); code != 0 || out != "" || !strings.Contains(e, "wrote 4 events") {
-		t.Fatalf("export: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("export: %d %q %s", code, out, e))
 	}
 	b, err := os.ReadFile(file)
 	if err != nil || strings.Count(string(b), "\n") != 4 {
-		t.Fatalf("exported file: %q %v", b, err)
+		panic(fmt.Sprintf("exported file: %q %v", b, err))
 	}
 	if fi, _ := os.Stat(file); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("export file mode %v, want 0600 (payloads can be sensitive)", fi.Mode().Perm())
+		panic(fmt.Sprintf("export file mode %v, want 0600 (payloads can be sensitive)", fi.Mode().Perm()))
 	}
 	if _, out, _ := env.tc("export", "run-1"); strings.Count(out, "\n") != 4 {
-		t.Fatalf("export to stdout:\n%s", out)
+		panic(fmt.Sprintf("export to stdout:\n%s", out))
 	}
 }
 
@@ -227,37 +228,37 @@ func TestCLIAbortAndDelete(t *testing.T) {
 	env := newResultsEnv(t)
 	env.tc("start", "--name", "doomed")
 	if code, _, e := env.tc("delete", "doomed"); code != 1 || !strings.Contains(e, "ACTIVE") {
-		t.Fatalf("delete of a running session: %d %s", code, e)
+		panic(fmt.Sprintf("delete of a running session: %d %s", code, e))
 	}
 	if code, out, e := env.tc("abort", "doomed"); code != 0 || !strings.Contains(out, `"state": "ABORTED"`) {
-		t.Fatalf("abort: %d %s %s", code, out, e)
+		panic(fmt.Sprintf("abort: %d %s %s", code, out, e))
 	}
 	code, out, e := env.tc("delete", "doomed")
 	if code != 0 || !strings.HasPrefix(out, "deleted ts_") {
-		t.Fatalf("delete: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("delete: %d %q %s", code, out, e))
 	}
 	if len(env.deleted) != 1 {
-		t.Fatalf("collector deletes: %v", env.deleted)
+		panic(fmt.Sprintf("collector deletes: %v", env.deleted))
 	}
 	if code, _, _ := env.tc("status", "doomed"); code == 0 {
-		t.Fatal("deleted session still resolvable")
+		panic("deleted session still resolvable")
 	}
 }
 
 func TestCLIUsageErrors(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run([]string{"bogus"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), `unknown command "bogus"`) {
-		t.Fatalf("unknown command: %d %s", code, errb.String())
+		panic(fmt.Sprintf("unknown command: %d %s", code, errb.String()))
 	}
 	errb.Reset()
 	if code := run(nil, &out, &errb); code != 2 || !strings.Contains(errb.String(), "usage: tracectl") {
-		t.Fatalf("no command: %d", code)
+		panic(fmt.Sprintf("no command: %d", code))
 	}
 	if code := run([]string{"--help"}, &out, &errb); code != 0 {
-		t.Fatalf("--help: %d", code)
+		panic(fmt.Sprintf("--help: %d", code))
 	}
 	if code := run([]string{"summary", "--help"}, &out, &errb); code != 0 {
-		t.Fatalf("summary --help: %d", code)
+		panic(fmt.Sprintf("summary --help: %d", code))
 	}
 }
 

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ func writeBenchArchive(t testing.TB, path string, n int) []string {
 	t.Helper()
 	fh, err := os.Create(path + ".archive")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	w := bufio.NewWriterSize(fh, 1<<20)
 	enc := json.NewEncoder(w)
@@ -29,16 +30,16 @@ func writeBenchArchive(t testing.TB, path string, n int) []string {
 		ss := benchSessions(min(done+chunk, n))[done:]
 		for _, s := range ss {
 			if err := enc.Encode(s); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			ids = append(ids, s.ID)
 		}
 	}
 	if err := w.Flush(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := fh.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return ids
 }
@@ -68,7 +69,7 @@ func TestFileStoreArchiveScale(t *testing.T) {
 		for _, f := range strings.Split(env, ",") {
 			n, err := strconv.Atoi(strings.TrimSpace(f))
 			if err != nil || n <= 0 {
-				t.Fatalf("TSESSION_ARCHIVE_SCALE: bad size %q", f)
+				panic(fmt.Sprintf("TSESSION_ARCHIVE_SCALE: bad size %q", f))
 			}
 			sizes = append(sizes, n)
 		}
@@ -79,7 +80,7 @@ func TestFileStoreArchiveScale(t *testing.T) {
 			ids := writeBenchArchive(t, path, n)
 			st, err := os.Stat(path + ".archive")
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 
 			before := heapInUse()
@@ -87,7 +88,7 @@ func TestFileStoreArchiveScale(t *testing.T) {
 			fs, err := NewFileStore(path)
 			closeLater(t, fs)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			open := time.Since(t0)
 			perSession := (float64(heapInUse()) - float64(before)) / float64(n)
@@ -96,12 +97,12 @@ func TestFileStoreArchiveScale(t *testing.T) {
 			// neither reads the lines of the finished sessions.
 			t0 = time.Now()
 			if l := fs.ListPending(); len(l) != 0 {
-				t.Fatalf("list pending: %d sessions, want none", len(l))
+				panic(fmt.Sprintf("list pending: %d sessions, want none", len(l)))
 			}
 			pendingTime := time.Since(t0)
 			t0 = time.Now()
 			if l := fs.ListState(StateActive); len(l) != 0 {
-				t.Fatalf("list state: %d sessions, want none", len(l))
+				panic(fmt.Sprintf("list state: %d sessions, want none", len(l)))
 			}
 			stateTime := time.Since(t0)
 
@@ -116,7 +117,7 @@ func TestFileStoreArchiveScale(t *testing.T) {
 				t0 := time.Now()
 				for _, id := range pick {
 					if s, ok := fs.Get(id); !ok || s.ID != id || s.BundleURI == "" || len(s.Bindings) != 1 {
-						t.Fatalf("get %s: %+v %v", id, s, ok)
+						panic(fmt.Sprintf("get %s: %+v %v", id, s, ok))
 					}
 				}
 				return time.Since(t0) / gets
@@ -128,7 +129,7 @@ func TestFileStoreArchiveScale(t *testing.T) {
 				list := fs.List()
 				d := time.Since(t0)
 				if len(list) != n || list[0].ID != ids[0] || list[n-1].ID != ids[n-1] {
-					t.Fatalf("list: %d sessions, want %d", len(list), n)
+					panic(fmt.Sprintf("list: %d sessions, want %d", len(list), n))
 				}
 				return d
 			}
@@ -139,12 +140,12 @@ func TestFileStoreArchiveScale(t *testing.T) {
 			t0 = time.Now()
 			for _, id := range pick[:deletes] {
 				if err := fs.Delete(id); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			}
 			deleteTime := time.Since(t0) / deletes
 			if _, ok := fs.Get(pick[0]); ok {
-				t.Fatalf("%s readable after delete", pick[0])
+				panic(fmt.Sprintf("%s readable after delete", pick[0]))
 			}
 
 			t.Logf("archive: %d sessions, %.1f MiB (%d B/session on disk)", n, float64(st.Size())/(1<<20), st.Size()/int64(n))

@@ -123,7 +123,7 @@ func TestTxScanAgreesWithParse(t *testing.T) {
 		}
 	}
 	if hits < 1000 {
-		t.Fatalf("corpus has only %d texts with transaction control", hits)
+		panic(fmt.Sprintf("corpus has only %d texts with transaction control", hits))
 	}
 	t.Logf("%d texts x 2 dialects: %d with transaction control, %d parsed needlessly", len(corpus), hits, maybes)
 }
@@ -162,7 +162,7 @@ func TestTrackTxUntracedMatchesTrackTx(t *testing.T) {
 			oldC.trackTx(info)
 			newC.trackTxUntraced(q)
 			if oldC.rawTx != newC.rawTx {
-				t.Fatalf("%s: statement %d %q: rawTx = %v, want %v", store, i, q, newC.rawTx, oldC.rawTx)
+				panic(fmt.Sprintf("%s: statement %d %q: rawTx = %v, want %v", store, i, q, newC.rawTx, oldC.rawTx))
 			}
 			type iso struct {
 				iso                                    isoState
@@ -170,14 +170,14 @@ func TestTrackTxUntracedMatchesTrackTx(t *testing.T) {
 			}
 			got := iso{newC.iso, newC.isoDefault, newC.defSerial, newC.defInTx, newC.nextSerial}
 			if want := (iso{oldC.iso, oldC.isoDefault, oldC.defSerial, oldC.defInTx, oldC.nextSerial}); got != want {
-				t.Fatalf("%s: statement %d %q: isolation state %+v, want %+v", store, i, q, got, want)
+				panic(fmt.Sprintf("%s: statement %d %q: isolation state %+v, want %+v", store, i, q, got, want))
 			}
 			if got.iso == isoSerial {
 				serial++
 			}
 		}
 		if serial < 100 {
-			t.Fatalf("%s: only %d statements of the corpus left a SERIALIZABLE transaction open", store, serial)
+			panic(fmt.Sprintf("%s: only %d statements of the corpus left a SERIALIZABLE transaction open", store, serial))
 		}
 	}
 }
@@ -240,7 +240,7 @@ func TestUntracedStatementsDoNotAllocate(t *testing.T) {
 	}
 	insert := b.String()
 	if len(insert) < 54<<10 {
-		t.Fatalf("statement is only %d bytes", len(insert))
+		panic(fmt.Sprintf("statement is only %d bytes", len(insert)))
 	}
 	selectLit := "SELECT id, status FROM public.orders WHERE tenant = 'acme-000001' AND status = 'shipped; held' AND amount > 100"
 
@@ -249,7 +249,7 @@ func TestUntracedStatementsDoNotAllocate(t *testing.T) {
 	c := newConn(nopConn{}, cfg, &pkCache{})
 	st, err := c.PrepareContext(context.Background(), insert)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	se, sq := st.(driver.StmtExecContext), st.(driver.StmtQueryContext)
 
@@ -274,12 +274,12 @@ func TestUntracedStatementsDoNotAllocate(t *testing.T) {
 		}
 	}
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("%d events recorded outside a session", n)
+		panic(fmt.Sprintf("%d events recorded outside a session", n))
 	}
 	if cacheHas(insert) || cacheHas(selectLit) {
-		t.Fatal("a statement outside a session was parsed")
+		panic("a statement outside a session was parsed")
 	}
 	if c.rawTx {
-		t.Fatal("an INSERT opened a transaction")
+		panic("an INSERT opened a transaction")
 	}
 }

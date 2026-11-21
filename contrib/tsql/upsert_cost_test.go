@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestUpsertSequence(t *testing.T) {
 	f := upFake(stockTable(), 1)
 	db := open(t, f, "postgres", noPKLookup, tsql.WithPKColumns("stock", "sku"))
 	if _, err := db.ExecContext(ctx, stockUpsert, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	fenceWant(t, f,
 		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500", upSelBefore, "ROLLBACK",
@@ -39,29 +40,29 @@ func TestUpsertSequence(t *testing.T) {
 	db = open(t, f, "postgres", noPKLookup, tsql.WithPKColumns("stock", "sku"))
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for i := 0; i < 2; i++ { // the first fence of a connection opens in two statements
 		if _, err := tx.ExecContext(ctx, stockUpsert, "widget", 7+i, "x"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	raw := f.RawCalls()
 	if len(raw) != 8+7 {
-		t.Fatalf("driver saw:\n%s", sqls(raw))
+		panic(fmt.Sprintf("driver saw:\n%s", sqls(raw)))
 	}
 	if got, want := sqls(raw[8:]), strings.Join([]string{
 		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", upSelBefore, "ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		stockUpsert,
 		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", upSelAfter, "ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 	}, "\n")+"\n"; got != want {
-		t.Fatalf("driver saw:\n%s\nwant:\n%s", got, want)
+		panic(fmt.Sprintf("driver saw:\n%s\nwant:\n%s", got, want))
 	}
 	if len(f.saves) != 0 {
-		t.Fatalf("savepoints left: %v", f.saves)
+		panic(fmt.Sprintf("savepoints left: %v", f.saves))
 	}
 }
 
@@ -73,14 +74,14 @@ func TestUpsertUsesKeyCache(t *testing.T) {
 	db := open(t, f, "postgres")
 	for i := 0; i < 3; i++ {
 		if _, err := db.ExecContext(ctx, stockUpsert, "widget", 7+i, "x"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	if got := f.PKLookups(); len(got) != 1 {
-		t.Fatalf("%d key lookups, want 1", len(got))
+		panic(fmt.Sprintf("%d key lookups, want 1", len(got)))
 	}
 	if got := f.Calls(); len(got) != 9 {
-		t.Fatalf("calls:\n%s", sqls(got))
+		panic(fmt.Sprintf("calls:\n%s", sqls(got)))
 	}
 }
 
@@ -93,20 +94,20 @@ func TestUpsertBeforeOff(t *testing.T) {
 	f := upFake(stockTable(), 1)
 	db := open(t, f, "postgres", tsql.WithUpsertBefore(false))
 	if _, err := db.ExecContext(ctx, stockUpsert, "gadget", 5, "Gadget"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("insert: mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("insert: mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	upCheck(t, e.Mutations[0], "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
 
 	if _, err := db.ExecContext(ctx, stockUpsert, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e = lastWrite(t, rec)
 	if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, []string{"upsert_unknown"}) {
-		t.Fatalf("update: mutations %+v flags %v attrs %v", e.Mutations, e.Flags, e.Attrs)
+		panic(fmt.Sprintf("update: mutations %+v flags %v attrs %v", e.Mutations, e.Flags, e.Attrs))
 	}
 	upCheck(t, e.Mutations[0], "upsert", false, "")
 	if jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) {
@@ -114,7 +115,7 @@ func TestUpsertBeforeOff(t *testing.T) {
 	}
 	calls := f.Calls()
 	if len(calls) != 4 || calls[1].SQL != upSelAfter || calls[3].SQL != calls[1].SQL {
-		t.Fatalf("calls, want each statement and one read after it:\n%s", sqls(calls))
+		panic(fmt.Sprintf("calls, want each statement and one read after it:\n%s", sqls(calls)))
 	}
 }
 
@@ -142,12 +143,12 @@ func TestUpsertRace(t *testing.T) {
 			}
 			db := open(t, f, "postgres")
 			if _, err := db.ExecContext(ctx, stockUpsert, tc.sku, 7, "Ours"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			e := lastWrite(t, rec)
 			upUnknown(t, e)
 			if len(e.Mutations) != 1 || jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) || e.Mutations[0].PK["sku"] != tc.sku {
-				t.Fatalf("mutations %+v", e.Mutations)
+				panic(fmt.Sprintf("mutations %+v", e.Mutations))
 			}
 		})
 	}
@@ -177,7 +178,7 @@ func TestUpsertBeforeReadFails(t *testing.T) {
 		}
 		db := open(t, f, "postgres")
 		if _, err := db.ExecContext(ctx, stockUpsert, tc.sku, 5, "Gadget"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := lastWrite(t, rec)
 		wantFlags := []string{"image_failed"}
@@ -185,7 +186,7 @@ func TestUpsertBeforeReadFails(t *testing.T) {
 			wantFlags = append(wantFlags, "upsert_unknown")
 		}
 		if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, wantFlags) {
-			t.Fatalf("%s: mutations %+v flags %v", tc.sku, e.Mutations, e.Flags)
+			panic(fmt.Sprintf("%s: mutations %+v flags %v", tc.sku, e.Mutations, e.Flags))
 		}
 		upCheck(t, e.Mutations[0], tc.op, false, tc.diff)
 	}
@@ -204,12 +205,12 @@ func TestUpsertAfterReadFails(t *testing.T) {
 	}
 	db := open(t, f, "postgres")
 	if _, err := db.ExecContext(ctx, stockUpsert, "widget", 5, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	upUnknown(t, e)
 	if m := e.Mutations[0]; !m.After.IsZero() || !reflect.DeepEqual(m.PK, map[string]any{"sku": "widget"}) || !hasFlag(e, "image_timeout") {
-		t.Fatalf("mutation %+v flags %v", m, e.Flags)
+		panic(fmt.Sprintf("mutation %+v flags %v", m, e.Flags))
 	}
 }
 
@@ -224,24 +225,24 @@ func TestUpsertRelationWithoutXmax(t *testing.T) {
 	db := open(t, f, "postgres")
 	for i, want := range []string{"qty:10->7", "qty:7->8"} {
 		if _, err := db.ExecContext(ctx, stockUpsert, "widget", 7+i, "x"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := lastWrite(t, rec)
 		if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		upCheck(t, e.Mutations[0], "update", true, want)
 	}
 	const plain = "SELECT * FROM stock WHERE sku IN ($1)"
 	if got := f.Calls(); len(got) != 4+3 || got[0].SQL != upSelBefore || got[1].SQL != plain || got[3].SQL != plain || got[4].SQL != plain || got[6].SQL != plain {
-		t.Fatalf("calls, want the very first read made twice (with and without system columns) and every later one once:\n%s", sqls(got))
+		panic(fmt.Sprintf("calls, want the very first read made twice (with and without system columns) and every later one once:\n%s", sqls(got)))
 	}
 	if _, err := db.ExecContext(ctx, stockUpsert, "gadget", 5, "Gadget"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	upCheck(t, e.Mutations[0], "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
 }
@@ -264,7 +265,7 @@ func TestUpsertMultiRowCount(t *testing.T) {
 		}
 		db := open(t, f, "postgres")
 		if _, err := db.ExecContext(ctx, stmt, "widget", 7, "x", "bolt", 4, "y"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		return lastWrite(t, rec)
 	}
@@ -275,7 +276,7 @@ func TestUpsertMultiRowCount(t *testing.T) {
 			u.put([]driver.Value{"bolt", int64(4), "y"})
 		})
 		if len(e.Mutations) != 1 || core.HasUncertainFlag(e.Flags) {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		upCheck(t, e.Mutations[0], "update", true, "qty:10->7")
 	})
@@ -287,7 +288,7 @@ func TestUpsertMultiRowCount(t *testing.T) {
 		})
 		upUnknown(t, e)
 		if len(e.Mutations) != 2 {
-			t.Fatalf("mutations %+v", e.Mutations)
+			panic(fmt.Sprintf("mutations %+v", e.Mutations))
 		}
 	})
 	// a row was written that is not under either key
@@ -297,7 +298,7 @@ func TestUpsertMultiRowCount(t *testing.T) {
 			u.put([]driver.Value{"bolt", int64(4), "y"}, 1)
 		})
 		if len(e.Mutations) != 3 || !hasFlag(e, "upsert_unknown") {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		upCheck(t, e.Mutations[0], "update", true, "qty:10->7")
 		upCheck(t, e.Mutations[1], "update", true, "qty:3->4")
@@ -334,7 +335,7 @@ func TestUpsertReturning(t *testing.T) {
 			db := open(t, f, "postgres", tc.opts...)
 			rs, err := db.QueryContext(ctx, stockUpsert+tc.returning, "widget", 7, "x")
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			cols, _ := rs.Columns()
 			n := 0
@@ -342,14 +343,14 @@ func TestUpsertReturning(t *testing.T) {
 				n++
 			}
 			if err := rs.Close(); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if !reflect.DeepEqual(cols, tc.cols) || n != 1 {
-				t.Fatalf("the application received %d rows of %v", n, cols)
+				panic(fmt.Sprintf("the application received %d rows of %v", n, cols))
 			}
 			e := lastWrite(t, rec)
 			if len(e.Mutations) != 1 || core.HasUncertainFlag(e.Flags) && tc.name != "key" {
-				t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+				panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 			}
 			upCheck(t, e.Mutations[0], "update", true, "qty:10->7")
 		})

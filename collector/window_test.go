@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ func windowed(t *testing.T, window time.Duration) (*Collector, *store.Mem) {
 func ingest(t *testing.T, c *Collector, evs ...core.Event) {
 	t.Helper()
 	if _, err := c.Ingest(context.Background(), "i1", evs); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -30,12 +31,12 @@ func storedSpans(t *testing.T, st *store.Mem) []string {
 	t.Helper()
 	evs, err := st.Events(context.Background(), sid, 0, 0)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	spans := make([]string, len(evs))
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("seq gap at %d: %d", i, e.Seq)
+			panic(fmt.Sprintf("seq gap at %d: %d", i, e.Seq))
 		}
 		spans[i] = e.SpanID
 	}
@@ -51,7 +52,7 @@ func waitStored(t *testing.T, st *store.Mem, n int, within time.Duration) []stri
 			return spans
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("only %v stored after %v, want %d events", spans, within, n)
+			panic(fmt.Sprintf("only %v stored after %v, want %d events", spans, within, n))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -68,12 +69,12 @@ func TestWindowIsPerEvent(t *testing.T) {
 	ingest(t, c, ev("x", core.KindDBRead, 200, 2)) // t=240ms
 	time.Sleep(120 * time.Millisecond)             // the timer fired at t=300ms: only "a" is due
 	if got := storedSpans(t, st); len(got) != 1 || got[0] != "a" {
-		t.Fatalf("after the first window: %v, want [a]", got)
+		panic(fmt.Sprintf("after the first window: %v, want [a]", got))
 	}
 	ingest(t, c, ev("y", core.KindDBRead, 150, 3)) // t=360ms, sorts before x
 	got := waitStored(t, st, 3, 3*time.Second)
 	if got[0] != "a" || got[1] != "y" || got[2] != "x" {
-		t.Fatalf("stored order %v, want [a y x]", got)
+		panic(fmt.Sprintf("stored order %v, want [a y x]", got))
 	}
 }
 
@@ -90,13 +91,13 @@ func TestWindowHoldIsBounded(t *testing.T) {
 		for _, s := range storedSpans(t, st) {
 			if s == "late-clock" {
 				if held := time.Since(start); held < window {
-					t.Fatalf("released after %v, before its window of %v passed", held, window)
+					panic(fmt.Sprintf("released after %v, before its window of %v passed", held, window))
 				}
 				return
 			}
 		}
 	}
-	t.Fatalf("event still held %v after it arrived (window %v)", time.Since(start), window)
+	panic(fmt.Sprintf("event still held %v after it arrived (window %v)", time.Since(start), window))
 }
 
 // In-order traffic keeps its order and is all released without a seal.
@@ -111,7 +112,7 @@ func TestWindowKeepsOrderUnderSteadyTraffic(t *testing.T) {
 	evs, _ := st.Events(context.Background(), sid, 0, 0)
 	for i, e := range evs {
 		if e.LocalSeq != uint64(i+1) {
-			t.Fatalf("in-order traffic was reordered at %d: local seq %d", i, e.LocalSeq)
+			panic(fmt.Sprintf("in-order traffic was reordered at %d: local seq %d", i, e.LocalSeq))
 		}
 	}
 }
@@ -121,12 +122,12 @@ func TestSealIgnoresTheWindow(t *testing.T) {
 	c, st := windowed(t, time.Hour)
 	ingest(t, c, ev("b", core.KindDBRead, 200, 1), ev("a", core.KindDBRead, 100, 2))
 	if got := storedSpans(t, st); len(got) != 0 {
-		t.Fatalf("stored inside the window: %v", got)
+		panic(fmt.Sprintf("stored inside the window: %v", got))
 	}
 	if _, err := c.Seal(context.Background(), sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got := storedSpans(t, st); len(got) != 2 || got[0] != "a" || got[1] != "b" {
-		t.Fatalf("after seal: %v, want [a b]", got)
+		panic(fmt.Sprintf("after seal: %v, want [a b]", got))
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -179,7 +180,7 @@ func TestShowKeyHash(t *testing.T) {
 	h := &Redactor{}
 	a := h.ShowKey("s1", "session:tok_SECRET123")
 	if !strings.HasPrefix(a, "session:#") || len(a) != len("session:#")+keyHashLen || strings.Contains(a, "SECRET") {
-		t.Fatalf("recorded as %q", a)
+		panic(fmt.Sprintf("recorded as %q", a))
 	}
 	if again := h.ShowKey("s1", "session:tok_SECRET123"); again != a {
 		t.Errorf("one key reads %q and %q within a session", a, again)
@@ -224,7 +225,7 @@ func TestKeyMaskHashIsNotKeyedByTheSession(t *testing.T) {
 	// It is this, and nothing an event carries can stand in for the key.
 	key := processKey()
 	if len(key) != 32 || bytes.Equal(key, make([]byte, 32)) {
-		t.Fatalf("process key %x", key)
+		panic(fmt.Sprintf("process key %x", key))
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte("s1\x00" + seg))

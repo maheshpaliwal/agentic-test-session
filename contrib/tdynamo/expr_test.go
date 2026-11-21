@@ -66,7 +66,7 @@ func TestSensitivePlaceholderSharedAcrossExpressions(t *testing.T) {
 		ReturnValues:              types.ReturnValueUpdatedOld, // After falls back to the update expression
 	})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := rec.Events()[0]
 	txt := string(e.Req.Inline) + fmt.Sprint(e.Mutations[0].PK) + string(e.Mutations[0].After.Inline)
@@ -93,7 +93,7 @@ func TestDeleteItemAllOldWithoutItemIsNotAMutation(t *testing.T) {
 		c, _, rec, ctx := setup(t, func(string) string { return tc.reply })
 		out, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String("t"), Key: key, ReturnValues: tc.rv})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if tc.rv == types.ReturnValueAllOld && tc.want == 1 && out.Attributes == nil {
 			t.Errorf("%s: the caller's Attributes must be kept", tc.name)

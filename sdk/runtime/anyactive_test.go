@@ -13,7 +13,7 @@ func TestSnapshotAnyActive(t *testing.T) {
 	s := &Subscriber{}
 	s.snap.Store(&snapshot{})
 	if s.AnyActive() {
-		t.Fatal("active before any state arrived")
+		panic("active before any state arrived")
 	}
 	for _, tc := range []struct {
 		name string
@@ -46,7 +46,7 @@ func TestSubscriberFeedsCoreAnyActive(t *testing.T) {
 
 	eventually(t, "first state", s.Ready)
 	if core.AnyActive() {
-		t.Fatal("active with an empty set")
+		panic("active with an empty set")
 	}
 	cp.set(`{"active":["ts_1"],"exclusive":"","kill":false}`)
 	eventually(t, "session start", core.AnyActive)

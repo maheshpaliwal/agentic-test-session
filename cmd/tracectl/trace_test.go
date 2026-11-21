@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -18,18 +19,18 @@ func TestCLITrace(t *testing.T) {
 		"4 span(s)",
 	}
 	if code != 0 || strings.TrimRight(out, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("trace: %d %s\n%s", code, e, out)
+		panic(fmt.Sprintf("trace: %d %s\n%s", code, e, out))
 	}
 	// --errors keeps only branches leading to a failure.
 	if _, out, _ := env.tc("trace", "run-1", "--errors"); strings.Contains(out, "SELECT 1") || !strings.Contains(out, "#4 worker") ||
 		!strings.Contains(out, "3 span(s), 1 hidden") {
-		t.Fatalf("--errors:\n%s", out)
+		panic(fmt.Sprintf("--errors:\n%s", out))
 	}
 	if _, out, _ := env.tc("trace", "run-1", "--depth", "1"); strings.Contains(out, "#2") || !strings.Contains(out, "2 span(s), 2 hidden") {
-		t.Fatalf("--depth:\n%s", out)
+		panic(fmt.Sprintf("--depth:\n%s", out))
 	}
 	if code, out, _ := env.tc("trace", "run-1", "--json"); code != 0 || !strings.Contains(out, `"roots"`) {
-		t.Fatalf("--json: %d\n%s", code, out)
+		panic(fmt.Sprintf("--json: %d\n%s", code, out))
 	}
 }
 
@@ -49,19 +50,19 @@ func TestCLIShow(t *testing.T) {
 		`status: ∅ -> "new"`,
 	} {
 		if code != 0 || !strings.Contains(out, want) {
-			t.Fatalf("show: %d %s\nmissing %q in:\n%s", code, e, want, out)
+			panic(fmt.Sprintf("show: %d %s\nmissing %q in:\n%s", code, e, want, out))
 		}
 	}
 	if code, out, _ := env.tc("show", "run-1", "#4"); code != 0 || !strings.Contains(out, "error     carrier") {
-		t.Fatalf("show #4: %d\n%s", code, out)
+		panic(fmt.Sprintf("show #4: %d\n%s", code, out))
 	}
 	if code, out, _ := env.tc("show", "--json", "run-1", "2"); code != 0 || !strings.Contains(out, `"seq": 2`) {
-		t.Fatalf("show --json: %d\n%s", code, out)
+		panic(fmt.Sprintf("show --json: %d\n%s", code, out))
 	}
 	if code, _, e := env.tc("show", "run-1", "9"); code != 1 || !strings.Contains(e, "no event #9") {
-		t.Fatalf("missing event: %d %s", code, e)
+		panic(fmt.Sprintf("missing event: %d %s", code, e))
 	}
 	if code, _, e := env.tc("show", "run-1", "abc"); code == 0 || !strings.Contains(e, "not an event sequence number") {
-		t.Fatalf("bad seq: %d %s", code, e)
+		panic(fmt.Sprintf("bad seq: %d %s", code, e))
 	}
 }

@@ -19,7 +19,7 @@ func delOpen(t testing.TB, path string) *FileStore {
 	fs, err := NewFileStore(path)
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		panic(fmt.Sprintf("open: %v", err))
 	}
 	return fs
 }
@@ -47,31 +47,31 @@ func TestDeleteThatStartsACompactionStaysDeleted(t *testing.T) {
 				fs.Evict("x")
 			}
 			if err := fs.Compact(); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			fs.wmu.Lock()
 			fs.compactMin = 1
 			fs.compactAt = fs.journalSize + 1 // the next record starts a compaction
 			fs.wmu.Unlock()
 			if err := fs.Delete("x"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			waitCompaction(fs)
 			if _, ok := fs.Get("x"); ok {
-				t.Fatal("x still there in the running store")
+				panic("x still there in the running store")
 			}
 			re := delOpen(t, path)
 			if s, ok := re.Get("x"); ok {
 				snap, _ := os.ReadFile(path)
 				j, _ := os.ReadFile(path + ".journal")
-				t.Fatalf("deleted session is back after reopen: %+v\nsnapshot has x: %v, journal: %q", s.Name, bytes.Contains(snap, []byte(`"x"`)), j)
+				panic(fmt.Sprintf("deleted session is back after reopen: %+v\nsnapshot has x: %v, journal: %q", s.Name, bytes.Contains(snap, []byte(`"x"`)), j))
 			}
 			// Neither store may be left with a line of it in the archive.
 			if raw, err := os.ReadFile(path + ".archive"); err == nil && bytes.Contains(raw, []byte(`"id":"x"`)) {
-				t.Fatalf("a line of the deleted session is left in the archive:\n%s", raw)
+				panic(fmt.Sprintf("a line of the deleted session is left in the archive:\n%s", raw))
 			}
 			if _, ok := re.Get("keep"); !ok {
-				t.Fatal("the other session is gone")
+				panic("the other session is gone")
 			}
 		})
 	}

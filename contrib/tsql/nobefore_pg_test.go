@@ -4,6 +4,7 @@ package tsql_test
 // TSESSION_TEST_PG_DSN; skipped otherwise).
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -24,17 +25,17 @@ func TestPGUpdateWithoutBeforeImageRecordsNoDiff(t *testing.T) {
 		rec, ctx := setup(t)
 		db, err := tsql.Open("pgx", rtDSN(t))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer db.Close()
 		rs, err := db.QueryContext(ctx, "UPDATE tsql_nb SET v = v || 'x' RETURNING *")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		for rs.Next() {
 		}
 		if err := rs.Close(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		noBeforeCheck(t, lastWrite(t, rec), "image_skipped", 2)
 	})
@@ -45,16 +46,16 @@ func TestPGUpdateWithoutBeforeImageRecordsNoDiff(t *testing.T) {
 		rec, ctx := setup(t)
 		db, err := tsql.Open("pgx", rtDSN(t), tsql.WithCaptureTimeout(50*time.Millisecond))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer db.Close()
 		if _, err := db.ExecContext(ctx, "UPDATE tsql_nb SET v = 'z' WHERE id = 1 AND pg_sleep(0.3) IS NOT NULL"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := lastWrite(t, rec)
 		noBeforeCheck(t, e, "image_timeout", 1)
 		if got := jsonMap(t, e.Mutations[0].After)["v"]; got != "z" {
-			t.Fatalf("after image v = %v", got)
+			panic(fmt.Sprintf("after image v = %v", got))
 		}
 	})
 }

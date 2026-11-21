@@ -82,9 +82,12 @@ func check(t *testing.T, fn func(tb testing.TB)) (failed bool, out string) {
 	r := &recorder{TB: t}
 	func() {
 		defer func() {
+			// The helpers stop a test by panicking with what is wrong, or
+			// through FailNow of the test they were given.
 			if v := recover(); v != nil {
 				if _, ok := v.(failNow); !ok {
-					panic(v)
+					r.failed = true
+					r.msgs = append(r.msgs, fmt.Sprint(v))
 				}
 			}
 		}()
@@ -100,12 +103,12 @@ func TestRunStopsTheSessionWithTheTest(t *testing.T) {
 		s := tsessiontest.Run(t, e.opts)
 		id = s.ID
 		if s.Info().Name != t.Name() || s.Info().State != "ACTIVE" {
-			t.Fatalf("session: %+v", s.Info())
+			panic(fmt.Sprintf("session: %+v", s.Info()))
 		}
 	})
 	s, err := client.Attach(context.Background(), e.opts, id)
 	if err != nil || s.Info().State != "SEALED" {
-		t.Fatalf("after the test: %+v %v", s.Info(), err)
+		panic(fmt.Sprintf("after the test: %+v %v", s.Info(), err))
 	}
 }
 
@@ -113,20 +116,20 @@ func TestRequireNoFailures(t *testing.T) {
 	e := newEnv(t)
 	s := tsessiontest.Run(t, e.opts)
 	if failed, out := check(t, func(tb testing.TB) { tsessiontest.RequireNoFailures(tb, s) }); failed {
-		t.Fatalf("clean session reported: %s", out)
+		panic(fmt.Sprintf("clean session reported: %s", out))
 	}
 	if !s.Info().Done() {
-		t.Fatalf("the assertion must stop the session first: %+v", s.Info())
+		panic(fmt.Sprintf("the assertion must stop the session first: %+v", s.Info()))
 	}
 	e.sum.Failures = []client.Failure{{Seq: 7, Service: "api", Kind: core.KindDBWrite, Name: "INSERT", Err: "duplicate key"}}
 	failed, out := check(t, func(tb testing.TB) { tsessiontest.RequireNoFailures(tb, s) })
 	if !failed || !strings.Contains(out, "#7 api db.write INSERT: duplicate key") {
-		t.Fatalf("failure not reported: %v %s", failed, out)
+		panic(fmt.Sprintf("failure not reported: %v %s", failed, out))
 	}
 	e.sum = client.Summary{Incomplete: true, PendingAsync: 2}
 	failed, out = check(t, func(tb testing.TB) { tsessiontest.RequireNoFailures(tb, s) })
 	if !failed || !strings.Contains(out, "incomplete") || !strings.Contains(out, "2 async job(s)") {
-		t.Fatalf("incomplete session not reported: %v %s", failed, out)
+		panic(fmt.Sprintf("incomplete session not reported: %v %s", failed, out))
 	}
 }
 
@@ -136,7 +139,7 @@ func TestRequireMutation(t *testing.T) {
 
 	ms := tsessiontest.RequireMutation(t, s, client.MutationFilter{Store: "postgres", Entity: "orders", Op: "INSERT"})
 	if len(ms) != 1 || ms[0].Seq != 1 || ms[0].Service != "api" || ms[0].TxID != "tx1" {
-		t.Fatalf("matches: %+v", ms)
+		panic(fmt.Sprintf("matches: %+v", ms))
 	}
 	// A mutation without a transaction outcome counts; a rolled-back one does not.
 	tsessiontest.RequireMutation(t, s, client.MutationFilter{Store: "redis"})
@@ -144,19 +147,19 @@ func TestRequireMutation(t *testing.T) {
 		tsessiontest.RequireMutation(tb, s, client.MutationFilter{Entity: "orders", Op: "update"})
 	})
 	if !failed || !strings.Contains(out, "no effective mutation") {
-		t.Fatalf("rolled-back update must not satisfy the assertion: %v %s", failed, out)
+		panic(fmt.Sprintf("rolled-back update must not satisfy the assertion: %v %s", failed, out))
 	}
 
 	tsessiontest.RequireNoMutation(t, s, client.MutationFilter{Entity: "orders", Op: "update"})
 	tsessiontest.RequireNoMutation(t, s, client.MutationFilter{Store: "mongo"})
 	failed, out = check(t, func(tb testing.TB) { tsessiontest.RequireNoMutation(tb, s, client.MutationFilter{Store: "postgres"}) })
 	if !failed || !strings.Contains(out, "event #1 insert postgres/orders") {
-		t.Fatalf("unexpected mutation not reported: %v %s", failed, out)
+		panic(fmt.Sprintf("unexpected mutation not reported: %v %s", failed, out))
 	}
 
 	all, err := s.Mutations(context.Background(), client.MutationFilter{})
 	if err != nil || len(all) != 3 {
-		t.Fatalf("unfiltered: %+v %v", all, err)
+		panic(fmt.Sprintf("unfiltered: %+v %v", all, err))
 	}
 }
 
@@ -173,7 +176,7 @@ func TestFailedTestLogsTheSession(t *testing.T) {
 	}
 	out := strings.Join(r.msgs, "\n")
 	if !strings.Contains(out, "tracectl summary "+s.ID) || !strings.Contains(out, "#3 worker worker.end ship: timeout") {
-		t.Fatalf("log of a failed test:\n%s", out)
+		panic(fmt.Sprintf("log of a failed test:\n%s", out))
 	}
 }
 
@@ -192,33 +195,33 @@ func TestFailedTestSavesAnArtifact(t *testing.T) {
 		return strings.Join(r.msgs, "\n")
 	}
 	if out := run(false); strings.Contains(out, "saved") {
-		t.Fatalf("a passing test must not save anything:\n%s", out)
+		panic(fmt.Sprintf("a passing test must not save anything:\n%s", out))
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("artifact directory created for a passing test: %v", err)
+		panic(fmt.Sprintf("artifact directory created for a passing test: %v", err))
 	}
 	out := run(true)
 	// The recorder reports the outer test's name, which contains no slash here;
 	// the sanitising is exercised through the file name below.
 	matches, _ := filepath.Glob(filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".ts_*.ndjson"))
 	if len(matches) != 1 {
-		t.Fatalf("artifacts in %s: %v", dir, matches)
+		panic(fmt.Sprintf("artifacts in %s: %v", dir, matches))
 	}
 	path := matches[0]
 	if !strings.Contains(out, "dashboard -open "+path) {
-		t.Fatalf("log does not point at the artifact:\n%s", out)
+		panic(fmt.Sprintf("log does not point at the artifact:\n%s", out))
 	}
 	b, err := os.ReadFile(path)
 	if err != nil || strings.Count(string(b), "\n") != 3 || !strings.Contains(string(b), `"seq":1`) {
-		t.Fatalf("artifact: %q %v", b, err)
+		panic(fmt.Sprintf("artifact: %q %v", b, err))
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("artifact mode %v, want 0600", fi.Mode().Perm())
+		panic(fmt.Sprintf("artifact mode %v, want 0600", fi.Mode().Perm()))
 	}
 	// A second failing test with the same name gets its own file.
 	run(true)
 	if matches, _ := filepath.Glob(filepath.Join(dir, "*.ndjson")); len(matches) != 2 {
-		t.Fatalf("two failed runs must leave two files, got %v", matches)
+		panic(fmt.Sprintf("two failed runs must leave two files, got %v", matches))
 	}
 }
 
@@ -241,8 +244,8 @@ func TestFailureIsListedOnce(t *testing.T) {
 	s := tsessiontest.Run(rc, e.opts)
 	func() {
 		defer func() {
-			if _, ok := recover().(failNow); !ok {
-				t.Fatal("RequireNoFailures must stop the test")
+			if recover() == nil {
+				panic("RequireNoFailures must stop the test")
 			}
 		}()
 		tsessiontest.RequireNoFailures(rc, s)
@@ -252,9 +255,9 @@ func TestFailureIsListedOnce(t *testing.T) {
 	}
 	out := strings.Join(r.msgs, "\n")
 	if n := strings.Count(out, "#3 worker worker.end ship: timeout"); n != 1 {
-		t.Fatalf("the failed event is listed %d times, want once:\n%s", n, out)
+		panic(fmt.Sprintf("the failed event is listed %d times, want once:\n%s", n, out))
 	}
 	if !strings.Contains(out, "tracectl summary "+s.ID) {
-		t.Fatalf("the pointer to the session is still printed:\n%s", out)
+		panic(fmt.Sprintf("the pointer to the session is still printed:\n%s", out))
 	}
 }

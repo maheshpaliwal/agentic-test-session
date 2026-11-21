@@ -19,7 +19,7 @@ func pgCollector(t *testing.T, schema string) (*Collector, *httptest.Server, *st
 	t.Helper()
 	pg, err := store.OpenPGConfig(context.Background(), store.PGConfig{DSN: os.Getenv("TSESSION_TEST_PG_DSN"), Schema: schema})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	cfg := DefaultConfig()
 	cfg.Window = 0
@@ -63,15 +63,15 @@ func TestPGRestartRecovery(t *testing.T) {
 	}()
 	r := post(t, srv2.URL, ev("b", core.KindDBWrite, 2, 2), ev("c", core.KindDBWrite, 3, 3), ev("d", core.KindDBWrite, 4, 4), ev("e", core.KindDBWrite, 5, 5))
 	if r.Accepted != 2 || r.Duplicates != 2 {
-		t.Fatalf("after restart: %+v", r)
+		panic(fmt.Sprintf("after restart: %+v", r))
 	}
 	got := events(t, c2)
 	if len(got) != 5 {
-		t.Fatalf("len=%d", len(got))
+		panic(fmt.Sprintf("len=%d", len(got)))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("seq gap: %d at %d", e.Seq, i)
+			panic(fmt.Sprintf("seq gap: %d at %d", e.Seq, i))
 		}
 	}
 	// concurrent ingest through the collector with overlapping duplicates
@@ -88,11 +88,11 @@ func TestPGRestartRecovery(t *testing.T) {
 	wg.Wait()
 	got = events(t, c2)
 	if len(got) != 35 {
-		t.Fatalf("after concurrent dedupe len=%d", len(got))
+		panic(fmt.Sprintf("after concurrent dedupe len=%d", len(got)))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("seq gap: %d at %d", e.Seq, i)
+			panic(fmt.Sprintf("seq gap: %d at %d", e.Seq, i))
 		}
 	}
 }
@@ -112,10 +112,10 @@ func TestPGHardening(t *testing.T) {
 	nul.Name = "a\x00b"
 	nul.Req.Inline = json.RawMessage(`{"x":"\u0000"}`)
 	if code, r := rawPost(t, srv.URL, ctProto, protoBody(t, nul)); code != 200 || r.Accepted != 1 {
-		t.Fatalf("nul ingest: %d %+v", code, r)
+		panic(fmt.Sprintf("nul ingest: %d %+v", code, r))
 	}
 	if n := len(events(t, c)); n != 1 {
-		t.Fatalf("stored %d", n)
+		panic(fmt.Sprintf("stored %d", n))
 	}
 
 	w := ev("w", core.KindDBWrite, 2, 2)
@@ -128,7 +128,7 @@ func TestPGHardening(t *testing.T) {
 	get(t, srv.URL+"/v1/sessions/"+sid+"/events", &out)
 	for _, e := range out.Events {
 		if e.SpanID == "w" && (e.Mutations[0].Effective == nil || *e.Mutations[0].Effective) {
-			t.Fatal("failed commit reported effective")
+			panic("failed commit reported effective")
 		}
 	}
 
@@ -144,11 +144,11 @@ func TestPGHardening(t *testing.T) {
 	seen := map[string]int{}
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("gap at %d", i)
+			panic(fmt.Sprintf("gap at %d", i))
 		}
 		seen[e.SpanID]++
 	}
 	if seen["x1"] != 1 || seen["x2"] != 1 || len(evs) != 5 {
-		t.Fatalf("%d events, %v", len(evs), seen)
+		panic(fmt.Sprintf("%d events, %v", len(evs), seen))
 	}
 }

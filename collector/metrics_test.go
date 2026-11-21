@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -14,12 +15,12 @@ func scrape(t *testing.T, url string) string {
 	t.Helper()
 	resp, err := http.Get(url + "/metrics")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/plain; version=0.0.4") {
-		t.Fatalf("GET /metrics: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+		panic(fmt.Sprintf("GET /metrics: %d %q", resp.StatusCode, resp.Header.Get("Content-Type")))
 	}
 	return string(b)
 }
@@ -32,16 +33,16 @@ func TestMetricsEndpoint(t *testing.T) {
 	a := ev("a", core.KindQueuePub, 1, 1) // never consumed: the seal is incomplete
 	post(t, srv.URL, a, a, ev("b", core.KindAPIIn, 2, 2), bad)
 	if _, err := c.Seal(ctx, sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	other := ev("c", core.KindAPIIn, 1, 1)
 	other.SessionID = "ts_other"
 	post(t, srv.URL, other)
 	if _, err := c.Seal(ctx, "ts_other"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := c.Delete(ctx, "ts_other"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	got := scrape(t, srv.URL)
@@ -66,11 +67,11 @@ func TestMetricsEndpoint(t *testing.T) {
 	req.Host = "evil.example"
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("foreign Host: %d", resp.StatusCode)
+		panic(fmt.Sprintf("foreign Host: %d", resp.StatusCode))
 	}
 }
 
@@ -80,7 +81,7 @@ func TestMetricsCountStoreTrouble(t *testing.T) {
 	sp := &spyStore{poison: func(e core.Event) bool { return e.SpanID == "poison" }}
 	c, srv := newSpyC(t, cfg, sp)
 	if _, err := c.Ingest(context.Background(), "", []core.Event{ev("ok", core.KindAPIIn, 1, 1), ev("poison", core.KindAPIIn, 2, 2)}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	got := scrape(t, srv.URL)
 	if !strings.Contains(got, "tsession_collector_quarantined_events_total 1") {
@@ -91,7 +92,7 @@ func TestMetricsCountStoreTrouble(t *testing.T) {
 	}
 	sp.down.Store(true)
 	if _, err := c.Ingest(context.Background(), "", []core.Event{ev("late", core.KindAPIIn, 3, 3)}); err == nil {
-		t.Fatal("expected a storage error")
+		panic("expected a storage error")
 	}
 	if got := scrape(t, srv.URL); !strings.Contains(got, `tsession_collector_ingest_errors_total{cause="storage"} 1`) ||
 		!strings.Contains(got, "tsession_collector_buffered_events 1") {

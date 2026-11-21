@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -92,8 +93,8 @@ func waitState(t *testing.T, m *Manager, id string, want State) Session {
 		time.Sleep(5 * time.Millisecond)
 	}
 	s, _ := m.Get(id)
-	t.Fatalf("session %s state=%s, want %s", id, s.State, want)
-	return s
+	panic(fmt.Sprintf("session %s state=%s, want %s", id, s.State, want))
+
 }
 
 func TestFSMHappyPath(t *testing.T) {
@@ -102,31 +103,31 @@ func TestFSMHappyPath(t *testing.T) {
 	m := newMgr(t, f, nil)
 	s, err := m.Start(StartRequest{Name: "a", QuiesceSeconds: 2, MaxDrainSeconds: 100})
 	if err != nil || s.State != StateActive || s.Mode != ModeHeader || s.InitiatedBy != "api" {
-		t.Fatalf("start: %+v %v", s, err)
+		panic(fmt.Sprintf("start: %+v %v", s, err))
 	}
 	if a := m.Active(); len(a.Active) != 1 || a.Active[0] != s.ID || a.Exclusive != "" {
-		t.Fatalf("active %+v", a)
+		panic(fmt.Sprintf("active %+v", a))
 	}
 	st, err := m.Stop(s.ID)
 	if err != nil || st.State != StateDraining {
-		t.Fatalf("stop: %+v %v", st, err)
+		panic(fmt.Sprintf("stop: %+v %v", st, err))
 	}
 	sealed := waitState(t, m, s.ID, StateSealed)
 	if sealed.Incomplete || sealed.DroppedEvents != 7 || sealed.BundleURI != "file:///bundle/x" || sealed.EndedAt.IsZero() {
-		t.Fatalf("sealed: %+v", sealed)
+		panic(fmt.Sprintf("sealed: %+v", sealed))
 	}
 	if got := m.Active(); len(got.Active) != 0 {
-		t.Fatalf("active after seal: %+v", got)
+		panic(fmt.Sprintf("active after seal: %+v", got))
 	}
 	// invalid transitions
 	if _, err := m.Abort(s.ID); err != ErrBadState {
-		t.Fatalf("abort sealed: %v", err)
+		panic(fmt.Sprintf("abort sealed: %v", err))
 	}
 	if again, err := m.Stop(s.ID); err != nil || again.State != StateSealed {
-		t.Fatalf("idempotent stop: %+v %v", again, err)
+		panic(fmt.Sprintf("idempotent stop: %+v %v", again, err))
 	}
 	if _, err := m.Stop("nope"); err != ErrNotFound {
-		t.Fatalf("got %v", err)
+		panic(fmt.Sprintf("got %v", err))
 	}
 }
 
@@ -138,16 +139,16 @@ func TestDrainWaitsForPendingAndQuiet(t *testing.T) {
 	m.Stop(s.ID)
 	time.Sleep(100 * time.Millisecond)
 	if cur, _ := m.Get(s.ID); cur.State != StateDraining || f.sealed.Load() != 0 {
-		t.Fatalf("sealed while pending: %+v", cur)
+		panic(fmt.Sprintf("sealed while pending: %+v", cur))
 	}
 	f.set(0, time.Now(), 0) // pending cleared but just saw an event
 	time.Sleep(15 * time.Millisecond)
 	if f.sealed.Load() != 0 {
-		t.Fatal("sealed before quiescence")
+		panic("sealed before quiescence")
 	}
 	got := waitState(t, m, s.ID, StateSealed)
 	if got.Incomplete {
-		t.Fatalf("should be complete: %+v", got)
+		panic(fmt.Sprintf("should be complete: %+v", got))
 	}
 }
 
@@ -159,7 +160,7 @@ func TestDrainTimeoutMarksIncomplete(t *testing.T) {
 	m.Stop(s.ID)
 	got := waitState(t, m, s.ID, StateSealed)
 	if !got.Incomplete || got.DroppedEvents != 2 || f.sealed.Load() != 1 {
-		t.Fatalf("got %+v sealed=%d", got, f.sealed.Load())
+		panic(fmt.Sprintf("got %+v sealed=%d", got, f.sealed.Load()))
 	}
 }
 
@@ -170,7 +171,7 @@ func TestSealIncompleteFromCollector(t *testing.T) {
 	s, _ := m.Start(StartRequest{QuiesceSeconds: 1, MaxDrainSeconds: 100})
 	m.Stop(s.ID)
 	if got := waitState(t, m, s.ID, StateSealed); !got.Incomplete {
-		t.Fatalf("%+v", got)
+		panic(fmt.Sprintf("%+v", got))
 	}
 }
 
@@ -181,12 +182,12 @@ func TestAbortDuringDrain(t *testing.T) {
 	s, _ := m.Start(StartRequest{MaxDrainSeconds: 1000})
 	m.Stop(s.ID)
 	if a, err := m.Abort(s.ID); err != nil || a.State != StateAborted {
-		t.Fatalf("%+v %v", a, err)
+		panic(fmt.Sprintf("%+v %v", a, err))
 	}
 	f.set(0, time.Time{}, 0)
 	time.Sleep(60 * time.Millisecond)
 	if cur, _ := m.Get(s.ID); cur.State != StateAborted || f.sealed.Load() != 0 {
-		t.Fatalf("aborted session changed: %+v", cur)
+		panic(fmt.Sprintf("aborted session changed: %+v", cur))
 	}
 }
 
@@ -206,31 +207,31 @@ func TestExclusiveConflict(t *testing.T) {
 	}
 	w := post("/v1/sessions", `{"mode":"exclusive","name":"one"}`)
 	if w.Code != 201 {
-		t.Fatalf("%d %s", w.Code, w.Body)
+		panic(fmt.Sprintf("%d %s", w.Code, w.Body))
 	}
 	var s1 Session
 	json.Unmarshal(w.Body.Bytes(), &s1)
 	if w := post("/v1/sessions", `{"mode":"exclusive"}`); w.Code != 409 {
-		t.Fatalf("want 409 got %d", w.Code)
+		panic(fmt.Sprintf("want 409 got %d", w.Code))
 	}
 	if w := post("/v1/sessions", `{"mode":"header"}`); w.Code != 201 {
-		t.Fatalf("header session should coexist: %d", w.Code)
+		panic(fmt.Sprintf("header session should coexist: %d", w.Code))
 	}
 	if a := m.Active(); a.Exclusive != s1.ID || len(a.Active) != 2 {
-		t.Fatalf("%+v", a)
+		panic(fmt.Sprintf("%+v", a))
 	}
 	// still conflicts while DRAINING
 	f.set(1, time.Now(), 0)
 	post("/v1/sessions/"+s1.ID+"/stop", "")
 	if w := post("/v1/sessions", `{"mode":"exclusive"}`); w.Code != 409 {
-		t.Fatalf("draining should still conflict: %d", w.Code)
+		panic(fmt.Sprintf("draining should still conflict: %d", w.Code))
 	}
 	post("/v1/sessions/"+s1.ID+"/abort", "")
 	if w := post("/v1/sessions", `{"mode":"exclusive"}`); w.Code != 201 {
-		t.Fatalf("after abort: %d", w.Code)
+		panic(fmt.Sprintf("after abort: %d", w.Code))
 	}
 	if w := post("/v1/sessions", `{"mode":"bogus"}`); w.Code != 400 {
-		t.Fatalf("bad mode: %d", w.Code)
+		panic(fmt.Sprintf("bad mode: %d", w.Code))
 	}
 }
 
@@ -243,13 +244,13 @@ func TestTTLExpiry(t *testing.T) {
 	s, _ := m.Start(StartRequest{TTLSeconds: 3}) // 30ms
 	got := waitState(t, m, s.ID, StateExpired)
 	if f.sealed.Load() != 1 || got.Reason != "ttl" || got.SealError != "" || got.Incomplete {
-		t.Fatalf("ttl must seal cleanly: %+v sealed=%d", got, f.sealed.Load())
+		panic(fmt.Sprintf("ttl must seal cleanly: %+v sealed=%d", got, f.sealed.Load()))
 	}
 	if got.EndedAt.IsZero() || len(m.Active().Active) != 0 {
-		t.Fatalf("%+v", got)
+		panic(fmt.Sprintf("%+v", got))
 	}
 	if _, err := m.Stop(s.ID); err != ErrBadState {
-		t.Fatalf("stop expired: %v", err)
+		panic(fmt.Sprintf("stop expired: %v", err))
 	}
 }
 
@@ -265,27 +266,27 @@ func TestRESTListGetKill(t *testing.T) {
 	var list []Session
 	getJSON(t, srv.URL+"/v1/sessions", &list)
 	if len(list) != 2 {
-		t.Fatalf("%d", len(list))
+		panic(fmt.Sprintf("%d", len(list)))
 	}
 	getJSON(t, srv.URL+"/v1/sessions?state=ABORTED", &list)
 	if len(list) != 1 || list[0].ID != s.ID {
-		t.Fatalf("%+v", list)
+		panic(fmt.Sprintf("%+v", list))
 	}
 	resp, _ := http.Get(srv.URL + "/v1/sessions/missing")
 	if resp.StatusCode != 404 {
-		t.Fatalf("%d", resp.StatusCode)
+		panic(fmt.Sprintf("%d", resp.StatusCode))
 	}
 	resp.Body.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/kill", "application/json", bytes.NewBufferString(`{"kill":true}`))
 	if err != nil || resp.StatusCode != 200 {
-		t.Fatal(err, resp)
+		panic(fmt.Sprint(err, resp))
 	}
 	resp.Body.Close()
 	var a ActiveSet
 	getJSON(t, srv.URL+"/v1/active", &a)
 	if !a.Kill || len(a.Active) != 1 {
-		t.Fatalf("%+v", a)
+		panic(fmt.Sprintf("%+v", a))
 	}
 }
 
@@ -293,11 +294,11 @@ func getJSON(t *testing.T, url string, v any) {
 	t.Helper()
 	resp, err := http.Get(url)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -313,11 +314,11 @@ func TestSSEStream(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/v1/active/stream", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
-		t.Fatalf("ct %q", ct)
+		panic(fmt.Sprintf("ct %q", ct))
 	}
 	lines := make(chan string, 64)
 	go func() {
@@ -333,20 +334,20 @@ func TestSSEStream(t *testing.T) {
 			select {
 			case l, ok := <-lines:
 				if !ok {
-					t.Fatal("stream closed")
+					panic("stream closed")
 				}
 				if strings.HasPrefix(l, prefix) {
 					return l
 				}
 			case <-ctx.Done():
-				t.Fatalf("timeout waiting for %q", prefix)
+				panic(fmt.Sprintf("timeout waiting for %q", prefix))
 			}
 		}
 	}
 	var a ActiveSet
 	json.Unmarshal([]byte(strings.TrimPrefix(next("data: "), "data: ")), &a)
 	if len(a.Active) != 1 || a.Active[0] != pre.ID {
-		t.Fatalf("snapshot %+v", a)
+		panic(fmt.Sprintf("snapshot %+v", a))
 	}
 	next(": heartbeat")
 	s2, _ := m.Start(StartRequest{Name: "two", Mode: ModeExclusive})
@@ -372,7 +373,7 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 	fs, err := NewFileStore(path)
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	f := newFakeCollector(t)
 	f.set(1, time.Now(), 0)
@@ -385,10 +386,10 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 	fs2, err := NewFileStore(path)
 	closeLater(t, fs2)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got, ok := fs2.Get(s.ID); !ok || got.State != StateDraining || got.Name != "persist" {
-		t.Fatalf("reload: %+v %v", got, ok)
+		panic(fmt.Sprintf("reload: %+v %v", got, ok))
 	}
 	f.set(0, time.Time{}, 0)
 	m2 := newMgr(t, f, func(c *Config) { c.Store = fs2 })
@@ -397,7 +398,7 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 	fs3, _ := NewFileStore(path)
 	closeLater(t, fs3)
 	if got, _ := fs3.Get(s.ID); got.State != StateSealed {
-		t.Fatalf("persisted %+v", got)
+		panic(fmt.Sprintf("persisted %+v", got))
 	}
 }
 
@@ -411,11 +412,11 @@ func TestTTLGoesThroughDraining(t *testing.T) {
 	s, _ := m.Start(StartRequest{TTLSeconds: 2, QuiesceSeconds: 1, MaxDrainSeconds: 20}) // drain up to 200ms
 	d := waitState(t, m, s.ID, StateDraining)
 	if d.Reason != "ttl" || len(m.Active().Active) != 1 {
-		t.Fatalf("draining: %+v", d)
+		panic(fmt.Sprintf("draining: %+v", d))
 	}
 	got := waitState(t, m, s.ID, StateExpired)
 	if !got.Incomplete || f.sealed.Load() != 1 {
-		t.Fatalf("drain timeout should be incomplete: %+v", got)
+		panic(fmt.Sprintf("drain timeout should be incomplete: %+v", got))
 	}
 }
 
@@ -442,7 +443,7 @@ func TestTTLSealFailureMarksSealedIncomplete(t *testing.T) {
 	s, _ := m.Start(StartRequest{TTLSeconds: 2, QuiesceSeconds: 1})
 	got := waitState(t, m, s.ID, StateSealed)
 	if !got.Incomplete || got.SealError == "" || got.Reason != "ttl" || calls.Load() < 3 {
-		t.Fatalf("got %+v calls=%d", got, calls.Load())
+		panic(fmt.Sprintf("got %+v calls=%d", got, calls.Load()))
 	}
 }
 
@@ -466,6 +467,6 @@ func TestSealRetrySucceedsAfterTransientFailure(t *testing.T) {
 	m.Stop(s.ID)
 	got := waitState(t, m, s.ID, StateSealed)
 	if got.Incomplete || got.SealError != "" || got.BundleURI != "b" {
-		t.Fatalf("%+v", got)
+		panic(fmt.Sprintf("%+v", got))
 	}
 }

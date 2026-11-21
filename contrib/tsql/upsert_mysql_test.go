@@ -8,6 +8,7 @@ package tsql_test
 
 import (
 	"database/sql/driver"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -64,18 +65,18 @@ func TestMySQLUpsert(t *testing.T) {
 			f := myFake(stockTable(), tc.affected, 0, tc.set...)
 			db := open(t, f, "mysql")
 			if _, err := db.ExecContext(ctx, tc.stmt, tc.sku, 5, "Gadget"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			e := lastWrite(t, rec)
 			if got := f.Calls(); len(got) != 3 || !strings.Contains(got[0].SQL, "* FROM stock WHERE `sku` IN (?)") || got[2].SQL != got[0].SQL {
-				t.Fatalf("calls, want one read before and one after:\n%s", sqls(got))
+				panic(fmt.Sprintf("calls, want one read before and one after:\n%s", sqls(got)))
 			}
 			if tc.op == "" {
 				upUnknown(t, e)
 				return
 			}
 			if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-				t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+				panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 			}
 			upCheck(t, e.Mutations[0], tc.op, tc.op == "update", tc.diff)
 		})
@@ -100,15 +101,15 @@ func TestMySQLUpsertGeneratedKey(t *testing.T) {
 	db := open(t, f, "mysql")
 	u.key = 0 // the read after the statement is by id
 	if _, err := db.ExecContext(ctx, "INSERT INTO users (email, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = VALUES(name)", "b@example.com", "Bob"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	upUnknown(t, e)
 	if m := e.Mutations[0]; !reflect.DeepEqual(m.PK, map[string]any{"id": int64(8)}) || jsonMap(t, m.After)["name"] != "Bob" {
-		t.Fatalf("mutation %+v", m)
+		panic(fmt.Sprintf("mutation %+v", m))
 	}
 	if !hasFlag(e, "image_skipped") || e.Attrs["image_skip_reason"] != "key_not_in_values" {
-		t.Fatalf("flags %v attrs %v", e.Flags, e.Attrs)
+		panic(fmt.Sprintf("flags %v attrs %v", e.Flags, e.Attrs))
 	}
 }
 
@@ -119,12 +120,12 @@ func TestMySQLUpsertMultiRow(t *testing.T) {
 	f := myFake(stockTable(), 3, 0, 1)
 	db := open(t, f, "mysql")
 	if _, err := db.ExecContext(ctx, "INSERT INTO stock (sku, qty, name) VALUES (?, ?, ?), (?, ?, ?) ON DUPLICATE KEY UPDATE qty = VALUES(qty)", "widget", 7, "x", "gadget", 5, "Gadget"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	upUnknown(t, e)
 	if got := f.Calls(); len(got) != 1 || len(e.Mutations) != 1 || !hasFlag(e, "multi_row_insert") {
-		t.Fatalf("mutations %+v flags %v calls:\n%s", e.Mutations, e.Flags, sqls(got))
+		panic(fmt.Sprintf("mutations %+v flags %v calls:\n%s", e.Mutations, e.Flags, sqls(got)))
 	}
 }
 
@@ -137,12 +138,12 @@ func TestMySQLUpsertKeyNotUnique(t *testing.T) {
 	f.pk = nil
 	db := open(t, f, "mysql")
 	if _, err := db.ExecContext(ctx, "INSERT INTO log (id, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)", 1, "c"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	upUnknown(t, e)
 	if !hasFlag(e, "pk_not_unique") || !e.Mutations[0].After.IsZero() {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 }
 
@@ -153,11 +154,11 @@ func TestMySQLUpsertBeforeOff(t *testing.T) {
 	f := myFake(stockTable(), 2, 0, 1)
 	db := open(t, f, "mysql", tsql.WithUpsertBefore(false))
 	if _, err := db.ExecContext(ctx, myODKU, "widget", 5, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	upUnknown(t, e)
 	if got := f.Calls(); len(got) != 2 || jsonMap(t, e.Mutations[0].After)["qty"] != float64(5) || !core.HasUncertainFlag(e.Flags) {
-		t.Fatalf("mutations %+v calls:\n%s", e.Mutations, sqls(got))
+		panic(fmt.Sprintf("mutations %+v calls:\n%s", e.Mutations, sqls(got)))
 	}
 }

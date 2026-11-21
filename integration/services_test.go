@@ -26,7 +26,7 @@ func buildBinary(t *testing.T, dir, name, moduleDir, pkg string) string {
 	cmd := exec.Command("go", "build", "-o", bin, pkg)
 	cmd.Dir = filepath.Join("..", moduleDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", name, err, out)
+		panic(fmt.Sprintf("build %s: %v\n%s", name, err, out))
 	}
 	return bin
 }
@@ -36,7 +36,7 @@ func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer ln.Close()
 	return ln.Addr().String()
@@ -55,7 +55,7 @@ func startProc(t *testing.T, name, bin, dir string, args ...string) *proc {
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	p.cmd.Env = append(os.Environ(), "TSESSION_ENABLED=") // the services must not pick up SDK settings
 	if err := p.cmd.Start(); err != nil {
-		t.Fatalf("start %s: %v", name, err)
+		panic(fmt.Sprintf("start %s: %v", name, err))
 	}
 	t.Cleanup(func() {
 		if p.cmd.ProcessState == nil {
@@ -70,7 +70,7 @@ func startProc(t *testing.T, name, bin, dir string, args ...string) *proc {
 func (p *proc) terminate(t *testing.T) int {
 	t.Helper()
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal %s: %v", p.name, err)
+		panic(fmt.Sprintf("signal %s: %v", p.name, err))
 	}
 	done := make(chan error, 1)
 	go func() { done <- p.cmd.Wait() }()
@@ -78,8 +78,8 @@ func (p *proc) terminate(t *testing.T) int {
 	case <-done:
 		return p.cmd.ProcessState.ExitCode()
 	case <-time.After(30 * time.Second):
-		t.Fatalf("%s did not stop within 30s of SIGTERM; output:\n%s", p.name, p.out)
-		return -1
+		panic(fmt.Sprintf("%s did not stop within 30s of SIGTERM; output:\n%s", p.name, p.out))
+
 	}
 }
 
@@ -94,7 +94,7 @@ func waitHealthy(t *testing.T, p *proc, addr string) {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s never answered /healthz on %s; output:\n%s", p.name, addr, p.out)
+			panic(fmt.Sprintf("%s never answered /healthz on %s; output:\n%s", p.name, addr, p.out))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -116,7 +116,7 @@ func TestServiceBinaries(t *testing.T) {
 	for _, bin := range []string{collectorBin, cpBin, dashBin} {
 		out, err := exec.Command(bin, "-version").CombinedOutput()
 		if err != nil || !strings.HasPrefix(string(out), "tsession-") || !strings.Contains(string(out), "(go") {
-			t.Fatalf("%s -version: %q %v", filepath.Base(bin), out, err)
+			panic(fmt.Sprintf("%s -version: %q %v", filepath.Base(bin), out, err))
 		}
 	}
 
@@ -133,7 +133,7 @@ func TestServiceBinaries(t *testing.T) {
 	dup := exec.Command(cpBin, "--listen", cpAddr, "--collector-url", "http://"+colAddr)
 	if out, err := dup.CombinedOutput(); err == nil || !strings.Contains(string(out), "address already in use") ||
 		!strings.Contains(string(out), "--addr") || strings.Contains(string(out), "control plane listening") {
-		t.Fatalf("second control plane on a taken port: %v\n%s", err, out)
+		panic(fmt.Sprintf("second control plane on a taken port: %v\n%s", err, out))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -141,48 +141,48 @@ func TestServiceBinaries(t *testing.T) {
 	opts := client.Options{BaseURL: "http://" + cpAddr, CollectorURL: "http://" + colAddr, Name: "binaries", QuiesceSeconds: 1}
 	sess, err := client.Start(ctx, opts)
 	if err != nil {
-		t.Fatalf("start session: %v\ncontrol plane output:\n%s", err, cp.out)
+		panic(fmt.Sprintf("start session: %v\ncontrol plane output:\n%s", err, cp.out))
 	}
 	info, err := sess.StopAndWait(ctx)
 	if err != nil || info.State != "SEALED" || info.SealError != "" {
-		t.Fatalf("stop: %+v %v\ncontrol plane output:\n%s\ncollector output:\n%s", info, err, cp.out, col.out)
+		panic(fmt.Sprintf("stop: %+v %v\ncontrol plane output:\n%s\ncollector output:\n%s", info, err, cp.out, col.out))
 	}
 
 	// The dashboard proxies both services.
 	resp, err := http.Get("http://" + dashAddr + "/api/cp/v1/sessions")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var listed []client.Info
 	err = json.NewDecoder(resp.Body).Decode(&listed)
 	resp.Body.Close()
 	if err != nil || len(listed) != 1 || listed[0].ID != sess.ID {
-		t.Fatalf("sessions through the dashboard: %+v %v", listed, err)
+		panic(fmt.Sprintf("sessions through the dashboard: %+v %v", listed, err))
 	}
 	for _, addr := range []string{colAddr, cpAddr} {
 		resp, err := http.Get("http://" + addr + "/metrics")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		var body bytes.Buffer
 		_, _ = body.ReadFrom(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK || !strings.Contains(body.String(), "tsession_build_info") {
-			t.Fatalf("metrics on %s: %d\n%.300s", addr, resp.StatusCode, body.String())
+			panic(fmt.Sprintf("metrics on %s: %d\n%.300s", addr, resp.StatusCode, body.String()))
 		}
 	}
 
 	// SIGTERM: each exits 0, and the control plane leaves its state in the one file.
 	for _, p := range []*proc{dash, cp, col} {
 		if code := p.terminate(t); code != 0 {
-			t.Fatalf("%s exited %d after SIGTERM; output:\n%s", p.name, code, p.out)
+			panic(fmt.Sprintf("%s exited %d after SIGTERM; output:\n%s", p.name, code, p.out))
 		}
 	}
 	if fi, err := os.Stat(storeFile + ".journal"); err == nil && fi.Size() > 0 {
-		t.Fatalf("the control plane left a journal of %d bytes after a clean stop", fi.Size())
+		panic(fmt.Sprintf("the control plane left a journal of %d bytes after a clean stop", fi.Size()))
 	}
 	snapshot, err := os.ReadFile(storeFile)
 	if err != nil || !strings.Contains(string(snapshot), fmt.Sprintf("%q", sess.ID)) {
-		t.Fatalf("the session is not in the store file after a clean stop: %v\n%.300s", err, snapshot)
+		panic(fmt.Sprintf("the session is not in the store file after a clean stop: %v\n%.300s", err, snapshot))
 	}
 }

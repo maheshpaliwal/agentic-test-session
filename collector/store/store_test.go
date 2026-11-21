@@ -18,7 +18,7 @@ func TestPG(t *testing.T) {
 	}
 	pg, err := store.OpenPG(context.Background(), dsn)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer pg.Close()
 	storetest.Run(t, pg)

@@ -73,7 +73,7 @@ func TestCLIRunCommandKilled(t *testing.T) {
 	code, _, e := env.run("killed", []string{"--fail-on-error"})
 	if want := 128 + int(syscall.SIGKILL); code != want || !strings.Contains(e, "the command was killed by a signal") ||
 		!strings.Contains(e, "exit status 137") || !strings.Contains(e, "events     2 over") {
-		t.Fatalf("exit %d, want %d\n%s", code, want, e)
+		panic(fmt.Sprintf("exit %d, want %d\n%s", code, want, e))
 	}
 	env.wantSession(1, "SEALED")
 }
@@ -85,7 +85,7 @@ func TestCLIRunForwardsSignal(t *testing.T) {
 	signalWhenReady(t)
 	code, out, e := env.run("term", []string{"--fail-on-error"})
 	if code != 0 || out != "terminated\n" || !strings.Contains(e, "(SEALED)") {
-		t.Fatalf("exit %d, stdout %q\n%s", code, out, e)
+		panic(fmt.Sprintf("exit %d, stdout %q\n%s", code, out, e))
 	}
 	env.wantSession(1, "SEALED")
 }
@@ -99,10 +99,10 @@ func TestCLIRunSecondSignalAborts(t *testing.T) {
 	start := time.Now()
 	code, out, e := env.run("term", []string{"--timeout", "5m"})
 	if code != 1 || out != "terminated\n" || !strings.Contains(e, "was not stopped and sealed: interrupted") {
-		t.Fatalf("exit %d, stdout %q\n%s", code, out, e)
+		panic(fmt.Sprintf("exit %d, stdout %q\n%s", code, out, e))
 	}
 	if d := time.Since(start); d > time.Minute {
-		t.Fatalf("the wait was not aborted: took %s", d)
+		panic(fmt.Sprintf("the wait was not aborted: took %s", d))
 	}
 	env.wantSession(1, "DRAINING")
 }
@@ -112,7 +112,7 @@ func TestCLIRunSecondSignalAborts(t *testing.T) {
 func TestCLIRunCommandHasItsOwnProcessGroup(t *testing.T) {
 	env := newRunEnv(t, okEvents()...)
 	if code, out, e := env.run("pgid", nil); code != 0 || out != "own-group=true\n" {
-		t.Fatalf("exit %d, stdout %q\n%s", code, out, e)
+		panic(fmt.Sprintf("exit %d, stdout %q\n%s", code, out, e))
 	}
 }
 
@@ -136,7 +136,7 @@ func TestCLIRunHangupStillSealsTheSession(t *testing.T) {
 	}()
 	code, _, e := env.run("term", nil) // the helper does not catch SIGHUP: it dies of it
 	if want := 128 + int(syscall.SIGHUP); code != want || !strings.Contains(e, "(SEALED)") {
-		t.Fatalf("exit %d, want %d\n%s", code, want, e)
+		panic(fmt.Sprintf("exit %d, want %d\n%s", code, want, e))
 	}
 	env.wantSession(1, "SEALED")
 }

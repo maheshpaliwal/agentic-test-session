@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -28,15 +29,15 @@ func TestSessionCountsSurvivesAPanickingStore(t *testing.T) {
 	_, srv := newSpyC(t, DefaultConfig(), &spyStore{Store: panicHeadStore{store.NewMem()}})
 	resp, err := http.Get(srv.URL + "/v1/sessions?ids=ts_a,ts_b")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	var out []sessionCount
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK || len(out) != 0 {
-		t.Fatalf("status %d, body %v, err %v", resp.StatusCode, out, err)
+		panic(fmt.Sprintf("status %d, body %v, err %v", resp.StatusCode, out, err))
 	}
 	if got := resp.Header.Get(headerUnanswered); got != "2" {
-		t.Fatalf("%s = %q, want 2", headerUnanswered, got)
+		panic(fmt.Sprintf("%s = %q, want 2", headerUnanswered, got))
 	}
 }
 
@@ -54,10 +55,10 @@ func TestSessionCountsLookupsAreBounded(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(listLookupTimeout + 10*time.Second):
-		t.Fatal("lookups against a hanging store never returned")
+		panic("lookups against a hanging store never returned")
 	}
 	if unanswered != 3 || time.Since(start) < listLookupTimeout {
-		t.Fatalf("unanswered %d after %v, want 3 after about %v", unanswered, time.Since(start), listLookupTimeout)
+		panic(fmt.Sprintf("unanswered %d after %v, want 3 after about %v", unanswered, time.Since(start), listLookupTimeout))
 	}
 }
 
@@ -68,7 +69,7 @@ func TestSessionListRefusesAMalformedQuery(t *testing.T) {
 	for _, q := range []string{"?ids=%zz", "?ids=a;x=1"} {
 		resp, err := http.Get(srv.URL + "/v1/sessions" + q)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {

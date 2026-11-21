@@ -3,6 +3,7 @@ package tredisv8
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func since(t *testing.T, rec *core.MemRecorder, n int, what string) string {
 	t.Helper()
 	b, err := json.Marshal(rec.Events()[n:])
 	if err != nil {
-		t.Fatalf("%s: the events are not JSON: %v", what, err)
+		panic(fmt.Sprintf("%s: the events are not JSON: %v", what, err))
 	}
 	if strings.Contains(string(b), leakMark) {
 		t.Errorf("%s records the secret: %s", what, b)
@@ -153,7 +154,7 @@ func TestSetGetReplyIsAValue(t *testing.T) {
 		c.Set(bg, "password:alice", leakMark, 0)
 		c.Set(bg, "user:9", `{"password":"`+leakMark+`","name":"ann"}`, 0)
 		if old, err := c.SetArgs(ctx, "password:alice", "new", redis.SetArgs{Get: true}).Result(); err != nil || old != leakMark {
-			t.Fatalf("the application got %q, %v", old, err)
+			panic(fmt.Sprintf("the application got %q, %v", old, err))
 		}
 		c.SetArgs(ctx, "user:9", "x", redis.SetArgs{Get: true})
 		c.Set(ctx, "user:9", "y", 0)
@@ -258,7 +259,7 @@ func TestHashFieldNamesAreMasked(t *testing.T) {
 		evs := rec.Events()
 		m := evs[1].Mutations[0]
 		if len(m.Diff) != 1 || !strings.HasPrefix(m.Diff[0].Field, "token:#") {
-			t.Fatalf("diff %+v", m.Diff)
+			panic(fmt.Sprintf("diff %+v", m.Diff))
 		}
 		shown := `"` + m.Diff[0].Field + `"`
 		for what, got := range map[string]string{

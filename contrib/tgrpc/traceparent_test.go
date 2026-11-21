@@ -2,6 +2,7 @@ package tgrpc
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -56,7 +57,7 @@ func (s *seenMD) last(t *testing.T) metadata.MD {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.md) == 0 {
-		t.Fatal("server saw no call")
+		panic("server saw no call")
 	}
 	return s.md[len(s.md)-1]
 }
@@ -96,7 +97,7 @@ func setupTraceparent(t *testing.T, appFirst bool) (*core.MemRecorder, *grpc.Cli
 		grpc.WithChainUnaryInterceptor(unary...),
 		grpc.WithChainStreamInterceptor(stream...))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() {
 		conn.Close()
@@ -111,23 +112,23 @@ func setupTraceparent(t *testing.T, appFirst bool) (*core.MemRecorder, *grpc.Cli
 func assertTraceparentKept(t *testing.T, rec *core.MemRecorder, md metadata.MD, root core.SpanContext) {
 	t.Helper()
 	if got := md.Get("traceparent"); len(got) != 1 || got[0] != appTraceparent {
-		t.Fatalf("application traceparent arrived as %q, want exactly %q", got, appTraceparent)
+		panic(fmt.Sprintf("application traceparent arrived as %q, want exactly %q", got, appTraceparent))
 	}
 	evs := rec.Events()
 	in, out := byKind(evs, core.KindAPIIn), byKind(evs, core.KindAPIOut)
 	if in == nil || out == nil {
-		t.Fatalf("events: %+v", evs)
+		panic(fmt.Sprintf("events: %+v", evs))
 	}
 	hlc := md.Get(core.KeyHLC)
 	if len(hlc) != 1 {
-		t.Fatalf("%s = %q", core.KeyHLC, hlc)
+		panic(fmt.Sprintf("%s = %q", core.KeyHLC, hlc))
 	}
 	own, want := md.Get(core.KeyTSessionTraceparent), "00-"+root.TraceID+"-"+out.SpanID+"-01;"+hlc[0]
 	if len(own) != 1 || own[0] != want {
-		t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, own, want)
+		panic(fmt.Sprintf("%s = %q, want %q", core.KeyTSessionTraceparent, own, want))
 	}
 	if in.ParentID != out.SpanID || in.TraceID != root.TraceID {
-		t.Fatalf("server span parent %q trace %q, want parent %q trace %q", in.ParentID, in.TraceID, out.SpanID, root.TraceID)
+		panic(fmt.Sprintf("server span parent %q trace %q, want parent %q trace %q", in.ParentID, in.TraceID, out.SpanID, root.TraceID))
 	}
 }
 
@@ -141,7 +142,7 @@ func TestClientKeepsApplicationTraceparent(t *testing.T) {
 			root := core.SpanContext{SessionID: "s1", TraceID: core.NewTraceID(), SpanID: core.NewSpanID()}
 			ctx := core.ContextWith(context.Background(), root)
 			if err := conn.Invoke(ctx, "/test.Echo/Echo", wrapperspb.String("hi"), new(wrapperspb.StringValue)); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertTraceparentKept(t, rec, seen.last(t), root)
 		})
@@ -151,19 +152,19 @@ func TestClientKeepsApplicationTraceparent(t *testing.T) {
 			ctx := core.ContextWith(context.Background(), root)
 			cs, err := conn.NewStream(ctx, &testDesc.Streams[0], "/test.Echo/Repeat")
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if err := cs.SendMsg(wrapperspb.String("x")); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if err := cs.CloseSend(); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			for {
 				if err := cs.RecvMsg(new(wrapperspb.StringValue)); err == io.EOF {
 					break
 				} else if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			}
 			waitFor(t, func() bool { return len(rec.Events()) >= 2 })
@@ -180,11 +181,11 @@ func TestServerReadsTraceparentFromOlderSDK(t *testing.T) {
 	ctx := metadata.AppendToOutgoingContext(context.Background(), core.KeySession, "s1",
 		core.KeyTraceparent, "00-"+trace+"-"+span+"-01")
 	if err := conn.Invoke(ctx, "/test.Echo/Echo", wrapperspb.String("hi"), new(wrapperspb.StringValue)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	in := byKind(rec.Events(), core.KindAPIIn)
 	if in == nil || in.ParentID != span || in.TraceID != trace {
-		t.Fatalf("api.in = %+v", in)
+		panic(fmt.Sprintf("api.in = %+v", in))
 	}
 }
 
@@ -200,10 +201,10 @@ func TestServerIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 		core.KeyTraceparent, "00-"+trace+"-"+forwarder+"-01",
 		core.KeyHLC, "2000")
 	if err := conn.Invoke(ctx, "/test.Echo/Echo", wrapperspb.String("hi"), new(wrapperspb.StringValue)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	in := byKind(rec.Events(), core.KindAPIIn)
 	if in == nil || in.ParentID != forwarder || in.TraceID != trace {
-		t.Fatalf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender)
+		panic(fmt.Sprintf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender))
 	}
 }

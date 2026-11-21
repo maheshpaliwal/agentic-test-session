@@ -79,7 +79,7 @@ func waitFor(t *testing.T, what string, f func() bool) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting for %s", what)
+	panic(fmt.Sprintf("timeout waiting for %s", what))
 }
 
 func TestStripNUL(t *testing.T) {
@@ -104,12 +104,12 @@ func TestIngestSanitizesNUL(t *testing.T) {
 	e.Req.Inline = json.RawMessage(`{"k":"v\u0000w"}`)
 	e.Attrs = map[string]string{"k\x00": "v"}
 	if code, r := rawPost(t, srv.URL, ctProto, protoBody(t, e)); code != 200 || r.Accepted != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 	got := events(t, c)
 	if len(got) != 1 || strings.ContainsRune(got[0].Name, 0) || !strings.Contains(got[0].Name, "\ufffd") ||
 		bytes.Contains(got[0].Req.Inline, []byte(`\u0000`)) {
-		t.Fatalf("%+v", got)
+		panic(fmt.Sprintf("%+v", got))
 	}
 }
 
@@ -128,7 +128,7 @@ func TestPoisonEventQuarantined(t *testing.T) {
 		batch = append(batch, e)
 	}
 	if r := post(t, srv.URL, batch...); r.Accepted != 9 {
-		t.Fatalf("%+v", r)
+		panic(fmt.Sprintf("%+v", r))
 	}
 	var ds DrainStatus
 	waitFor(t, "quarantine", func() bool {
@@ -137,25 +137,25 @@ func TestPoisonEventQuarantined(t *testing.T) {
 	})
 	got := events(t, c)
 	if len(got) != 8 {
-		t.Fatalf("stored %d", len(got))
+		panic(fmt.Sprintf("stored %d", len(got)))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) || e.Name == "POISON" {
-			t.Fatalf("pos %d: %+v", i, e)
+			panic(fmt.Sprintf("pos %d: %+v", i, e))
 		}
 	}
 	// ingest keeps working and the retried poison is a duplicate, not a new failure
 	if r := post(t, srv.URL, batch[4], ev("later", core.KindDBRead, 20, 20)); r.Duplicates != 1 || r.Accepted != 1 {
-		t.Fatalf("%+v", r)
+		panic(fmt.Sprintf("%+v", r))
 	}
 	res, err := c.Seal(context.Background(), sid)
 	if err != nil || !res.Incomplete || res.Quarantined != 1 {
-		t.Fatalf("%+v %v", res, err)
+		panic(fmt.Sprintf("%+v %v", res, err))
 	}
 	var s Summary
 	get(t, srv.URL+"/v1/sessions/"+sid+"/summary", &s)
 	if s.Quarantined != 1 || s.Flags["quarantined"] != 1 || !s.Incomplete {
-		t.Fatalf("%+v", s)
+		panic(fmt.Sprintf("%+v", s))
 	}
 }
 
@@ -167,10 +167,10 @@ func TestPoisonWindowZeroDoesNotReturn500Forever(t *testing.T) {
 	e := ev("p", core.KindDBRead, 1, 1)
 	e.Name = "POISON"
 	if code, _ := rawPost(t, srv.URL, ctProto, protoBody(t, e)); code != 200 {
-		t.Fatalf("status %d", code)
+		panic(fmt.Sprintf("status %d", code))
 	}
 	if st, _ := c.seq.Status(context.Background(), sid); st.Quarantined != 1 || st.Pending != 0 {
-		t.Fatalf("%+v", st)
+		panic(fmt.Sprintf("%+v", st))
 	}
 }
 
@@ -185,7 +185,7 @@ func TestStoreOutageDoesNotQuarantine(t *testing.T) {
 	sp.down.Store(false)
 	waitFor(t, "recovery", func() bool { return len(events(t, c)) == 3 })
 	if q := c.seq.quarantined(sid); q != 0 {
-		t.Fatalf("quarantined during outage: %d", q)
+		panic(fmt.Sprintf("quarantined during outage: %d", q))
 	}
 }
 
@@ -200,7 +200,7 @@ func TestSeqConflictReloadsFromStore(t *testing.T) {
 	mustIngest := func(c *Collector, evs ...core.Event) {
 		t.Helper()
 		if _, err := c.Ingest(ctx, "", evs); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	mustIngest(b, ev("b0", core.KindAPIIn, 1, 1))                                 // B loads (next=2)
@@ -209,11 +209,11 @@ func TestSeqConflictReloadsFromStore(t *testing.T) {
 	mustIngest(b, ev("b3", core.KindAPIIn, 4, 4), ev("a2", core.KindAPIIn, 3, 3)) // stale next; a2 duplicates what A stored
 	got, _ := shared.Events(ctx, sid, 0, 0)
 	if len(got) != 4 {
-		t.Fatalf("stored %d: %+v", len(got), got)
+		panic(fmt.Sprintf("stored %d: %+v", len(got), got))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("gap at %d", i)
+			panic(fmt.Sprintf("gap at %d", i))
 		}
 	}
 }
@@ -230,17 +230,17 @@ func TestDrainStatusReceiveTimeAndBuffered(t *testing.T) {
 	var ds DrainStatus
 	get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 	if ds.LastEventUnixNs < before || ds.ReceivedUnixNs != ds.LastEventUnixNs {
-		t.Fatalf("receive time not used: %+v", ds)
+		panic(fmt.Sprintf("receive time not used: %+v", ds))
 	}
 	if ds.Pending != 1 || ds.EventCount != 0 {
-		t.Fatalf("buffered event must be pending: %+v", ds)
+		panic(fmt.Sprintf("buffered event must be pending: %+v", ds))
 	}
 	waitFor(t, "flush", func() bool {
 		get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 		return ds.EventCount == 1 && ds.Pending == 0
 	})
 	if ds.LastEventUnixNs < before {
-		t.Fatalf("%+v", ds)
+		panic(fmt.Sprintf("%+v", ds))
 	}
 }
 
@@ -274,16 +274,16 @@ func TestConcurrentSealWritesBundleOnce(t *testing.T) {
 	}
 	wg.Wait()
 	if n := sp.putSeals.Load(); n != 1 {
-		t.Fatalf("sealed %d times", n)
+		panic(fmt.Sprintf("sealed %d times", n))
 	}
 	for _, u := range uris {
 		if u == "" || u != uris[0] {
-			t.Fatalf("uris differ: %v", uris)
+			panic(fmt.Sprintf("uris differ: %v", uris))
 		}
 	}
 	ents, _ := os.ReadDir(strings.TrimPrefix(uris[0], "file://"))
 	if len(ents) != 2 {
-		t.Fatalf("bundle dir has %d entries (temp files left?)", len(ents))
+		panic(fmt.Sprintf("bundle dir has %d entries (temp files left?)", len(ents)))
 	}
 }
 
@@ -297,8 +297,8 @@ func txEff(t *testing.T, c *Collector, span string) string {
 			return fmt.Sprint(*e.Mutations[0].Effective)
 		}
 	}
-	t.Fatalf("span %s missing", span)
-	return ""
+	panic(fmt.Sprintf("span %s missing", span))
+
 }
 
 func TestTxFailedCommitNotEffective(t *testing.T) {
@@ -340,7 +340,7 @@ func TestTxFailedCommitNotEffective(t *testing.T) {
 	// store-level outcomes
 	o, _ := c.st.TxOutcomes(context.Background(), sid)
 	if !o["t1"] || o["t2"] || o["t3"] || o["t4"] || o["t5"] {
-		t.Fatalf("%v", o)
+		panic(fmt.Sprintf("%v", o))
 	}
 }
 
@@ -358,27 +358,27 @@ func TestWorkerRetryLedger(t *testing.T) {
 		var ds DrainStatus
 		get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 		if ds.Pending != 1 {
-			t.Fatalf("closed by retry_pending end: %+v", ds)
+			panic(fmt.Sprintf("closed by retry_pending end: %+v", ds))
 		}
 		post(t, srv.URL, worker("r1", "worker.retry", 3, "pub", nil))
 		get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 		if ds.Pending != 1 {
-			t.Fatalf("closed by worker.retry: %+v", ds)
+			panic(fmt.Sprintf("closed by worker.retry: %+v", ds))
 		}
 		post(t, srv.URL, worker("e2", "worker.end", 4, "pub", nil))
 		get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 		if ds.Pending != 0 {
-			t.Fatalf("final end did not close: %+v", ds)
+			panic(fmt.Sprintf("final end did not close: %+v", ds))
 		}
 		if res, _ := c.Seal(context.Background(), sid); res.Incomplete {
-			t.Fatalf("%+v", res)
+			panic(fmt.Sprintf("%+v", res))
 		}
 	})
 	t.Run("dlq closes", func(t *testing.T) {
 		c, srv := newC(t, 0, "")
 		post(t, srv.URL, ev("pub", core.KindQueuePub, 1, 1), worker("e1", "worker.end", 2, "pub", retry), worker("d", "worker.dlq", 3, "pub", nil))
 		if res, _ := c.Seal(context.Background(), sid); res.Incomplete || len(res.Orphaned) != 0 {
-			t.Fatalf("%+v", res)
+			panic(fmt.Sprintf("%+v", res))
 		}
 	})
 	t.Run("out of order: final end, retry end, then publisher", func(t *testing.T) {
@@ -386,11 +386,11 @@ func TestWorkerRetryLedger(t *testing.T) {
 		ctx := context.Background()
 		for _, e := range []core.Event{worker("e2", "worker.end", 4, "pub", nil), worker("e1", "worker.end", 2, "pub", retry), ev("pub", core.KindQueuePub, 1, 1)} {
 			if _, err := c.Ingest(ctx, "", []core.Event{e}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		if res, _ := c.Seal(ctx, sid); res.Incomplete || len(res.Orphaned) != 0 {
-			t.Fatalf("%+v", res)
+			panic(fmt.Sprintf("%+v", res))
 		}
 	})
 	t.Run("out of order: retry end before publisher, no final", func(t *testing.T) {
@@ -398,21 +398,21 @@ func TestWorkerRetryLedger(t *testing.T) {
 		ctx := context.Background()
 		for _, e := range []core.Event{worker("e1", "worker.end", 2, "pub", retry), ev("pub", core.KindQueuePub, 1, 1)} {
 			if _, err := c.Ingest(ctx, "", []core.Event{e}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		res, _ := c.Seal(ctx, sid)
 		if !res.Incomplete || len(res.Orphaned) != 1 || len(res.RetryPending) != 1 || res.RetryPending[0] != "pub" {
-			t.Fatalf("%+v", res)
+			panic(fmt.Sprintf("%+v", res))
 		}
 		for _, e := range mustView(t, c) {
 			if e.SpanID == "pub" && (len(e.Flags) != 2 || e.Flags[1] != "retry_pending") {
-				t.Fatalf("flags %v", e.Flags)
+				panic(fmt.Sprintf("flags %v", e.Flags))
 			}
 		}
 		// idempotent re-seal keeps the report
 		if r2, _ := c.Seal(ctx, sid); len(r2.RetryPending) != 1 {
-			t.Fatalf("%+v", r2)
+			panic(fmt.Sprintf("%+v", r2))
 		}
 	})
 	t.Run("plain orphan is not retry_pending", func(t *testing.T) {
@@ -420,7 +420,7 @@ func TestWorkerRetryLedger(t *testing.T) {
 		_, _ = c.Ingest(context.Background(), "", []core.Event{ev("pub", core.KindQueuePub, 1, 1)})
 		res, _ := c.Seal(context.Background(), sid)
 		if len(res.Orphaned) != 1 || len(res.RetryPending) != 0 {
-			t.Fatalf("%+v", res)
+			panic(fmt.Sprintf("%+v", res))
 		}
 	})
 }
@@ -492,23 +492,23 @@ func TestViewCacheAvoidsRedecode(t *testing.T) {
 	}
 	// summary also asks the sequencer for status (one load per actor lifetime, already loaded)
 	if n := sp.eventsN.Load() - base; n != 1 {
-		t.Fatalf("store.Events called %d times for 30 polls, want 1", n)
+		panic(fmt.Sprintf("store.Events called %d times for 30 polls, want 1", n))
 	}
 	if len(tr.Roots) != 2 || s.EventCount != 2 {
-		t.Fatalf("%+v %+v", tr, s)
+		panic(fmt.Sprintf("%+v %+v", tr, s))
 	}
 	post(t, srv.URL, ev("c", core.KindAPIIn, 3, 3))
 	get(t, srv.URL+"/v1/sessions/"+sid+"/trace", &tr)
 	get(t, srv.URL+"/v1/sessions/"+sid+"/summary", &s)
 	if len(tr.Roots) != 3 || s.EventCount != 3 {
-		t.Fatalf("cache not invalidated: %+v %+v", tr, s)
+		panic(fmt.Sprintf("cache not invalidated: %+v %+v", tr, s))
 	}
 	if _, err := c.Seal(context.Background(), sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	get(t, srv.URL+"/v1/sessions/"+sid+"/summary", &s)
 	if !s.Sealed {
-		t.Fatal("seal not reflected")
+		panic("seal not reflected")
 	}
 }
 
@@ -546,15 +546,15 @@ func TestNoGoroutineGrowthOnRandomIDs(t *testing.T) {
 			path = base + "/entities"
 		}
 		if code := rawReq(h, path); code != 200 && code != 404 {
-			t.Fatalf("%s: %d", path, code)
+			panic(fmt.Sprintf("%s: %d", path, code))
 		}
 	}
 	if n := c.seq.actorCount(); n != 0 {
-		t.Fatalf("%d actors spawned by reads", n)
+		panic(fmt.Sprintf("%d actors spawned by reads", n))
 	}
 	after := runtime.NumGoroutine()
 	if after > before+2 {
-		t.Fatalf("goroutines grew %d -> %d", before, after)
+		panic(fmt.Sprintf("goroutines grew %d -> %d", before, after))
 	}
 	t.Logf("goroutines before=%d after=%d actors=%d", before, after, c.seq.actorCount())
 }
@@ -573,14 +573,14 @@ func TestSealedIdleActorEvicted(t *testing.T) {
 		e := ev("a", core.KindAPIIn, 1, 1)
 		e.SessionID = fmt.Sprintf("s%d", i)
 		if _, err := c.Ingest(ctx, "", []core.Event{e}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if _, err := c.Seal(ctx, e.SessionID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	if c.seq.actorCount() == 0 {
-		t.Fatal("expected live actors right after sealing")
+		panic("expected live actors right after sealing")
 	}
 	waitFor(t, "eviction", func() bool { return c.seq.actorCount() == 0 })
 	// actorCount() hits 0 before the evicted actors' goroutines have exited.
@@ -590,16 +590,16 @@ func TestSealedIdleActorEvicted(t *testing.T) {
 	e.SessionID = "s7"
 	r, err := c.Ingest(ctx, "", []core.Event{e})
 	if err != nil || r.Duplicates != 1 {
-		t.Fatalf("%+v %v", r, err)
+		panic(fmt.Sprintf("%+v %v", r, err))
 	}
 	e2 := ev("b", core.KindAPIIn, 2, 2)
 	e2.SessionID = "s7"
 	if _, err := c.Ingest(ctx, "", []core.Event{e2}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs, _ := c.st.Events(ctx, "s7", 0, 0)
 	if len(evs) != 2 || evs[1].Seq != 2 {
-		t.Fatalf("%+v", evs)
+		panic(fmt.Sprintf("%+v", evs))
 	}
 	// an unsealed session with a buffered event is never evicted
 	cfg.Window = time.Hour
@@ -608,7 +608,7 @@ func TestSealedIdleActorEvicted(t *testing.T) {
 	_, _ = c2.Ingest(ctx, "", []core.Event{ev("a", core.KindAPIIn, 1, 1)})
 	time.Sleep(150 * time.Millisecond)
 	if c2.seq.actorCount() != 1 {
-		t.Fatal("actor with buffered events was evicted")
+		panic("actor with buffered events was evicted")
 	}
 }
 

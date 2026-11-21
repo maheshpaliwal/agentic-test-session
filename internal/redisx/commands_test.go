@@ -69,18 +69,18 @@ func TestWrittenKeysOfPop(t *testing.T) {
 	a := args("BLPOP", "q1", "q2", "q3", "0")
 	keys := KeysOf("BLPOP", Classify("BLPOP", a), a)
 	if w := WrittenKeys("BLPOP", a, keys, "q2"); !slices.Equal(w, []int{2}) {
-		t.Fatalf("popped q2: %v", w)
+		panic(fmt.Sprintf("popped q2: %v", w))
 	}
 	if w := WrittenKeys("BLPOP", a, keys, "elsewhere"); !slices.Equal(w, keys) {
-		t.Fatalf("unmatched reply key must fall back to every key: %v", w)
+		panic(fmt.Sprintf("unmatched reply key must fall back to every key: %v", w))
 	}
 	if !IsPop("bzmpop") || IsPop("lpop") {
-		t.Fatal("IsPop")
+		panic("IsPop")
 	}
 	// the popped key only narrows pops
 	d := args("del", "a", "b")
 	if w := WrittenKeys("del", d, []int{1, 2}, "a"); len(w) != 2 {
-		t.Fatalf("%v", w)
+		panic(fmt.Sprintf("%v", w))
 	}
 }
 

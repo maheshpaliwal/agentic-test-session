@@ -40,7 +40,7 @@ func TestGoTestHelperProcess(t *testing.T) {
 		t.Helper()
 		resp, err := (&http.Client{Transport: s.Transport(nil)}).Get(os.Getenv(helperSvcEnv) + path)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		resp.Body.Close()
 	}
@@ -65,7 +65,7 @@ func TestGoTestHelperProcess(t *testing.T) {
 	// the ambient one must still be recording, or AttachEnv fails.
 	s, err := client.AttachEnv(context.Background(), client.Options{})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	get(t, s, "/plain")
 }
@@ -144,7 +144,7 @@ func (env *goTestEnv) run(t *testing.T, mode string, flags ...string) (code int,
 	find := func(re, in string) string {
 		m := regexp.MustCompile(re).FindStringSubmatch(in)
 		if m == nil {
-			t.Fatalf("no %s in:\n%s\nstderr:\n%s", re, in, stderr)
+			panic(fmt.Sprintf("no %s in:\n%s\nstderr:\n%s", re, in, stderr))
 		}
 		return m[1]
 	}
@@ -174,10 +174,10 @@ func TestCLIRunGoTests(t *testing.T) {
 	env := newGoTestEnv(t)
 	code, outer, own, e := env.run(t, "go-ambient", "--fail-on-error", "--fail-on-incomplete", "--fail-on-empty")
 	if code != 0 {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	if outer == own {
-		t.Fatalf("tsessiontest.Run used the ambient session %s", outer)
+		panic(fmt.Sprintf("tsessiontest.Run used the ambient session %s", outer))
 	}
 	env.wantHits(t, outer, "/ambient-a", "/ambient-b", "/plain")
 	env.wantHits(t, own, "/own")
@@ -198,7 +198,7 @@ func TestCLIRunGoTestsWithTheirOwnSessions(t *testing.T) {
 	env := newGoTestEnv(t)
 	code, outer, own, e := env.run(t, "go-own", "--fail-on-empty")
 	if code != exitCheckFailed {
-		t.Fatalf("exit %d, want %d\n%s", code, exitCheckFailed, e)
+		panic(fmt.Sprintf("exit %d, want %d\n%s", code, exitCheckFailed, e))
 	}
 	env.wantHits(t, outer)
 	env.wantHits(t, own, "/own")

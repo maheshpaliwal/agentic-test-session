@@ -6,6 +6,7 @@ package tsql_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -56,7 +57,7 @@ func rtLookups(cs []rtCall) int {
 func rtWrite(t *testing.T, rec *core.MemRecorder, ex rtExecer, ctx context.Context, q string, args ...any) core.Event {
 	t.Helper()
 	if _, err := ex.ExecContext(ctx, q, args...); err != nil {
-		t.Fatalf("%s: %v", q, err)
+		panic(fmt.Sprintf("%s: %v", q, err))
 	}
 	return lastWrite(t, rec)
 }
@@ -66,14 +67,14 @@ func rtWrite(t *testing.T, rec *core.MemRecorder, ex rtExecer, ctx context.Conte
 func rtWantUpdate(t *testing.T, e core.Event, pk map[string]any, oldQty, newQty int64) {
 	t.Helper()
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	m := e.Mutations[0]
 	if !reflect.DeepEqual(m.PK, pk) {
-		t.Fatalf("pk %v, want %v", m.PK, pk)
+		panic(fmt.Sprintf("pk %v, want %v", m.PK, pk))
 	}
 	if m.Before.IsZero() || m.After.IsZero() || len(m.Diff) != 1 || m.Diff[0].Field != "qty" || m.Diff[0].Old != oldQty || m.Diff[0].New != newQty {
-		t.Fatalf("mutation %+v, want qty %d -> %d", m, oldQty, newQty)
+		panic(fmt.Sprintf("mutation %+v, want qty %d -> %d", m, oldQty, newQty))
 	}
 }
 
@@ -91,29 +92,29 @@ func TestPGPKNonIDKey(t *testing.T) {
 	t.Logf("non-id key: first statement on the handle %d round trips (%d lookup), steady state %d (%d lookups)",
 		len(first), rtLookups(first), len(steady), rtLookups(steady))
 	if rtLookups(first) != 1 || rtLookups(steady) != 0 || len(first) != 10 || len(steady) != 7 {
-		t.Fatalf("first:\n%s\nsteady:\n%s", strings.Join(rtSQLs(first), "\n"), strings.Join(rtSQLs(steady), "\n"))
+		panic(fmt.Sprintf("first:\n%s\nsteady:\n%s", strings.Join(rtSQLs(first), "\n"), strings.Join(rtSQLs(steady), "\n")))
 	}
 	// DELETE and INSERT get the key too.
 	e := rtWrite(t, rec, db, ctx, "INSERT INTO tsql_pk_stock (sku, qty) VALUES ($1, $2)", "sprocket", 3)
 	if m := e.Mutations[0]; !reflect.DeepEqual(m.PK, map[string]any{"sku": "sprocket"}) || hasFlag(e, "after_from_args") {
-		t.Fatalf("insert %+v flags %v", m, e.Flags)
+		panic(fmt.Sprintf("insert %+v flags %v", m, e.Flags))
 	}
 	e = rtWrite(t, rec, db, ctx, "DELETE FROM tsql_pk_stock WHERE qty = $1", 3)
 	if m := e.Mutations[0]; !reflect.DeepEqual(m.PK, map[string]any{"sku": "sprocket"}) || len(e.Flags) != 0 {
-		t.Fatalf("delete %+v flags %v", m, e.Flags)
+		panic(fmt.Sprintf("delete %+v flags %v", m, e.Flags))
 	}
 	// A multi-row update pairs every row with its own after image.
 	e = rtWrite(t, rec, db, ctx, "UPDATE tsql_pk_stock SET qty = qty + 100 WHERE qty < $1", 100)
 	if len(e.Mutations) != 2 || len(e.Flags) != 0 {
-		t.Fatalf("multi-row: %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("multi-row: %+v flags %v", e.Mutations, e.Flags))
 	}
 	for _, m := range e.Mutations {
 		if len(m.PK) != 1 || len(m.Diff) != 1 || m.Diff[0].New.(int64)-m.Diff[0].Old.(int64) != 100 {
-			t.Fatalf("multi-row mutation %+v", m)
+			panic(fmt.Sprintf("multi-row mutation %+v", m))
 		}
 	}
 	if n := rtLookups(d.take()); n != 0 {
-		t.Fatalf("%d more lookups for a table already known", n)
+		panic(fmt.Sprintf("%d more lookups for a table already known", n))
 	}
 }
 
@@ -138,7 +139,7 @@ func TestPGPKQuotedIdentifiers(t *testing.T) {
 	rtWantUpdate(t, e, map[string]any{"SKU": "widget", "order": int64(1)}, 10, 9)
 	e = rtWrite(t, rec, db, ctx, `INSERT INTO "tsql PK Items" ("SKU", "order", qty) VALUES ($1, $2, $3)`, "widget", 2, 4)
 	if m := e.Mutations[0]; !reflect.DeepEqual(m.PK, map[string]any{"SKU": "widget", "order": int64(2)}) || len(e.Flags) != 0 {
-		t.Fatalf("insert %+v flags %v", m, e.Flags)
+		panic(fmt.Sprintf("insert %+v flags %v", m, e.Flags))
 	}
 }
 
@@ -155,7 +156,7 @@ func TestPGPKSchemaQualifiedAndSearchPath(t *testing.T) {
 	rtWantUpdate(t, e, map[string]any{"sku": "widget"}, 10, 9)
 
 	if _, err := db.ExecContext(ctx, "SET search_path TO tsql_pk_s, public"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.ExecContext(ctx, "RESET search_path")
 	d.take()
@@ -164,7 +165,7 @@ func TestPGPKSchemaQualifiedAndSearchPath(t *testing.T) {
 	e = rtWrite(t, rec, db, ctx, "UPDATE tsql_pk_stock SET qty = qty - 1 WHERE qty IN ($1)", 9)
 	rtWantUpdate(t, e, map[string]any{"code": int64(7)}, 9, 8)
 	if n := rtLookups(d.take()); n != 1 {
-		t.Fatalf("%d lookups after search_path changed, want 1", n)
+		panic(fmt.Sprintf("%d lookups after search_path changed, want 1", n))
 	}
 }
 
@@ -181,14 +182,14 @@ func TestPGPKNoKeyAndView(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			e := rtWrite(t, rec, db, ctx, "UPDATE "+table+" SET qty = qty - 1 WHERE sku = $1", "widget")
 			if !hasFlag(e, "pk_unknown") || !hasFlag(e, "after_unavailable") || len(e.Mutations) != 1 {
-				t.Fatalf("%s: flags %v mutations %+v", table, e.Flags, e.Mutations)
+				panic(fmt.Sprintf("%s: flags %v mutations %+v", table, e.Flags, e.Mutations))
 			}
 			if m := e.Mutations[0]; m.PK != nil || m.Before.IsZero() || !m.After.IsZero() || len(m.Diff) != 0 || !m.AfterUnavailable() {
-				t.Fatalf("%s: mutation %+v", table, m)
+				panic(fmt.Sprintf("%s: mutation %+v", table, m))
 			}
 		}
 		if n := rtLookups(d.take()); n != 1 {
-			t.Fatalf("%s: %d lookups for two statements, want 1", table, n)
+			panic(fmt.Sprintf("%s: %d lookups for two statements, want 1", table, n))
 		}
 	}
 	// WithPKColumns is how such a table gets a key.
@@ -196,10 +197,10 @@ func TestPGPKNoKeyAndView(t *testing.T) {
 	d.take()
 	e := rtWrite(t, rec, db, ctx, "UPDATE tsql_pk_nokey SET qty = qty - 1 WHERE sku = $1", "widget")
 	if m := e.Mutations[0]; !reflect.DeepEqual(m.PK, map[string]any{"sku": "widget"}) || len(m.Diff) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("declared key: %+v flags %v", m, e.Flags)
+		panic(fmt.Sprintf("declared key: %+v flags %v", m, e.Flags))
 	}
 	if n := rtLookups(d.take()); n != 0 {
-		t.Fatalf("%d lookups for a table with a declared key", n)
+		panic(fmt.Sprintf("%d lookups for a table with a declared key", n))
 	}
 }
 
@@ -219,7 +220,7 @@ func TestPGPKLookupInsideTransactionLeavesItUntouched(t *testing.T) {
 	}
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer tx.Rollback()
 	rtMustExec(t, tx, "SET LOCAL statement_timeout = '7s'", "UPDATE tsql_pk_stock SET qty = 11 WHERE sku = 'gadget'", "SAVEPOINT app")
@@ -227,25 +228,25 @@ func TestPGPKLookupInsideTransactionLeavesItUntouched(t *testing.T) {
 	d.take()
 	e := rtWrite(t, rec, tx, ctx, "UPDATE tsql_pk_stock SET qty = qty - 1 WHERE sku = $1", "widget")
 	if n := rtLookups(d.take()); n != 1 {
-		t.Fatalf("%d lookups in the transaction, want 1", n)
+		panic(fmt.Sprintf("%d lookups in the transaction, want 1", n))
 	}
 	rtWantUpdate(t, e, map[string]any{"sku": "widget"}, 10, 9)
 	if got, want := state(tx), strings.Replace(before, "widget=10", "widget=9", 1); got != want {
-		t.Fatalf("transaction state after the lookup:\n%s\nwant:\n%s", got, want)
+		panic(fmt.Sprintf("transaction state after the lookup:\n%s\nwant:\n%s", got, want))
 	}
 	// The application's savepoint is still its own, and still there.
 	rtMustExec(t, tx, "ROLLBACK TO SAVEPOINT app")
 	if got := state(tx); got != before {
-		t.Fatalf("after ROLLBACK TO the application's savepoint:\n%s\nwant:\n%s", got, before)
+		panic(fmt.Sprintf("after ROLLBACK TO the application's savepoint:\n%s\nwant:\n%s", got, before))
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
+		panic(fmt.Sprintf("commit: %v", err))
 	}
 	if got := rtShow(t, db, "SELECT string_agg(sku || '=' || qty, ',' ORDER BY sku) FROM tsql_pk_stock"); got != "gadget=11,widget=10" {
-		t.Fatalf("committed rows %q", got)
+		panic(fmt.Sprintf("committed rows %q", got))
 	}
 	if got := rtShow(t, db, "SHOW statement_timeout"); got != "0" {
-		t.Fatalf("statement_timeout after the transaction: %q", got)
+		panic(fmt.Sprintf("statement_timeout after the transaction: %q", got))
 	}
 }
 
@@ -271,7 +272,7 @@ func TestPGPKLookupDeniedKeepsTransactionUsable(t *testing.T) {
 	dropAll()
 	adm, err := sql.Open("pgx", admin.String())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer adm.Close()
 	if _, err := adm.Exec("CREATE DATABASE " + dbName); err != nil {
@@ -285,7 +286,7 @@ func TestPGPKLookupDeniedKeepsTransactionUsable(t *testing.T) {
 	inDB.Path = "/" + dbName
 	setupDB, err := sql.Open("pgx", inDB.String())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, s := range []string{
 		"REVOKE SELECT ON pg_catalog.pg_index FROM PUBLIC",
@@ -295,7 +296,7 @@ func TestPGPKLookupDeniedKeepsTransactionUsable(t *testing.T) {
 	} {
 		if _, err := setupDB.Exec(s); err != nil {
 			setupDB.Close()
-			t.Fatalf("%s: %v", s, err)
+			panic(fmt.Sprintf("%s: %v", s, err))
 		}
 	}
 	setupDB.Close()
@@ -308,31 +309,31 @@ func TestPGPKLookupDeniedKeepsTransactionUsable(t *testing.T) {
 	sql.Register(name, d)
 	db, err := tsql.Open(name, limited.String(), tsql.WithStore("postgres"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for i := 0; i < 5; i++ {
 		e := rtWrite(t, rec, tx, ctx, "UPDATE stock SET qty = qty - 1 WHERE sku = $1", "widget")
 		// The key was not found, so this is the "after image unavailable" record.
 		if hasFlag(e, "pk_lookup_failed") != (i < 3) || !hasFlag(e, "after_unavailable") || len(e.Mutations) != 1 || len(e.Mutations[0].Diff) != 0 {
-			t.Fatalf("statement %d: flags %v mutations %+v", i, e.Flags, e.Mutations)
+			panic(fmt.Sprintf("statement %d: flags %v mutations %+v", i, e.Flags, e.Mutations))
 		}
 	}
 	if got := rtShow(t, tx, "SELECT qty::text FROM stock"); got != "5" {
-		t.Fatalf("qty inside the transaction %q, want 5", got)
+		panic(fmt.Sprintf("qty inside the transaction %q, want 5", got))
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit after refused lookups: %v", err)
+		panic(fmt.Sprintf("commit after refused lookups: %v", err))
 	}
 	if n := rtLookups(d.take()); n != 3 {
-		t.Fatalf("%d lookups, want 3 and then none", n)
+		panic(fmt.Sprintf("%d lookups, want 3 and then none", n))
 	}
 	if got := rtShow(t, db, "SELECT qty::text FROM stock"); got != "5" {
-		t.Fatalf("committed qty %q, want 5", got)
+		panic(fmt.Sprintf("committed qty %q, want 5", got))
 	}
 }

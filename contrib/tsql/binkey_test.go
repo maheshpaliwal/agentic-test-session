@@ -6,6 +6,7 @@ package tsql_test
 import (
 	"bytes"
 	"database/sql/driver"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -36,11 +37,11 @@ func TestBinaryKeysAreToldApart(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, binDB("k", []byte{0xff, 0xfe, 0x01}, []byte{0xff, 0xfe, 0x02}), "postgres")
 	if _, err := db.ExecContext(ctx, "UPDATE t SET v = upper(v) WHERE v >= $1", "a"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 2 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	for i, want := range []string{`\xfffe01`, `\xfffe02`} {
 		m := e.Mutations[i]
@@ -65,16 +66,16 @@ func TestBinaryKeyFromArgumentMatchesTheImage(t *testing.T) {
 		rec, ctx := setup(t)
 		db := open(t, binDB("k", key), "postgres", opts...)
 		if _, err := db.ExecContext(ctx, "DELETE FROM t WHERE k = $1", key); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := lastWrite(t, rec)
 		if len(e.Mutations) != 1 {
-			t.Fatalf("mutations %+v", e.Mutations)
+			panic(fmt.Sprintf("mutations %+v", e.Mutations))
 		}
 		return e.Mutations[0].PK["k"]
 	}
 	if img, arg := pkOf(), pkOf(tsql.WithImages(false), tsql.WithPKColumns("t", "k")); img != `\xfffe01` || arg != img {
-		t.Fatalf("pk from the image %v, from the argument %v", img, arg)
+		panic(fmt.Sprintf("pk from the image %v, from the argument %v", img, arg))
 	}
 }
 
@@ -90,13 +91,13 @@ func TestLongKeysAreBoundedAndToldApart(t *testing.T) {
 		db := open(t, binDB("k", keys[0], keys[1]), "postgres")
 		for range 2 {
 			if _, err := db.ExecContext(ctx, "UPDATE t SET v = upper(v) WHERE v >= $1", "a"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		ws := byKind(rec.Events(), core.KindDBWrite)
 		ms := ws[0].Mutations
 		if len(ms) != 2 {
-			t.Fatalf("%s: mutations %+v flags %v", name, ms, ws[0].Flags)
+			panic(fmt.Sprintf("%s: mutations %+v flags %v", name, ms, ws[0].Flags))
 		}
 		a, b := ms[0].PK["k"].(string), ms[1].PK["k"].(string)
 		if a == b || len(a) > 1100 || !strings.Contains(a, "...[5000 bytes sha256:") {
@@ -116,10 +117,10 @@ func TestBinaryKeyInSensitiveColumnIsMasked(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, binDB("api_key", []byte{0xff, 0xfe, 0x01}), "postgres")
 	if _, err := db.ExecContext(ctx, "UPDATE t SET v = upper(v) WHERE v >= $1", "a"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m := lastWrite(t, rec).Mutations[0]
 	if m.PK["api_key"] != core.RedactedValue || jsonMap(t, m.Before)["api_key"] != core.RedactedValue || jsonMap(t, m.After)["api_key"] != core.RedactedValue {
-		t.Fatalf("pk %v before %s after %s", m.PK, m.Before.Inline, m.After.Inline)
+		panic(fmt.Sprintf("pk %v before %s after %s", m.PK, m.Before.Inline, m.After.Inline))
 	}
 }

@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,26 +78,26 @@ func TestConsumeViaSkipsLookupWhenNothingActive(t *testing.T) {
 
 	start := time.Now()
 	if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "id1"}, handler); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	h := WrapHandler(sc, "asynq", "q", "j", 0, func(c context.Context, _ string, _ int, _ []byte) error { return handler(c) })
 	if err := h(context.Background(), "id2", 1, []byte(`{"a":1}`)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := ConsumeSQSMessageOpts(context.Background(), "q", sqsMsg(`{"a":1}`), 0, SQSOptions{SideChannel: sc}, handler); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if el := time.Since(start); el > wellUnderBound {
-		t.Fatalf("three untraced jobs waited %v on a hanging side channel", el)
+		panic(fmt.Sprintf("three untraced jobs waited %v on a hanging side channel", el))
 	}
 	if ran != 3 {
-		t.Fatalf("handlers ran %d times, want 3", ran)
+		panic(fmt.Sprintf("handlers ran %d times, want 3", ran))
 	}
 	if g, p := sc.gets.Load(), sc.puts.Load(); g != 0 || p != 0 {
-		t.Fatalf("side channel saw %d gets and %d puts, want none", g, p)
+		panic(fmt.Sprintf("side channel saw %d gets and %d puts, want none", g, p))
 	}
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("recorded %d events with no session", n)
+		panic(fmt.Sprintf("recorded %d events with no session", n))
 	}
 }
 
@@ -109,7 +110,7 @@ func TestConsumeViaSkipsLookupWithoutSessionSet(t *testing.T) {
 	start := time.Now()
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", MessageID: "id1"}, func(context.Context) error { return nil })
 	if el := time.Since(start); el > wellUnderBound || sc.gets.Load() != 0 {
-		t.Fatalf("waited %v, gets=%d", el, sc.gets.Load())
+		panic(fmt.Sprintf("waited %v, gets=%d", el, sc.gets.Load()))
 	}
 }
 
@@ -117,14 +118,14 @@ func TestConsumeViaLooksUpWhenSessionActive(t *testing.T) {
 	rec, ctx := setup(t, true) // session s1 is active
 	sc := &countSide{}
 	if err := PublishVia(ctx, sc, "id1", Message{Queue: "q", JobName: "j"}, func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "id1"},
 		func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if p, g := sc.puts.Load(), sc.gets.Load(); p != 1 || g != 1 {
-		t.Fatalf("puts=%d gets=%d, want 1 and 1", p, g)
+		panic(fmt.Sprintf("puts=%d gets=%d, want 1 and 1", p, g))
 	}
 	assertLinked(t, rec)
 }
@@ -139,7 +140,7 @@ func TestConsumeViaLooksUpForExclusiveSession(t *testing.T) {
 	_ = PublishVia(pubCtx, sc, "id1", Message{Queue: "q", JobName: "j"}, func(context.Context) error { return nil })
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "id1"}, func(context.Context) error { return nil })
 	if g := sc.gets.Load(); g != 1 {
-		t.Fatalf("gets=%d, want 1", g)
+		panic(fmt.Sprintf("gets=%d, want 1", g))
 	}
 	assertLinked(t, rec)
 
@@ -147,7 +148,7 @@ func TestConsumeViaLooksUpForExclusiveSession(t *testing.T) {
 	core.SetSessions(core.StaticSessions{ExclusiveID: "ex"})
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "other"}, func(context.Context) error { return nil })
 	if g := sc.gets.Load(); g != 2 {
-		t.Fatalf("gets=%d, want 2", g)
+		panic(fmt.Sprintf("gets=%d, want 2", g))
 	}
 }
 
@@ -160,7 +161,7 @@ func TestConsumeViaLooksUpWhenSetCannotTell(t *testing.T) {
 	_ = ConsumeVia(context.Background(), sc, Delivery{Queue: "q", MessageID: "id1"}, func(context.Context) error { return nil })
 	_ = ConsumeSQSMessageOpts(context.Background(), "q", sqsMsg(`{}`), 0, SQSOptions{SideChannel: sc}, func(context.Context) error { return nil })
 	if g := sc.gets.Load(); g != 2 {
-		t.Fatalf("gets=%d, want 2", g)
+		panic(fmt.Sprintf("gets=%d, want 2", g))
 	}
 }
 
@@ -168,7 +169,7 @@ func TestSQSSideChannelLookupWhenSessionActive(t *testing.T) {
 	sc := &countSide{}
 	rec, _, _ := sqsRound(t, 10, SQSOptions{SideChannel: sc}) // no free attribute slot
 	if p, g := sc.puts.Load(), sc.gets.Load(); p != 1 || g != 1 {
-		t.Fatalf("puts=%d gets=%d, want 1 and 1", p, g)
+		panic(fmt.Sprintf("puts=%d gets=%d, want 1 and 1", p, g))
 	}
 	assertLinked(t, rec)
 }
@@ -182,24 +183,24 @@ func TestUntracedPublishDoesNotWriteSideChannel(t *testing.T) {
 	start := time.Now()
 	if err := PublishVia(context.Background(), sc, "id1", Message{Queue: "q", JobName: "j"},
 		func(context.Context) error { sent++; return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	c := &fakeSQS{}
 	in := &sqs.SendMessageInput{QueueUrl: aws.String("q"), MessageBody: aws.String(`{}`), MessageAttributes: fill(10)}
 	if _, err := SendMessageOpts(context.Background(), c, SQSOptions{SideChannel: sc}, in); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if el := time.Since(start); el > wellUnderBound {
-		t.Fatalf("untraced publishes waited %v", el)
+		panic(fmt.Sprintf("untraced publishes waited %v", el))
 	}
 	if sent != 1 || len(c.sent) != 1 || len(c.sent[0].MessageAttributes) != 10 {
-		t.Fatalf("sent=%d sqs=%d", sent, len(c.sent))
+		panic(fmt.Sprintf("sent=%d sqs=%d", sent, len(c.sent)))
 	}
 	if p := sc.puts.Load(); p != 0 {
-		t.Fatalf("side channel saw %d puts, want none", p)
+		panic(fmt.Sprintf("side channel saw %d puts, want none", p))
 	}
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("recorded %d events", n)
+		panic(fmt.Sprintf("recorded %d events", n))
 	}
 }
 

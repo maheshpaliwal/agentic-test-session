@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -32,7 +33,7 @@ func ingress(t *testing.T, rec *MemRecorder, m map[string]string, car MapCarrier
 	sp.End()
 	ev := rec.Events()
 	if len(ev) != n+1 {
-		t.Fatalf("events %d", len(ev))
+		panic(fmt.Sprintf("events %d", len(ev)))
 	}
 	return &ev[n]
 }
@@ -41,15 +42,15 @@ func TestParseBindPriority(t *testing.T) {
 	got := ParseBindPriority(" header:X-User-Id, jwt:sub,bogus:x,header:,nocolon,cookie:Sid,header:x-user-id,query:q ")
 	want := []string{"header:x-user-id", "jwt_claim:sub", "cookie:Sid", "query:q"}
 	if len(got) != len(want) {
-		t.Fatalf("%v", got)
+		panic(fmt.Sprintf("%v", got))
 	}
 	for i := range want {
 		if got[i].String() != want[i] {
-			t.Fatalf("%v", got)
+			panic(fmt.Sprintf("%v", got))
 		}
 	}
 	if ParseBindPriority("") != nil {
-		t.Fatal("empty")
+		panic("empty")
 	}
 }
 
@@ -60,7 +61,7 @@ func TestPriorityPresentBound(t *testing.T) {
 	SetSessions(setSessions)
 	ev := ingress(t, rec, map[string]string{"header:x-user-id": "100", "header:name": "alice"}, MapCarrier{})
 	if ev == nil || ev.SessionID != "sU" || ev.Attrs["bound_by"] != "header:x-user-id" || ev.Attrs["bound_fallback"] != "" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 }
 
@@ -70,14 +71,14 @@ func TestPriorityPresentUnboundNoFallThrough(t *testing.T) {
 	SetSessions(prioSessions())
 	// uid present but unbound; name would match alice's session: must be untraced.
 	if ev := ingress(t, rec, map[string]string{"header:x-user-id": "999", "header:name": "alice"}, MapCarrier{}); ev != nil {
-		t.Fatalf("fell through: %+v", ev)
+		panic(fmt.Sprintf("fell through: %+v", ev))
 	}
 	// also beats exclusive mode
 	s := prioSessions()
 	s.ExclusiveID = "sX"
 	SetSessions(s)
 	if ev := ingress(t, rec, map[string]string{"header:x-user-id": "999"}, MapCarrier{}); ev != nil {
-		t.Fatalf("exclusive overrode: %+v", ev)
+		panic(fmt.Sprintf("exclusive overrode: %+v", ev))
 	}
 }
 
@@ -87,17 +88,17 @@ func TestPriorityAbsentFallsBack(t *testing.T) {
 	SetSessions(prioSessions())
 	ev := ingress(t, rec, map[string]string{"header:name": "alice"}, MapCarrier{})
 	if ev == nil || ev.SessionID != "sN" || ev.Attrs["bound_by"] != "header:name" || ev.Attrs["bound_fallback"] != "true" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	// no priority key present: remaining (non-listed) keys, OR manner
 	ev = ingress(t, rec, map[string]string{"cookie:sid": "c9"}, MapCarrier{})
 	if ev == nil || ev.SessionID != "sX" || ev.Attrs["bound_fallback"] != "true" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	// value never recorded
 	for _, v := range ev.Attrs {
 		if v == "c9" {
-			t.Fatal("value leaked")
+			panic("value leaked")
 		}
 	}
 }
@@ -107,7 +108,7 @@ func TestPriorityUnsetKeepsOR(t *testing.T) {
 	// uid unbound value + name bound: OR => matches via name (old behaviour)
 	ev := ingress(t, rec, map[string]string{"header:x-user-id": "999", "header:name": "alice"}, MapCarrier{})
 	if ev == nil || ev.SessionID != "sN" || ev.Attrs["bound_fallback"] != "" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 }
 
@@ -116,17 +117,17 @@ func TestAmbiguousUntraced(t *testing.T) {
 	before := BindingAmbiguous()
 	m := map[string]string{"header:x-user-id": "100", "header:name": "alice"} // two sessions
 	if ev := ingress(t, rec, m, MapCarrier{}); ev != nil {
-		t.Fatalf("ambiguous traced: %+v", ev)
+		panic(fmt.Sprintf("ambiguous traced: %+v", ev))
 	}
 	if BindingAmbiguous() != before+1 {
-		t.Fatal("counter")
+		panic("counter")
 	}
 	// same session via two keys is not ambiguous
 	s := prioSessions()
 	s.Bindings = append(s.Bindings, Binding{"sU", "header", "name", "alice2"})
 	SetSessions(s)
 	if ev := ingress(t, rec, map[string]string{"header:x-user-id": "100", "header:name": "alice2"}, MapCarrier{}); ev == nil || ev.SessionID != "sU" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 }
 
@@ -137,7 +138,7 @@ func TestHeaderSessionBeatsPriorityAndAmbiguity(t *testing.T) {
 	m := map[string]string{"header:x-user-id": "999", "header:name": "alice"}
 	ev := ingress(t, rec, m, MapCarrier{KeySession: "sX"})
 	if ev == nil || ev.SessionID != "sX" || ev.Attrs["bound_by"] != "" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 }
 
@@ -148,10 +149,10 @@ func TestPriorityNoBindingsNoExtraction(t *testing.T) {
 	a := &mapAttrs{m: map[string]string{"header:x-user-id": "1"}}
 	ctx, c := t.Context(), MapCarrier{}
 	if n := testing.AllocsPerRun(200, func() { BeginIngressAttrs(ctx, KindAPIIn, "a", c, a) }); n != 0 {
-		t.Fatalf("allocs %v", n)
+		panic(fmt.Sprintf("allocs %v", n))
 	}
 	if a.calls != 0 {
-		t.Fatal("extracted with no bindings")
+		panic("extracted with no bindings")
 	}
 }
 
@@ -161,13 +162,13 @@ func TestPriorityMask(t *testing.T) {
 	h := http.Header{"X-User-Id": {"100"}, "Other": {"ok"}}
 	out := RedactHeadersBound(h)
 	if out["X-User-Id"][0] != RedactedValue || out["Other"][0] != "ok" {
-		t.Fatalf("%v", out)
+		panic(fmt.Sprintf("%v", out))
 	}
 	if q := MaskBoundQuery("uid=100&a=b"); q == "uid=100&a=b" || q[len(q)-3:] != "a=b" {
-		t.Fatalf("%s", q)
+		panic(q)
 	}
 	Configure(Config{})
 	if MaskBoundQuery("uid=100") != "uid=100" {
-		t.Fatal("mask should be gone without priority")
+		panic("mask should be gone without priority")
 	}
 }

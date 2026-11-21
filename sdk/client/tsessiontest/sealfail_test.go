@@ -2,6 +2,7 @@ package tsessiontest_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,9 +44,9 @@ func TestRequireNoFailuresWithFailedSeal(t *testing.T) {
 	info := s.Info()
 	t.Logf("control plane: state=%s incomplete=%v seal_error=%q", info.State, info.Incomplete, info.SealError)
 	if !info.Incomplete || info.SealError == "" {
-		t.Fatalf("test setup: expected an incomplete session, got %+v", info)
+		panic(fmt.Sprintf("test setup: expected an incomplete session, got %+v", info))
 	}
 	if !failed {
-		t.Fatalf("RequireNoFailures passed for an incomplete, unsealed session (output %q)", out)
+		panic(fmt.Sprintf("RequireNoFailures passed for an incomplete, unsealed session (output %q)", out))
 	}
 }

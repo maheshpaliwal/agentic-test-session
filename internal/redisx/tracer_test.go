@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"slices"
 	"strings"
@@ -151,7 +152,7 @@ func TestRecordedErrorHoldsNothingOfAMaskedArgument(t *testing.T) {
 		run(tr, ctx, cmd, nil)
 		evs := rec.Events()[from:]
 		if len(evs) != 1 || evs[0].Err == "" {
-			t.Fatalf("%v: recorded %+v", cmd.args, evs)
+			panic(fmt.Sprintf("%v: recorded %+v", cmd.args, evs))
 		}
 		// The instance is the machine's host name plus random text: nothing
 		// of the command, and on some host it holds four characters of some
@@ -159,12 +160,12 @@ func TestRecordedErrorHoldsNothingOfAMaskedArgument(t *testing.T) {
 		evs[0].Instance = ""
 		b, err := json.Marshal(evs[0])
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		for _, form := range []string{s, strings.ToUpper(s), strings.ToLower(s), reverse(s)} {
 			for i := 0; i+4 <= len(form); i++ {
 				if strings.Contains(string(b), form[i:i+4]) {
-					t.Fatalf("%v failing with %q records %q of the secret %q: %s", cmd.args, text, form[i:i+4], s, b)
+					panic(fmt.Sprintf("%v failing with %q records %q of the secret %q: %s", cmd.args, text, form[i:i+4], s, b))
 				}
 			}
 		}

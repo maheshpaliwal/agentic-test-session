@@ -18,7 +18,7 @@ func storeFiles(t *testing.T, fs *FileStore) [3]string {
 	for i, p := range []string{fs.path, fs.journalPath(), fs.archivePath()} {
 		b, err := os.ReadFile(p)
 		if err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
+			panic(err)
 		}
 		out[i] = string(b)
 	}
@@ -31,7 +31,7 @@ func TestFileStoreClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	hot, archived := archiveSession(0, "hot", StateActive), archiveSession(1, "archived", StateSealed)
 	cachedToo := archiveSession(2, "archived and cached", StateAborted)
@@ -40,17 +40,17 @@ func TestFileStoreClose(t *testing.T) {
 	wantStore(t, "open", fs, []Session{hot, archived, cachedToo})
 	handle := fs.ar
 	if handle == nil {
-		t.Fatal("test setup: no archive file is open")
+		panic("test setup: no archive file is open")
 	}
 
 	if err := fs.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+		panic(fmt.Sprintf("close: %v", err))
 	}
 	if _, err := handle.Stat(); !errors.Is(err, os.ErrClosed) {
-		t.Fatalf("the archive file is still open after Close (stat: %v)", err)
+		panic(fmt.Sprintf("the archive file is still open after Close (stat: %v)", err))
 	}
 	if err := fs.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
+		panic(fmt.Sprintf("second close: %v", err))
 	}
 	files := storeFiles(t, fs)
 
@@ -58,50 +58,50 @@ func TestFileStoreClose(t *testing.T) {
 	changed := hot
 	changed.Name = "changed after close"
 	if err := fs.Put(changed); !errors.Is(err, ErrStoreClosed) {
-		t.Fatalf("put after close: %v", err)
+		panic(fmt.Sprintf("put after close: %v", err))
 	}
 	if err := fs.Put(archiveSession(3, "new", StateActive)); !errors.Is(err, ErrStoreClosed) {
-		t.Fatalf("put of a new session after close: %v", err)
+		panic(fmt.Sprintf("put of a new session after close: %v", err))
 	}
 	if err := fs.Delete(hot.ID); !errors.Is(err, ErrStoreClosed) {
-		t.Fatalf("delete after close: %v", err)
+		panic(fmt.Sprintf("delete after close: %v", err))
 	}
 	if err := fs.Delete(archived.ID); !errors.Is(err, ErrStoreClosed) {
-		t.Fatalf("delete of an archived session after close: %v", err)
+		panic(fmt.Sprintf("delete of an archived session after close: %v", err))
 	}
 	if err := fs.Compact(); !errors.Is(err, ErrStoreClosed) {
-		t.Fatalf("compact after close: %v", err)
+		panic(fmt.Sprintf("compact after close: %v", err))
 	}
 	fs.Evict(hot.ID)
 	if got, ok := fs.Get(hot.ID); !ok || got.Name != hot.Name {
-		t.Fatalf("hot session after close: %+v %v", got, ok)
+		panic(fmt.Sprintf("hot session after close: %+v %v", got, ok))
 	}
 	if _, ok := fs.MemStore.Get(hot.ID); !ok {
-		t.Fatal("evict after close took the session out of the hot set")
+		panic("evict after close took the session out of the hot set")
 	}
 	if got := storeFiles(t, fs); got != files {
-		t.Fatalf("files changed after close:\n%q\nwant\n%q", got, files)
+		panic(fmt.Sprintf("files changed after close:\n%q\nwant\n%q", got, files))
 	}
 	if _, err := os.Stat(fs.archivePath()); err != nil {
-		t.Fatalf("archive file: %v", err)
+		panic(fmt.Sprintf("archive file: %v", err))
 	}
 
 	// Archived sessions are not served, and that is an error, not "unknown".
 	for _, s := range []Session{archived, cachedToo} {
 		if _, ok, err := fs.GetErr(s.ID); ok || !errors.Is(err, ErrStoreClosed) {
-			t.Fatalf("GetErr %s after close: %v %v", s.ID, ok, err)
+			panic(fmt.Sprintf("GetErr %s after close: %v %v", s.ID, ok, err))
 		}
 		if _, ok := fs.Get(s.ID); ok {
-			t.Fatalf("Get %s after close found it", s.ID)
+			panic(fmt.Sprintf("Get %s after close found it", s.ID))
 		}
 	}
 	if _, ok, err := fs.GetErr("ts_nope"); ok || err != nil {
-		t.Fatalf("GetErr of an unknown id after close: %v %v", ok, err)
+		panic(fmt.Sprintf("GetErr of an unknown id after close: %v %v", ok, err))
 	}
 	wantSameSessions(t, "list after close", fs.List(), []Session{hot})
 	wantSameSessions(t, "list pending after close", fs.ListPending(), []Session{hot})
 	if n := fs.ReadErrors(); n != 6 { // two by GetErr, two by Get, two by List
-		t.Fatalf("read errors after close: %d, want 6", n)
+		panic(fmt.Sprintf("read errors after close: %d, want 6", n))
 	}
 
 	// Everything is on disk for the next store.
@@ -110,13 +110,13 @@ func TestFileStoreClose(t *testing.T) {
 	// A store without an archive closes too.
 	empty, err := NewFileStore(filepath.Join(t.TempDir(), "s.json"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := empty.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := empty.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -138,21 +138,21 @@ func TestFileStoreCloseWaitsForCompaction(t *testing.T) {
 		started := fs.compacting != nil
 		fs.wmu.Unlock()
 		if err := fs.Close(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		fs.wmu.Lock()
 		running := fs.compacting
 		fs.wmu.Unlock()
 		if running != nil {
-			t.Fatal("a compaction is running after Close")
+			panic("a compaction is running after Close")
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		for _, e := range entries {
 			if n := e.Name(); n != "s.json" && n != "s.json.journal" && n != "s.json.archive" {
-				t.Fatalf("round %d: %s left behind by Close (compaction started: %v)", round, n, started)
+				panic(fmt.Sprintf("round %d: %s left behind by Close (compaction started: %v)", round, n, started))
 			}
 		}
 		wantStore(t, "reopened", openStore(t, path), want)
@@ -204,11 +204,11 @@ func TestFileStoreCloseWhileInUse(t *testing.T) {
 		runtime.Gosched()
 	}
 	if err := fs.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wg.Wait()
 	if err := fs.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var want []Session
 	for _, ss := range stored {

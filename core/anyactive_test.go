@@ -40,7 +40,7 @@ func BenchmarkAnyActive(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		if AnyActive() {
-			b.Fatal("active")
+			panic("active")
 		}
 	}
 }

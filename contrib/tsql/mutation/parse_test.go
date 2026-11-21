@@ -1,6 +1,7 @@
 package mutation
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -47,7 +48,7 @@ func TestParseKinds(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			in := Parse(c.sql, c.d)
 			if in.Kind != c.kind || in.Table != c.table || in.Schema != c.schema {
-				t.Fatalf("got kind=%v schema=%q table=%q, want %v %q %q", in.Kind, in.Schema, in.Table, c.kind, c.schema, c.table)
+				panic(fmt.Sprintf("got kind=%v schema=%q table=%q, want %v %q %q", in.Kind, in.Schema, in.Table, c.kind, c.schema, c.table))
 			}
 		})
 	}
@@ -56,38 +57,38 @@ func TestParseKinds(t *testing.T) {
 func TestStringsAndCommentsDoNotConfuse(t *testing.T) {
 	in := Parse(`UPDATE t SET note = 'WHERE x = 1; -- not a comment' WHERE id = $1 -- trailing`, Postgres)
 	if in.Where != "id = $1" {
-		t.Fatalf("where=%q", in.Where)
+		panic(fmt.Sprintf("where=%q", in.Where))
 	}
 	in = Parse("UPDATE t SET a = $$ WHERE $$ WHERE id = $1", Postgres)
 	if in.Where != "id = $1" {
-		t.Fatalf("dollar-quote: where=%q", in.Where)
+		panic(fmt.Sprintf("dollar-quote: where=%q", in.Where))
 	}
 	in = Parse(`SELECT 'it''s FROM x' AS s FROM real_t`, Postgres)
 	if in.Table != "real_t" {
-		t.Fatalf("table=%q", in.Table)
+		panic(fmt.Sprintf("table=%q", in.Table))
 	}
 	in = Parse(`SELECT 'a\' FROM x' FROM real_t`, MySQL)
 	if in.Table != "real_t" {
-		t.Fatalf("mysql backslash: table=%q", in.Table)
+		panic(fmt.Sprintf("mysql backslash: table=%q", in.Table))
 	}
 	in = Parse("SELECT 1 /* a /* nested */ FROM x */ FROM real_t", Postgres)
 	if in.Table != "real_t" {
-		t.Fatalf("nested comment: table=%q", in.Table)
+		panic(fmt.Sprintf("nested comment: table=%q", in.Table))
 	}
 	in = Parse("# c\nDELETE FROM t WHERE id = 1", MySQL)
 	if in.Kind != Delete {
-		t.Fatalf("mysql # comment: %v", in.Kind)
+		panic(fmt.Sprintf("mysql # comment: %v", in.Kind))
 	}
 	in = Parse("SELECT a::int FROM t WHERE b = $1::text", Postgres)
 	if in.Table != "t" || in.Named {
-		t.Fatalf("cast handled wrong: %+v", in)
+		panic(fmt.Sprintf("cast handled wrong: %+v", in))
 	}
 }
 
 func TestInsertValues(t *testing.T) {
 	in := Parse("INSERT INTO t (id, name, n, z, expr) VALUES ($1, 'bob', -4, NULL, now()+1)", Postgres)
 	if !reflect.DeepEqual(in.Columns, []string{"id", "name", "n", "z", "expr"}) {
-		t.Fatalf("cols=%v", in.Columns)
+		panic(fmt.Sprintf("cols=%v", in.Columns))
 	}
 	want := map[string]Value{
 		"id":   {Arg: 0},
@@ -96,37 +97,37 @@ func TestInsertValues(t *testing.T) {
 		"z":    {Arg: -1},
 	}
 	if !reflect.DeepEqual(in.Values, want) {
-		t.Fatalf("values=%v", in.Values)
+		panic(fmt.Sprintf("values=%v", in.Values))
 	}
 	in = Parse("INSERT INTO t (a) VALUES (?), (?)", MySQL)
 	if !in.MultiRow || in.Values != nil {
-		t.Fatalf("multirow: %+v", in)
+		panic(fmt.Sprintf("multirow: %+v", in))
 	}
 	in = Parse("INSERT INTO t (a, b) VALUES (?, ?)", MySQL)
 	if in.Values["b"].Arg != 1 || !in.QMark || in.Dollar {
-		t.Fatalf("mysql values: %+v", in)
+		panic(fmt.Sprintf("mysql values: %+v", in))
 	}
 	in = Parse("INSERT INTO t (SELECT * FROM u)", Postgres)
 	if len(in.Columns) != 0 {
-		t.Fatalf("subselect treated as cols: %v", in.Columns)
+		panic(fmt.Sprintf("subselect treated as cols: %v", in.Columns))
 	}
 }
 
 func TestReturning(t *testing.T) {
 	in := Parse("UPDATE t SET a=1 WHERE id=1 RETURNING *", Postgres)
 	if !in.HasReturning || !in.ReturningAll {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 	in = Parse("DELETE FROM t WHERE id=1 RETURNING id, name", Postgres)
 	if !in.HasReturning || in.ReturningAll {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 	if in.Where != "id=1" {
-		t.Fatalf("where=%q", in.Where)
+		panic(fmt.Sprintf("where=%q", in.Where))
 	}
 	in = Parse("INSERT INTO t (a) VALUES (1)", Postgres)
 	if in.HasReturning {
-		t.Fatal("unexpected returning")
+		panic("unexpected returning")
 	}
 }
 
@@ -149,7 +150,7 @@ func TestComplexStatements(t *testing.T) {
 	// subquery FROM inside SET is not "UPDATE ... FROM"
 	in := Parse("UPDATE a SET x = (SELECT max(y) FROM b) WHERE id = $1", Postgres)
 	if in.Complex {
-		t.Fatal("subquery wrongly complex")
+		panic("subquery wrongly complex")
 	}
 }
 
@@ -157,26 +158,26 @@ func TestImageSelectRenumber(t *testing.T) {
 	in := Parse("UPDATE public.orders o SET status = $1, note = $2 WHERE o.id = $3 AND o.tenant = $4 AND o.x <> $3", Postgres)
 	q, idx, reason := in.ImageSelect(51)
 	if reason != "" {
-		t.Fatal(reason)
+		panic(reason)
 	}
 	wantQ := "SELECT * FROM public.orders o WHERE o.id = $1 AND o.tenant = $2 AND o.x <> $1 LIMIT 51"
 	if q != wantQ || !reflect.DeepEqual(idx, []int{2, 3}) {
-		t.Fatalf("q=%q idx=%v", q, idx)
+		panic(fmt.Sprintf("q=%q idx=%v", q, idx))
 	}
 
 	in = Parse("UPDATE t SET a = ?, b = ? WHERE id = ? AND k = ? ORDER BY id LIMIT 2", MySQL)
 	q, idx, reason = in.ImageSelect(51)
 	if reason != "" {
-		t.Fatal(reason)
+		panic(reason)
 	}
 	if q != "SELECT * FROM t WHERE id = ? AND k = ? ORDER BY id LIMIT 2" || !reflect.DeepEqual(idx, []int{2, 3}) {
-		t.Fatalf("q=%q idx=%v", q, idx)
+		panic(fmt.Sprintf("q=%q idx=%v", q, idx))
 	}
 
 	in = Parse("DELETE FROM t WHERE id = $1 RETURNING id", Postgres)
 	q, _, _ = in.ImageSelect(0)
 	if q != "SELECT * FROM t WHERE id = $1" {
-		t.Fatalf("q=%q", q)
+		panic(fmt.Sprintf("q=%q", q))
 	}
 
 	for sql, want := range map[string]string{
@@ -198,25 +199,25 @@ func TestEquals(t *testing.T) {
 		"org":    {Arg: -1, Literal: int64(7)},
 	}
 	if !reflect.DeepEqual(in.Equals, want) {
-		t.Fatalf("equals=%v", in.Equals)
+		panic(fmt.Sprintf("equals=%v", in.Equals))
 	}
 	if in := Parse("DELETE FROM t WHERE id = 1 OR id = 2", Postgres); in.Equals != nil {
-		t.Fatalf("OR must disable equalities: %v", in.Equals)
+		panic(fmt.Sprintf("OR must disable equalities: %v", in.Equals))
 	}
 	if in := Parse("DELETE FROM t WHERE id IN ($1,$2)", Postgres); in.Equals != nil {
-		t.Fatalf("IN must not yield equalities: %v", in.Equals)
+		panic(fmt.Sprintf("IN must not yield equalities: %v", in.Equals))
 	}
 }
 
 func TestPlaceholderStyles(t *testing.T) {
 	if in := Parse("SELECT * FROM t WHERE a = $1", Postgres); !in.Dollar || in.QMark {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 	if in := Parse("SELECT * FROM t WHERE a = :a", Postgres); !in.Named {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 	if in := Parse("SELECT '?' FROM t", MySQL); in.QMark {
-		t.Fatal("? inside string counted")
+		panic("? inside string counted")
 	}
 }
 
@@ -232,10 +233,10 @@ func TestEndAndMulti(t *testing.T) {
 	q := "UPDATE t SET a = 1 WHERE id = 2 ; -- done"
 	in := Parse(q, Postgres)
 	if q[:in.End] != "UPDATE t SET a = 1 WHERE id = 2" || in.Multi {
-		t.Fatalf("end=%q multi=%v", q[:in.End], in.Multi)
+		panic(fmt.Sprintf("end=%q multi=%v", q[:in.End], in.Multi))
 	}
 	if !Parse("SELECT 1; SELECT 2", Postgres).Multi {
-		t.Fatal("expected Multi")
+		panic("expected Multi")
 	}
 }
 
@@ -261,7 +262,7 @@ func TestWithPrefixedMutationIsComplex(t *testing.T) {
 func TestWriteCTEHasNoReturningRows(t *testing.T) {
 	in := Parse("WITH u AS (UPDATE t SET a=1 WHERE b=2 RETURNING *) SELECT count(*) FROM u", Postgres)
 	if in.Kind != Update || !in.WritesInCTE || in.HasReturning || in.ReturningAll {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 }
 

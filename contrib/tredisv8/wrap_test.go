@@ -2,6 +2,7 @@ package tredisv8
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -31,22 +32,22 @@ func TestWrapAnyThroughWrapper(t *testing.T) {
 	mr := miniredis.RunT(t)
 	w := &wrapperClient{Cmdable: redis.NewClient(&redis.Options{Addr: mr.Addr()})}
 	if !WrapAny(w.Cmdable, WithBeforeImage("user:*")) {
-		t.Fatal("WrapAny must hook the concrete client")
+		panic("WrapAny must hook the concrete client")
 	}
 	if WrapAny(w.Cmdable) {
-		t.Fatal("second WrapAny must be a no-op")
+		panic("second WrapAny must be a no-op")
 	}
 	w.HSet(ctx, "user:1", "name", "a")
 	w.HSet(ctx, "user:1", "name", "b")
 	ev := rec.Events()
 	if len(ev) != 2 {
-		t.Fatalf("events=%d (double hook or traced image reads)", len(ev))
+		panic(fmt.Sprintf("events=%d (double hook or traced image reads)", len(ev)))
 	}
 	if m := ev[1].Mutations[0]; string(m.Before.Inline) != `{"name":"a"}` || string(m.After.Inline) != `{"name":"b"}` {
-		t.Fatalf("%s -> %s", m.Before.Inline, m.After.Inline)
+		panic(fmt.Sprintf("%s -> %s", m.Before.Inline, m.After.Inline))
 	}
 	if WrapAny(w) || WrapAny(nil) { // wrapper itself has no AddHook
-		t.Fatal("non-hookable must report false")
+		panic("non-hookable must report false")
 	}
 }
 
@@ -60,31 +61,31 @@ func TestBareHookAndTxPipeline(t *testing.T) {
 		p.Incr(ctx, "n")
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ev := rec.Events()
 	if len(ev) != 2 { // multi/exec are not spans
-		t.Fatalf("events=%d", len(ev))
+		panic(fmt.Sprintf("events=%d", len(ev)))
 	}
 	if ev[0].Attrs["pipeline"] != "true" || ev[1].Attrs["pipeline_size"] == "" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	c.Get(context.Background(), "a") // no session
 	if len(rec.Events()) != 2 {
-		t.Fatal("untraced call produced events")
+		panic("untraced call produced events")
 	}
 }
 
 func TestDisabledPassthrough(t *testing.T) {
 	c := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	if WrapAny(c) {
-		t.Fatal("disabled WrapAny must not hook")
+		panic("disabled WrapAny must not hook")
 	}
 	if Wrap(c) != c {
-		t.Fatal("disabled Wrap must return the same client")
+		panic("disabled Wrap must return the same client")
 	}
 	if WrapAny(c) {
-		t.Fatal("still disabled")
+		panic("still disabled")
 	}
 }
 
@@ -100,12 +101,12 @@ func TestWrapNeverPanics(t *testing.T) {
 	c := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	var typedNil *redis.Client
 	if Wrap(typedNil) != nil {
-		t.Fatal("typed-nil client must be returned as is")
+		panic("typed-nil client must be returned as is")
 	}
 	Wrap(valueClient{Client: c}) // unhashable: must not panic
 	Wrap(c)
 	c.Set(ctx, "k", "v", 0)
 	if len(rec.Events()) != 1 {
-		t.Fatalf("events=%d", len(rec.Events()))
+		panic(fmt.Sprintf("events=%d", len(rec.Events())))
 	}
 }

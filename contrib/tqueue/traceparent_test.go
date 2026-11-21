@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/url"
 	"reflect"
@@ -36,7 +37,7 @@ func lastPub(t *testing.T, rec *core.MemRecorder) core.Event {
 	t.Helper()
 	pubs := byKind(rec.Events(), core.KindQueuePub)
 	if len(pubs) == 0 {
-		t.Fatal("no publish span")
+		panic("no publish span")
 	}
 	return pubs[len(pubs)-1]
 }
@@ -46,12 +47,12 @@ func assertLastWorker(t *testing.T, rec *core.MemRecorder, pub core.Event) {
 	t.Helper()
 	st := byKind(rec.Events(), core.KindWorkerStart)
 	if len(st) == 0 {
-		t.Fatal("no worker.start: the consumer did not join the session")
+		panic("no worker.start: the consumer did not join the session")
 	}
 	w := st[len(st)-1]
 	if w.ParentID != pub.SpanID || w.TraceID != pub.TraceID || !contains(w.LinkIDs, pub.SpanID) {
-		t.Fatalf("worker parent %q trace %q links %v, want publish span %q trace %q",
-			w.ParentID, w.TraceID, w.LinkIDs, pub.SpanID, pub.TraceID)
+		panic(fmt.Sprintf("worker parent %q trace %q links %v, want publish span %q trace %q",
+			w.ParentID, w.TraceID, w.LinkIDs, pub.SpanID, pub.TraceID))
 	}
 }
 
@@ -95,7 +96,7 @@ func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 		"kafka": func(t *testing.T, ctx context.Context, republisher core.Event) {
 			w := &batchWriter{}
 			if err := ProduceMessages(ctx, w, kafka.Message{Topic: "a", Value: []byte(`{}`)}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			msg := w.calls[0][0]
 			c := kafkaCarrier{&msg.Headers}
@@ -103,24 +104,24 @@ func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 			c.Set(core.KeySession, "s1")
 			c.Set(core.KeyHLC, newClock())
 			if err := ConsumeMessage(context.Background(), msg, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		},
 		"amqp": func(t *testing.T, ctx context.Context, republisher core.Event) {
 			ch := &fakeAMQP{}
 			if err := PublishAMQP(ctx, ch, "ex", "k", false, false, amqp.Publishing{Body: []byte(`{}`)}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			h := ch.got[0].Headers
 			h[core.KeyTraceparent], h[core.KeySession], h[core.KeyHLC] = tpFor(republisher), "s1", newClock()
 			if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: h, RoutingKey: "k", DeliveryTag: 1}, 0, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		},
 		"sqs": func(t *testing.T, ctx context.Context, republisher core.Event) {
 			attrs := sqsSend(t, ctx, fill(2), SQSOptions{})
 			if sqsForm(attrs) != "full" {
-				t.Fatalf("form %q", sqsForm(attrs))
+				panic(fmt.Sprintf("form %q", sqsForm(attrs)))
 			}
 			attrs[core.KeyTraceparent], attrs[core.KeySession], attrs[core.KeyHLC] = strAttr(tpFor(republisher)), strAttr("s1"), strAttr(newClock())
 			sqsConsume(t, attrs, SQSOptions{})
@@ -128,15 +129,15 @@ func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 		"side channel": func(t *testing.T, ctx context.Context, republisher core.Event) {
 			sc := &MemSideChannel{}
 			if err := PublishVia(ctx, sc, "m1", Message{Queue: "q", JobName: "j"}, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			m, _ := sc.Get(ctx, SideKey("m1"))
 			m[core.KeyTraceparent], m[core.KeySession], m[core.KeyHLC] = tpFor(republisher), "s1", newClock()
 			if err := sc.Put(ctx, SideKey("m1"), m, 0); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m1"}, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		},
 	} {
@@ -146,7 +147,7 @@ func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 			republisher := core.Event{TraceID: sc.TraceID, SpanID: core.NewSpanID()}
 			run(t, ctx, republisher)
 			if first := lastPub(t, rec); first.SpanID == republisher.SpanID {
-				t.Fatal("test setup: the two publishers have one span id")
+				panic("test setup: the two publishers have one span id")
 			}
 			assertLastWorker(t, rec, republisher)
 		})
@@ -176,30 +177,30 @@ func TestKafkaKeepsApplicationTraceparent(t *testing.T) {
 				{Topic: "a", Value: []byte(`{}`)}, // no application tracing on this one
 			}
 			if err := ProduceMessagesOpts(ctx, w, opts, in...); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			got := w.calls[0]
 			pubs := byKind(rec.Events(), core.KindQueuePub)
 			pubOf := func(i int) core.Event { return pubs[min(i, len(pubs)-1)] }
 
 			if tp := kafkaHeaders(got[0], "traceparent"); len(tp) != 1 || tp[0] != appTP {
-				t.Fatalf("application traceparent is now %q", tp)
+				panic(fmt.Sprintf("application traceparent is now %q", tp))
 			}
 			if own, want := kafkaHeaders(got[0], core.KeyTSessionTraceparent), ownFor(pubOf(0), header(got[0], core.KeyHLC)); len(own) != 1 || own[0] != want {
-				t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, own, want)
+				panic(fmt.Sprintf("%s = %q, want %q", core.KeyTSessionTraceparent, own, want))
 			}
 			// Without an application value both keys carry tsession's.
 			if header(got[1], "traceparent") != tpFor(pubOf(1)) || header(got[1], core.KeyTSessionTraceparent) != ownFor(pubOf(1), header(got[1], core.KeyHLC)) {
-				t.Fatalf("message without application tracing: %v", got[1].Headers)
+				panic(fmt.Sprintf("message without application tracing: %v", got[1].Headers))
 			}
 			for i, m := range got {
 				if err := ConsumeMessage(context.Background(), m, noop); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				assertLastWorker(t, rec, pubOf(i))
 			}
 			if len(in[0].Headers) != 1 || len(in[1].Headers) != 0 {
-				t.Fatal("caller's messages mutated")
+				panic("caller's messages mutated")
 			}
 		})
 	}
@@ -217,7 +218,7 @@ func TestKafkaRepublishWithCopiedHeaders(t *testing.T) {
 				first.Headers = []kafka.Header{{Key: "traceparent", Value: []byte(app)}}
 			}
 			if err := ProduceMessages(ctx, w, first); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			received := w.calls[0][0]
 			pub1 := lastPub(t, rec)
@@ -225,28 +226,28 @@ func TestKafkaRepublishWithCopiedHeaders(t *testing.T) {
 				return ProduceMessages(hctx, w, kafka.Message{Topic: "b", Value: received.Value, Headers: received.Headers})
 			})
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			second := w.calls[1][0]
 			pub2 := lastPub(t, rec)
 			if pub2.SpanID == pub1.SpanID {
-				t.Fatal("second publish not recorded")
+				panic("second publish not recorded")
 			}
 			if own, want := kafkaHeaders(second, core.KeyTSessionTraceparent), ownFor(pub2, header(second, core.KeyHLC)); len(own) != 1 || own[0] != want {
-				t.Fatalf("%s = %q, want the second publish %q", core.KeyTSessionTraceparent, own, want)
+				panic(fmt.Sprintf("%s = %q, want the second publish %q", core.KeyTSessionTraceparent, own, want))
 			}
 			if hlc := kafkaHeaders(second, core.KeyHLC); len(hlc) != 1 {
-				t.Fatalf("%s = %q, want one", core.KeyHLC, hlc)
+				panic(fmt.Sprintf("%s = %q, want one", core.KeyHLC, hlc))
 			}
 			want := tpFor(pub2) // tsession's own stale copy is replaced
 			if app != "" {
 				want = app
 			}
 			if tp := kafkaHeaders(second, "traceparent"); len(tp) != 1 || tp[0] != want {
-				t.Fatalf("traceparent = %q, want %q", tp, want)
+				panic(fmt.Sprintf("traceparent = %q, want %q", tp, want))
 			}
 			if err := ConsumeMessage(context.Background(), second, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertLastWorker(t, rec, pub2)
 		})
@@ -259,15 +260,15 @@ func TestKafkaOverwriteTraceparentSetting(t *testing.T) {
 	w := &batchWriter{}
 	msg := kafka.Message{Topic: "a", Headers: []kafka.Header{{Key: "traceparent", Value: []byte(appTP)}}}
 	if err := ProduceMessages(ctx, w, msg); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	pub := lastPub(t, rec)
 	if tp := kafkaHeaders(w.calls[0][0], "traceparent"); len(tp) != 1 || tp[0] != tpFor(pub) {
-		t.Fatalf("traceparent = %q, want tsession's %q", tp, tpFor(pub))
+		panic(fmt.Sprintf("traceparent = %q, want tsession's %q", tp, tpFor(pub)))
 	}
 	// What the setting is for: a consumer on an older SDK links correctly.
 	if _, _, span := oldExtract(func(k string) string { return header(w.calls[0][0], k) }); span != pub.SpanID {
-		t.Fatalf("older consumer would link to %q", span)
+		panic(fmt.Sprintf("older consumer would link to %q", span))
 	}
 }
 
@@ -280,14 +281,14 @@ func TestKafkaLeavesEmptyApplicationTraceparent(t *testing.T) {
 			w := &batchWriter{}
 			msg := kafka.Message{Topic: "a", Value: []byte(`{}`), Headers: []kafka.Header{{Key: "traceparent"}}}
 			if err := ProduceMessagesOpts(ctx, w, opts, msg); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			got := w.calls[0][0]
 			if tp := kafkaHeaders(got, "traceparent"); len(tp) != 1 || tp[0] != "" {
-				t.Fatalf("empty application traceparent is now %q", tp)
+				panic(fmt.Sprintf("empty application traceparent is now %q", tp))
 			}
 			if err := ConsumeMessage(context.Background(), got, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertLastWorker(t, rec, lastPub(t, rec))
 		})
@@ -307,7 +308,7 @@ func TestAMQPSeesTraceparentUnderAnyNameCase(t *testing.T) {
 			ch := &fakeAMQP{}
 			in := amqp.Publishing{Body: []byte(`{}`), Headers: amqp.Table{name: appTP, "Other": "1"}}
 			if err := PublishAMQP(ctx, ch, "ex", "k", false, false, in); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			got, pub := ch.got[0].Headers, lastPub(t, rec)
 			want := appTP
@@ -315,13 +316,13 @@ func TestAMQPSeesTraceparentUnderAnyNameCase(t *testing.T) {
 				want = tpFor(pub) // replaced where it is
 			}
 			if _, added := got["traceparent"]; added || got[name] != want || got["Other"] != "1" || len(got) != 5 {
-				t.Fatalf("%s, overwrite=%v: headers %v, want %s = %q and no traceparent", name, overwrite, got, name, want)
+				panic(fmt.Sprintf("%s, overwrite=%v: headers %v, want %s = %q and no traceparent", name, overwrite, got, name, want))
 			}
 			if in.Headers[name] != appTP || len(in.Headers) != 2 {
-				t.Fatalf("caller's headers mutated: %v", in.Headers)
+				panic(fmt.Sprintf("caller's headers mutated: %v", in.Headers))
 			}
 			if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: got, RoutingKey: "k", DeliveryTag: 1}, 0, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertLastWorker(t, rec, pub)
 		}
@@ -337,14 +338,14 @@ func TestAMQPLeavesTraceparentThatIsNotText(t *testing.T) {
 			ch := &fakeAMQP{}
 			in := amqp.Publishing{Body: []byte(`{}`), Headers: amqp.Table{"traceparent": app}}
 			if err := PublishAMQP(ctx, ch, "ex", "k", false, false, in); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			got := ch.got[0].Headers
 			if !reflect.DeepEqual(got["traceparent"], app) {
-				t.Fatalf("application traceparent %v (%T) is now %v (%T)", app, app, got["traceparent"], got["traceparent"])
+				panic(fmt.Sprintf("application traceparent %v (%T) is now %v (%T)", app, app, got["traceparent"], got["traceparent"]))
 			}
 			if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: got, RoutingKey: "k", DeliveryTag: 1}, 0, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertLastWorker(t, rec, lastPub(t, rec))
 		})
@@ -358,31 +359,31 @@ func TestAMQPKeepsApplicationTraceparent(t *testing.T) {
 			ch := &fakeAMQP{}
 			in := amqp.Publishing{Body: []byte(`{}`), Headers: amqp.Table{"traceparent": app, "app": "1"}}
 			if err := PublishAMQP(ctx, ch, "ex", "job.run", false, false, in); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			got := ch.got[0].Headers
 			pub := lastPub(t, rec)
 			switch v := got["traceparent"].(type) {
 			case string:
 				if v != appTP || name != "string" {
-					t.Fatalf("application traceparent is now %q", v)
+					panic(fmt.Sprintf("application traceparent is now %q", v))
 				}
 			case []byte:
 				if string(v) != appTP || name != "bytes" {
-					t.Fatalf("application traceparent is now %q", v)
+					panic(fmt.Sprintf("application traceparent is now %q", v))
 				}
 			default:
-				t.Fatalf("application traceparent is now %T", v)
+				panic(fmt.Sprintf("application traceparent is now %T", v))
 			}
 			if hlc, _ := got[core.KeyHLC].(string); got[core.KeyTSessionTraceparent] != ownFor(pub, hlc) || got["app"] != "1" {
-				t.Fatalf("headers: %v", got)
+				panic(fmt.Sprintf("headers: %v", got))
 			}
 			if len(in.Headers) != 2 {
-				t.Fatal("caller's headers mutated")
+				panic("caller's headers mutated")
 			}
 			dl := amqp.Delivery{Headers: got, RoutingKey: "job.run", Body: ch.got[0].Body, DeliveryTag: 1}
 			if err := ConsumeDelivery(context.Background(), "q", dl, 0, noop); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertLastWorker(t, rec, pub)
 		})
@@ -393,22 +394,22 @@ func TestAMQPRepublishWithCopiedHeaders(t *testing.T) {
 	rec, ctx := setup(t, true)
 	ch := &fakeAMQP{}
 	if err := PublishAMQP(ctx, ch, "ex", "k", false, false, amqp.Publishing{Body: []byte(`{}`)}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	received := amqp.Delivery{Headers: ch.got[0].Headers, RoutingKey: "k", DeliveryTag: 1}
 	err := ConsumeDelivery(context.Background(), "q", received, 0, func(hctx context.Context) error {
 		return PublishAMQP(hctx, ch, "ex", "k2", false, false, amqp.Publishing{Headers: received.Headers})
 	})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	pub2 := lastPub(t, rec)
 	got := ch.got[1].Headers
 	if hlc, _ := got[core.KeyHLC].(string); got[core.KeyTSessionTraceparent] != ownFor(pub2, hlc) || got["traceparent"] != tpFor(pub2) {
-		t.Fatalf("stale context passed on: %v, want %q", got, tpFor(pub2))
+		panic(fmt.Sprintf("stale context passed on: %v, want %q", got, tpFor(pub2)))
 	}
 	if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: got, RoutingKey: "k2", DeliveryTag: 2}, 0, noop); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	assertLastWorker(t, rec, pub2)
 }
@@ -422,14 +423,14 @@ func sqsSend(t *testing.T, ctx context.Context, attrs map[string]types.MessageAt
 	in := &sqs.SendMessageInput{QueueUrl: aws.String("q"), MessageBody: aws.String(`{"n":1}`), MessageAttributes: attrs}
 	before := len(attrs)
 	if _, err := SendMessageOpts(ctx, c, opts, in); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if len(attrs) != before {
-		t.Fatal("caller's attributes mutated")
+		panic("caller's attributes mutated")
 	}
 	sent := c.sent[0].MessageAttributes
 	if len(sent) > maxSQSAttrs {
-		t.Fatalf("%d attributes sent, the limit is %d", len(sent), maxSQSAttrs)
+		panic(fmt.Sprintf("%d attributes sent, the limit is %d", len(sent), maxSQSAttrs))
 	}
 	return sent
 }
@@ -438,7 +439,7 @@ func sqsConsume(t *testing.T, attrs map[string]types.MessageAttributeValue, opts
 	t.Helper()
 	msg := types.Message{MessageId: aws.String("m"), Body: aws.String(`{"n":1}`), MessageAttributes: attrs}
 	if err := ConsumeSQSMessageOpts(context.Background(), "q", msg, 0, opts, noop); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -495,33 +496,33 @@ func TestSQSFormsAndAttributeLimit(t *testing.T) {
 			sent := sqsSend(t, ctx, in, opts)
 			pub := lastPub(t, rec)
 			if got := sqsForm(sent); got != tc.form || len(sent) != tc.sent {
-				t.Fatalf("form %q with %d attributes, want %q with %d", got, len(sent), tc.form, tc.sent)
+				panic(fmt.Sprintf("form %q with %d attributes, want %q with %d", got, len(sent), tc.form, tc.sent))
 			}
 			for k, v := range in { // every application attribute, traceparent included, is as it was
 				if aws.ToString(sent[k].StringValue) != aws.ToString(v.StringValue) {
-					t.Fatalf("application attribute %q changed to %q", k, aws.ToString(sent[k].StringValue))
+					panic(fmt.Sprintf("application attribute %q changed to %q", k, aws.ToString(sent[k].StringValue)))
 				}
 			}
 			switch tc.form {
 			case "full":
 				want := ownFor(pub, aws.ToString(sent[core.KeyHLC].StringValue))
 				if got := aws.ToString(sent[core.KeyTSessionTraceparent].StringValue); got != want {
-					t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, got, want)
+					panic(fmt.Sprintf("%s = %q, want %q", core.KeyTSessionTraceparent, got, want))
 				}
 				if !has(in, "traceparent") && aws.ToString(sent["traceparent"].StringValue) != tpFor(pub) {
-					t.Fatalf("traceparent = %q, want tsession's", aws.ToString(sent["traceparent"].StringValue))
+					panic(fmt.Sprintf("traceparent = %q, want tsession's", aws.ToString(sent["traceparent"].StringValue)))
 				}
 			case "compact":
 				q, err := url.ParseQuery(aws.ToString(sent[ctxAttr].StringValue))
 				if err != nil || q.Get(core.KeyTSessionTraceparent) != ownFor(pub, q.Get(core.KeyHLC)) || q.Get(core.KeyTraceparent) != tpFor(pub) ||
 					q.Get(core.KeySession) != "s1" || q.Get(core.KeyHLC) == "" {
-					t.Fatalf("compact attribute = %v (%v)", q, err)
+					panic(fmt.Sprintf("compact attribute = %v (%v)", q, err))
 				}
 			}
 			sqsConsume(t, sent, opts)
 			if tc.untraced {
 				if !contains(pub.Flags, FlagAttrLimit) || len(byKind(rec.Events(), core.KindWorkerStart)) != 0 {
-					t.Fatalf("want propagation skipped and flagged; flags %v", pub.Flags)
+					panic(fmt.Sprintf("want propagation skipped and flagged; flags %v", pub.Flags))
 				}
 				return
 			}
@@ -548,15 +549,15 @@ func TestSQSReadByOlderConsumer(t *testing.T) {
 			pub := lastPub(t, rec)
 			session, trace, span := oldExtract(oldSQSGet(sent))
 			if session != "s1" {
-				t.Fatalf("session = %q: the event would not be recorded at all", session)
+				panic(fmt.Sprintf("session = %q: the event would not be recorded at all", session))
 			}
 			if tc.correct {
 				if span != pub.SpanID || trace != pub.TraceID {
-					t.Fatalf("older consumer links to %s/%s, want %s/%s", trace, span, pub.TraceID, pub.SpanID)
+					panic(fmt.Sprintf("older consumer links to %s/%s, want %s/%s", trace, span, pub.TraceID, pub.SpanID))
 				}
 			} else if !strings.Contains(appTP, trace+"-"+span) {
 				// The compatibility note: it reads the application's ids.
-				t.Fatalf("older consumer links to %s/%s; the note says the application's ids", trace, span)
+				panic(fmt.Sprintf("older consumer links to %s/%s; the note says the application's ids", trace, span))
 			}
 		})
 	}
@@ -582,10 +583,10 @@ func TestSQSLeavesTraceparentThatIsNotAString(t *testing.T) {
 				in["traceparent"] = app
 				sent := sqsSend(t, ctx, in, SQSOptions{})
 				if !reflect.DeepEqual(sent["traceparent"], app) {
-					t.Fatalf("application traceparent is now %s %q", aws.ToString(sent["traceparent"].DataType), aws.ToString(sent["traceparent"].StringValue))
+					panic(fmt.Sprintf("application traceparent is now %s %q", aws.ToString(sent["traceparent"].DataType), aws.ToString(sent["traceparent"].StringValue)))
 				}
 				if got := sqsForm(sent); got != form {
-					t.Fatalf("form %q, want %q", got, form)
+					panic(fmt.Sprintf("form %q, want %q", got, form))
 				}
 				if form == "none" {
 					return
@@ -621,7 +622,7 @@ func TestSQSConsumerPrefersAttributesToLeftoverCompact(t *testing.T) {
 				attrs[attr] = strAttr(compact)
 				attrs[core.KeyTraceparent], attrs[core.KeySession], attrs[core.KeyHLC] = strAttr(fresh), strAttr("s1"), strAttr("2")
 				if _, _, span := oldExtract(oldSQSGet(attrs)); span != "aaaaaaaaaaaaaaaa" {
-					t.Fatalf("test setup: an older consumer reads %s", span)
+					panic(fmt.Sprintf("test setup: an older consumer reads %s", span))
 				}
 				sqsConsume(t, attrs, SQSOptions{})
 				assertLastWorker(t, rec, core.Event{TraceID: trace, SpanID: "aaaaaaaaaaaaaaaa"})
@@ -647,25 +648,25 @@ func TestSQSOverwriteTraceparentSetting(t *testing.T) {
 			sent := sqsSend(t, ctx, in, SQSOptions{})
 			pub := lastPub(t, rec)
 			if got := sqsForm(sent); got != form {
-				t.Fatalf("form %q, want %q", got, form)
+				panic(fmt.Sprintf("form %q, want %q", got, form))
 			}
 			for k, v := range in {
 				if k != "traceparent" && aws.ToString(sent[k].StringValue) != aws.ToString(v.StringValue) {
-					t.Fatalf("application attribute %q changed", k)
+					panic(fmt.Sprintf("application attribute %q changed", k))
 				}
 			}
 			tp := aws.ToString(sent["traceparent"].StringValue)
 			if form == "none" {
 				if tp != appTP {
-					t.Fatalf("nothing was propagated, yet traceparent is now %q", tp)
+					panic(fmt.Sprintf("nothing was propagated, yet traceparent is now %q", tp))
 				}
 				return
 			}
 			if tp != tpFor(pub) || aws.ToString(sent["traceparent"].DataType) != "String" {
-				t.Fatalf("traceparent = %q, want tsession's %q", tp, tpFor(pub))
+				panic(fmt.Sprintf("traceparent = %q, want tsession's %q", tp, tpFor(pub)))
 			}
 			if session, trace, span := oldExtract(oldSQSGet(sent)); session != "s1" || trace != pub.TraceID || span != pub.SpanID {
-				t.Fatalf("older consumer links to %s/%s in session %q, want %s/%s", trace, span, session, pub.TraceID, pub.SpanID)
+				panic(fmt.Sprintf("older consumer links to %s/%s in session %q, want %s/%s", trace, span, session, pub.TraceID, pub.SpanID))
 			}
 			sqsConsume(t, sent, SQSOptions{})
 			assertLastWorker(t, rec, pub)
@@ -679,7 +680,7 @@ func TestSQSOverwriteTraceparentSetting(t *testing.T) {
 	opts := SQSOptions{SideChannel: &MemSideChannel{}}
 	sent := sqsSend(t, ctx, withApp(maxSQSAttrs), opts)
 	if aws.ToString(sent["traceparent"].StringValue) != appTP || len(sent) != maxSQSAttrs {
-		t.Fatalf("side channel: attributes changed: %v", sent)
+		panic(fmt.Sprintf("side channel: attributes changed: %v", sent))
 	}
 	sqsConsume(t, sent, opts)
 	assertLastWorker(t, rec, lastPub(t, rec))
@@ -696,7 +697,7 @@ func TestSQSFromOlderProducer(t *testing.T) {
 		t.Helper()
 		st := byKind(rec.Events(), core.KindWorkerStart)
 		if w := st[len(st)-1]; w.ParentID != span || w.TraceID != trace {
-			t.Fatalf("%s: worker parent %q trace %q, want %q %q", name, w.ParentID, w.TraceID, span, trace)
+			panic(fmt.Sprintf("%s: worker parent %q trace %q, want %q %q", name, w.ParentID, w.TraceID, span, trace))
 		}
 	}
 	sqsConsume(t, map[string]types.MessageAttributeValue{
@@ -734,23 +735,23 @@ func TestSQSRepublishWithCopiedAttributes(t *testing.T) {
 				second = sqsSend(t, hctx, received, SQSOptions{})
 				return nil
 			}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			pub2 := lastPub(t, rec)
 			if pub2.SpanID == pub1.SpanID {
-				t.Fatal("second publish not recorded")
+				panic("second publish not recorded")
 			}
 			if got := sqsForm(second); got != tc.form || len(second) != len(received) {
-				t.Fatalf("form %q with %d attributes, want %q with %d", got, len(second), tc.form, len(received))
+				panic(fmt.Sprintf("form %q with %d attributes, want %q with %d", got, len(second), tc.form, len(received)))
 			}
 			if has(tc.first, "traceparent") && aws.ToString(second["traceparent"].StringValue) != appTP {
-				t.Fatalf("application traceparent is now %q", aws.ToString(second["traceparent"].StringValue))
+				panic(fmt.Sprintf("application traceparent is now %q", aws.ToString(second["traceparent"].StringValue)))
 			}
 			sqsConsume(t, second, SQSOptions{})
 			assertLastWorker(t, rec, pub2)
 			if !has(tc.first, "traceparent") {
 				if _, _, span := oldExtract(oldSQSGet(second)); span != pub2.SpanID {
-					t.Fatalf("older consumer would link to %q, want the second publish %q", span, pub2.SpanID)
+					panic(fmt.Sprintf("older consumer would link to %q, want the second publish %q", span, pub2.SpanID))
 				}
 			}
 		})
@@ -781,20 +782,20 @@ func TestSQSRepublishRemovesLegacyCompactAttribute(t *testing.T) {
 				sent := sqsSend(t, ctx, in, opts)
 				pub := lastPub(t, rec)
 				if has(sent, legacyCtxAttr) {
-					t.Fatalf("the stale %q attribute was sent on: %v", legacyCtxAttr, sent)
+					panic(fmt.Sprintf("the stale %q attribute was sent on: %v", legacyCtxAttr, sent))
 				}
 				for k, v := range app {
 					if !reflect.DeepEqual(sent[k], v) {
-						t.Fatalf("application attribute %q changed", k)
+						panic(fmt.Sprintf("application attribute %q changed", k))
 					}
 				}
 				if got := sqsForm(sent); got != form {
-					t.Fatalf("form %q, want %q", got, form)
+					panic(fmt.Sprintf("form %q, want %q", got, form))
 				}
 				sqsConsume(t, sent, opts)
 				assertLastWorker(t, rec, pub)
 				if session, trace, span := oldExtract(oldSQSGet(sent)); session != "s1" || trace != pub.TraceID || span != pub.SpanID {
-					t.Fatalf("older consumer links to %s/%s in session %q, want %s/%s", trace, span, session, pub.TraceID, pub.SpanID)
+					panic(fmt.Sprintf("older consumer links to %s/%s in session %q, want %s/%s", trace, span, session, pub.TraceID, pub.SpanID))
 				}
 			})
 		}
@@ -810,18 +811,18 @@ func TestSQSRepublishRemovesLegacyCompactAttribute(t *testing.T) {
 		in[ctxAttr] = types.MessageAttributeValue{DataType: aws.String("Binary"), BinaryValue: []byte{1}} // the application's
 		sent := sqsSend(t, ctx, in, SQSOptions{})
 		if has(sent, legacyCtxAttr) || len(sent) != maxSQSAttrs-1 || !reflect.DeepEqual(sent[ctxAttr], in[ctxAttr]) {
-			t.Fatalf("sent %v", sent)
+			panic(fmt.Sprintf("sent %v", sent))
 		}
 		if !contains(lastPub(t, rec).Flags, FlagAttrLimit) {
-			t.Fatalf("flags %v", lastPub(t, rec).Flags)
+			panic(fmt.Sprintf("flags %v", lastPub(t, rec).Flags))
 		}
 		if session, _, _ := oldExtract(oldSQSGet(sent)); session != "" {
-			t.Fatalf("older consumer still reads session %q from the message", session)
+			panic(fmt.Sprintf("older consumer still reads session %q from the message", session))
 		}
 		before := len(byKind(rec.Events(), core.KindWorkerStart))
 		sqsConsume(t, sent, SQSOptions{})
 		if len(byKind(rec.Events(), core.KindWorkerStart)) != before {
-			t.Fatal("consumer joined the session through a stale carrier")
+			panic("consumer joined the session through a stale carrier")
 		}
 	})
 
@@ -830,7 +831,7 @@ func TestSQSRepublishRemovesLegacyCompactAttribute(t *testing.T) {
 		setup(t, true)
 		sent := sqsSend(t, context.Background(), map[string]types.MessageAttributeValue{legacyCtxAttr: strAttr(stale)}, SQSOptions{})
 		if aws.ToString(sent[legacyCtxAttr].StringValue) != stale || len(sent) != 1 {
-			t.Fatalf("sent %v", sent)
+			panic(fmt.Sprintf("sent %v", sent))
 		}
 	})
 }
@@ -857,10 +858,10 @@ func TestSQSLeavesApplicationAttributeNamedTS(t *testing.T) {
 				in[legacyCtxAttr] = app
 				sent := sqsSend(t, ctx, in, SQSOptions{})
 				if !reflect.DeepEqual(sent[legacyCtxAttr], app) {
-					t.Fatalf("application attribute %q is now %v", legacyCtxAttr, sent[legacyCtxAttr])
+					panic(fmt.Sprintf("application attribute %q is now %v", legacyCtxAttr, sent[legacyCtxAttr]))
 				}
 				if got := sqsForm(sent); got != form {
-					t.Fatalf("form %q, want %q", got, form)
+					panic(fmt.Sprintf("form %q, want %q", got, form))
 				}
 				if form == "none" {
 					return
@@ -880,10 +881,10 @@ func TestSQSUntracedSendLeavesCopiedCarrier(t *testing.T) {
 	n := len(rec.Events())
 	sent := sqsSend(t, context.Background(), received, SQSOptions{})
 	if len(rec.Events()) != n {
-		t.Fatal("publish outside a session recorded")
+		panic("publish outside a session recorded")
 	}
 	if len(sent) != len(received) || aws.ToString(sent[ctxAttr].StringValue) != aws.ToString(received[ctxAttr].StringValue) {
-		t.Fatalf("untraced message changed: %v", sent)
+		panic(fmt.Sprintf("untraced message changed: %v", sent))
 	}
 }
 
@@ -892,11 +893,11 @@ func TestSQSReceiveRequestsOwnTraceparent(t *testing.T) {
 	var got *sqs.ReceiveMessageInput
 	c := recvSQS{func(in *sqs.ReceiveMessageInput) { got = in }}
 	if _, err := ReceiveMessage(context.Background(), c, &sqs.ReceiveMessageInput{QueueUrl: aws.String("q")}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, want := range []string{core.KeyTSessionTraceparent, core.KeyTraceparent} {
 		if !contains(got.MessageAttributeNames, want) {
-			t.Fatalf("%q not requested: %v", want, got.MessageAttributeNames)
+			panic(fmt.Sprintf("%q not requested: %v", want, got.MessageAttributeNames))
 		}
 	}
 }
@@ -909,18 +910,18 @@ func TestSideChannelRecord(t *testing.T) {
 	rec, ctx := setup(t, true)
 	sc := &MemSideChannel{}
 	if err := PublishVia(ctx, sc, "m1", Message{Queue: "q", JobName: "j"}, noop); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	pub := lastPub(t, rec)
 	m, err := sc.Get(ctx, SideKey("m1"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if m[core.KeyTSessionTraceparent] != ownFor(pub, m[core.KeyHLC]) || m[core.KeyHLC] == "" || m[core.KeyTraceparent] != tpFor(pub) || m[core.KeySession] != "s1" {
-		t.Fatalf("record = %v", m)
+		panic(fmt.Sprintf("record = %v", m))
 	}
 	if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m1"}, noop); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	assertLastWorker(t, rec, pub)
 
@@ -928,19 +929,19 @@ func TestSideChannelRecord(t *testing.T) {
 	// from an older SDK has traceparent only, and a consumer on an older SDK
 	// reads traceparent from a record written now.
 	if _, _, span := oldExtract(core.MapCarrier(m).Get); span != pub.SpanID {
-		t.Fatalf("older consumer would link to %q", span)
+		panic(fmt.Sprintf("older consumer would link to %q", span))
 	}
 	trace, span := core.NewTraceID(), core.NewSpanID()
 	old := map[string]string{core.KeySession: "s1", core.KeyTraceparent: "00-" + trace + "-" + span + "-01"}
 	if err := sc.Put(ctx, SideKey("m2"), old, 0); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m2"}, noop); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	st := byKind(rec.Events(), core.KindWorkerStart)
 	if w := st[len(st)-1]; w.ParentID != span || w.TraceID != trace {
-		t.Fatalf("record from an older SDK: worker parent %q trace %q", w.ParentID, w.TraceID)
+		panic(fmt.Sprintf("record from an older SDK: worker parent %q trace %q", w.ParentID, w.TraceID))
 	}
 }
 
@@ -952,7 +953,7 @@ func TestSQSSideChannelIgnoresApplicationTraceparent(t *testing.T) {
 	sent := sqsSend(t, ctx, withApp(10), opts)
 	pub := lastPub(t, rec)
 	if aws.ToString(sent["traceparent"].StringValue) != appTP || has(sent, core.KeyTSessionTraceparent) {
-		t.Fatalf("attributes: %v", sent)
+		panic(fmt.Sprintf("attributes: %v", sent))
 	}
 	sqsConsume(t, sent, opts)
 	assertLastWorker(t, rec, pub)

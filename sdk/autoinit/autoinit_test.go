@@ -15,10 +15,10 @@ func TestNoopWhenDisabled(t *testing.T) {
 	// Importing the package (init already ran without TSESSION_ENABLED=true)
 	// must leave everything untouched.
 	if core.Enabled() {
-		t.Fatal("core enabled")
+		panic("core enabled")
 	}
 	if _, ok := http.DefaultTransport.(*http.Transport); !ok {
-		t.Fatalf("DefaultTransport replaced: %T", http.DefaultTransport)
+		panic(fmt.Sprintf("DefaultTransport replaced: %T", http.DefaultTransport))
 	}
 }
 
@@ -28,7 +28,7 @@ func TestNoopWhenDisabled(t *testing.T) {
 func TestOverwriteTraceparentEnv(t *testing.T) {
 	if os.Getenv("AUTOINIT_TEST_CHILD") == "1" {
 		if !core.Enabled() {
-			t.Fatal("child: SDK not enabled")
+			panic("child: SDK not enabled")
 		}
 		fmt.Printf("overwrite=%v\n", core.GetConfig().OverwriteTraceparent)
 		return
@@ -44,7 +44,7 @@ func TestOverwriteTraceparentEnv(t *testing.T) {
 			"TSESSION_OVERWRITE_TRACEPARENT="+tc.val)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("child (%q): %v\n%s", tc.val, err, out)
+			panic(fmt.Sprintf("child (%q): %v\n%s", tc.val, err, out))
 		}
 		if want := fmt.Sprintf("overwrite=%v\n", tc.want); !strings.Contains(string(out), want) {
 			t.Errorf("TSESSION_OVERWRITE_TRACEPARENT=%q: want %q in child output:\n%s", tc.val, want, out)
@@ -55,6 +55,6 @@ func TestOverwriteTraceparentEnv(t *testing.T) {
 func TestBindPriorityEnvParse(t *testing.T) {
 	got := core.ParseBindPriority("header:X-User-Id,jwt:sub,bad")
 	if len(got) != 2 || got[0].String() != "header:x-user-id" || got[1].String() != "jwt_claim:sub" {
-		t.Fatalf("%v", got)
+		panic(fmt.Sprintf("%v", got))
 	}
 }

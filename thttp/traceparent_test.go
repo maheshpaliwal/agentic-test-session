@@ -1,6 +1,7 @@
 package thttp
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -56,27 +57,27 @@ func TestClientKeepsApplicationTraceparent(t *testing.T) {
 			req, _ := http.NewRequestWithContext(core.ContextWith(t.Context(), root), "GET", down.URL+"/next", nil)
 			resp, err := (&http.Client{Transport: build()}).Do(req)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 
 			if len(gotApp) != 1 || gotApp[0] != appTraceparent {
-				t.Fatalf("application traceparent arrived as %q, want exactly %q", gotApp, appTraceparent)
+				panic(fmt.Sprintf("application traceparent arrived as %q, want exactly %q", gotApp, appTraceparent))
 			}
 			out, in := kind(rec.Events(), core.KindAPIOut), kind(rec.Events(), core.KindAPIIn)
 			if len(out) != 1 || len(in) != 1 {
-				t.Fatalf("api.out/api.in = %d/%d", len(out), len(in))
+				panic(fmt.Sprintf("api.out/api.in = %d/%d", len(out), len(in)))
 			}
 			if want := "00-" + root.TraceID + "-" + out[0].SpanID + "-01;" + gotHLC; gotOwn != want {
-				t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, gotOwn, want)
+				panic(fmt.Sprintf("%s = %q, want %q", core.KeyTSessionTraceparent, gotOwn, want))
 			}
 			if in[0].ParentID != out[0].SpanID || in[0].TraceID != root.TraceID {
-				t.Fatalf("downstream span parent %q trace %q, want parent %q trace %q",
-					in[0].ParentID, in[0].TraceID, out[0].SpanID, root.TraceID)
+				panic(fmt.Sprintf("downstream span parent %q trace %q, want parent %q trace %q",
+					in[0].ParentID, in[0].TraceID, out[0].SpanID, root.TraceID))
 			}
 			if len(req.Header) != 0 {
-				t.Fatalf("caller's request headers mutated: %v", req.Header)
+				panic(fmt.Sprintf("caller's request headers mutated: %v", req.Header))
 			}
 		})
 	}
@@ -95,18 +96,18 @@ func TestClientSeesTraceparentUnderNonCanonicalKey(t *testing.T) {
 	req.Header["traceparent"] = []string{appTraceparent}
 	resp, err := Client(nil).Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if tp := got.Values("Traceparent"); len(tp) != 1 || tp[0] != appTraceparent {
-		t.Fatalf("receiver got traceparent %q, want exactly the application's", tp)
+		panic(fmt.Sprintf("receiver got traceparent %q, want exactly the application's", tp))
 	}
 	out, in := kind(rec.Events(), core.KindAPIOut), kind(rec.Events(), core.KindAPIIn)
 	if len(out) != 1 || len(in) != 1 || in[0].ParentID != out[0].SpanID || in[0].TraceID != root.TraceID {
-		t.Fatalf("api.out %+v, api.in %+v", out, in)
+		panic(fmt.Sprintf("api.out %+v, api.in %+v", out, in))
 	}
 	if len(req.Header) != 1 {
-		t.Fatalf("caller's request headers mutated: %v", req.Header)
+		panic(fmt.Sprintf("caller's request headers mutated: %v", req.Header))
 	}
 }
 
@@ -120,17 +121,17 @@ func TestClientWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	req, _ := http.NewRequestWithContext(core.ContextWith(t.Context(), root), "GET", down.URL, nil)
 	resp, err := Client(nil).Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	out := kind(rec.Events(), core.KindAPIOut)
 	if len(out) != 1 {
-		t.Fatalf("api.out = %d", len(out))
+		panic(fmt.Sprintf("api.out = %d", len(out)))
 	}
 	want := "00-" + root.TraceID + "-" + out[0].SpanID + "-01"
 	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want+";"+got.Get(core.KeyHLC) {
-		t.Fatalf("traceparent %q, %s %q, want %q and that with the clock", got.Get("Traceparent"), core.KeyTSessionTraceparent,
-			got.Get(core.KeyTSessionTraceparent), want)
+		panic(fmt.Sprintf("traceparent %q, %s %q, want %q and that with the clock", got.Get("Traceparent"), core.KeyTSessionTraceparent,
+			got.Get(core.KeyTSessionTraceparent), want))
 	}
 }
 
@@ -145,7 +146,7 @@ func TestHandlerReadsTraceparentFromOlderSDK(t *testing.T) {
 	Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
 	in := kind(rec.Events(), core.KindAPIIn)
 	if len(in) != 1 || in[0].ParentID != span || in[0].TraceID != trace {
-		t.Fatalf("api.in = %+v", in)
+		panic(fmt.Sprintf("api.in = %+v", in))
 	}
 }
 
@@ -165,6 +166,6 @@ func TestHandlerIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 	Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
 	in := kind(rec.Events(), core.KindAPIIn)
 	if len(in) != 1 || in[0].ParentID != forwarder || in[0].TraceID != trace {
-		t.Fatalf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender)
+		panic(fmt.Sprintf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender))
 	}
 }

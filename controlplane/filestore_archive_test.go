@@ -40,7 +40,7 @@ func jsonLine(t *testing.T, s Session) string {
 	t.Helper()
 	b, err := json.Marshal(s)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return string(b)
 }
@@ -54,12 +54,12 @@ func wantStore(t *testing.T, what string, fs *FileStore, want []Session, gone ..
 	wantSameSessions(t, what+": list", fs.List(), want)
 	for _, s := range want {
 		if got, ok := fs.Get(s.ID); !ok || !reflect.DeepEqual(got, s) {
-			t.Fatalf("%s: get %s:\n got %+v %v\nwant %+v", what, s.ID, got, ok, s)
+			panic(fmt.Sprintf("%s: get %s:\n got %+v %v\nwant %+v", what, s.ID, got, ok, s))
 		}
 	}
 	for _, id := range gone {
 		if got, ok := fs.Get(id); ok {
-			t.Fatalf("%s: get %s: %+v, want none", what, id, got)
+			panic(fmt.Sprintf("%s: get %s: %+v, want none", what, id, got))
 		}
 	}
 	for _, st := range append(archStates[1:], "PAUSED", "NOPE") {
@@ -116,12 +116,12 @@ func TestFileStoreArchiveReads(t *testing.T) {
 	wantStore(t, "reopened", re, all)
 	wantStore(t, "reopened, uncached", uncached(openStore(t, path)), all)
 	if _, hot := re.MemStore.Get(changed.ID); !hot {
-		t.Fatal("session changed after its eviction is not hot")
+		panic("session changed after its eviction is not hot")
 	}
 	for id, r := range re.arch {
 		s, _, _ := re.getArchived(id)
 		if archStates[r.state] != s.State && !(r.state == 0 && s.State == "PAUSED") || r.sealPending != s.SealPending {
-			t.Fatalf("index entry of %s: %+v, session %+v", id, r, s)
+			panic(fmt.Sprintf("index entry of %s: %+v, session %+v", id, r, s))
 		}
 	}
 }
@@ -162,7 +162,7 @@ func TestFileStoreArchiveOffsets(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "s.json")
 			if err := os.WriteFile(path+".archive", []byte(c.content), 0o600); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			var gone []string
 			for _, s := range ss {
@@ -179,7 +179,7 @@ func TestFileStoreArchiveOffsets(t *testing.T) {
 					tidy += jsonLine(t, s) + "\n"
 				}
 				if got, _ := os.ReadFile(fs.archivePath()); string(got) != tidy {
-					t.Fatalf("archive after open:\n%q\nwant\n%q", got, tidy)
+					panic(fmt.Sprintf("archive after open:\n%q\nwant\n%q", got, tidy))
 				}
 			}
 			// New lines land behind the old ones, at the offsets the index says.
@@ -215,23 +215,23 @@ func TestFileStoreArchiveDamagedUnderStore(t *testing.T) {
 	other.ID = "ts_other0001"
 	r := fs.arch[ss[1].ID]
 	if line := jsonLine(t, other); len(line) != int(r.n) {
-		t.Fatalf("test setup: line of %d bytes, want %d", len(line), r.n)
+		panic(fmt.Sprintf("test setup: line of %d bytes, want %d", len(line), r.n))
 	} else if _, err := fs.ar.WriteAt([]byte(line), r.off); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	// The file ends in the middle of the line of s4.
 	if err := os.Truncate(fs.archivePath(), fs.arch[ss[4].ID].off+10); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantSameSessions(t, "list", fs.List(), []Session{ss[0], ss[2], ss[3]})
 	for i, s := range ss {
 		got, ok := fs.Get(s.ID)
 		if readable := i == 0 || i == 2 || i == 3; ok != readable || ok && !reflect.DeepEqual(got, s) {
-			t.Fatalf("get %s: %+v %v", s.ID, got, ok)
+			panic(fmt.Sprintf("get %s: %+v %v", s.ID, got, ok))
 		}
 	}
 	if l := fs.ListState(StateAborted); len(l) != 3 {
-		t.Fatalf("list state: %+v", l)
+		panic(fmt.Sprintf("list state: %+v", l))
 	}
 }
 
@@ -250,22 +250,22 @@ func TestFileStoreArchiveReplacedUnderStore(t *testing.T) {
 		fs.Evict(s.ID)
 	}
 	if err := fs.Delete(ss[0].ID); err != nil { // leaves a blank line at the start
-		t.Fatal(err)
+		panic(err)
 	}
 	before, err := os.Stat(fs.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	re := uncached(openStore(t, path))
 	after, err := os.Stat(fs.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if os.SameFile(before, after) || after.Size() >= before.Size() {
-		t.Fatalf("archive not written anew on open: %d bytes before, %d after", before.Size(), after.Size())
+		panic(fmt.Sprintf("archive not written anew on open: %d bytes before, %d after", before.Size(), after.Size()))
 	}
 	if re.arch[ss[1].ID].off == fs.arch[ss[1].ID].off {
-		t.Fatal("test setup: the offsets did not change")
+		panic("test setup: the offsets did not change")
 	}
 	wantStore(t, "store with the old offsets", fs, ss[1:], ss[0].ID)
 	wantStore(t, "store with the new offsets", re, ss[1:], ss[0].ID)
@@ -287,33 +287,33 @@ func TestFileStoreDeleteArchivedInPlace(t *testing.T) {
 		fs.Evict(s.ID)
 	}
 	if err := fs.Compact(); err != nil { // the journal no longer names them
-		t.Fatal(err)
+		panic(err)
 	}
 	before, err := os.Stat(fs.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	archive := func() string {
 		t.Helper()
 		b, err := os.ReadFile(fs.archivePath())
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		return string(b)
 	}
 
 	if err := fs.Delete(ss[1].ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	after, err := os.Stat(fs.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if !os.SameFile(before, after) || after.Size() != before.Size() {
-		t.Fatalf("delete replaced or resized the archive: %d bytes before, %d after", before.Size(), after.Size())
+		panic(fmt.Sprintf("delete replaced or resized the archive: %d bytes before, %d after", before.Size(), after.Size()))
 	}
 	if a := archive(); strings.Contains(a, ss[1].ID) || strings.Contains(a, "name-1-secret") || strings.Contains(a, "user-1") {
-		t.Fatalf("deleted session left in the archive:\n%s", a)
+		panic(fmt.Sprintf("deleted session left in the archive:\n%s", a))
 	}
 	left := []Session{ss[0], ss[2], ss[3], ss[4]}
 	wantStore(t, "after delete", fs, left, ss[1].ID)
@@ -323,10 +323,10 @@ func TestFileStoreDeleteArchivedInPlace(t *testing.T) {
 	mustPut(t, fs, ss[2])
 	fs.Evict(ss[2].ID)
 	if a := archive(); strings.Contains(a, "name-2-secret") || strings.Count(a, ss[2].ID) != 1 {
-		t.Fatalf("old line of a session archived again left in the archive:\n%s", a)
+		panic(fmt.Sprintf("old line of a session archived again left in the archive:\n%s", a))
 	}
 	if len(fs.stale) != 0 {
-		t.Fatalf("stale lines: %+v", fs.stale)
+		panic(fmt.Sprintf("stale lines: %+v", fs.stale))
 	}
 	left[1] = ss[2]
 	wantStore(t, "after archiving again", fs, left, ss[1].ID)
@@ -335,7 +335,7 @@ func TestFileStoreDeleteArchivedInPlace(t *testing.T) {
 	re := uncached(openStore(t, path))
 	wantStore(t, "reopened", re, left, ss[1].ID)
 	if n := len(fileLines(t, re.archivePath())); n != len(left) {
-		t.Fatalf("archive has %d lines after a restart, want %d", n, len(left))
+		panic(fmt.Sprintf("archive has %d lines after a restart, want %d", n, len(left)))
 	}
 
 	// Deleting them all removes the file. A new archive starts at offset 0
@@ -344,11 +344,11 @@ func TestFileStoreDeleteArchivedInPlace(t *testing.T) {
 	wantStore(t, "cached", re, left)
 	for _, s := range left {
 		if err := re.Delete(s.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	if _, err := os.Stat(re.archivePath()); !os.IsNotExist(err) {
-		t.Fatalf("empty archive left behind: %v", err)
+		panic(fmt.Sprintf("empty archive left behind: %v", err))
 	}
 	again := left[0]
 	again.Name = "same id, stored again"
@@ -371,7 +371,7 @@ func TestFileStoreArchiveCrashes(t *testing.T) {
 		t.Helper()
 		raw, err := os.ReadFile(fs.archivePath())
 		if err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
+			panic(err)
 		}
 		return bytes.Contains(raw, []byte(id))
 	}
@@ -383,35 +383,35 @@ func TestFileStoreArchiveCrashes(t *testing.T) {
 		fs, a, b := setup(t)
 		old, err := os.ReadFile(fs.archivePath())
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		a.Name = "a, second record"
 		mustPut(t, fs, a)
 		fs.Evict(a.ID)
 		newLine := jsonLine(t, a) + "\n"
 		if err := os.WriteFile(fs.archivePath(), append(old, newLine...), 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		for _, compactFirst := range []bool{false, true} {
 			re := uncached(openStore(t, fs.path))
 			wantStore(t, "reopened", re, []Session{a, b})
 			if compactFirst { // the delete is then in no journal when the store is opened next
 				if err := re.Compact(); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			}
 		}
 		re := openStore(t, fs.path)
 		if err := re.Delete(a.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := re.Compact(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		re2 := openStore(t, fs.path)
 		wantStore(t, "after delete and restart", re2, []Session{b}, a.ID)
 		if archiveHas(t, re2, a.ID) {
-			t.Fatal("a line of the deleted session is left")
+			panic("a line of the deleted session is left")
 		}
 	})
 
@@ -420,13 +420,13 @@ func TestFileStoreArchiveCrashes(t *testing.T) {
 	t.Run("delete record lost", func(t *testing.T) {
 		fs, a, b := setup(t)
 		if err := fs.Compact(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := fs.Delete(a.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := os.Remove(fs.journalPath()); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		wantStore(t, "reopened", uncached(openStore(t, fs.path)), []Session{b}, a.ID)
 	})
@@ -441,34 +441,34 @@ func TestFileStoreArchiveCrashes(t *testing.T) {
 		fs, a, b := setup(t)
 		archive, err := os.ReadFile(fs.archivePath())
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := fs.Delete(a.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := os.WriteFile(fs.archivePath(), archive, 0o600); err != nil { // the line was never overwritten
-			t.Fatal(err)
+			panic(err)
 		}
 		dir := filepath.Dir(fs.path)
 		if err := os.Chmod(dir, 0o500); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		re, err := NewFileStore(fs.path)
 		closeLater(t, re)
 		if cerr := os.Chmod(dir, 0o700); cerr != nil {
-			t.Fatal(cerr)
+			panic(cerr)
 		}
 		if err != nil {
-			t.Fatalf("open: %v", err)
+			panic(fmt.Sprintf("open: %v", err))
 		}
 		wantStore(t, "opened in a read-only directory", uncached(re), []Session{b}, a.ID)
 		if archiveHas(t, re, a.ID) {
-			t.Fatal("the line of the deleted session is left")
+			panic("the line of the deleted session is left")
 		}
 		re2 := uncached(openStore(t, fs.path))
 		wantStore(t, "reopened", re2, []Session{b}, a.ID)
 		if n := len(fileLines(t, re2.archivePath())); n != 1 {
-			t.Fatalf("archive has %d lines, want 1", n)
+			panic(fmt.Sprintf("archive has %d lines, want 1", n))
 		}
 	})
 
@@ -481,43 +481,43 @@ func TestFileStoreArchiveCrashes(t *testing.T) {
 		fs, a, b := setup(t)
 		archive, err := os.ReadFile(fs.archivePath())
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := fs.Delete(a.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := os.WriteFile(fs.archivePath(), archive, 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		dir := filepath.Dir(fs.path)
 		if err := os.Chmod(fs.archivePath(), 0o400); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := os.Chmod(dir, 0o500); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		_, err = NewFileStore(fs.path)
 		if cerr := os.Chmod(dir, 0o700); cerr != nil {
-			t.Fatal(cerr)
+			panic(cerr)
 		}
 		if err == nil {
-			t.Fatal("store opened although a journalled delete could not be finished")
+			panic("store opened although a journalled delete could not be finished")
 		}
 		// A read-only archive without such a delete is served, not changed.
 		if err := os.Remove(fs.journalPath()); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		ro := uncached(openStore(t, fs.path))
 		wantStore(t, "read-only archive", ro, []Session{a, b})
 		if err := ro.Delete(a.ID); err == nil {
-			t.Fatal("delete from a read-only archive reported success")
+			panic("delete from a read-only archive reported success")
 		}
 		if got, ok := ro.Get(a.ID); !ok || got.Name != a.Name {
-			t.Fatalf("session lost by a failed delete: %+v %v", got, ok)
+			panic(fmt.Sprintf("session lost by a failed delete: %+v %v", got, ok))
 		}
 		// Once the file is writable the delete, journalled above, is finished.
 		if err := os.Chmod(fs.archivePath(), 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		wantStore(t, "writable again", uncached(openStore(t, fs.path)), []Session{b}, a.ID)
 	})
@@ -588,7 +588,7 @@ func TestFileStoreArchiveCacheBound(t *testing.T) {
 		n := len(fs.cache.m)
 		fs.cache.mu.Unlock()
 		if n == 0 || n > 8 {
-			t.Fatalf("%d sessions cached, want 1..8", n)
+			panic(fmt.Sprintf("%d sessions cached, want 1..8", n))
 		}
 	}
 }
@@ -779,22 +779,22 @@ func TestFileStoreConcurrentModel(t *testing.T) {
 		}
 	}
 	if len(want) == 0 || len(gone) == 0 || len(fs.arch) == 0 {
-		t.Fatalf("test setup: %d sessions stored, %d deleted, %d archived", len(want), len(gone), len(fs.arch))
+		panic(fmt.Sprintf("test setup: %d sessions stored, %d deleted, %d archived", len(want), len(gone), len(fs.arch)))
 	}
 	wantStore(t, "live", fs, want, gone...)
 	re := wantSameAfterReopen(t, fs)
 	wantStore(t, "reopened", uncached(re), want, gone...)
 	// The restart left one line per archived session.
 	if n := len(fileLines(t, re.archivePath())); n != len(re.arch) {
-		t.Fatalf("archive has %d lines for %d archived sessions", n, len(re.arch))
+		panic(fmt.Sprintf("archive has %d lines for %d archived sessions", n, len(re.arch)))
 	}
 	raw, err := os.ReadFile(re.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, id := range gone {
 		if bytes.Contains(raw, []byte(id)) {
-			t.Fatalf("deleted session %s is in the archive", id)
+			panic(fmt.Sprintf("deleted session %s is in the archive", id))
 		}
 	}
 }
@@ -836,33 +836,33 @@ func TestFileStoreArchiveCacheHoldsNoDeadEntries(t *testing.T) {
 			fs.List() // may cache it again
 		}
 		if _, ok := fs.Get(s.ID); !ok {
-			t.Fatalf("cycle %d: session not found", i)
+			panic(fmt.Sprintf("cycle %d: session not found", i))
 		}
 		if err := fs.Delete(s.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if cached()[s.ID] {
-			t.Fatalf("cycle %d: the deleted session is still cached", i)
+			panic(fmt.Sprintf("cycle %d: the deleted session is still cached", i))
 		}
 	}
 	for id := range cached() {
 		if _, ok := fs.arch[id]; !ok {
-			t.Fatalf("%s is cached and not archived", id)
+			panic(fmt.Sprintf("%s is cached and not archived", id))
 		}
 	}
 	wantSameSessions(t, "list", fs.List(), live)
 	for _, s := range live {
 		if !cached()[s.ID] {
-			t.Fatalf("%s is not cached after a List (cache holds %d of %d)", s.ID, len(cached()), fs.cache.max)
+			panic(fmt.Sprintf("%s is not cached after a List (cache holds %d of %d)", s.ID, len(cached()), fs.cache.max))
 		}
 	}
 	// The second List needs no line from the file: it works without it.
 	if err := fs.ar.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantSameSessions(t, "list from the cache", fs.List(), live)
 	if n := fs.ReadErrors(); n != 0 {
-		t.Fatalf("%d lines were read again and failed", n)
+		panic(fmt.Sprintf("%d lines were read again and failed", n))
 	}
 
 	// The last archived session takes the archive file and the cache with it.
@@ -871,13 +871,13 @@ func TestFileStoreArchiveCacheHoldsNoDeadEntries(t *testing.T) {
 	re.List()
 	for _, s := range live {
 		if err := re.Delete(s.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	re.cache.mu.Lock()
 	n := len(re.cache.m)
 	re.cache.mu.Unlock()
 	if n != 0 {
-		t.Fatalf("%d sessions cached after all were deleted", n)
+		panic(fmt.Sprintf("%d sessions cached after all were deleted", n))
 	}
 }

@@ -21,7 +21,7 @@ func isoDSN(t testing.TB, f func(u *url.URL, q url.Values)) string {
 	t.Helper()
 	u, err := url.Parse(rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	q := u.Query()
 	f(u, q)
@@ -42,7 +42,7 @@ func isoOpen(t *testing.T, d *rtDriver, dsn string, opts ...tsql.Option) *sql.DB
 	sql.Register(name, d)
 	db, err := tsql.Open(name, dsn, append([]tsql.Option{tsql.WithStore("postgres")}, opts...)...)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
@@ -78,7 +78,7 @@ func isoLevel(t *testing.T, want string) func(rtQueryer) {
 	return func(q rtQueryer) {
 		t.Helper()
 		if got := rtShow(t, q, "SHOW transaction_isolation"); got != want {
-			t.Fatalf("the transaction runs at %q, want %q", got, want)
+			panic(fmt.Sprintf("the transaction runs at %q, want %q", got, want))
 		}
 	}
 }
@@ -103,24 +103,24 @@ func TestPGSerializableSetByStatementSendsNoCapture(t *testing.T) {
 				d := &rtDriver{}
 				c, err := isoOpen(t, d, rtDSN(t)).Conn(ctx)
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				defer c.Close()
 				take := rtTake(d)
 				got := isoRunCheck(t, c, ic, ctx, ctl, take, isoLevel(t, "serializable"), isoWrites...)
 				if strings.Join(got, "\n") != strings.Join(isoWrites, "\n") {
-					t.Fatalf("driver saw:\n%s\nwant only the application's statements", strings.Join(got, "\n"))
+					panic(fmt.Sprintf("driver saw:\n%s\nwant only the application's statements", strings.Join(got, "\n")))
 				}
 				ws := byKind(rec.Events(), core.KindDBWrite)
 				if len(ws) != len(isoWrites) {
-					t.Fatalf("%d write events, want %d", len(ws), len(isoWrites))
+					panic(fmt.Sprintf("%d write events, want %d", len(ws), len(isoWrites)))
 				}
 				for _, e := range ws {
 					if e.Err != "" || len(e.Mutations) != 1 {
-						t.Fatalf("event %q: err %q mutations %+v", e.Name, e.Err, e.Mutations)
+						panic(fmt.Sprintf("event %q: err %q mutations %+v", e.Name, e.Err, e.Mutations))
 					}
 					if e.Mutations[0].Op != "insert" && !hasFlag(e, "image_skipped:serializable") {
-						t.Fatalf("event %q: flags %v", e.Name, e.Flags)
+						panic(fmt.Sprintf("event %q: flags %v", e.Name, e.Flags))
 					}
 				}
 				// the next transaction, at another level, is read again
@@ -131,7 +131,7 @@ func TestPGSerializableSetByStatementSendsNoCapture(t *testing.T) {
 				}
 				got = isoRun(t, c, next, ctx, ctl, take, isoWrites...)
 				if isoReads(got) != 4 {
-					t.Fatalf("the transaction after it ran %d image reads, want 4:\n%s", isoReads(got), strings.Join(got, "\n"))
+					panic(fmt.Sprintf("the transaction after it ran %d image reads, want 4:\n%s", isoReads(got), strings.Join(got, "\n")))
 				}
 			})
 		}
@@ -164,7 +164,7 @@ func TestPGSerializableDefaultSendsNoCapture(t *testing.T) {
 				t.Helper()
 				c, err := db.Conn(ctx)
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				defer c.Close() // back to the pool
 				ic := isoCase{}
@@ -186,17 +186,17 @@ func TestPGSerializableDefaultSendsNoCapture(t *testing.T) {
 				}
 			}
 			if asks != 1 || strings.Join(app, "\n") != strings.Join(isoWrites, "\n") {
-				t.Fatalf("first transaction on the connection, driver saw:\n%s\nwant one fence that asks, and the application's statements", strings.Join(got, "\n"))
+				panic(fmt.Sprintf("first transaction on the connection, driver saw:\n%s\nwant one fence that asks, and the application's statements", strings.Join(got, "\n")))
 			}
 			t.Logf("first transaction on the connection:\n  %s", strings.Join(got, "\n  "))
 			for i, raw := range []bool{false, true, false} {
 				if got := run(raw); strings.Join(got, "\n") != strings.Join(isoWrites, "\n") {
-					t.Fatalf("transaction %d, driver saw:\n%s\nwant only the application's statements", i+2, strings.Join(got, "\n"))
+					panic(fmt.Sprintf("transaction %d, driver saw:\n%s\nwant only the application's statements", i+2, strings.Join(got, "\n")))
 				}
 			}
 			for _, e := range byKind(rec.Events(), core.KindDBWrite) {
 				if e.Err != "" || e.Mutations[0].Op != "insert" && !hasFlag(e, "image_skipped:serializable") {
-					t.Fatalf("event %q: err %q flags %v", e.Name, e.Err, e.Flags)
+					panic(fmt.Sprintf("event %q: err %q flags %v", e.Name, e.Err, e.Flags))
 				}
 			}
 			// In autocommit the capture has a transaction of its own and the
@@ -204,23 +204,23 @@ func TestPGSerializableDefaultSendsNoCapture(t *testing.T) {
 			// TestPGAutocommitCaptureUnderSerializableDefaultIsHarmless).
 			take()
 			if _, err := db.ExecContext(ctx, isoWrites[0]); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			got = take()
 			e := lastWrite(t, rec)
 			if isoReads(got) != 2 || !strings.HasPrefix(got[0], "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") ||
 				len(e.Mutations) != 1 || e.Mutations[0].Before.IsZero() || e.Mutations[0].After.IsZero() || len(e.Flags) != 0 {
-				t.Fatalf("autocommit: flags %v, driver saw:\n%s", e.Flags, strings.Join(got, "\n"))
+				panic(fmt.Sprintf("autocommit: flags %v, driver saw:\n%s", e.Flags, strings.Join(got, "\n")))
 			}
 			// A transaction that states its level is read, without asking.
 			c, err := db.Conn(ctx)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer c.Close()
 			got = isoRunCheck(t, c, isoCase{begin: "BEGIN ISOLATION LEVEL READ COMMITTED"}, ctx, ctx, take, isoLevel(t, "read committed"), isoWrites...)
 			if isoReads(got) != 4 || strings.Contains(strings.Join(got, "\n"), isoAsk) {
-				t.Fatalf("READ COMMITTED transaction, driver saw:\n%s", strings.Join(got, "\n"))
+				panic(fmt.Sprintf("READ COMMITTED transaction, driver saw:\n%s", strings.Join(got, "\n")))
 			}
 		})
 	}
@@ -238,7 +238,7 @@ func isoBeginTx(opts *sql.TxOptions, first ...string) func(*testing.T, *sql.Conn
 		t.Helper()
 		tx, err := c.BeginTx(context.Background(), opts)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		rtMustExec(t, tx, first...)
 		return tx, tx.Commit
@@ -281,24 +281,24 @@ func TestPGSerializableConcurrentTransactionsSucceedTraced(t *testing.T) {
 				for i := range ex {
 					c, err := db.Conn(context.Background())
 					if err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					defer c.Close()
 					ex[i], commit[i] = w.open(t, c)
 				}
 				for i := range ex {
 					if _, err := ex[i].ExecContext(ctx, "INSERT INTO tsql_iso_c (id, v) VALUES ($1, $2)", i+1, "x"); err != nil {
-						t.Fatalf("transaction %d: INSERT: %v", i+1, err)
+						panic(fmt.Sprintf("transaction %d: INSERT: %v", i+1, err))
 					}
 					isoLevel(t, "serializable")(ex[i])
 				}
 				for i := range commit {
 					if err := commit[i](); err != nil {
-						t.Fatalf("transaction %d: COMMIT: %v", i+1, err)
+						panic(fmt.Sprintf("transaction %d: COMMIT: %v", i+1, err))
 					}
 				}
 				if n := len(byKind(rec.Events(), core.KindDBWrite)); traced && n != 2 || !traced && n != 0 {
-					t.Fatalf("%d write events", n)
+					panic(fmt.Sprintf("%d write events", n))
 				}
 			})
 		}
@@ -327,22 +327,22 @@ func TestPGAutocommitCaptureUnderSerializableDefaultIsHarmless(t *testing.T) {
 			other, third := rtRawConn(t), rtRawConn(t)
 			rtMustExec(t, other, "BEGIN ISOLATION LEVEL SERIALIZABLE")
 			if got := rtShow(t, other, "SELECT v FROM tsql_iso_ctl"); got != "1" {
-				t.Fatalf("ctl = %s", got)
+				panic(fmt.Sprintf("ctl = %s", got))
 			}
 			rtMustExec(t, third, "BEGIN ISOLATION LEVEL SERIALIZABLE", "UPDATE tsql_iso_ctl SET v = v + 1", "COMMIT")
 			if _, err := db.ExecContext(ctx, "INSERT INTO tsql_iso_r (id, v) VALUES ($1, $2)", 1, "a"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if _, err := other.ExecContext(context.Background(), "INSERT INTO tsql_iso_r (id, v) VALUES (2, 'b')"); err != nil {
-				t.Fatalf("the other connection's INSERT: %v", err)
+				panic(fmt.Sprintf("the other connection's INSERT: %v", err))
 			}
 			if _, err := other.ExecContext(context.Background(), "COMMIT"); err != nil {
-				t.Fatalf("the other connection's COMMIT: %v", err)
+				panic(fmt.Sprintf("the other connection's COMMIT: %v", err))
 			}
 			if traced {
 				e := lastWrite(t, rec)
 				if len(e.Mutations) != 1 || e.Mutations[0].After.IsZero() || hasFlag(e, "after_from_args") {
-					t.Fatalf("the INSERT's row was not read back: flags %v", e.Flags)
+					panic(fmt.Sprintf("the INSERT's row was not read back: flags %v", e.Flags))
 				}
 			}
 		})

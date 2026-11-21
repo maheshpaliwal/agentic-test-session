@@ -1,6 +1,7 @@
 package thttp
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,7 @@ func TestQueryTokenRedactedInReq(t *testing.T) {
 	e := rec.Events()[0]
 	all := e.Name + string(e.Req.Inline)
 	if strings.Contains(all, "SYNTH123") || strings.Contains(all, "SYNTHREF") || !strings.Contains(all, "a=1") {
-		t.Fatalf("leak: %s", all)
+		panic(fmt.Sprintf("leak: %s", all))
 	}
 }
 
@@ -31,12 +32,12 @@ func TestClientURLRedacted(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/x?api_key=SYNTHKEY&q=1", nil)
 	resp, err := Client(nil).Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	for _, e := range kind(rec.Events(), core.KindAPIOut) {
 		if strings.Contains(string(e.Req.Inline), "SYNTHKEY") {
-			t.Fatalf("leak: %s", e.Req.Inline)
+			panic(fmt.Sprintf("leak: %s", e.Req.Inline))
 		}
 	}
 }
@@ -60,7 +61,7 @@ func TestOversizeAndFormBodiesRedacted(t *testing.T) {
 		s := string(e.Req.Inline) + string(e.Resp.Inline)
 		for _, bad := range []string{"SYNTHFORM", "SYNTHBIG", "SYNTHTRUNC", "SYNTHPW"} {
 			if strings.Contains(s, bad) {
-				t.Fatalf("leak %s: %s", bad, s)
+				panic(fmt.Sprintf("leak %s: %s", bad, s))
 			}
 		}
 	}
@@ -81,7 +82,7 @@ func TestSSEEndsSpanEarly(t *testing.T) {
 	req.Header.Set(core.KeySession, "s1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	buf := make([]byte, 16)
 	resp.Body.Read(buf)
@@ -89,7 +90,7 @@ func TestSSEEndsSpanEarly(t *testing.T) {
 	close(release)
 	resp.Body.Close()
 	if len(evs) != 1 || evs[0].Attrs["stream"] != "true" {
-		t.Fatalf("span not ended early: %+v", evs)
+		panic(fmt.Sprintf("span not ended early: %+v", evs))
 	}
 }
 
@@ -114,12 +115,12 @@ func TestHijackEndsSpanEarly(t *testing.T) {
 	req.Header.Set("Upgrade", "websocket")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs := rec.Events()
 	close(release)
 	resp.Body.Close()
 	if len(evs) != 1 || evs[0].Attrs["stream"] != "true" {
-		t.Fatalf("span not ended early: %+v", evs)
+		panic(fmt.Sprintf("span not ended early: %+v", evs))
 	}
 }

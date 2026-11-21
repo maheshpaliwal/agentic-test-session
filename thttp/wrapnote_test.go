@@ -2,6 +2,7 @@ package thttp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -38,14 +39,14 @@ func TestClientWrappersBeforeStart(t *testing.T) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 		resp, err := c.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		resp.Body.Close()
 	}
 	get(own)
 	get(&http.Client{Transport: rt})
 	if n := len(kind(rec.Events(), core.KindAPIOut)); n != 0 {
-		t.Fatalf("%d api.out events from wrappers made before the start: the note would be wrong", n)
+		panic(fmt.Sprintf("%d api.out events from wrappers made before the start: the note would be wrong", n))
 	}
 
 	// What the SDK does at start with PatchDefaultTransport.
@@ -54,6 +55,6 @@ func TestClientWrappersBeforeStart(t *testing.T) {
 	defer func() { http.DefaultTransport = orig }()
 	get(plain)
 	if n := len(kind(rec.Events(), core.KindAPIOut)); n != 1 {
-		t.Fatalf("%d api.out events from a client without a transport, want 1", n)
+		panic(fmt.Sprintf("%d api.out events from a client without a transport, want 1", n))
 	}
 }

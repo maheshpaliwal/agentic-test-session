@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,6 +26,6 @@ func TestWrapHandlerBeforeStartRecords(t *testing.T) {
 	_ = PublishVia(ctx, sc, "id1", Message{Queue: "q", JobName: "j"}, func(context.Context) error { return nil })
 	_ = h(context.Background(), "id1", 1, []byte(`{"a":1}`))
 	if len(byKind(rec.Events(), core.KindQueuePub)) != 1 || len(byKind(rec.Events(), core.KindWorkerEnd)) != 1 {
-		t.Fatalf("a handler wrapped before the start must record: %d events", len(rec.Events()))
+		panic(fmt.Sprintf("a handler wrapped before the start must record: %d events", len(rec.Events())))
 	}
 }

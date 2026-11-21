@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -44,7 +45,7 @@ func roundTrip(t *testing.T, rec *core.MemRecorder, root core.SpanContext, rt ht
 	req, _ := http.NewRequestWithContext(core.ContextWith(t.Context(), root), "GET", srv.URL+"/x", nil)
 	resp, err := (&http.Client{Transport: rt}).Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	var out []core.Event
@@ -54,7 +55,7 @@ func roundTrip(t *testing.T, rec *core.MemRecorder, root core.SpanContext, rt ht
 		}
 	}
 	if len(out) != 1 {
-		t.Fatalf("api.out spans: %d", len(out))
+		panic(fmt.Sprintf("api.out spans: %d", len(out)))
 	}
 	return got, out[0]
 }
@@ -75,11 +76,11 @@ func TestTransportKeepsApplicationTraceparent(t *testing.T) {
 			rec, root := traceparentSetup(t, core.Config{})
 			got, out := roundTrip(t, rec, root, build())
 			if v := got.Values("Traceparent"); len(v) != 1 || v[0] != appTraceparent {
-				t.Fatalf("application traceparent arrived as %q", v)
+				panic(fmt.Sprintf("application traceparent arrived as %q", v))
 			}
 			sc, ok := core.ExtractSpanContext(core.HTTPHeaderCarrier(got))
 			if !ok || sc.SpanID != out.SpanID || sc.TraceID != root.TraceID {
-				t.Fatalf("server would link to %+v, want span %s trace %s", sc, out.SpanID, root.TraceID)
+				panic(fmt.Sprintf("server would link to %+v, want span %s trace %s", sc, out.SpanID, root.TraceID))
 			}
 		})
 	}
@@ -90,7 +91,7 @@ func TestTransportWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	got, out := roundTrip(t, rec, root, &Transport{Base: &http.Transport{}})
 	want := "00-" + root.TraceID + "-" + out.SpanID + "-01"
 	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want+";"+got.Get(core.KeyHLC) {
-		t.Fatalf("traceparent %q, own key %q, want %q and that with the clock", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want)
+		panic(fmt.Sprintf("traceparent %q, own key %q, want %q and that with the clock", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want))
 	}
 }
 
@@ -102,7 +103,7 @@ func TestTransportOverwriteTraceparentSetting(t *testing.T) {
 	got, out := roundTrip(t, rec, root, otelLike{next: &Transport{Base: &http.Transport{}}, tp: appTraceparent})
 	want := "00-" + root.TraceID + "-" + out.SpanID + "-01"
 	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want+";"+got.Get(core.KeyHLC) {
-		t.Fatalf("traceparent %q, own key %q, want %q and that with the clock", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want)
+		panic(fmt.Sprintf("traceparent %q, own key %q, want %q and that with the clock", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want))
 	}
 }
 
@@ -111,14 +112,14 @@ func TestStartPassesOverwriteTraceparent(t *testing.T) {
 	// background and only retries.
 	cfg := Config{Service: "s", ControlPlaneURL: "http://127.0.0.1:1", CollectorURL: "http://127.0.0.1:1", OverwriteTraceparent: true}
 	if err := Start(cfg); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	got := core.GetConfig().OverwriteTraceparent
 	Stop()
 	if !got {
-		t.Fatal("Config.OverwriteTraceparent did not reach core")
+		panic("Config.OverwriteTraceparent did not reach core")
 	}
 	if core.GetConfig().OverwriteTraceparent {
-		t.Fatal("setting survived Stop")
+		panic("setting survived Stop")
 	}
 }

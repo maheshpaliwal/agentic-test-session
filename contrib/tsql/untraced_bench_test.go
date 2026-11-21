@@ -95,14 +95,14 @@ func BenchmarkUntraced(b *testing.B) {
 				if mode == "tsql" {
 					db = benchOpen(b, f)
 					if tsql.UnwrapDriver(db.Driver()) == db.Driver() {
-						b.Fatal("driver is not wrapped")
+						panic("driver is not wrapped")
 					}
 				} else {
 					name := uniqueName("bare-bench")
 					sql.Register(name, f)
 					var err error
 					if db, err = sql.Open(name, "dsn"); err != nil {
-						b.Fatal(err)
+						panic(err)
 					}
 					db.SetMaxOpenConns(1)
 					b.Cleanup(func() { db.Close() })
@@ -111,11 +111,11 @@ func BenchmarkUntraced(b *testing.B) {
 					if s.query {
 						rows, err := db.QueryContext(ctx, q, s.args...)
 						if err != nil {
-							b.Fatal(err)
+							panic(err)
 						}
 						rows.Close()
 					} else if _, err := db.ExecContext(ctx, q, s.args...); err != nil {
-						b.Fatal(err)
+						panic(err)
 					}
 				}
 				reset := func() { // the fake's call log, without scanning the statements

@@ -89,7 +89,7 @@ func pageStores(t *testing.T, ss []Session) map[string]Store {
 		}
 		fs.Evict(evict...)
 		if len(fs.arch) != len(evict) {
-			t.Fatalf("%d sessions archived, want %d", len(fs.arch), len(evict))
+			panic(fmt.Sprintf("%d sessions archived, want %d", len(fs.arch), len(evict)))
 		}
 		return fs
 	}
@@ -110,14 +110,14 @@ func getList(t *testing.T, base string, v url.Values) (*http.Response, []Session
 	t.Helper()
 	resp, err := http.Get(base + "/v1/sessions?" + v.Encode())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	var list []Session
 	if resp.StatusCode == http.StatusOK {
 		if err := json.Unmarshal(b, &list); err != nil {
-			t.Fatalf("GET %v: %v in %.200s", v, err, b)
+			panic(fmt.Sprintf("GET %v: %v in %.200s", v, err, b))
 		}
 	}
 	return resp, list
@@ -133,13 +133,13 @@ func walkPages(t *testing.T, base string, v url.Values, limit int, wantTotal str
 	for page := 0; ; page++ {
 		resp, list := getList(t, base, v)
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("page %d of %v: status %d", page, v, resp.StatusCode)
+			panic(fmt.Sprintf("page %d of %v: status %d", page, v, resp.StatusCode))
 		}
 		if got := resp.Header.Get(HeaderTotal); got != wantTotal {
-			t.Fatalf("page %d of %v: %s %q, want %q", page, v, HeaderTotal, got, wantTotal)
+			panic(fmt.Sprintf("page %d of %v: %s %q, want %q", page, v, HeaderTotal, got, wantTotal))
 		}
 		if got := resp.Header.Get(HeaderUnreadable); got != "" {
-			t.Fatalf("page %d of %v: %s %q", page, v, HeaderUnreadable, got)
+			panic(fmt.Sprintf("page %d of %v: %s %q", page, v, HeaderUnreadable, got))
 		}
 		for _, s := range list {
 			ids = append(ids, s.ID)
@@ -147,15 +147,15 @@ func walkPages(t *testing.T, base string, v url.Values, limit int, wantTotal str
 		next := resp.Header.Get(HeaderNext)
 		if next == "" {
 			if len(list) > limit {
-				t.Fatalf("last page of %v has %d sessions, limit %d", v, len(list), limit)
+				panic(fmt.Sprintf("last page of %v has %d sessions, limit %d", v, len(list), limit))
 			}
 			return ids
 		}
 		if len(list) != limit {
-			t.Fatalf("page %d of %v has %d sessions and a next page, want %d", page, v, len(list), limit)
+			panic(fmt.Sprintf("page %d of %v has %d sessions and a next page, want %d", page, v, len(list), limit))
 		}
 		if page > 10000 {
-			t.Fatalf("paging %v does not end", v)
+			panic(fmt.Sprintf("paging %v does not end", v))
 		}
 		v.Set("before", next)
 	}
@@ -253,19 +253,19 @@ func TestListWithoutParametersIsUnchanged(t *testing.T) {
 				wantBody, _ := json.Marshal(want)
 				resp, err := http.Get(srv.URL + path)
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/json" {
-					t.Fatalf("%s: status %d, content type %q", path, resp.StatusCode, resp.Header.Get("Content-Type"))
+					panic(fmt.Sprintf("%s: status %d, content type %q", path, resp.StatusCode, resp.Header.Get("Content-Type")))
 				}
 				if string(body) != string(wantBody)+"\n" {
-					t.Fatalf("%s: body differs from the list of the store (%d bytes, want %d)", path, len(body), len(wantBody)+1)
+					panic(fmt.Sprintf("%s: body differs from the list of the store (%d bytes, want %d)", path, len(body), len(wantBody)+1))
 				}
 				for h := range resp.Header {
 					if strings.HasPrefix(h, "X-Tsession-") {
-						t.Fatalf("%s: unexpected header %s", path, h)
+						panic(fmt.Sprintf("%s: unexpected header %s", path, h))
 					}
 				}
 			}
@@ -276,7 +276,7 @@ func TestListWithoutParametersIsUnchanged(t *testing.T) {
 	for _, path := range []string{"/v1/sessions", "/v1/sessions?state=ACTIVE", "/v1/sessions?limit=5", "/v1/sessions?name=x"} {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -293,7 +293,7 @@ func TestListPageRejectsBadParameters(t *testing.T) {
 			resp, _ := getList(t, srv.URL, url.Values{"limit": {"5"}})
 			next := resp.Header.Get(HeaderNext)
 			if next == "" {
-				t.Fatal("no cursor on the first page")
+				panic("no cursor on the first page")
 			}
 			for _, q := range []string{
 				"limit=0", "limit=-1", "limit=1001", "limit=abc", "limit=", "limit=5.0", "limit=99999999999999999999",
@@ -302,7 +302,7 @@ func TestListPageRejectsBadParameters(t *testing.T) {
 			} {
 				resp, err := http.Get(srv.URL + "/v1/sessions?" + q)
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				var e map[string]string
 				_ = json.NewDecoder(resp.Body).Decode(&e)
@@ -329,14 +329,14 @@ func TestListPageCursorSurvivesDelete(t *testing.T) {
 			want := newestFirst(ss, PageQuery{})
 			p, err := m.ListPage(PageQuery{Limit: 10})
 			if err != nil || len(p.Sessions) != 10 || p.Next == "" {
-				t.Fatalf("first page: %d sessions, next %q, err %v", len(p.Sessions), p.Next, err)
+				panic(fmt.Sprintf("first page: %d sessions, next %q, err %v", len(p.Sessions), p.Next, err))
 			}
 			if err := st.Delete(p.Sessions[9].ID); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			p, err = m.ListPage(PageQuery{Limit: 10, Before: p.Next})
 			if err != nil || len(p.Sessions) != 10 || p.Sessions[0].ID != want[10] || p.Total != 29 {
-				t.Fatalf("second page: %d sessions from %s (want %s), total %d, err %v", len(p.Sessions), p.Sessions[0].ID, want[10], p.Total, err)
+				panic(fmt.Sprintf("second page: %d sessions from %s (want %s), total %d, err %v", len(p.Sessions), p.Sessions[0].ID, want[10], p.Total, err))
 			}
 		})
 	}
@@ -345,7 +345,7 @@ func TestListPageCursorSurvivesDelete(t *testing.T) {
 // An index entry is what every archived session costs in memory.
 func TestArchRefSize(t *testing.T) {
 	if got := unsafe.Sizeof(archRef{}); got != 24 {
-		t.Fatalf("archRef is %d bytes, want 24", got)
+		panic(fmt.Sprintf("archRef is %d bytes, want 24", got))
 	}
 }
 
@@ -363,27 +363,27 @@ func TestFileStorePageReadsOnlyItsLines(t *testing.T) {
 		before := fs.lineReads.Load()
 		p, err := fs.ListPage(q)
 		if err != nil {
-			t.Fatalf("%s: %v", what, err)
+			panic(fmt.Sprintf("%s: %v", what, err))
 		}
 		got := fs.lineReads.Load() - before
 		if len(p.Sessions) != wantSessions || got > maxReads || p.Unreadable != 0 {
-			t.Fatalf("%s: %d sessions (want %d) for %d archive lines read (want at most %d), %d unreadable",
-				what, len(p.Sessions), wantSessions, got, maxReads, p.Unreadable)
+			panic(fmt.Sprintf("%s: %d sessions (want %d) for %d archive lines read (want at most %d), %d unreadable",
+				what, len(p.Sessions), wantSessions, got, maxReads, p.Unreadable))
 		}
 		t.Logf("%s: %d sessions, %d archive lines read", what, len(p.Sessions), got)
 		return p
 	}
 	p := reads("first page", PageQuery{Limit: 200}, 200, 200)
 	if p.Total != n || p.Sessions[0].ID != ids[n-1] || p.Sessions[199].ID != ids[n-200] {
-		t.Fatalf("first page: total %d, from %s to %s", p.Total, p.Sessions[0].ID, p.Sessions[199].ID)
+		panic(fmt.Sprintf("first page: total %d, from %s to %s", p.Total, p.Sessions[0].ID, p.Sessions[199].ID))
 	}
 	p = reads("second page", PageQuery{Limit: 200, Before: p.Next}, 200, 200)
 	if p.Sessions[0].ID != ids[n-201] {
-		t.Fatalf("second page starts at %s, want %s", p.Sessions[0].ID, ids[n-201])
+		panic(fmt.Sprintf("second page starts at %s, want %s", p.Sessions[0].ID, ids[n-201]))
 	}
 	p = reads("by state", PageQuery{Limit: 200, State: StateSealed}, 200, 200)
 	if p.Total != n {
-		t.Fatalf("by state: total %d", p.Total)
+		panic(fmt.Sprintf("by state: total %d", p.Total))
 	}
 	reads("by a state no session is in", PageQuery{Limit: 200, State: StateAborted}, 0, 0)
 	// 50,000 distinct names in 65,536 hash values: about one other session
@@ -391,7 +391,7 @@ func TestFileStorePageReadsOnlyItsLines(t *testing.T) {
 	for _, i := range []int{0, 1234, n - 1} {
 		p = reads("by name", PageQuery{Limit: 200, Name: fmt.Sprintf("checkout flow %d", i)}, 1, 8)
 		if p.Sessions[0].ID != ids[i] || p.Total != -1 {
-			t.Fatalf("by name: got %s, total %d", p.Sessions[0].ID, p.Total)
+			panic(fmt.Sprintf("by name: got %s, total %d", p.Sessions[0].ID, p.Total))
 		}
 	}
 	reads("by a name no session has", PageQuery{Limit: 200, Name: "no such session"}, 0, 8)
@@ -413,10 +413,10 @@ func TestFileStorePageByNameStopsAtTheLimit(t *testing.T) {
 	before := fs.lineReads.Load()
 	p, err := fs.ListPage(PageQuery{Name: "nightly", Limit: 1})
 	if err != nil || len(p.Sessions) != 1 || p.Sessions[0].ID != ss[n-1].ID || p.Next == "" {
-		t.Fatalf("newest by name: %+v, err %v", p, err)
+		panic(fmt.Sprintf("newest by name: %+v, err %v", p, err))
 	}
 	if got := fs.lineReads.Load() - before; got > 64 {
-		t.Fatalf("the newest of %d sessions with one name took %d archive line reads", n, got)
+		panic(fmt.Sprintf("the newest of %d sessions with one name took %d archive line reads", n, got))
 	}
 }
 
@@ -427,7 +427,7 @@ func TestListSaysWhenSessionsAreUnreadable(t *testing.T) {
 	fs, err := NewFileStore(filepath.Join(t.TempDir(), "s.json"), WithStoreLogger(logs.logger()))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	uncached(fs)
 	const n = 40
@@ -517,7 +517,7 @@ func TestListPageWhileSessionsChange(t *testing.T) {
 				if isStable(i) {
 					wantStable[s.ID] = true
 					if err := st.Put(s); err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 				}
 			}
@@ -577,14 +577,14 @@ func TestListPageWhileSessionsChange(t *testing.T) {
 				for first := true; ; {
 					p, err := pl.ListPage(q)
 					if err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					if p.Unreadable != 0 {
-						t.Fatalf("run %d: %d sessions unreadable", run, p.Unreadable)
+						panic(fmt.Sprintf("run %d: %d sessions unreadable", run, p.Unreadable))
 					}
 					for _, s := range p.Sessions {
 						if k := keyOf(s); !first && !k.older(last) {
-							t.Fatalf("run %d: %s came after %s: twice or out of order", run, s.ID, last.id)
+							panic(fmt.Sprintf("run %d: %s came after %s: twice or out of order", run, s.ID, last.id))
 						} else {
 							last, first = k, false
 						}
@@ -596,7 +596,7 @@ func TestListPageWhileSessionsChange(t *testing.T) {
 				}
 				for id := range wantStable {
 					if !seen[id] {
-						t.Fatalf("run %d (limit %d): %s was in the store all along and is on no page", run, q.Limit, id)
+						panic(fmt.Sprintf("run %d (limit %d): %s was in the store all along and is on no page", run, q.Limit, id))
 					}
 				}
 			}
@@ -619,7 +619,7 @@ func BenchmarkListSessions(b *testing.B) {
 		fs, err := NewFileStore(path)
 		closeLater(b, fs)
 		if err != nil {
-			b.Fatal(err)
+			panic(err)
 		}
 		m := NewManager(Config{Store: fs})
 		b.Cleanup(m.Close)
@@ -637,7 +637,7 @@ func BenchmarkListSessions(b *testing.B) {
 					p, err = fs.ListPage(PageQuery{Limit: 1000, Before: p.Next})
 				}
 				if err != nil || p.Next == "" {
-					b.Fatalf("cursor: %v", err)
+					panic(fmt.Sprintf("cursor: %v", err))
 				}
 				bc.query = "?limit=200&before=" + p.Next
 			}
@@ -649,7 +649,7 @@ func BenchmarkListSessions(b *testing.B) {
 					w := httptest.NewRecorder()
 					h.ServeHTTP(w, r)
 					if w.Code != 200 {
-						b.Fatalf("status %d", w.Code)
+						panic(fmt.Sprintf("status %d", w.Code))
 					}
 					bytes = w.Body.Len()
 				}

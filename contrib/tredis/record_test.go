@@ -3,6 +3,7 @@ package tredis
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -101,7 +102,7 @@ func TestWriteThatAnswersNilIsAMutation(t *testing.T) {
 	servers(t, func(t *testing.T, addr string) {
 		c, rec, ctx := setupAt(t, addr)
 		if err := c.GetSet(ctx, "user:1:a", "v").Err(); err != redis.Nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		c.Do(ctx, "set", "user:1:b", "v", "GET")
 		c.Do(ctx, "set", "user:1:c", "v", "XX", "GET") // no such key: nothing is written
@@ -123,16 +124,16 @@ func TestCommandQueuedByARawMultiIsNotAMutation(t *testing.T) {
 		one := Wrap(redis.NewClient(&redis.Options{Addr: addr, DB: testDB, PoolSize: 1})) // one connection: MULTI is per connection
 		defer one.Close()
 		if err := one.Do(ctx, "multi").Err(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if v, err := one.Do(ctx, "set", "user:20", "q").Result(); err != nil || v != "QUEUED" {
-			t.Fatal(v, err)
+			panic(fmt.Sprint(v, err))
 		}
 		if err := one.Do(ctx, "discard").Err(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if n, _ := one.Exists(context.Background(), "user:20").Result(); n != 0 {
-			t.Fatal("the key was written")
+			panic("the key was written")
 		}
 		for _, e := range rec.Events() {
 			if e.Name != "SET user:20" {
