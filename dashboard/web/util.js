@@ -105,6 +105,7 @@
     if (s.seal_error) w.push('Seal failed: ' + s.seal_error);
     if (s.incomplete) w.push('This session is incomplete: some events or async work may be missing' + (s.dropped_events ? ' (' + s.dropped_events + ' events dropped)' : '') + '. Treat the history as a lower bound.');
     else if (s.dropped_events) w.push(s.dropped_events + ' events were dropped.');
+    (s.incomplete_reasons || []).forEach((r) => w.push('Events did not reach the collector: ' + r));
     return w;
   }
 

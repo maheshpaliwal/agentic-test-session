@@ -57,6 +57,8 @@ assert.strictEqual(U.ndjson([{ a: 1 }, { b: 2 }]), '{"a":1}\n{"b":2}\n');
 assert.strictEqual(U.ndjson([]), '');
 assert.deepStrictEqual(U.sessionWarnings({}), []);
 assert.strictEqual(U.sessionWarnings({ seal_error: 'x', incomplete: true, dropped_events: 3 }).length, 2);
+assert.deepStrictEqual(U.sessionWarnings({ incomplete: true, incomplete_reasons: ['service a (instance i): 0 of 2 recorded events reached the collector'] }).slice(1),
+  ['Events did not reach the collector: service a (instance i): 0 of 2 recorded events reached the collector']);
 assert.strictEqual(U.kindGroup('api.in'), 'api');
 assert.strictEqual(U.kindGroup('db.tx.commit'), 'tx');
 assert.strictEqual(U.kindGroup('db.write'), 'db');

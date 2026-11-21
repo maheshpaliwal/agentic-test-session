@@ -273,7 +273,8 @@ func Stop(t testing.TB, s *client.Session) client.Summary {
 var failuresListed sync.Map
 
 // RequireNoFailures fails the test if the session recorded a failed event or is incomplete (dropped or
-// quarantined events, asynchronous work that never finished).
+// quarantined events, asynchronous work that never finished, events a service recorded and could not
+// deliver to the collector).
 func RequireNoFailures(t testing.TB, s *client.Session) {
 	t.Helper()
 	sum := Stop(t, s)
@@ -290,12 +291,18 @@ func RequireNoFailures(t testing.TB, s *client.Session) {
 	// The control plane knows things the collector's summary does not: a drain
 	// that ran out of time and a seal that failed.
 	info := s.Info()
+	for _, r := range info.IncompleteReasons {
+		t.Errorf("tsession: session %s is incomplete: %s", s.ID, r)
+	}
+	for _, w := range info.DeliveryUnconfirmed {
+		t.Logf("tsession: session %s: delivery unconfirmed: %s", s.ID, w)
+	}
 	switch {
 	case info.SealError != "":
 		t.Errorf("tsession: session %s was not sealed: %s", s.ID, info.SealError)
 	case info.DrainTimedOut:
 		t.Errorf("tsession: session %s stopped draining at its time limit with asynchronous work still running", s.ID)
-	case info.Incomplete && !sum.Incomplete:
+	case info.Incomplete && !sum.Incomplete && len(info.IncompleteReasons) == 0:
 		t.Errorf("tsession: the control plane marked session %s incomplete", s.ID)
 	}
 	if len(sum.Failures) > 0 || sum.Incomplete || info.SealError != "" || info.DrainTimedOut || info.Incomplete {

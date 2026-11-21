@@ -214,6 +214,9 @@ func incompleteReasons(info client.Info, sum client.Summary) []string {
 		}
 		out = append(out, fmt.Sprintf("Unfinished async work: %d published job(s) that a worker %s.", sum.PendingAsync, state))
 	}
+	for _, r := range info.IncompleteReasons {
+		out = append(out, "Events did not reach the collector: "+clip(r, reportErrMax))
+	}
 	if info.SealError != "" {
 		r := "Seal error: the collector could not seal the session: " + clip(info.SealError, reportErrMax)
 		if info.SealPending {

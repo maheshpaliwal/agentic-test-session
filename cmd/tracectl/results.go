@@ -44,7 +44,7 @@ type gates struct{ onError, onIncomplete, onEmpty bool }
 
 func (g *gates) register(fs *flag.FlagSet) {
 	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
-	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work, a failed seal)")
+	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined/undelivered events, orphaned async work, a failed seal)")
 	fs.BoolVar(&g.onEmpty, "fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
 }
 
@@ -60,7 +60,11 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 	switch {
 	case !g.onIncomplete:
 	case sum.Incomplete || info.Incomplete || info.SealError != "":
-		failed = append(failed, "session is incomplete")
+		msg := "session is incomplete"
+		if len(info.IncompleteReasons) > 0 {
+			msg += " (" + strings.Join(info.IncompleteReasons, "; ") + ")"
+		}
+		failed = append(failed, msg)
 	case info.State == "":
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
@@ -83,7 +87,7 @@ const emptySession = "session recorded no events (see tracectl doctor)"
 
 func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	state := info.State
-	if sum.Incomplete {
+	if sum.Incomplete || len(info.IncompleteReasons) > 0 {
 		state += ", incomplete"
 	}
 	fmt.Fprintf(w, "session    %s  %s  (%s)\n", info.ID, displayName(info), state)
@@ -98,6 +102,15 @@ func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	}
 	if sum.DroppedEvents > 0 || sum.Quarantined > 0 {
 		fmt.Fprintf(w, "lost       %d dropped by SDKs, %d quarantined by the collector\n", sum.DroppedEvents, sum.Quarantined)
+	}
+	// Events that never reached the collector are in none of the counts
+	// above: only the service that recorded them knows, and it told the
+	// control plane.
+	for _, r := range info.IncompleteReasons {
+		fmt.Fprintf(w, "delivery   incomplete: %s\n", clip(r, 400))
+	}
+	for _, r := range info.DeliveryUnconfirmed {
+		fmt.Fprintf(w, "delivery   unconfirmed: %s\n", clip(r, 400))
 	}
 	if len(sum.ByKind) > 0 {
 		fmt.Fprintf(w, "by kind    %s\n", joinCounts(sum.ByKind))
