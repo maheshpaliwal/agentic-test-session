@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -52,6 +55,9 @@ type Exporter struct {
 	// collector is abandoned instead of holding up shutdown.
 	ctx    context.Context
 	cancel context.CancelFunc
+	// lastErr is why the last request to the collector failed, nil once one
+	// succeeded. The delivery reporter reads it.
+	lastErr atomic.Pointer[string]
 
 	// Everything below is touched by the export goroutine only.
 
@@ -271,6 +277,9 @@ type batch struct {
 	// accepted says that the collector took events; total that a request
 	// failed without the collector blaming a session.
 	accepted, total bool
+	// rejected is how many of the events it answered for the collector
+	// rejected (see countRejected).
+	rejected int
 }
 
 type eventState uint8
@@ -372,6 +381,9 @@ func (e *Exporter) resolve(b *batch) (lost []core.Event) {
 	// sent are the sessions of the batch; open those with an unresolved
 	// event, took those with a delivered one.
 	sent, open, took := set.Set[string]{}, set.Set[string]{}, set.Set[string]{}
+	// o counts the ring events the collector answered for, for the delivery
+	// accounts. An sdk.dropped event is not an event of the session.
+	o := outcome{delivered: map[string]uint64{}, rejected: uint64(b.rejected)}
 	for i := range b.evs {
 		sid := b.evs[i].SessionID
 		sent.Add(sid)
@@ -381,6 +393,12 @@ func (e *Exporter) resolve(b *batch) (lost []core.Event) {
 		}
 		if b.state[i] == eventDelivered {
 			took.Add(sid)
+			if i < len(b.ids) {
+				if o.delivered[sid] == 0 {
+					o.order = append(o.order, sid)
+				}
+				o.delivered[sid]++
+			}
 		} else {
 			lost = append(lost, b.evs[i])
 		}
@@ -390,8 +408,8 @@ func (e *Exporter) resolve(b *batch) (lost []core.Event) {
 			delete(e.drops, sid)
 		}
 	}
-	e.rec.settle(b.ids, gone)
-	e.rec.AddDrops(lost)
+	o.lost = lost
+	e.rec.settle(b.ids, gone, &o)
 
 	now := time.Now()
 	heldChanged := false
@@ -535,6 +553,9 @@ type answer struct {
 	// of every session it did not name.
 	failed          set.Set[string]
 	took, tookOther bool
+	// rejected is the number of events the answer rejected, when it was
+	// counted as dropped (see countRejected).
+	rejected int
 }
 
 // send ships the events of b at idx in order and records what became of
@@ -564,6 +585,7 @@ func (e *Exporter) send(b *batch, idx []int) bool {
 			a.result = postPermanent
 		}
 	}
+	b.rejected += a.rejected
 	switch a.result {
 	case postOK:
 		b.accepted = true
@@ -627,12 +649,14 @@ func (e *Exporter) post(batch []core.Event) answer {
 		}
 		req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, e.cfg.CollectorURL+"/v1/ingest", bytes.NewReader(body))
 		if err != nil {
-			return answer{result: postPermanent} // malformed collector URL; retrying will not help
+			e.noteErr("the collector URL is malformed")
+			return answer{result: postPermanent} // retrying will not help
 		}
 		req.Header.Set("Content-Type", e.cfg.Encoder.ContentType())
 		req.Header.Set("X-TSession-Instance", inst)
 		resp, err := e.client.Do(req)
 		if err != nil {
+			e.noteErr(scrubError(err))
 			continue
 		}
 		rb, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
@@ -641,21 +665,25 @@ func (e *Exporter) post(batch []core.Event) answer {
 		parsed := rerr == nil && json.Unmarshal(rb, &ir) == nil
 		switch {
 		case resp.StatusCode/100 == 2:
+			e.lastErr.Store(nil)
+			a := answer{result: postOK}
 			if parsed {
-				e.countRejected(batch, ir.Rejected, nil)
+				a.rejected = e.countRejected(batch, ir.Rejected, nil)
 			}
-			return answer{result: postOK}
+			return a
 		case resp.StatusCode == http.StatusRequestEntityTooLarge:
 			return answer{result: postTooLarge}
 		case resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusTooManyRequests:
+			e.noteErr(fmt.Sprintf("the collector refused the events (HTTP %d)", resp.StatusCode))
 			return answer{result: postPermanent}
 		}
+		e.noteErr(fmt.Sprintf("the collector answered HTTP %d", resp.StatusCode))
 		if !parsed {
 			continue
 		}
 		if a, ok := failedSessions(batch, ir); ok {
 			if a.tookOther {
-				e.countRejected(batch, ir.Rejected, a.failed)
+				a.rejected = e.countRejected(batch, ir.Rejected, a.failed)
 			}
 			return a // the sessions' own backoff is the retry
 		}
@@ -688,18 +716,68 @@ func failedSessions(batch []core.Event, ir ingestAnswer) (a answer, ok bool) {
 // countRejected adds the events the collector rejected, in an answer that
 // took events of the batch, to the drop count of the first session it took.
 // It does not count for batches made only of sdk.dropped events, or a
-// collector that rejects them would feed itself forever.
-func (e *Exporter) countRejected(batch []core.Event, rejected int, failed set.Set[string]) {
+// collector that rejects them would feed itself forever. It returns the
+// number it counted.
+func (e *Exporter) countRejected(batch []core.Event, rejected int, failed set.Set[string]) int {
 	if rejected <= 0 {
-		return
+		return 0
 	}
 	for i := range batch {
 		if batch[i].Kind != core.KindSDKDropped && !failed.Has(batch[i].SessionID) {
 			e.rec.AddDropCount(batch[i].SessionID, uint64(rejected))
-			return
+			return rejected
 		}
 	}
+	return 0
 }
+
+// noteErr remembers why a request failed, for the delivery report. A request
+// cut short by Close says nothing about the collector.
+func (e *Exporter) noteErr(msg string) {
+	if e.ctx.Err() == nil {
+		e.lastErr.Store(&msg)
+	}
+}
+
+// lastError is why the last request to the collector failed, "" when it did
+// not.
+func (e *Exporter) lastError() string {
+	if p := e.lastErr.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// scrubError is the text of a failed request without what the URL may carry
+// of credentials (userinfo, query), cut to what a delivery report holds.
+func scrubError(err error) string {
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		msg = ue.Op + " " + DisplayURL(ue.URL) + ": " + ue.Err.Error()
+	}
+	if len(msg) > maxReportError {
+		msg = msg[:maxReportError]
+	}
+	return msg
+}
+
+// kick asks for one forced pass (every failing session is retried, whatever
+// its backoff or the cooldown) without waiting for its result. It does
+// nothing while a pass is running. It waits a moment for the export
+// goroutine: a send that does not wait at all misses it whenever that is
+// awake for its own ticker, and two tickers started together fire together.
+func (e *Exporter) kick() {
+	t := time.NewTimer(kickWait)
+	defer t.Stop()
+	select {
+	case e.flushReq <- make(chan bool, 1):
+	case <-e.done:
+	case <-t.C:
+	}
+}
+
+const kickWait = 10 * time.Millisecond
 
 // Flush exports everything buffered and reports whether the ring was emptied
 // within timeout. While the collector is failing, as a whole or for single

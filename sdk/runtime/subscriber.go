@@ -20,10 +20,13 @@ type activeSet struct {
 	Kill      bool     `json:"kill"`
 	// Bindings is optional: older control planes omit it.
 	Bindings []core.Binding `json:"bindings"`
+	// Draining is optional too: the ids in Active that are DRAINING.
+	Draining []string `json:"draining"`
 }
 
 type snapshot struct {
 	active    map[string]struct{}
+	draining  map[string]struct{}
 	exclusive string
 	kill      bool
 	bindings  core.BindingSet
@@ -42,6 +45,9 @@ type Subscriber struct {
 	snap       atomic.Pointer[snapshot]
 	ready      atomic.Bool
 	streaming  atomic.Bool
+	// connects counts the streams opened: a new one may lead to another
+	// control plane (a restart, an upgrade).
+	connects atomic.Uint64
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -144,7 +150,8 @@ func (s *Subscriber) Close() {
 }
 
 func (s *Subscriber) apply(a activeSet) {
-	sn := &snapshot{active: set.Of(a.Active...), exclusive: a.Exclusive, kill: a.Kill, bindings: core.NewBindingSet(a.Bindings)}
+	sn := &snapshot{active: set.Of(a.Active...), draining: set.Of(a.Draining...), exclusive: a.Exclusive, kill: a.Kill,
+		bindings: core.NewBindingSet(a.Bindings)}
 	s.snap.Store(sn)
 	s.ready.Store(true)
 }
@@ -216,6 +223,7 @@ func (s *Subscriber) stream(parent context.Context) bool {
 		return false
 	}
 	s.streaming.Store(true)
+	s.connects.Add(1)
 	defer s.streaming.Store(false)
 
 	watchdog := time.AfterFunc(s.idle, cancel)

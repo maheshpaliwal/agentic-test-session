@@ -371,6 +371,30 @@ func propCase(seed int64) (out propResult) {
 		defer m.mu.Unlock()
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
+		// The delivery accounts: they agree with the ring at every moment, they
+		// never claim an event the collector does not have, and at the end
+		// every recorded event is delivered or dropped. Without lost answers
+		// they are exactly what the collector stored and was told was dropped.
+		for _, msg := range accountErrorsLocked(rec) {
+			bad("%s: %s", when, msg)
+		}
+		for _, sid := range sids {
+			a := account{}
+			if p := rec.acct[sid]; p != nil {
+				a = *p
+			}
+			stored := uint64(len(m.delivered[sid]))
+			switch {
+			case a.recorded != uint64(want[sid]):
+				bad("%s: session %s: account says %d recorded, %d were", when, sid, a.recorded, want[sid])
+			case a.delivered > stored:
+				bad("%s: session %s: account claims %d delivered, the collector stored %d", when, sid, a.delivered, stored)
+			case end && (a.buffered() != 0 || stored > a.delivered+uint64(m.unacked[sid])):
+				bad("%s: session %s: account %+v at the end; the collector stored %d (%d without an answer)", when, sid, a, stored, m.unacked[sid])
+			case end && timeout == 2*time.Second && (a.delivered != stored || a.dropped != m.dropped[sid]):
+				bad("%s: session %s: account %+v, the collector stored %d and was told of %d dropped", when, sid, a, stored, m.dropped[sid])
+			}
+		}
 		for _, sid := range sids {
 			if end && rec.drops[sid] != 0 {
 				bad("%s: session %s: %d drops are not reported", when, sid, rec.drops[sid])
@@ -451,6 +475,9 @@ func propCase(seed int64) (out propResult) {
 		exp.Close(to)
 		if d := time.Since(start); d > to+500*time.Millisecond { // room for a busy machine under -race
 			bad("Close(%v) took %v", to, d)
+		}
+		for _, msg := range accountErrors(rec) { // what Close left in the ring is still accounted as buffered
+			bad("after Close: %s", msg)
 		}
 	} else {
 		m.mu.Lock()
