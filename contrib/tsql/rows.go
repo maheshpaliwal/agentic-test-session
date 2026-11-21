@@ -51,7 +51,7 @@ func (r *rows) note(dest []driver.Value) {
 		if r.cols == nil {
 			r.cols = r.inner.Columns()
 		}
-		r.data = append(r.data, rowMap(r.cols, dest))
+		r.data = append(r.data, rowMap(r.cols, dest, r.pkCols))
 		r.raws = append(r.raws, rawPK(r.cols, dest, r.pkCols))
 	}
 }

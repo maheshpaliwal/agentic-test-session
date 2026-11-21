@@ -1,9 +1,12 @@
 package tsql
 
 import (
+	"crypto/sha256"
 	"database/sql/driver"
+	"encoding/hex"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,25 +21,140 @@ const maxCellLen = 1024
 const truncMark = "...[truncated]"
 
 // toValue converts a driver value into something JSON-friendly. It copies
-// byte slices because drivers reuse buffers.
-func toValue(v any, max int) any {
+// byte slices because drivers reuse buffers. Binary data is only counted
+// ("<3 bytes>"); see keyValue for the values of key columns.
+func toValue(v any, max int) any { return render(v, max, false) }
+
+// Limits of a key value's display form. A binary key is shown whole, in hex,
+// up to maxKeyBytes; a longer one, like a text key longer than maxCellLen,
+// keeps a prefix and ends in its length and a hash of the whole value.
+const (
+	maxKeyBytes    = 64
+	keyPrefixBytes = 32
+	keyHashBytes   = 8
+)
+
+// keyValue is toValue for the value of a primary-key column. Rows are told
+// apart and filed by this form, so two different keys must never look the
+// same, which a count of bytes and a cut-off prefix do:
+//
+//   - binary data (bytes that are not UTF-8) is written in hex, Postgres
+//     style: \xfffe0001. Beyond maxKeyBytes it is the first keyPrefixBytes
+//     and "...[100 bytes sha256:0123456789abcdef]";
+//   - text is kept as text up to maxCellLen bytes, then cut and given the
+//     same ending;
+//   - bytes that are text which itself starts with \x are written in hex, so
+//     no text reads like the hex form of other bytes.
+//
+// The same value has the same form wherever it comes from (a row image, a
+// bind argument), so before, after and PK of a mutation agree.
+func keyValue(v any) any { return render(v, maxCellLen, true) }
+
+func render(v any, max int, key bool) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
 	case []byte:
-		if utf8.Valid(x) {
-			return capStr(string(x), max)
-		}
-		return fmt.Sprintf("<%d bytes>", len(x))
+		return renderBytes(x, max, key)
 	case string:
+		if key {
+			return capKey(x, max)
+		}
 		return capStr(x, max)
 	case time.Time:
 		return x.UTC().Format(time.RFC3339Nano)
 	case int64, float64, bool, int, int32, float32, uint64:
 		return x
-	default:
-		return capStr(fmt.Sprint(x), max)
 	}
+	// What a driver that checks its own arguments (pgx) lets through. A
+	// Valuer says what it stands for (pgtype.UUID, pgtype.Text, sql.Null*);
+	// one that renders itself is taken at its word (uuid.UUID); a byte array
+	// or a named byte slice is bytes, and 16 of them in an array are a UUID.
+	if vr, ok := v.(driver.Valuer); ok {
+		if val, ok := valuerValue(vr); ok {
+			if _, again := val.(driver.Valuer); !again {
+				return render(val, max, key)
+			}
+		}
+	} else if _, ok := v.(fmt.Stringer); !ok {
+		if b, isUUID, ok := byteSeq(v); ok {
+			if isUUID {
+				return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+			}
+			return renderBytes(b, max, key)
+		}
+	}
+	if key {
+		return capKey(fmt.Sprint(v), max)
+	}
+	return capStr(fmt.Sprint(v), max)
+}
+
+func renderBytes(b []byte, max int, key bool) any {
+	switch {
+	case !key && utf8.Valid(b):
+		return capStr(string(b), max)
+	case !key:
+		return fmt.Sprintf("<%d bytes>", len(b))
+	case utf8.Valid(b) && !strings.HasPrefix(string(b), `\x`):
+		return capKey(string(b), max)
+	case len(b) <= maxKeyBytes:
+		return `\x` + hex.EncodeToString(b)
+	}
+	return `\x` + hex.EncodeToString(b[:keyPrefixBytes]) + keyTail(b)
+}
+
+// keyTail ends a key value that is not shown whole.
+func keyTail[T string | []byte](whole T) string {
+	sum := sha256.Sum256([]byte(whole))
+	return fmt.Sprintf("...[%d bytes sha256:%x]", len(whole), sum[:keyHashBytes])
+}
+
+// capKey is capStr for a key value: what is cut off is replaced by the
+// value's length and hash, so two long keys with the same beginning differ.
+func capKey(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + keyTail(s)
+}
+
+// valuerValue calls v.Value like database/sql does: a nil pointer whose
+// method has a value receiver is NULL, and a Valuer that fails or panics is
+// rendered as it is.
+func valuerValue(v driver.Valuer) (val driver.Value, ok bool) {
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return nil, true
+	}
+	defer func() {
+		if recover() != nil {
+			val, ok = nil, false
+		}
+	}()
+	val, err := v.Value()
+	return val, err == nil
+}
+
+// byteSeq returns the bytes of a byte array or of a named byte slice.
+func byteSeq(v any) (b []byte, uuid, ok bool) {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return rv.Bytes(), false, true
+		}
+	case reflect.Array:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			b = make([]byte, rv.Len())
+			reflect.Copy(reflect.ValueOf(b), rv)
+			return b, len(b) == 16, true
+		}
+	}
+	return nil, false, false
 }
 
 func capStr(s string, max int) string {
@@ -50,14 +168,27 @@ func capStr(s string, max int) string {
 	return s
 }
 
-func rowMap(cols []string, dest []driver.Value) map[string]any {
+// rowMap renders one result row. The columns named in pkCols are the row's
+// key and get the faithful form of keyValue.
+func rowMap(cols []string, dest []driver.Value, pkCols []string) map[string]any {
 	m := make(map[string]any, len(cols))
 	for i, c := range cols {
 		if i < len(dest) {
-			m[c] = toValue(dest[i], maxCellLen)
+			m[c] = render(dest[i], maxCellLen, isKeyCol(c, pkCols))
 		}
 	}
 	return m
+}
+
+// isKeyCol reports whether col is one of pkCols, compared as rawPK and
+// lookupCI compare column names.
+func isKeyCol(col string, pkCols []string) bool {
+	for _, pc := range pkCols {
+		if strings.EqualFold(col, pc) {
+			return true
+		}
+	}
+	return false
 }
 
 // argValues renders bind arguments; masked positions become core.RedactedValue.

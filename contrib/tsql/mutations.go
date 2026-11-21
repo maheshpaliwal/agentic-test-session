@@ -10,14 +10,15 @@ import (
 )
 
 // resolve evaluates an operand to its display form and the faithful driver
-// value (used for binding, never the lossy display form).
-func (t *stmtTrace) resolve(v mutation.Value) (disp any, raw driver.Value, ok bool) {
+// value (used for binding, never the lossy display form). key says the
+// operand is the value of a key column (see keyValue).
+func (t *stmtTrace) resolve(v mutation.Value, key bool) (disp any, raw driver.Value, ok bool) {
 	if v.Arg >= 0 {
 		if v.Arg >= len(t.args) {
 			return nil, nil, false
 		}
 		raw = t.args[v.Arg].Value
-		return toValue(raw, maxCellLen), raw, true
+		return render(raw, maxCellLen, key), raw, true
 	}
 	return v.Literal, v.Literal, true
 }
@@ -37,7 +38,7 @@ func (t *stmtTrace) pkFromValues(m map[string]mutation.Value, pkCols []string) p
 		if !ok {
 			return pkRef{}
 		}
-		d, r, ok := t.resolve(v)
+		d, r, ok := t.resolve(v, true)
 		if !ok {
 			return pkRef{}
 		}
@@ -179,7 +180,7 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		} else if t.cfg.images {
 			row := map[string]any{}
 			for col, v := range in.Values {
-				if d, _, ok := t.resolve(v); ok {
+				if d, _, ok := t.resolve(v, isKeyCol(col, pkCols)); ok {
 					row[col] = d
 				}
 			}

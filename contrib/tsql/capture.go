@@ -303,7 +303,7 @@ func (c *conn) fetchImgs(ctx context.Context, q string, vals []driver.Value, lim
 	}
 	out := make([]img, len(rs))
 	for i, row := range rs {
-		out[i] = img{disp: rowMap(cols, row), raw: rawPK(cols, row, pkCols)}
+		out[i] = img{disp: rowMap(cols, row, pkCols), raw: rawPK(cols, row, pkCols)}
 	}
 	return out, nil
 }

@@ -53,6 +53,21 @@
 // "id" does not identify a row. A table without a primary key and a view
 // have nothing to find: declare their key with WithPKColumns.
 //
+// Rows are told apart by the recorded value of their key, so a key value is
+// recorded in a form that no other value shares, the same in the mutation's
+// pk and in its row images, and the same whether it was read from a row or
+// taken from a bind argument. Text and numbers are recorded as they are. A
+// binary key (bytes that are not UTF-8 text; a bytea, BINARY or BLOB key) is
+// recorded in hex, "\xfffe0001"; bytes that are text are recorded as that
+// text, unless it starts with "\x". A binary key of more than 64 bytes keeps
+// its first 32 and ends in its length and a hash of the whole value,
+// "...[100 bytes sha256:0123456789abcdef]"; a text key of more than 1024
+// bytes is cut and ends the same way. A uuid is recorded in its text form,
+// also when it is bound as 16 bytes or as a driver.Valuer (pgtype.UUID).
+// Binary values of other columns are only counted ("<3 bytes>"), so a change
+// that keeps the length does not show in the diff. A key column with a
+// sensitive name is masked like any other.
+//
 // Three flags mark a write whose key or new values are not known:
 //
 //   - "pk_unknown": no value for the key columns was found in the row images,
