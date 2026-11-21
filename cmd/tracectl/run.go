@@ -23,7 +23,7 @@ const (
 		"[--report FILE [--format markdown|junit]] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.
-	sessionEnv = "TSESSION_ID"
+	sessionEnv = client.SessionEnv
 
 	// What env(1) and timeout(1) exit with when the command cannot be run.
 	exitCannotRun = 126
@@ -191,7 +191,9 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	var gateErr error
 	if waitCtx.Err() == nil {
 		readCtx, cancel := context.WithTimeout(waitCtx, runResultsTimeout)
-		gateErr, err = c.runResults(readCtx, s, &g, *reportPath, *format, render)
+		// In header mode without bindings only what carries the id is recorded.
+		byID := opts.Mode != "exclusive" && len(opts.Bindings) == 0
+		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render)
 		cancel()
 		if err != nil {
 			failed = true
@@ -216,8 +218,9 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 }
 
 // runResults prints the summary of the session run recorded, writes its
-// report and returns the verdict of the gates.
-func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, reportPath, format string,
+// report and returns the verdict of the gates. byID says that the session
+// records only requests that carry its id; an empty one then gets a hint.
+func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID bool, reportPath, format string,
 	render func(*sessionReport) ([]byte, error)) (gateErr, err error) {
 	if render == nil {
 		sum, err := s.Summary(ctx)
@@ -225,6 +228,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, repor
 			return nil, err
 		}
 		printSummary(c.stderr, s.Info(), sum)
+		c.hintUntagged(byID, sum)
 		return g.check(s.Info(), sum, len(sum.Failures)), nil
 	}
 	rep, err := loadReport(ctx, s)
@@ -232,12 +236,25 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, repor
 		return nil, err
 	}
 	printSummary(c.stderr, rep.info, rep.sum)
+	c.hintUntagged(byID, rep.sum)
 	gateErr = g.check(rep.info, rep.sum, len(rep.failures))
 	out, err := render(rep)
 	if err != nil {
 		return gateErr, err
 	}
 	return gateErr, c.writeReportFile(reportPath, format, out)
+}
+
+// hintUntagged says, for an empty session that records by id, what most
+// often went wrong: the command did not send the id. Go tests written with
+// tsessiontest.Run are the common case: each records in a session of its own.
+func (c *cli) hintUntagged(byID bool, sum client.Summary) {
+	if !byID || sum.EventCount != 0 {
+		return
+	}
+	fmt.Fprintln(c.stderr, "tracectl: nothing was recorded: the command has to send $"+sessionEnv+
+		" as the x-tsession-id header itself (Go: client.AttachEnv, tsessiontest.Ambient)")
+	fmt.Fprintln(c.stderr, "tracectl: sessions the command starts on its own, such as those of tsessiontest.Run, are separate from this one")
 }
 
 // stopRetryEvery is the pause between attempts to stop the session while

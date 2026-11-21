@@ -90,8 +90,10 @@ Prefer the variables for connection strings: flag values show up in the process 
 | `--collector` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` |
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
-command only. Nothing reads it by itself: the command sends it as the `x-tsession-id` header (or uses a binding
-or `--mode exclusive`, which need no id). When `--cp` or `--collector` were given on the command line, the
+command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or
+uses a binding or `--mode exclusive`, which need no id). In Go, `client.AttachEnv` and `tsessiontest.Ambient`
+read `TSESSION_ID` and return that session for tagging requests; `tsessiontest.Run` does not read it and starts
+a session per test, as it does without `tracectl run`. When `--cp` or `--collector` were given on the command line, the
 command also gets them as `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`. The session's TTL (`--ttl`,
 default one hour) must be longer than the command takes, or the session expires under it.
 

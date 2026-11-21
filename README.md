@@ -134,6 +134,17 @@ Stopping a session waits for it to go quiet (3s by default), so each such test t
 `sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
 `Trace`).
 
+Such tests need only `go test`. Under `tracectl run -- go test ./...` they still record in their own sessions,
+and the session of `tracectl run` stays empty (`--fail-on-empty` then fails). To record a whole `go test` as one
+session instead, let the tests join it, and leave the verdict to the gates of `tracectl run`:
+
+```go
+sess := tsessiontest.Ambient(t, client.Options{})   // the session in $TSESSION_ID; fails the test without one
+// ... drive the system with sess.Header() or sess.Transport(nil); no Require calls: the session is shared ...
+```
+
+Outside a test, `client.AttachEnv` returns the same session.
+
 ```bash
 # one line: start a session, run the tests with its id in $TSESSION_ID, stop, wait for the seal, print the summary
 tracectl run --name my-run --fail-on-error --fail-on-incomplete --fail-on-empty --report tsession.md -- ./run-e2e.sh
