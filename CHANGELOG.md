@@ -18,9 +18,20 @@ Before deploying:
   for an `UPDATE` whose row cannot be read back. Tests that assert on recorded keys or diffs of tables keyed by
   something other than `id` will see different values, and the database user needs to read the catalog
   (`pg_index`, `information_schema`); `WithPKLookup(false)` restores the old key choice.
-- `tsql` records binary and over-long primary-key values in a new form (`\xfffe0001`; beyond 64 bytes a
-  prefix plus `...[N bytes sha256:…]`), so that different rows no longer share a key. Events recorded earlier
-  show such keys as `<3 bytes>` and file under a different key.
+- `tsql` records binary primary-key values in hex (`\xfffe0001`; beyond 64 bytes a prefix plus
+  `...[N bytes sha256:…]`), so that different rows no longer share a key; text keys are kept whole up to 1024
+  bytes. Events recorded earlier show a binary key as `<3 bytes>` and file under a different key. Note that the
+  bytes of a binary key are now in the recording, where before only their length was.
+- `controlplane.NewFileStore` takes options (`NewFileStore(path, opts ...FileStoreOption)`); code that holds it
+  as a `func(string)` value no longer compiles. In package `dashboard`, `Session` and `Binding` are now the
+  `controlplane` types (`CreatedAt` is a `time.Time`, not a string), and `BuildTrace`, `Node`, `EntityRef` and
+  `EntityMutation` are gone.
+- Recorded inbound request headers now include `x-tsession-traceparent`, which changes payload sizes and
+  saved exports.
+- The SDK exporter keeps events until the collector accepts them: `Flush` returns false while events are
+  buffered, and `runtime.Stop` with an unreachable collector takes its full 2s. Events reach the collector's
+  store 0.5 to 1s after arrival at the default window (it was up to 0.5s). Test teardowns and tests that read
+  results at once may need to wait (`Session.StopAndWait` does).
 - `tsql` records an upsert that updated a row with op `update`, where it recorded `upsert`. An assertion that
   filters on `Op: "upsert"` (for example `tsessiontest.RequireMutation`) no longer matches those rows, and
   `ON CONSTRAINT` upserts lose their image and carry `upsert_unknown`.
@@ -75,6 +86,8 @@ Rolling back:
 
 ### Added
 
+- `tracectl start --id-only` prints just the session id, for scripts; `tracectl doctor --require-services N`
+  exits 3 with fewer connected SDK instances (a CI preflight).
 - **`tracectl digest <id|name>`**: a whole session in one bounded answer for an AI agent or a person: the
   verdict, the failures with where they sit in the call tree, what changed (with uncertain records marked) and
   the call tree with repeated siblings collapsed (`40x`). It never exceeds `--max-bytes` (default 16384) and
@@ -175,7 +188,8 @@ Rolling back:
   during an outage. `Flush` returns false while events are buffered, and `runtime.Stop` with an unreachable
   collector takes its full 2s.
 - **Control plane file store** (`--store-file`). Changes are appended to `<file>.journal` instead of rewriting
-  the whole file under the session lock; finished sessions past retention live in `<file>.archive` with a small
+  the whole file under the session lock (the journal is new; `<file>.archive` already existed); finished sessions
+  past retention live in `<file>.archive` with a small
   index in memory and are read on demand (one file descriptor stays open); deleting an archived session
   overwrites its line in place. Snapshots are fsynced; torn lines and leftover temp files are tolerated; damaged
   archive lines are saved to `<file>.archive.corrupt` and reported at start; an archived session that cannot be
@@ -201,9 +215,10 @@ Rolling back:
   `rows_redacted_conservatively`, `diff_truncated`.
 - The dashboard proxy forwards `DELETE` for exactly `/v1/sessions/{id}` on the control plane: anyone who can
   reach the dashboard can delete finished sessions. The kill switch and the collector's internal API stay
-  blocked.
+  blocked. The proxy also serves `GET /metrics` of both services and the control plane's
+  `GET /v1/subscribers` (the names of connected services) to anyone who can reach the dashboard.
 - The collector has a read timeout of one minute per request and the servers close idle connections after two
-  minutes (the dashboard after one).
+  minutes.
 
 ### Fixed
 
@@ -274,8 +289,7 @@ Rolling back:
   the application's transaction, or in autocommit a read-only transaction that made the application's write
   fail. The fence is now closed under its own deadline.
 - `tracectl report`: a session with no events is headed **Empty**, not **Passed**; with `--fail-on-empty` the
-  job summary used to say "Passed" on a failed job. `tracectl start --id-only` prints just the id for scripts,
-  and `tracectl doctor --require-services N` exits 3 with fewer connected services (a CI preflight).
+  job summary used to say "Passed" on a failed job.
 - `tsessiontest`: a failed event reported by `RequireNoFailures` is no longer printed a second time when the
   test ends.
 - Collector: an ingest racing with shutdown could panic (send on a closed channel); it now gets `503`. A seal
