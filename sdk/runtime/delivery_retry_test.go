@@ -206,13 +206,14 @@ func TestReporterOpensTheStreamAnewWhenItsReportsFailForTheGrace(t *testing.T) {
 			panic(fmt.Sprintf("%d streams after an outage far shorter than the grace, want the two the test opened", len(s)))
 		}
 	})
-	// Reports that never arrived on the stream: the control plane has not
-	// heard of this process on its connection, and names it already. Another
-	// stream would change nothing, take the process off the control plane's
-	// list for a moment, and hold the drain of a session it took part in for
-	// another grace. (It did: a service that delivered its events and whose
-	// reports were refused from the start left its first session complete.)
-	t.Run("never heard of on its stream: the stream stays", func(t *testing.T) {
+	// Reports that were refused on the stream from the start: the control
+	// plane has not heard of this process on its connection, and names it
+	// already. Another stream would change nothing, take the process off the
+	// control plane's list for a moment, and hold the drain of a session it
+	// took part in for another grace. (It did: a service that delivered its
+	// events and whose reports were refused from the start left its first
+	// session complete.)
+	t.Run("refused from the start, never heard of on its stream: the stream stays", func(t *testing.T) {
 		const period = 50 * time.Millisecond
 		cp := newReportCP(t, fmt.Sprintf(`{"active":["someone-elses"],"delivery_reports":true,"delivery_heartbeat_ms":%d}`, period.Milliseconds()))
 		cp.setStatus(http.StatusForbidden)
@@ -223,11 +224,35 @@ func TestReporterOpensTheStreamAnewWhenItsReportsFailForTheGrace(t *testing.T) {
 			panic(fmt.Sprintf("%d streams of a process whose reports never arrived, want the one", len(s)))
 		}
 	})
+	// Reports that were lost from the start, not refused (the fifth review: a
+	// gateway that passed the first one on and answered 504): the control
+	// plane may have heard of this process, which cannot know. One more
+	// stream, on which it has not; and no further one.
+	t.Run("lost from the start: once", func(t *testing.T) {
+		const period = 50 * time.Millisecond
+		cp := newReportCP(t, fmt.Sprintf(`{"active":["someone-elses"],"delivery_reports":true,"delivery_heartbeat_ms":%d}`, period.Milliseconds()))
+		cp.setStatus(http.StatusGatewayTimeout)
+		began := time.Now()
+		// A stream at most every ReopenGap, were the rule broken: far more than 2.
+		newReportEnvOn(t, cp, nil, func(c *reporterConfig) { c.RetryBase, c.ReopenGap = 5*time.Millisecond, time.Millisecond })
+		eventually(t, "a second stream", func() bool { return len(cp.streams()) == 2 })
+		if d := time.Since(began); d < 2*period {
+			panic(fmt.Sprintf("the stream was opened anew after %v, before the grace of %v was up", d, 2*period))
+		}
+		n := cp.postCount()
+		eventually(t, "attempts on the new stream", func() bool { return cp.postCount() >= n+3 })
+		time.Sleep(10 * period) // five graces
+		if s := cp.streams(); len(s) != 2 {
+			panic(fmt.Sprintf("%d streams of a process whose reports got no answer from the start, want 2", len(s)))
+		}
+	})
 	for _, code := range []int{http.StatusServiceUnavailable, http.StatusForbidden} {
 		t.Run(fmt.Sprintf("HTTP %d for the grace: once", code), func(t *testing.T) {
 			const period = 100 * time.Millisecond // a grace of 200ms
 			cp := newReportCP(t, fmt.Sprintf(`{"active":["someone-elses"],"delivery_reports":true,"delivery_heartbeat_ms":%d}`, period.Milliseconds()))
-			newReportEnvOn(t, cp, nil, func(c *reporterConfig) { c.RetryBase = 5 * time.Millisecond })
+			// Two streams are never closer than a grace, or ReopenGap (5s by
+			// default: longer than the test waits for the second outage).
+			newReportEnvOn(t, cp, nil, func(c *reporterConfig) { c.RetryBase, c.ReopenGap = 5*time.Millisecond, time.Millisecond })
 			eventually(t, "the hello", func() bool { return cp.beats() >= 1 })
 			failedAt := time.Now()
 			cp.setStatus(code)

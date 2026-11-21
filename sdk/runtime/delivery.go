@@ -157,6 +157,14 @@ type reporterConfig struct {
 	// report endpoint that ends within the drain must not cost a session its
 	// report.
 	DrainRetry time.Duration
+	// ReopenGap is the least time between two streams this process opens
+	// anew because its reports fail (default 5s; see reporter.failed). The
+	// gap is a grace of the control plane when that is longer, so this is the
+	// bound that holds whatever period the control plane asks for.
+	ReopenGap time.Duration
+	// Now is the clock (default time.Now): a test runs a day of failures
+	// through the reporter without waiting for it.
+	Now func() time.Time
 }
 
 // reporter sends the delivery accounts of the recorder to the control plane:
@@ -199,6 +207,14 @@ type reporter struct {
 	failingSince time.Time
 	askNow       bool
 	idleAt       time.Time
+	// reopened: the stream that is open is one this process opened anew
+	// itself (see failed). lost: a request on it got no answer, or the answer
+	// of something that failed (a 5xx), so it may have arrived all the same;
+	// a refusal (4xx) is the answer of something that did not pass it on.
+	// reopenedAt is when a stream was last opened anew.
+	reopened   bool
+	lost       bool
+	reopenedAt time.Time
 	// refused: the last report was refused (a 4xx), not lost. It is not sent
 	// again while no session runs (see pass).
 	refused  bool
@@ -253,6 +269,10 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	def(&cfg.Timeout, 2*time.Second)
 	def(&cfg.RetryBase, time.Second)
 	def(&cfg.DrainRetry, 200*time.Millisecond)
+	def(&cfg.ReopenGap, 5*time.Second)
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	def(&cfg.Heartbeat, 5*time.Second)
 	def(&cfg.PassBudget, cfg.Tick)
 	if cfg.Burst <= 0 {
@@ -373,6 +393,7 @@ func (r *reporter) pass() {
 	if c := r.sub.connects.Load(); c != r.connects {
 		r.connects, r.mode, r.hello, r.refused = c, modeBatch, true, false
 		r.reachTold = nil // what is behind a new stream knows nothing of it
+		r.reopened, r.lost = r.askNow, false
 		if r.askNow {
 			// The stream this process opened anew itself (see failed): the
 			// control plane names a connection it has not heard of within a
@@ -385,7 +406,7 @@ func (r *reporter) pass() {
 		}
 	}
 	streaming := r.sub.streaming.Load()
-	now := time.Now()
+	now := r.cfg.Now()
 	r.renote(sn, now)
 	if busy := len(sn.active) > 0; busy != r.busy {
 		// The first session after none: the control plane expects to hear of
@@ -536,7 +557,7 @@ func (r *reporter) period(sn *snapshot) time.Duration {
 // pause grows with every failure in a row (see failed); while the report of a
 // draining session waits (urgent) it is DrainRetry at most.
 func (r *reporter) paused(urgent bool) bool {
-	now := time.Now()
+	now := r.cfg.Now()
 	if !now.Before(r.retryAt) {
 		return false
 	}
@@ -549,7 +570,7 @@ func (r *reporter) flush(todo []due, hello bool, total uint64, urgent bool) {
 	if r.mode == modeOff || r.paused(urgent) {
 		return
 	}
-	began := time.Now()
+	began := r.cfg.Now()
 	for i := 0; len(todo) > 0 || hello; i++ {
 		if r.mode == modeSingle {
 			if i == r.cfg.Burst || len(todo) == 0 || !r.send(todo[0].sid, todo[0].st, todo[0].d) {
@@ -567,7 +588,7 @@ func (r *reporter) flush(todo []due, hello bool, total uint64, urgent bool) {
 		todo, hello = todo[n:], false
 		// A request that took long has kept the accounts waiting: the rest
 		// is sent by the next pass, from what the accounts say then.
-		if time.Since(began) >= r.cfg.PassBudget {
+		if r.cfg.Now().Sub(began) >= r.cfg.PassBudget {
 			return
 		}
 	}
@@ -600,7 +621,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 	code, answer := r.postBatch(b, r.cfg.Timeout)
 	switch {
 	case code/100 == 2:
-		now := time.Now()
+		now := r.cfg.Now()
 		for i, x := range chunk {
 			status := "accepted" // an answer that says nothing of a report: the control plane has it
 			if i < len(answer.Results) {
@@ -618,7 +639,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 				x.st.closed = true
 			}
 		}
-		r.hello, r.beatAt = false, time.Now()
+		r.hello, r.beatAt = false, r.cfg.Now()
 		if reach != nil {
 			r.reachTold = reach
 		}
@@ -648,7 +669,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
 	switch code := r.post(sid, d, r.cfg.Timeout); {
 	case code/100 == 2:
-		st.sent, st.last, st.sentAt, st.resend = true, d, time.Now(), false
+		st.sent, st.last, st.sentAt, st.resend = true, d, r.cfg.Now(), false
 		r.up()
 	case r.noEndpoint(code):
 		// A control plane without the endpoint: say nothing, it is not an error.
@@ -692,21 +713,38 @@ func (r *reporter) noEndpoint(code int) bool {
 //
 // When the reports have failed for a whole grace of the control plane (two
 // heartbeat periods: a request is made when that time is up, and it fails
-// too) on a stream on which they arrived before, the stream is opened anew.
-// The control plane does not name an instance it has heard of and that is
-// silent now unless something ties it to the session: such an instance is
-// frozen or idle far more often than cut off. One it has never heard of on
-// its connection is named, in every session, and that is what this process
-// becomes: connected, and never heard of. A process that is frozen cannot do
-// that, and one whose reports fail for less than the grace does not.
-// (Opening the stream anew when the outage is first noticed, after two
-// failures, would name every instance behind an endpoint that is merely slow.)
+// too), the stream is opened anew. The control plane does not name an
+// instance it has heard of and that is silent now unless something ties it to
+// the session: such an instance is frozen or idle far more often than cut
+// off. One it has never heard of on its connection is named, in every
+// session, and that is what this process becomes: connected, and never heard
+// of. A process that is frozen cannot do that, and one whose reports fail for
+// less than the grace does not. (Opening the stream anew when the outage is
+// first noticed, after two failures, would name every instance behind an
+// endpoint that is merely slow.)
 //
-// Once per outage: on the new stream nothing has arrived (hello), and a
-// process whose reports never arrived is what the control plane takes it for
-// already. Opening that stream anew would only take the process off the
-// control plane's list for a moment, and give it another grace in the drain
-// of a session it took part in (a new connection is a sign of life).
+// Which streams: one on which the control plane may have heard of this
+// process. That is one on which a report was answered (not hello), and one on
+// which none was but a request was lost rather than refused: it may have
+// arrived, with only its answer lost on the way back. The control plane then
+// takes this process for one it has heard of, and this process cannot know.
+// (The fifth review: the first report arrived, its answer did not, nothing
+// arrived since; no session named the instance.)
+//
+// Which not: a stream on which every request was refused (4xx). Nothing of
+// this process arrived on it, which is what the control plane takes it for
+// already; another stream would only take the process off the control plane's
+// list for a moment, and give it another grace in the drain of a session it
+// took part in (a new connection is a sign of life). And a stream this
+// process opened anew itself, until a report is answered on it: one new
+// stream per outage says all there is to say. Without that rule every failure
+// after the grace opened another (11,624 streams in 17 seconds, once).
+//
+// And never two within a grace of the control plane, nor within ReopenGap,
+// whatever else is the case: streams that keep breaking by themselves during
+// an outage, each followed by a lost request, would otherwise be answered
+// with one more stream each. Nor while the stream opened anew has not
+// delivered its first set (askNow): ending it then would start over.
 func (r *reporter) failed(code int) {
 	r.refused = code/100 == 4
 	r.failures++
@@ -714,27 +752,30 @@ func (r *reporter) failed(code int) {
 	if r.refused {
 		steps = 5
 	}
-	r.failedAt = time.Now()
+	r.failedAt = r.cfg.Now()
 	if r.failures == 1 {
 		r.failingSince = r.failedAt
 	}
+	r.lost = r.lost || !r.refused
 	// Never longer than a heartbeat period: when the outage is over, the
 	// control plane hears of this process as soon as it would of a healthy one.
 	period := r.period(r.sub.snap.Load())
 	r.retryAt = r.failedAt.Add(min(r.cfg.RetryBase<<min(r.failures-1, steps), period))
-	if !r.hello && !r.askNow && r.mode == modeBatch {
-		if grace := r.failingSince.Add(2 * period); !r.failedAt.Before(grace) {
-			r.askNow = true
-			r.sub.reopen()
-		} else if grace.Before(r.retryAt) {
-			r.retryAt = grace // the request that says whether the grace went by without a word
+	if heard := !r.hello || r.lost && !r.reopened; heard && !r.askNow && r.mode == modeBatch {
+		gap := max(2*period, r.cfg.ReopenGap)
+		if grace := r.failingSince.Add(2 * period); r.failedAt.Before(grace) {
+			if grace.Before(r.retryAt) {
+				r.retryAt = grace // the request that says whether the grace went by without a word
+			}
+		} else if (r.reopenedAt.IsZero() || r.failedAt.Sub(r.reopenedAt) >= gap) && r.sub.reopen() {
+			r.askNow, r.reopenedAt = true, r.failedAt
 		}
 	}
 	if r.down || !r.refused && r.failures < 2 {
 		return
 	}
 	r.down = true
-	if now := time.Now(); r.lastOutageLog.IsZero() || now.Sub(r.lastOutageLog) >= outageLogGap {
+	if now := r.cfg.Now(); r.lastOutageLog.IsZero() || now.Sub(r.lastOutageLog) >= outageLogGap {
 		r.lastOutageLog, r.outageLogged = now, true
 		what := "did not answer"
 		if code != 0 {

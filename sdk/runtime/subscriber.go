@@ -179,12 +179,16 @@ func (s *Subscriber) setAnnounce(on bool) {
 // control plane this process is then a new connection, of which it has heard
 // nothing yet (see reporter.failed), and for the moment between the two it is
 // not connected at all: a session whose drain ends in that moment does not
-// look at it. Nothing happens while no stream is open.
-func (s *Subscriber) reopen() {
-	if cancel := s.streamCancel.Load(); cancel != nil {
-		s.again.Store(true)
-		(*cancel)()
+// look at it. Nothing happens while no stream is open, and reopen then
+// reports false: the next stream is a new connection anyway.
+func (s *Subscriber) reopen() bool {
+	cancel := s.streamCancel.Load()
+	if cancel == nil {
+		return false
 	}
+	s.again.Store(true)
+	(*cancel)()
+	return true
 }
 
 // IsActive reports whether id is ACTIVE/DRAINING and the kill switch is off.
