@@ -7,6 +7,9 @@ on a development laptop, mostly against in-process fakes; treat them as indicati
 
 ### Upgrading
 
+- Added: `ExporterConfig.ReachCheck` (zero, off, for `NewExporter`; `runtime.Start` sets 30 s),
+  `client.Info.StoppedInstances`, `client.Subscriber.Collector`; a session has `stopped_instances` (at most 64)
+  and `stopped_instances_more`, left out of `GET /v1/sessions`.
 - `GET /healthz` of the collector and the control plane can answer `503 degraded: <reason>`: while a background
   loop of theirs restarts after a panic, and once the panic budget is spent. `tracectl doctor` then prints
   `DEGRADED <reason>` and exits 1. A health check that restarts on the first non-200 will restart sooner than
@@ -118,6 +121,11 @@ Rolling back:
 
 ### Added
 
+- A collector URL that leads nowhere shows before any session: the SDK checks its collector's `/healthz` while
+  idle (every 30 s, not per event) and tells the control plane; `GET /v1/subscribers` gains `collector`, and
+  `tracectl doctor` prints `CANNOT REACH COLLECTOR: <error>` for such a service and exits 3 under
+  `--require-delivery`, also with no session running. Any HTTP answer but a 5xx counts as reached, so a wrong
+  URL at which another HTTP server answers is not detected.
 - `tsessiontest.RequireEvent` and `tsessiontest.RequireFailure` with `tsessiontest.EventFilter` (service, kind,
   part of the name): assert that a call, a query or a job was recorded, or that a failure the test provoked was
   met where it should be. Both return the matching events.
@@ -381,6 +389,14 @@ Rolling back:
 
 ### Fixed
 
+- The SDK's `stopped` note (it stopped recording after a panic) makes a session incomplete only when a delivery
+  report or events in the collector tie that instance to it; for the other running sessions it is one
+  `delivery_unconfirmed` line. One note, from any caller, marked every running session incomplete. The notes are
+  stored with the session and survive a restart of the control plane, which lost them. A service that stops
+  recording before its first event of a session is therefore "unconfirmed" there: the default gates pass, and
+  `--fail-on-unconfirmed` fails.
+- `/healthz` is degraded while a seal retry or a compaction that panicked waits for its next attempt (at most
+  30 s for a compaction); both stay outside the panic budget.
 - Delivery accounting, from its fourth review: a connected service that was heard of and is merely silent (frozen,
   or the report endpoint briefly down) is no longer named under `delivery_unconfirmed` in sessions it left no
   report and no events in (46 to 80 of 200 sessions in the reviewer's runs, now 0); an SDK whose reports fail for
