@@ -110,7 +110,7 @@ func OpenPGConfig(ctx context.Context, cfg PGConfig) (*PG, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = bc.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+qs)
+	err = createSchema(ctx, bc, qs)
 	bc.Close(ctx) //nolint:errcheck
 	if err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -129,6 +129,25 @@ func OpenPGConfig(ctx context.Context, cfg PGConfig) (*PG, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &PG{pool: pool}, nil
+}
+
+// createSchema creates the schema under the migration's advisory lock:
+// CREATE SCHEMA IF NOT EXISTS is not safe against itself, and of several
+// collectors starting together on a new database all but one would fail
+// with a unique violation.
+func createSchema(ctx context.Context, c *pgx.Conn, quoted string) error {
+	tx, err := c.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('tsession.migrate'))`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+quoted); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // migrate runs the DDL under an advisory lock so concurrent collectors

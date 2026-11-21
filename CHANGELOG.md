@@ -160,6 +160,9 @@ Rolling back:
 
 ### Fixed
 
+- Collector on Postgres: several collectors starting together on a database without the schema failed with a
+  unique violation in `CREATE SCHEMA`; the schema is now created under the migration lock. `make it` also runs
+  the Postgres store's own tests against the real server.
 - Collector: a retention sweep that runs out of time resumes where it stopped, so sessions that cannot be
   deleted no longer block the ones after them.
 - `tsql` on Postgres: a capture that ran longer than a second left its `statement_timeout` and savepoint in

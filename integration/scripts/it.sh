@@ -14,6 +14,7 @@ export TSESSION_TEST_PG_DSN="$TSESSION_IT_PG_DSN" # contrib/tsql's tests against
 run_tests() {
   (cd "$HERE" && go test -count=1 -v -timeout 300s ./...)
   (cd "$HERE/../contrib/tsql" && go test -count=1 -tags integration -timeout 300s ./...)
+  (cd "$HERE/../collector" && go test -count=1 -timeout 300s ./store/...)
 }
 
 start() {
