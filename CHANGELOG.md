@@ -197,6 +197,8 @@ Rolling back:
 
 ### Changed
 
+- The dashboard binary panics on a start-up error (a refused listen address, an unreadable `-open` file) where
+  it called `log.Fatalf`: the message is the same, followed by a stack trace, and the exit status is 2, not 1.
 - **gRPC failures follow the HTTP rule.** A call is a failed event when its status says the callee failed
   (`Unknown`, `DeadlineExceeded`, `Unimplemented`, `Internal`, `Unavailable`, `DataLoss`), as an HTTP 5xx is;
   the other statuses are recorded in `grpc.code` and `grpc.message` and are not failures, as an HTTP 4xx is
