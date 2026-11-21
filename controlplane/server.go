@@ -23,6 +23,7 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/sessions/{id}", m.hDelete)
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", m.transition(m.Stop))
 	mux.HandleFunc("POST /v1/sessions/{id}/abort", m.transition(m.Abort))
+	mux.HandleFunc("POST /v1/sessions/{id}/delivery", m.hDelivery)
 	mux.HandleFunc("GET /v1/active", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, m.Active())
 	})
@@ -204,15 +205,18 @@ func (m *Manager) hKill(w http.ResponseWriter, r *http.Request) {
 
 // identity cleans a self-reported service or instance name: printable ASCII
 // only, at most 128 bytes. It is shown to operators, never trusted.
-func identity(s string) string {
+func identity(s string) string { return identityN(s, 128) }
+
+// identityN is identity with another length limit.
+func identityN(s string, limit int) string {
 	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r > 0x7e {
 			return -1
 		}
 		return r
 	}, s)
-	if len(s) > 128 {
-		s = s[:128]
+	if len(s) > limit {
+		s = s[:limit]
 	}
 	return s
 }

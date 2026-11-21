@@ -2,6 +2,7 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ func main() {
 	hosts := flag.String("allowed-hosts", svc.Env("TSESSION_CP_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (e.g. controlplane:7070); default loopback only")
 	origins := flag.String("allowed-origins", svc.Env("TSESSION_CP_ALLOWED_ORIGINS", ""), "comma-separated browser Origins allowed to call the API (default none)")
 	retention := flag.Duration("retention", svc.EnvPositiveDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long; without --store-file they are then forgotten")
+	grace := flag.Duration("delivery-grace", svc.EnvDur("TSESSION_CP_DELIVERY_GRACE", 10*time.Second), "how long a drain waits for a service that reported undelivered events and delivers none, before the session is sealed incomplete; 0 turns the check off")
 	showVersion := svc.VersionFlag("tsession-controlplane")
 	flag.Parse()
 	showVersion()
@@ -56,6 +58,8 @@ func main() {
 		Logger:     log,
 		DefaultTTL: *ttl,
 		Retention:  *retention,
+		// For Config zero means the default, so "off" is passed as negative.
+		DeliveryGrace: cmp.Or(*grace, -1),
 
 		AllowedHosts:   svc.SplitCSV(*hosts),
 		AllowedOrigins: svc.SplitCSV(*origins),

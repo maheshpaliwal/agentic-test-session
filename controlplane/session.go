@@ -95,6 +95,20 @@ type Session struct {
 	// Bindings attribute requests carrying a matching attribute to this
 	// session (see docs/BINDING.md). Live only while the session is ACTIVE.
 	Bindings []Binding `json:"bindings,omitempty"`
+	// Delivery is the last delivery report of every SDK instance that sent
+	// one for this session, by service and instance (see Delivery). Instances
+	// that never reported are not listed: an SDK older than the reports, or a
+	// service that was never connected.
+	Delivery []Delivery `json:"delivery,omitempty"`
+	// IncompleteReasons says why the control plane itself marked the session
+	// incomplete, beyond what SealError and DrainTimedOut say: one line per
+	// instance whose events did not all reach the collector. A session with a
+	// reason is Incomplete whatever the collector's seal says.
+	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
+	// DeliveryUnconfirmed names the instances whose last report left events
+	// undelivered without evidence that they were lost. It is a warning: the
+	// session is not Incomplete because of it.
+	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
 
 // ActiveSet is the payload of GET /v1/active and the SSE stream.
@@ -104,6 +118,10 @@ type ActiveSet struct {
 	Kill      bool     `json:"kill"`
 	// Bindings lists the bindings of ACTIVE sessions only (not DRAINING).
 	Bindings []ActiveBinding `json:"bindings,omitempty"`
+	// Draining lists the ids in Active that are DRAINING. An SDK flushes the
+	// events of such a session and sends its final delivery report; SDKs that
+	// do not know the field keep recording as before.
+	Draining []string `json:"draining,omitempty"`
 	// Generation counts the changes to the active set since the control plane
 	// started. Compare it with Subscriber.Generation to see which followers
 	// have been sent this version.

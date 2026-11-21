@@ -132,6 +132,38 @@ type Info struct {
 	// asynchronous work still outstanding.
 	DrainTimedOut bool      `json:"drain_timed_out,omitempty"`
 	Bindings      []Binding `json:"bindings,omitempty"`
+	// Delivery is the last delivery report of every SDK instance that sent
+	// one: what it recorded for the session and what became of it. Services
+	// with an older SDK, or that were never connected, are not listed.
+	Delivery []Delivery `json:"delivery,omitempty"`
+	// IncompleteReasons says why the control plane marked the session
+	// incomplete: one line per instance whose events did not all reach the
+	// collector. Such a session is Incomplete even when the collector's
+	// summary is not: the missing events never got there.
+	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
+	// DeliveryUnconfirmed names instances that went silent while they held
+	// undelivered events, without evidence that these were lost. A warning:
+	// the session is not Incomplete because of it.
+	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+}
+
+// Delivery is one SDK instance's account of the events it recorded for a
+// session: Recorded = Delivered + Dropped + Buffered.
+type Delivery struct {
+	Service   string `json:"service,omitempty"`
+	Instance  string `json:"instance"`
+	Recorded  int64  `json:"recorded"`
+	Delivered int64  `json:"delivered"` // accepted by the collector
+	Dropped   int64  `json:"dropped"`   // lost for good
+	Buffered  int64  `json:"buffered"`  // still held by the instance when it last reported
+	// LastError is why the instance's last request to the collector failed.
+	LastError string `json:"last_error,omitempty"`
+	// Final is set when the instance reported after it had seen the session
+	// draining, or while it shut down; otherwise it may have recorded or
+	// delivered more since.
+	Final bool `json:"final,omitempty"`
+	// At is when the control plane received the report.
+	At time.Time `json:"at"`
 }
 
 // Done reports whether the session reached a terminal state.

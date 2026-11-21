@@ -22,7 +22,9 @@ func (m *Manager) startDrainLocked(id string) {
 }
 
 // drain polls the collector until the session is quiet or max_drain elapses,
-// seals it, and records the outcome. A seal that still fails when
+// seals it, and records the outcome. Quiet also means that no SDK instance
+// that sent delivery reports still holds events it may yet deliver (see
+// deliverySettled). A seal that still fails when
 // SealRetryBudget is spent ends the session SEALED with SealError and
 // SealPending, and is retried in the background (see sealretry.go).
 func (m *Manager) drain(ctx context.Context, id string) {
@@ -59,12 +61,16 @@ func (m *Manager) drain(ctx context.Context, id string) {
 				}
 				prev, haveStatus = st, true
 			}
-			if st.Pending == 0 && time.Since(changedAt) >= quiet {
+			// The reports are looked at last, and only once the collector is
+			// quiet: a delivery it has just seen restarts the quiet window, so
+			// the instance has that long to say so before the reports close.
+			if st.Pending == 0 && time.Since(changedAt) >= quiet && m.deliverySettled(id, begin, false) {
 				break
 			}
 		}
 		if !time.Now().Before(deadline) {
 			timedOut = true
+			m.deliverySettled(id, begin, true)
 			break
 		}
 		select {
@@ -97,7 +103,8 @@ func (m *Manager) drain(ctx context.Context, id string) {
 	}
 	m.tel.finished.With(string(cur.State)).Inc()
 	cur.DrainTimedOut = timedOut
-	cur.Incomplete = timedOut || err != nil || res.Incomplete
+	short := m.judgeDeliveryLocked(&cur)
+	cur.Incomplete = timedOut || err != nil || res.Incomplete || short
 	cur.DroppedEvents = last.DroppedEvents
 	cur.BundleURI = res.BundleURI
 	if perr := m.putLocked(cur); perr != nil {

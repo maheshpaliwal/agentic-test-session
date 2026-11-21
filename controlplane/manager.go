@@ -37,6 +37,14 @@ type Config struct {
 	// keeps its SealError and is no longer retried.
 	SealPendingBudget time.Duration
 	HeartbeatPeriod   time.Duration // SSE heartbeat; default 15s
+	// DeliveryGrace is how long a drain waits for an SDK instance that
+	// reported undelivered events and delivers none (see delivery.go); after
+	// it the session is sealed and marked incomplete for them. It must be
+	// longer than an SDK needs to notice that its collector is back (an
+	// exporter pass and its cooldown). Default 10 TimeUnits; negative turns
+	// the check off: reports are stored, nothing is waited for and no session
+	// is marked incomplete because of them.
+	DeliveryGrace time.Duration
 	// Retention is how long terminal sessions stay in the hot in-memory set
 	// before being evicted from it (still readable if the Store archives them,
 	// e.g. FileStore); default 24h.
@@ -62,6 +70,8 @@ type Manager struct {
 	subs    map[chan ActiveSet]Subscriber
 	cancels map[string]context.CancelFunc // in-flight drains
 	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
+	// delivery holds what is not stored of the delivery reports of live sessions.
+	delivery map[string]*deliveryState
 
 	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
 	// O(all sessions ever). terminal queues finished sessions for eviction.
@@ -116,6 +126,9 @@ func NewManager(cfg Config) *Manager {
 	if cfg.TimeUnit <= 0 {
 		cfg.TimeUnit = time.Second
 	}
+	if cfg.DeliveryGrace == 0 {
+		cfg.DeliveryGrace = 10 * cfg.TimeUnit
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -126,7 +139,7 @@ func NewManager(cfg Config) *Manager {
 		subs:    map[chan ActiveSet]Subscriber{},
 		cancels: map[string]context.CancelFunc{},
 		pending: map[string]*sealRetry{},
-		live:    map[string]Session{},
+		live:    map[string]Session{}, delivery: map[string]*deliveryState{},
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
@@ -348,6 +361,7 @@ func (m *Manager) Abort(id string) (Session, error) {
 		c()
 		delete(m.cancels, id)
 	}
+	delete(m.delivery, id)
 	s.State, s.EndedAt = StateAborted, time.Now().UTC()
 	if err := m.putLocked(s); err != nil {
 		return s, err
@@ -507,10 +521,13 @@ func (m *Manager) activeLocked() ActiveSet {
 	}
 	slices.Sort(a.Active) // IDs are time-prefixed, so this is creation order
 	for _, id := range a.Active {
-		if s := m.live[id]; s.State == StateActive {
+		switch s := m.live[id]; s.State {
+		case StateActive:
 			for _, b := range s.Bindings {
 				a.Bindings = append(a.Bindings, ActiveBinding{SessionID: id, Binding: b})
 			}
+		case StateDraining:
+			a.Draining = append(a.Draining, id)
 		}
 	}
 	return a

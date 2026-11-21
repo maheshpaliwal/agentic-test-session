@@ -112,7 +112,8 @@ func (m *Manager) retrySeal(ctx context.Context, id string, r *sealRetry) {
 	case err == nil:
 		cur.SealError, cur.SealPending = "", false
 		cur.BundleURI = res.BundleURI
-		cur.Incomplete = cur.DrainTimedOut || res.Incomplete
+		// The seal knows nothing of events that never reached the collector.
+		cur.Incomplete = cur.DrainTimedOut || res.Incomplete || len(cur.IncompleteReasons) > 0
 		m.tel.sealRetries.With("success").Inc()
 		m.log.Info("seal succeeded on retry", "id", id)
 	case m.rootCtx.Err() != nil:
