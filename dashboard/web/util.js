@@ -120,7 +120,7 @@
   /* Event flags that say the recorded key or row image of the event's mutations is incomplete or uncertain.
      Mirrors core.UncertainFlag (the collector counts the same flags in an entity's `uncertain`). */
   const UNCERTAIN = { pk_unknown: 1, pk_not_unique: 1, pk_lookup_failed: 1, after_unavailable: 1, after_from_args: 1, after_failed: 1,
-    image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1, upsert_unknown: 1 };
+    image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1, diff_concurrent: 1, upsert_unknown: 1 };
   const uncertainFlag = (f) => UNCERTAIN[flagBase(f)] === 1;
   // How many entries of an entity history carry such a flag (entries of an older collector have no flags: 0).
   const uncertainCount = (ms) => (ms || []).filter((m) => m && Array.isArray(m.flags) && m.flags.some(uncertainFlag)).length;
@@ -167,6 +167,26 @@
   function deliveryUnconfirmed(s) {
     const list = s && Array.isArray(s.delivery_unconfirmed) ? s.delivery_unconfirmed : [];
     return list.filter((r) => typeof r === 'string' && r).map((r) => 'Delivery not confirmed: ' + r);
+  }
+
+  /* The delivery reports of a session's SDK instances as table rows: which service and instance, and its own count of
+     the events it recorded and of what became of them. short marks an instance that, by that count, did not get every
+     event to the collector; such rows come first. The verdict itself (incomplete_reasons, delivery_unconfirmed) also
+     holds a report against what the collector has, so a row that is not short can still be named there. */
+  function deliveryRows(s) {
+    const num = (v) => typeof v === 'number' && isFinite(v) ? v : 0;
+    const rows = (s && Array.isArray(s.delivery) ? s.delivery : []).filter((d) => d && typeof d === 'object').map((d) => {
+      const r = { service: String(d.service || ''), instance: String(d.instance || ''), recorded: num(d.recorded), delivered: num(d.delivered),
+        dropped: num(d.dropped), buffered: num(d.buffered), final: d.final === true, lastError: String(d.last_error || '') };
+      r.short = r.dropped > 0 || r.buffered > 0 || r.delivered < r.recorded;
+      return r;
+    });
+    return rows.sort((a, b) => (b.short - a.short) || a.service.localeCompare(b.service) || a.instance.localeCompare(b.instance));
+  }
+  // The line that opens the delivery table.
+  function deliverySummary(rows) {
+    const short = rows.filter((r) => r.short).length;
+    return 'Delivery reports: ' + rows.length + ' instance' + (rows.length === 1 ? '' : 's') + (short ? ', ' + short + ' with events not delivered' : ', all delivered by their own count');
   }
 
   // Colour/icon group for an event kind: api db cache queue worker retry dlq tx sys.
@@ -619,7 +639,7 @@
   }
 
   const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flatten, diffRows, HIDDEN_CHANGE, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
-    mergeEvents, ndjson, sessionWarnings, deliveryUnconfirmed, curlFor, connectedText };
+    mergeEvents, ndjson, sessionWarnings, deliveryUnconfirmed, deliveryRows, deliverySummary, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
 })(typeof window !== 'undefined' ? window : globalThis);

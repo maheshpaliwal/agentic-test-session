@@ -111,6 +111,23 @@ assert.deepStrictEqual(U.deliveryUnconfirmed({ delivery_unconfirmed: ['service b
   ['Delivery not confirmed: service b (instance j): the collector has 9 events']);
 // The warning stands on its own: such a session is not incomplete.
 assert.deepStrictEqual(U.sessionWarnings({ delivery_unconfirmed: ['x'] }), []);
+
+// The delivery table: one row per instance report, the ones that did not deliver everything first.
+{
+  const rows = U.deliveryRows({ delivery: [
+    { service: 'api', instance: 'i-1', recorded: 5, delivered: 5, dropped: 0, buffered: 0, final: true, at: '2026-01-01T00:00:00Z' },
+    { service: 'worker', instance: 'w-2', recorded: 7, delivered: 2, dropped: 4, buffered: 1, last_error: 'dial tcp: refused' },
+    { instance: 'x', recorded: 3, delivered: 3 }, null, 'junk'] });
+  assert.deepStrictEqual(rows.map((r) => r.service + '/' + r.instance + ':' + r.short), ['worker/w-2:true', '/x:false', 'api/i-1:false']);
+  assert.deepStrictEqual(rows[0], { service: 'worker', instance: 'w-2', recorded: 7, delivered: 2, dropped: 4, buffered: 1, final: false, lastError: 'dial tcp: refused', short: true });
+  assert.strictEqual(U.deliverySummary(rows), 'Delivery reports: 3 instances, 1 with events not delivered');
+  assert.strictEqual(U.deliverySummary(rows.slice(1, 2)), 'Delivery reports: 1 instance, all delivered by their own count');
+  assert.deepStrictEqual(U.deliveryRows({}), []);
+  assert.deepStrictEqual(U.deliveryRows(null), []);
+  assert.deepStrictEqual(U.deliveryRows({ delivery: 'x' }), []);
+}
+// The flags that mark a change uncertain (the Go test holds the whole list against core.UncertainFlag).
+assert.ok(U.uncertainFlag('diff_concurrent') && U.uncertainFlag('image_skipped:deadline') && !U.uncertainFlag('truncated'));
 assert.strictEqual(U.kindGroup('api.in'), 'api');
 assert.strictEqual(U.kindGroup('db.tx.commit'), 'tx');
 assert.strictEqual(U.kindGroup('db.write'), 'db');

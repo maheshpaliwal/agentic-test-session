@@ -61,25 +61,43 @@
     return h('span', { class: 'kchip kg-' + g + (isErr ? ' err' : ''), title: g + ' event' }, icon(KIND_ICON[g]), span('', kind || '?'));
   }
   const FLAG_CLS = { tx_unresolved: 't-warn', orphaned: 't-err', oversize_dropped: 't-err', image_skipped: '', propagation_skipped: '' };
+  /* What each flag of an event means. Every flag an SDK or the collector can put on an event has a line here
+     (TestFlagHelpCoversEveryFlag holds the list against the code); a reason after a colon has one of its own. */
   const FLAG_HELP = { tx_unresolved: 'no commit/rollback seen for this transaction', orphaned: 'async work with no matching counterpart',
-    image_skipped: 'before/after image not captured', after_unavailable: 'the updated row could not be read back; its new values are not known',
+    retry_pending: 'the job failed and a retry is scheduled that has not run yet',
+    image_skipped: 'before/after image not captured',
+    'image_skipped:deadline': 'the caller\'s deadline left too little time to read the row images, so they were not read',
+    'image_skipped:serializable': 'nothing is read inside a SERIALIZABLE transaction (the extra reads could make it fail), so there are no row images',
+    'image_skipped:pk_unbindable': 'the key holds a value that cannot be bound to read the row back (a NULL), so there is no row image',
+    after_unavailable: 'the updated row could not be read back; its new values are not known',
     pk_unknown: 'no primary key value found for the row; declare the key with tsql.WithPKColumns', pk_lookup_failed: 'the primary key could not be read from the database catalog',
     pk_not_unique: 'the key columns matched more than one row, so the new values were not recorded; declare the key with tsql.WithPKColumns',
     after_from_args: 'the new values were taken from the statement, not read back from the database',
     returning_partial: 'the statement\'s RETURNING lists only some columns; the recorded row was read separately',
+    returning_appended: 'the SDK added RETURNING * to the statement to read the written row',
     effects_unknown: 'the statement runs code on the server (DO, CALL, EXECUTE); the rows it changed are not recorded',
-    upsert_unknown: 'whether the upsert inserted or updated the row is not known; no diff is recorded',
-    diff_truncated: 'the collection is larger than the image limit; the diff is partial or absent',
-    diff_concurrent: 'the diff holds a change this command cannot have made; another client wrote in between',
+    entity_unknown: 'the table the statement writes could not be told from its text; no mutation is recorded',
+    table_skipped: 'the table is excluded from capture by configuration; the statement is recorded without its rows',
+    bulk_copy: 'a bulk load (COPY); its rows are not recorded one by one',
+    multi_row_insert: 'one INSERT with several rows',
     mutations_truncated: 'the statement changed more rows than were captured',
     args_redacted_conservatively: 'an argument could not be tied to a column, so more was masked than needed',
     rows_redacted_conservatively: 'a returned column could not be tied to its source, so more was masked than needed',
     oversize_dropped: 'payload dropped for exceeding size limits',
+    truncated: 'a payload was larger than the capture limit and was cut', redacted: 'sensitive values were masked by the SDK',
     after_failed: 'reading the row back after the write failed; its new values are not known',
     upsert_unknown: 'whether this upsert inserted the row or updated one that was there is not known, so no changed fields are listed',
     image_timeout: 'reading the row images took too long and was abandoned', image_failed: 'reading the row images failed',
-    image_truncated: 'the statement changed more rows than are captured; only some have images', diff_truncated: 'the list of changed fields was cut short',
-    propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };
+    image_truncated: 'the statement changed more rows than are captured; only some have images',
+    diff_truncated: 'the list of changed fields is partial or absent: it was cut short, or a value or a collection was larger than the capture limit',
+    diff_concurrent: 'the diff holds a change this command cannot have made; another client wrote in between',
+    unprocessed_items: 'DynamoDB left some items of the batch unprocessed; no mutation is recorded for them',
+    write_errors: 'MongoDB reported write errors for part of the command',
+    unfinished: 'no reply to the command was seen; what it changed is not recorded',
+    propagation_skipped: 'session context was not propagated downstream',
+    'propagation_skipped:attr_limit': 'the message already had the most attributes the queue allows, so the session context was not attached',
+    'propagation_skipped:side_channel': 'the session context could not be stored beside the message, so the consumer will not join the session',
+    unattributed: 'event could not be attributed to a session with certainty' };
   // A flag with a reason ("image_skipped:deadline") is styled and explained as its base flag.
   const flagHelp = (x) => FLAG_HELP[x] || FLAG_HELP[U.flagBase(x)] || '';
   const flagTag = (x) => tag(x, FLAG_CLS[x] || FLAG_CLS[U.flagBase(x)] || 't-warn', flagHelp(x));
@@ -667,8 +685,8 @@
         h('td', null, h('div', { class: 'stats' }, h('span', { title: 'events captured' }, h('b', { text: s.event_count === undefined ? '-' : s.event_count }), 'events'),
           s.service_count !== undefined ? h('span', { title: 'services seen' }, h('b', { text: s.service_count }), 'services') : null,
           h('span', { title: 'wall-clock duration' }, icon('clock', 'sm'), h('b', { text: dur })))),
-        h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', (s.incomplete_reasons || [])[0] || 'some async work or events are missing', 'warn') : null,
-          U.deliveryUnconfirmed(s).length ? tag('delivery unconfirmed', 't-warn', U.deliveryUnconfirmed(s)[0], 'warn') : null,
+        h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', (s.incomplete_reasons || []).join('\n') || 'some async work or events are missing', 'warn') : null,
+          U.deliveryUnconfirmed(s).length ? tag('delivery unconfirmed', 't-info', U.deliveryUnconfirmed(s).join('\n'), 'info') : null,
           s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag(s.seal_pending ? 'seal retrying' : 'seal error', 't-err', s.seal_error) : null)),
         h('td', { class: 'num' }, stop, del));
     }
@@ -1020,7 +1038,7 @@
       }), statePill(s.state),
       isLive(s) ? h('span', { class: 'live-tag' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), 'live tail') : null,
       s.incomplete ? tag('incomplete', 't-warn', 'some async work or events are missing', 'warn') : null,
-      U.deliveryUnconfirmed(s).length ? tag('delivery unconfirmed', 't-warn', 'whether every event arrived could not be confirmed', 'warn') : null,
+      U.deliveryUnconfirmed(s).length ? tag('delivery unconfirmed', 't-info', 'whether every event arrived could not be confirmed; the session is not incomplete for it', 'info') : null,
       s.reason ? tag('reason: ' + s.reason, 't-warn', 'why the session ended') : null,
       h('span', { class: 'grow' }),
       h('div', { class: 'shead-actions' },
@@ -1056,10 +1074,30 @@
     }
     const unconfirmed = U.deliveryUnconfirmed(s);
     if (unconfirmed.length) {
-      head.appendChild(h('div', { class: 'callout warn', role: 'note' }, icon('warn'), h('div', { class: 'ct' },
+      // A note, not a failure: nothing is known to be missing.
+      head.appendChild(h('div', { class: 'callout info', role: 'note' }, icon('info'), h('div', { class: 'ct' },
         h('strong', { text: 'Delivery not confirmed' }),
         h('span', { text: 'The control plane could not tell whether every event of these service instances reached the collector. The session is not marked incomplete for it.' }),
         unconfirmed.map((x) => h('span', { text: x })))));
+    }
+    const reports = U.deliveryRows(s);
+    if (reports.length) {
+      // Open when the verdict rests on it; a choice made by hand survives the repaint of the header.
+      const open = D.deliveryOpen === undefined ? !!((s.incomplete_reasons || []).length || unconfirmed.length) : D.deliveryOpen;
+      const numTd = (n, bad) => h('td', { class: 'num' }, bad && n ? tag(String(n), 't-warn') : String(n));
+      const det = h('details', { class: 'more delivery', open: open },
+        h('summary', { text: U.deliverySummary(reports) }),
+        h('div', { class: 'card tablewrap' }, h('table', { class: 'dtable' },
+          h('thead', null, h('tr', null, [['Service', ''], ['Instance', ''], ['Recorded', 'num'], ['Delivered', 'num'], ['Dropped', 'num'], ['Still held', 'num'], ['Report', ''], ['Last error', '']].map((x) => h('th', { class: x[1], text: x[0] })))),
+          h('tbody', null, reports.map((r) => h('tr', null,
+            h('td', { text: r.service || '-' }), h('td', { class: 'mono', text: r.instance || '-' }),
+            numTd(r.recorded), h('td', { class: 'num' }, r.delivered < r.recorded ? tag(r.delivered + ' of ' + r.recorded, 't-warn', 'by the instance\'s own count, not every recorded event was delivered') : String(r.delivered)),
+            numTd(r.dropped, true), numTd(r.buffered, true),
+            h('td', { title: r.final ? 'sent after the instance learned that the session was ending and had tried to flush' : 'a periodic report: the instance may have recorded or delivered more since', text: r.final ? 'final' : 'periodic' }),
+            h('td', { text: r.lastError || '-' })))))),
+        h('div', { class: 'note', text: 'As each SDK instance last reported it. The verdict also holds these counts against the events the collector has from the instance.' }));
+      det.addEventListener('toggle', () => { D.deliveryOpen = det.open; });
+      head.appendChild(det);
     }
   }
 
@@ -1968,7 +2006,7 @@
         h('button', { type: 'button', class: 'linkbtn', text: '#' + e.seq + ' ' + e.name, onclick: () => openDrawer(D, e, { focus: false }) })))));
       box.appendChild(asec);
       const fk = Object.keys(flagsC);
-      if (fk.length) box.appendChild(h('div', { class: 'section' }, h('h2', { text: 'Flags' }), h('div', { class: 'pv-meta' }, fk.sort().map((f) => tag(f + ' ×' + flagsC[f], FLAG_CLS[f] || 't-warn', FLAG_HELP[f])))));
+      if (fk.length) box.appendChild(h('div', { class: 'section' }, h('h2', { text: 'Flags' }), h('div', { class: 'pv-meta' }, fk.sort().map((f) => tag(f + ' ×' + flagsC[f], FLAG_CLS[f] || FLAG_CLS[U.flagBase(f)] || 't-warn', flagHelp(f))))));
       if (D.srv) box.appendChild(h('div', { class: 'section' }, h('details', { class: 'more' }, h('summary', { text: 'Raw collector summary' }), jsonViewer(srv, 'collector summary'))));
       drawCharts();
     }

@@ -250,6 +250,8 @@ dialog[open]{animation:dlg 160ms var(--ease)}
 .fact .v{margin-top:2px;font-weight:550;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .fact .v small{color:var(--muted);font-weight:400}
 .shead .callout{margin-top:16px}
+.shead details.delivery{margin-top:12px}
+.shead details.delivery .note{margin-top:6px}
 .bindlist{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:16px}
 .bindlist .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600}
 .live-tag{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font-size:12px;font-weight:600}
