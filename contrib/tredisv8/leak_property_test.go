@@ -442,6 +442,7 @@ func (p *leakProbe) check(kind, s string, from int) {
 	leaked := false
 	for _, e := range p.rec.Events()[from:] {
 		p.events++
+		e.Instance = "" // the host name is not the command's, and can hold part of a secret by chance
 		b, err := json.Marshal(e)
 		if err != nil {
 			p.t.Errorf("%s, %s: the event is not JSON: %v", kind, p.what, err)

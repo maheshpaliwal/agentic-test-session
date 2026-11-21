@@ -153,6 +153,10 @@ func TestRecordedErrorHoldsNothingOfAMaskedArgument(t *testing.T) {
 		if len(evs) != 1 || evs[0].Err == "" {
 			t.Fatalf("%v: recorded %+v", cmd.args, evs)
 		}
+		// The instance is the machine's host name plus random text: nothing
+		// of the command, and on some host it holds four characters of some
+		// secret by chance (a CI runner did).
+		evs[0].Instance = ""
 		b, err := json.Marshal(evs[0])
 		if err != nil {
 			t.Fatal(err)
