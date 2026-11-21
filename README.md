@@ -171,7 +171,8 @@ tracectl list --limit 20                     # the newest sessions
 ```
 
 A failed event is one that returned an error or an HTTP status of 500 or above; a 4xx response is recorded
-but does not count as a failure.
+but does not count as a failure. A gRPC call differs: every status other than `OK` counts, `NotFound` and
+`Canceled` included (see the `contrib/tgrpc` doc comment).
 
 Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
 `3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
