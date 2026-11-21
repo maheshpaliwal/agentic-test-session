@@ -117,7 +117,9 @@ func TestCLIDoctorShowsADegradedService(t *testing.T) {
 	}
 
 	// A 503 without the reason is not a degraded service: it is not ours.
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "upstream down", 503) }))
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusServiceUnavailable)
+	}))
 	defer other.Close()
 	env.col = other.URL
 	if code, out, e := env.tc("doctor"); code != 1 || !strings.Contains(out, "UNREACHABLE  GET /healthz: 503") || !strings.Contains(e, "unreachable") {

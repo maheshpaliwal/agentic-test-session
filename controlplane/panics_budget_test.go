@@ -440,9 +440,14 @@ func TestACompactionThatPanicsIsCountedAndDoesNotHoldTheStore(t *testing.T) {
 			}
 		}
 		// A later compaction ran: the snapshot was written.
-		f.lockIdle()
-		snap := f.snapSize
-		f.wmu.Unlock()
+		var snap int64
+		if !returnsWithin(10*time.Second, func() {
+			f.lockIdle()
+			snap = f.snapSize
+			f.wmu.Unlock()
+		}) {
+			panic(site + ": the store waits for a compaction that panicked")
+		}
 		if snap == 0 {
 			panic(site + ": no compaction ran after the one that panicked")
 		}

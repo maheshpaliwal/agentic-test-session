@@ -148,6 +148,34 @@ func TestExporterThatAlwaysPanicsStaysStoppedAfterItsRestarts(t *testing.T) {
 
 func goroutinesBefore() int { return goruntime.NumGoroutine() }
 
+// hostError is a type of the host application that calls itself a runtime
+// error; its text is the host's.
+type hostError struct{ text string }
+
+func (e hostError) Error() string { return e.text }
+func (hostError) RuntimeError()   {}
+
+// Only the text of a panic of the Go runtime itself is logged. A panic value
+// of the host that implements runtime.Error is the host's data like any
+// other: its type is logged, its text is not.
+func TestALoopDoesNotLogTheTextOfAHostTypeThatCallsItselfARuntimeError(t *testing.T) {
+	out := captureLog(t)
+	done := make(chan struct{})
+	startLoop("exporter", "x", nil, func() { panic(hostError{"cannot encode the order of customer hunter2-secret"}) }, func() { close(done) }, nil)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		panic("the loop never gave up")
+	}
+	logs := out.String()
+	if strings.Contains(logs, "hunter2") || strings.Contains(logs, "cannot encode") {
+		panic("the log carries the text of the host's panic value:\n" + logs)
+	}
+	if !strings.Contains(logs, "the exporter goroutine panicked (runtime.hostError) and is restarted") {
+		t.Errorf("log:\n%s", logs)
+	}
+}
+
 // A runtime panic's text names no data and is logged; when a loop stays
 // stopped its owner is told, once (the subscriber then says that nothing is
 // active, so recording ends instead of going on for sessions long over).
