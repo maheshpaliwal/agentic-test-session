@@ -268,6 +268,8 @@ Rolling back:
 
 ### Changed
 
+- `tracectl diff` says when a side is incomplete (`note: b is incomplete: ...`, and `"recording": "incomplete"`
+  on that side in JSON): what such a side lacks may be events that were lost, not what the run did.
 - `tracectl digest` shows an HTTP status of 400 and above on a request's line (`code HTTP 404`, `"code"` in
   JSON). A 4xx is not a failed event, so a request the test was refused read like one that went well.
   Requests with different statuses are no longer merged into one line.

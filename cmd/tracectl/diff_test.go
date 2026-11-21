@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 func TestNormalizeName(t *testing.T) {
@@ -558,5 +559,21 @@ func TestCLIDiffUsage(t *testing.T) {
 	}
 	if code := run([]string{"diff", "--bogus", "a", "b"}, &out, &errb); code == 0 {
 		t.Errorf("unknown flag: %d", code)
+	}
+}
+
+func TestDiffNamesAnIncompleteSide(t *testing.T) {
+	if got := recordingOf(client.Info{State: "SEALED"}); got != "" {
+		panic(fmt.Sprintf("complete: %q", got))
+	}
+	for _, info := range []client.Info{{Incomplete: true}, {IncompleteReasons: []string{"x"}}, {SealError: "x"}} {
+		if got := recordingOf(info); got != "incomplete" {
+			panic(fmt.Sprintf("%+v: %q", info, got))
+		}
+	}
+	var b bytes.Buffer
+	printDiff(&b, diffReport{A: sessionRef{ID: "ts_a", Name: "a"}, B: sessionRef{ID: "ts_b", Name: "b", Recording: "incomplete"}})
+	if want := "a  ts_a  a\nb  ts_b  b\nnote: b is incomplete: what it lacks may be events that were lost, not what the run did\nno differences\n"; b.String() != want {
+		panic(fmt.Sprintf("got %q", b.String()))
 	}
 }
