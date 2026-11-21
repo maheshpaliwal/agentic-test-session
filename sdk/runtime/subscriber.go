@@ -43,14 +43,20 @@ type Subscriber struct {
 	service    string        // reported to the control plane, for its list of connected services
 	instance   string
 	// reportsAs is the instance name this process sends delivery reports
-	// under; empty when it sends none. The stream announces it.
+	// under; empty when it sends none. The stream announces it while announce
+	// is set: not to a control plane that turned out not to take the reports
+	// (see setAnnounce).
 	reportsAs string
-	snap      atomic.Pointer[snapshot]
-	ready     atomic.Bool
-	streaming atomic.Bool
+	announce  atomic.Bool
+	// streamCancel ends the stream that is open, nil when none is.
+	streamCancel atomic.Pointer[context.CancelFunc]
+	snap         atomic.Pointer[snapshot]
+	ready        atomic.Bool
+	streaming    atomic.Bool
 	// connects counts the streams opened: a new one may lead to another
-	// control plane (a restart, an upgrade).
+	// control plane (a restart, an upgrade). opened is signalled for each.
 	connects atomic.Uint64
+	opened   chan struct{}
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -80,12 +86,28 @@ func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscr
 		service:    service,
 		instance:   instance,
 		reportsAs:  reportsAs,
+		opened:     make(chan struct{}, 1),
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
 	s.snap.Store(&snapshot{})
+	s.announce.Store(reportsAs != "")
 	go s.run(ctx)
 	return s
+}
+
+// setAnnounce says whether the stream names the instance this process sends
+// delivery reports under. The announcement tells the control plane to expect
+// reports from this process, so it is taken back when the control plane does
+// not take them (an older one), and made again when it does. A change opens
+// the stream anew: the announcement is a header of the request.
+func (s *Subscriber) setAnnounce(on bool) {
+	if s.reportsAs == "" || s.announce.Swap(on) == on {
+		return
+	}
+	if cancel := s.streamCancel.Load(); cancel != nil {
+		(*cancel)()
+	}
 }
 
 // IsActive reports whether id is ACTIVE/DRAINING and the kill switch is off.
@@ -213,6 +235,9 @@ func (s *Subscriber) poll(ctx context.Context) {
 func (s *Subscriber) stream(parent context.Context) bool {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// Before the announcement is read: a change after this ends the stream.
+	s.streamCancel.Store(&cancel)
+	defer s.streamCancel.Store(nil)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+"/v1/active/stream", nil)
 	if err != nil {
 		return false
@@ -224,7 +249,7 @@ func (s *Subscriber) stream(parent context.Context) bool {
 	if s.instance != "" {
 		req.Header.Set(core.HeaderInstance, s.instance)
 	}
-	if s.reportsAs != "" {
+	if s.reportsAs != "" && s.announce.Load() {
 		req.Header.Set(core.HeaderDeliveryInstance, s.reportsAs)
 	}
 	resp, err := s.client.Do(req)
@@ -237,6 +262,10 @@ func (s *Subscriber) stream(parent context.Context) bool {
 	}
 	s.streaming.Store(true)
 	s.connects.Add(1)
+	select {
+	case s.opened <- struct{}{}:
+	default:
+	}
 	defer s.streaming.Store(false)
 
 	watchdog := time.AfterFunc(s.idle, cancel)

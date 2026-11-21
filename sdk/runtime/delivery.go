@@ -12,11 +12,15 @@ import (
 	"net/url"
 	"slices"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 )
 
-// deliveryReport is the body of POST /v1/sessions/{id}/delivery: what this
-// process recorded for a session and what became of it. The counts are
-// cumulative, so a report replaces the ones before it.
+// deliveryReport is what this process recorded for a session and what became
+// of it. The counts are cumulative, so a report replaces the ones before it.
+// It is sent as one entry of a batch (POST /v1/delivery, see deliveryBatch);
+// to a control plane without that endpoint it is the body of
+// POST /v1/sessions/{id}/delivery.
 type deliveryReport struct {
 	Service   string `json:"service,omitempty"`
 	Instance  string `json:"instance"`
@@ -42,8 +46,48 @@ func (d deliveryReport) counts() deliveryReport {
 	return d
 }
 
+// deliveryBatch is the body of POST /v1/delivery: the reports of this process
+// for any number of sessions. One without reports says only that the reports
+// of this process arrive.
+type deliveryBatch struct {
+	Service        string        `json:"service,omitempty"`
+	Instance       string        `json:"instance"`
+	DeliveredTotal uint64        `json:"delivered_total"`
+	Reports        []batchReport `json:"reports"`
+}
+
+// batchReport is one report of a batch: a deliveryReport without what the
+// batch says once, with the session it is about.
+type batchReport struct {
+	Session   string `json:"session"`
+	Recorded  uint64 `json:"recorded"`
+	Delivered uint64 `json:"delivered"`
+	Dropped   uint64 `json:"dropped"`
+	Buffered  uint64 `json:"buffered"`
+	LastError string `json:"last_error,omitempty"`
+	Final     bool   `json:"final,omitempty"`
+}
+
+// batchAnswer is the answer to a batch: what became of each report, in order.
+type batchAnswer struct {
+	Results []struct {
+		Status string `json:"status"`
+	} `json:"results"`
+}
+
 // maxReportError bounds LastError.
 const maxReportError = 256
+
+// How the reports are sent.
+const (
+	// modeBatch: all that is due in one request (POST /v1/delivery).
+	modeBatch = iota
+	// modeSingle: a control plane that does not know the batch endpoint and
+	// may know the older one, a request per session.
+	modeSingle
+	// modeOff: a control plane that knows neither.
+	modeOff
+)
 
 // reporterConfig tunes a reporter. Zero values get defaults.
 type reporterConfig struct {
@@ -67,14 +111,28 @@ type reporterConfig struct {
 	// while the stream is down (see pass).
 	KickEvery time.Duration
 	Timeout   time.Duration // per report request (default 2s)
-	// Burst is the most reports one pass sends (default 32). With the default
-	// Tick that is 128 reports a second: many sessions that change at once
-	// are reported over a few passes, the draining ones first.
+	// Batch is the most reports one request carries (default 256, which is
+	// also the most a control plane takes). Many sessions that change at once
+	// are reported in a few requests, the draining ones first.
+	Batch int
+	// Burst is the most requests one pass sends to a control plane that takes
+	// one report per request (default 32).
 	Burst int
+	// PassBudget is how long a pass goes on sending batches (default Tick):
+	// after a request that took it past that, the rest waits for the next
+	// pass.
+	PassBudget time.Duration
 	// RetryBase is the pause after a first failed report; it doubles with
 	// every further one (default 1s), up to 4 times as long for a control
 	// plane that does not answer or fails, 32 times for one that refuses.
 	RetryBase time.Duration
+	// DrainRetry is the pause after a failed report while the report of a
+	// draining session is waiting, whatever RetryBase has grown to (default
+	// 200ms, so that the next pass tries again: a request every 250ms). The
+	// control plane waits only so long for the report, and an outage of the
+	// report endpoint that ends within the drain must not cost a session its
+	// report.
+	DrainRetry time.Duration
 }
 
 // reporter sends the delivery accounts of the recorder to the control plane:
@@ -90,16 +148,19 @@ type reporter struct {
 	instance string
 
 	sessions map[string]*reportState
-	// idle are the draining sessions this process recorded nothing for and
-	// has said so (see pass).
-	idle map[string]*reportState
-	// off is set when the control plane does not know the endpoint (an older
-	// one answers 404). It lasts until the stream is opened again, which is
-	// when the control plane may have been replaced.
-	off      bool
+	// mode is how reports are sent (modeBatch, modeSingle, modeOff). It falls
+	// back when the control plane does not know an endpoint (an older one
+	// answers 404), until the stream is opened again, which is when the
+	// control plane may have been replaced.
+	mode int
+	// hello is set while the control plane has not been told, since the
+	// stream was last opened, that the reports of this process arrive. A
+	// batch says so, also one without reports.
+	hello    bool
 	connects uint64
 	failures int
-	retryAt  time.Time // no report before this, after a failed one
+	failedAt time.Time // when the last report failed
+	retryAt  time.Time // no report before this, after a failed one (see paused)
 	kickedAt time.Time
 	urgentOf *snapshot // the active set whose draining sessions the exporter was told of
 	// down, outageLogged and lastOutageLog make the reporter say once when
@@ -142,11 +203,18 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	def(&cfg.KickEvery, time.Second)
 	def(&cfg.Timeout, 2*time.Second)
 	def(&cfg.RetryBase, time.Second)
+	def(&cfg.DrainRetry, 200*time.Millisecond)
+	def(&cfg.PassBudget, cfg.Tick)
 	if cfg.Burst <= 0 {
 		cfg.Burst = 32
 	}
-	r := &reporter{cfg: cfg, rec: rec, exp: exp, sub: sub, service: service, instance: instance,
-		sessions: map[string]*reportState{}, idle: map[string]*reportState{}, stop: make(chan struct{}), done: make(chan struct{})}
+	if cfg.Batch <= 0 || cfg.Batch > maxBatchReports {
+		cfg.Batch = maxBatchReports
+	}
+	// The names as the control plane compares them: the stream's headers
+	// reach it trimmed, and a report must name the same instance.
+	r := &reporter{cfg: cfg, rec: rec, exp: exp, sub: sub, service: ident.Clean(service), instance: ident.Clean(instance),
+		sessions: map[string]*reportState{}, stop: make(chan struct{}), done: make(chan struct{})}
 	go r.loop()
 	return r
 }
@@ -160,6 +228,11 @@ func (r *reporter) loop() {
 		case <-r.stop:
 			return
 		case <-t.C:
+			r.pass()
+		case <-r.sub.opened:
+			// The stream was opened: say at once that the reports of this
+			// process arrive, not a tick later. The control plane names a
+			// process it has not heard of a second after it connected.
 			r.pass()
 		}
 	}
@@ -199,19 +272,21 @@ type due struct {
 // control plane that this process is working through a backlog. A session
 // that left the active set is forgotten.
 //
-// A draining session this process recorded nothing for is reported once,
-// as that, while the stream is up: this process told the control plane, when
-// it opened the stream, that it reports, and the control plane then expects
-// to hear from it for every draining session. An instance it does not hear
-// from is one whose reports do not arrive.
+// A session this process recorded nothing for is not reported. The control
+// plane does not expect to hear of it: it looks for the report of a process
+// only when the collector has events of that process for the session.
+//
+// When the stream is opened, one request tells the control plane that the
+// reports of this process arrive, also when nothing is due (see hello).
 //
 // While the stream is down this process learns of a drain late, from a poll,
 // or not at all. Its reports then do not wait for FirstDelay or Interval:
 // what the control plane was not told before it seals a session, it cannot
 // hold against the collector.
 //
-// A pass sends Burst reports at most, the draining sessions first and of
-// those the ones reported longest ago, and none after one that failed.
+// Everything that is due goes into one request, Batch reports at most; what
+// does not fit follows at once, the draining sessions first and of those the
+// ones reported longest ago. Nothing is sent after a request that failed.
 //
 // The set read here is the raw one: under the kill switch IsActive is false
 // for every session, and what was recorded before must still be accounted.
@@ -222,20 +297,20 @@ func (r *reporter) pass() {
 		r.urgentOf = sn
 		r.exp.setUrgent(sn.draining)
 	}
-	if len(accts) == 0 && len(r.sessions) == 0 && len(sn.draining) == 0 && len(r.idle) == 0 {
-		return
-	}
 	if c := r.sub.connects.Load(); c != r.connects {
-		r.connects, r.off = c, false
+		r.connects, r.mode, r.hello = c, modeBatch, true
 		for _, st := range r.sessions {
 			st.resend = true
 		}
-		clear(r.idle)
+	}
+	streaming := r.sub.streaming.Load()
+	hello := r.hello && streaming && r.mode == modeBatch
+	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
+		return
 	}
 	now := time.Now()
-	streaming := r.sub.streaming.Load()
 	total := r.rec.deliveredTotal()
-	stuck, turned := false, false
+	stuck, turned, urgent := false, false, false
 	var todo []due
 	for sid, a := range accts {
 		if _, live := sn.active[sid]; !live {
@@ -261,8 +336,10 @@ func (r *reporter) pass() {
 		paced := now.Sub(st.sentAt) >= r.cfg.KickEvery
 		send := false
 		switch {
+		case st.closed:
 		case draining:
 			send = changed || d.Buffered > 0 && d.DeliveredTotal != st.last.DeliveredTotal && paced
+			urgent = urgent || changed
 		case !changed:
 		case !st.sent:
 			send = d.Buffered == 0 || !streaming || now.Sub(st.seen) >= r.cfg.FirstDelay
@@ -278,26 +355,6 @@ func (r *reporter) pass() {
 			delete(r.sessions, sid)
 		}
 	}
-	for sid := range r.idle {
-		if _, ok := sn.draining[sid]; !ok {
-			delete(r.idle, sid)
-		}
-	}
-	if streaming {
-		for sid := range sn.draining {
-			if _, has := accts[sid]; has {
-				continue
-			}
-			st := r.idle[sid]
-			if st == nil {
-				st = &reportState{seen: now}
-				r.idle[sid] = st
-			}
-			if !st.sent && !st.closed {
-				todo = append(todo, due{sid, st, deliveryReport{Service: r.service, Instance: r.instance, DeliveredTotal: total, Final: true}, true})
-			}
-		}
-	}
 	slices.SortFunc(todo, func(a, b due) int {
 		if a.draining != b.draining {
 			if a.draining {
@@ -307,34 +364,119 @@ func (r *reporter) pass() {
 		}
 		return cmp.Or(a.st.sentAt.Compare(b.st.sentAt), cmp.Compare(a.sid, b.sid))
 	})
-	for i, x := range todo {
-		if i == r.cfg.Burst || !r.send(x.sid, x.st, x.d) {
-			break
-		}
-	}
+	r.flush(todo, hello, total, urgent)
 	if stuck && (turned || now.Sub(r.kickedAt) >= r.cfg.KickEvery) {
 		r.kickedAt = now
 		r.exp.kick()
 	}
 }
 
-// send posts one report, unless reporting is off, paused after a failure, or
-// over for this session. It reports false when the pass should send no more:
-// reporting is off or paused.
-func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
-	if r.off || time.Now().Before(r.retryAt) {
+// paused reports whether a failed request keeps this pass from sending. The
+// pause grows with every failure in a row (see failed); while the report of a
+// draining session waits (urgent) it is DrainRetry at most.
+func (r *reporter) paused(urgent bool) bool {
+	now := time.Now()
+	if !now.Before(r.retryAt) {
 		return false
 	}
-	if st.closed {
-		return true
+	return !urgent || now.Sub(r.failedAt) < r.cfg.DrainRetry
+}
+
+// flush sends what a pass found due, in the order given. With hello a
+// request is sent even when nothing is due.
+func (r *reporter) flush(todo []due, hello bool, total uint64, urgent bool) {
+	if r.mode == modeOff || r.paused(urgent) {
+		return
 	}
+	began := time.Now()
+	for i := 0; len(todo) > 0 || hello; i++ {
+		if r.mode == modeSingle {
+			if i == r.cfg.Burst || len(todo) == 0 || !r.send(todo[0].sid, todo[0].st, todo[0].d) {
+				return
+			}
+			todo = todo[1:]
+			continue
+		}
+		n := min(len(todo), r.cfg.Batch)
+		if !r.sendBatch(todo[:n], total) {
+			// Not sent. A control plane without the endpoint is tried again at
+			// the next pass, a report per request.
+			return
+		}
+		todo, hello = todo[n:], false
+		// A request that took long has kept the accounts waiting: the rest
+		// is sent by the next pass, from what the accounts say then.
+		if time.Since(began) >= r.cfg.PassBudget {
+			return
+		}
+	}
+}
+
+// maxBatchReports is the most reports a control plane takes in one request,
+// and maxBatchAnswer bounds what is read of its answer.
+const (
+	maxBatchReports = 256
+	maxBatchAnswer  = 64 << 10
+)
+
+// sendBatch posts the reports of chunk in one request and notes what became
+// of each. It reports false when nothing more should be sent now: the request
+// failed, or the control plane does not know the endpoint.
+func (r *reporter) sendBatch(chunk []due, total uint64) bool {
+	b := deliveryBatch{Service: r.service, Instance: r.instance, DeliveredTotal: total, Reports: make([]batchReport, len(chunk))}
+	for i, x := range chunk {
+		b.Reports[i] = batchReport{Session: x.sid, Recorded: x.d.Recorded, Delivered: x.d.Delivered, Dropped: x.d.Dropped,
+			Buffered: x.d.Buffered, LastError: x.d.LastError, Final: x.d.Final}
+	}
+	code, answer := r.postBatch(b, r.cfg.Timeout)
+	switch {
+	case code/100 == 2:
+		now := time.Now()
+		for i, x := range chunk {
+			status := "accepted" // an answer that says nothing of a report: the control plane has it
+			if i < len(answer.Results) {
+				status = answer.Results[i].Status
+			}
+			switch status {
+			case "accepted", "stale", "full":
+				// full: the session keeps reports of as many instances as it
+				// can, and this is another one. The control plane goes by what
+				// a refused report says, so a change is still reported: events
+				// that are lost later must not go unsaid.
+				x.st.sent, x.st.last, x.st.sentAt, x.st.resend = true, x.d, now, false
+			case "failed": // the control plane could not store it: sent again
+			default: // closed, unknown, invalid: no report of this session will be taken
+				x.st.closed = true
+			}
+		}
+		r.hello = false
+		r.sub.setAnnounce(true)
+		r.up()
+		return true
+	case code == http.StatusNotFound || code == http.StatusMethodNotAllowed:
+		// A control plane without the endpoint. It may know the older one; it
+		// does not expect to hear from this process either way, and one that
+		// knows the older endpoint only would take the stream's announcement
+		// for a promise to report every draining session.
+		r.mode = modeSingle
+		r.sub.setAnnounce(false)
+		return false
+	default:
+		r.failed(code)
+		return false
+	}
+}
+
+// send posts one report to a control plane that takes one per request. It
+// reports false when no more should be sent now.
+func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
 	switch code := r.post(sid, d, r.cfg.Timeout); {
 	case code/100 == 2:
 		st.sent, st.last, st.sentAt, st.resend = true, d, time.Now(), false
 		r.up()
 	case code == http.StatusNotFound || code == http.StatusMethodNotAllowed:
 		// A control plane without the endpoint: say nothing, it is not an error.
-		r.off = true
+		r.mode = modeOff
 		return false
 	case code == http.StatusConflict:
 		st.closed = true // the session is finished or being sealed
@@ -353,8 +495,10 @@ func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
 // after the first failure, twice as long after each further one, up to 4
 // times RetryBase. A request that was refused (4xx) will be refused again
 // until someone changes something, so its pause grows to 32 times RetryBase.
-// The outage is logged once: at the first refusal, and at the second failure
-// in a row otherwise (a single lost request is retried without a word).
+// While the report of a draining session waits the pause is DrainRetry (see
+// paused). The outage is logged once: at the first refusal, and at the second
+// failure in a row otherwise (a single lost request is retried without a
+// word).
 func (r *reporter) failed(code int) {
 	refused := code/100 == 4
 	r.failures++
@@ -362,7 +506,8 @@ func (r *reporter) failed(code int) {
 	if refused {
 		steps = 5
 	}
-	r.retryAt = time.Now().Add(r.cfg.RetryBase << min(r.failures-1, steps))
+	r.failedAt = time.Now()
+	r.retryAt = r.failedAt.Add(r.cfg.RetryBase << min(r.failures-1, steps))
 	if r.down || !refused && r.failures < 2 {
 		return
 	}
@@ -373,7 +518,7 @@ func (r *reporter) failed(code int) {
 		if code != 0 {
 			what = fmt.Sprintf("answered HTTP %d", code)
 		}
-		log.Printf("tsession: cannot send delivery reports to the control plane at %s (it %s); they are retried, and until they arrive the sessions this service takes part in are marked incomplete",
+		log.Printf("tsession: cannot send delivery reports to the control plane at %s (it %s); they are retried, and until they arrive the sessions this service takes part in are marked incomplete, or say that its delivery is unconfirmed",
 			DisplayURL(r.sub.base), what)
 	}
 }
@@ -391,27 +536,46 @@ func (r *reporter) up() {
 }
 
 // post sends one report and returns the status code, 0 when there was no
-// answer. The body of the answer is not read for more than to reuse the
-// connection.
+// answer.
 func (r *reporter) post(sid string, d deliveryReport, timeout time.Duration) int {
-	body, err := json.Marshal(d)
+	code, _ := r.do("/v1/sessions/"+url.PathEscape(sid)+"/delivery", d, timeout, nil)
+	return code
+}
+
+// postBatch sends one batch and returns the status code, 0 when there was no
+// answer, and what the control plane said of each report.
+func (r *reporter) postBatch(b deliveryBatch, timeout time.Duration) (int, batchAnswer) {
+	var a batchAnswer
+	code, _ := r.do("/v1/delivery", b, timeout, &a)
+	return code, a
+}
+
+// do posts body as JSON to path of the control plane and returns the status
+// code, 0 when there was no answer. The answer is decoded into out when it is
+// a 2xx and out is not nil; it is not read for more than that, and to reuse
+// the connection.
+func (r *reporter) do(path string, body any, timeout time.Duration, out any) (int, error) {
+	b, err := json.Marshal(body)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.sub.base+"/v1/sessions/"+url.PathEscape(sid)+"/delivery", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.sub.base+path, bytes.NewReader(b))
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.sub.client.Do(req)
 	if err != nil {
-		return 0
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if out != nil && resp.StatusCode/100 == 2 {
+		_ = json.NewDecoder(io.LimitReader(resp.Body, maxBatchAnswer)).Decode(out)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12)) // let the connection be reused
-	resp.Body.Close()
-	return resp.StatusCode
+	return resp.StatusCode, nil
 }
 
 // close stops the reporter and, within timeout, sends a last report for
@@ -423,25 +587,45 @@ func (r *reporter) post(sid string, d deliveryReport, timeout time.Duration) int
 func (r *reporter) close(timeout time.Duration) {
 	close(r.stop)
 	<-r.done
-	if r.off {
+	if r.mode == modeOff {
 		return
 	}
 	deadline := time.Now().Add(timeout)
 	sn := r.sub.snap.Load()
 	total := r.rec.deliveredTotal()
+	var last []batchReport
 	for sid, a := range r.rec.accounts() {
 		st := r.sessions[sid]
 		if _, live := sn.active[sid]; !live || st != nil && st.closed {
 			continue
 		}
+		d := r.report(a, true, total)
+		d.Dropped, d.Buffered = d.Dropped+d.Buffered, 0
+		last = append(last, batchReport{Session: sid, Recorded: d.Recorded, Delivered: d.Delivered, Dropped: d.Dropped, LastError: d.LastError, Final: true})
+	}
+	slices.SortFunc(last, func(a, b batchReport) int { return cmp.Compare(a.Session, b.Session) })
+	for len(last) > 0 {
 		left := time.Until(deadline)
 		if left <= 0 {
 			return
 		}
-		d := r.report(a, true, total)
-		d.Dropped, d.Buffered = d.Dropped+d.Buffered, 0
-		if code := r.post(sid, d, min(left, r.cfg.Timeout)); code == 0 || code == http.StatusNotFound {
+		n := 1
+		code := 0
+		if r.mode == modeBatch {
+			n = min(len(last), r.cfg.Batch)
+			code, _ = r.postBatch(deliveryBatch{Service: r.service, Instance: r.instance, DeliveredTotal: total, Reports: last[:n]}, min(left, r.cfg.Timeout))
+			if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+				r.mode = modeSingle
+				continue
+			}
+		} else {
+			x := last[0]
+			code = r.post(x.Session, deliveryReport{Service: r.service, Instance: r.instance, Recorded: x.Recorded, Delivered: x.Delivered,
+				Dropped: x.Dropped, DeliveredTotal: total, LastError: x.LastError, Final: true}, min(left, r.cfg.Timeout))
+		}
+		if code == 0 || code == http.StatusNotFound {
 			return // unreachable, or without the endpoint
 		}
+		last = last[n:]
 	}
 }

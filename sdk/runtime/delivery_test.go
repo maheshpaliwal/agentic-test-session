@@ -160,22 +160,42 @@ type reportCP struct {
 	srv *httptest.Server
 
 	mu     sync.Mutex
-	status int // answer of the delivery endpoint; 0: 200; 404: as if the route did not exist
+	status int // answer of the delivery endpoints; 0: 200; 404: as if the routes did not exist
+	// noBatch makes it a control plane from before POST /v1/delivery: it takes
+	// one report per request (or none, with status 404).
+	noBatch bool
+	// answer is what a batch says of the reports of a session ("closed", ...)
+	// instead of "accepted"; the per-session endpoint answers 409 for it.
+	answer map[string]string
 	got    map[string][]deliveryReport
-	posts  int
+	order  []string // the sessions in the order their reports arrived
+	posts  int      // requests that carried reports, or were refused
+	hellos int      // batches without reports that were accepted
+	sizes  []int    // the reports of every accepted batch
+	// announced is the X-Tsession-Delivery-Instance of every stream opened.
+	announced []string
 }
 
 func newReportCP(t *testing.T, state string) *reportCP {
-	cp := &reportCP{fakeCP: newFakeCP(state), got: map[string][]deliveryReport{}}
+	cp := &reportCP{fakeCP: newFakeCP(state), got: map[string][]deliveryReport{}, answer: map[string]string{}}
 	mux := http.NewServeMux()
-	mux.Handle("/", cp.fakeCP.mux())
+	inner := cp.fakeCP.mux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/active/stream" {
+			cp.mu.Lock()
+			cp.announced = append(cp.announced, r.Header.Get(core.HeaderDeliveryInstance))
+			cp.mu.Unlock()
+		}
+		inner.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("POST /v1/sessions/{id}/delivery", cp.delivery)
+	mux.HandleFunc("POST /v1/delivery", cp.batch)
 	cp.srv = httptest.NewServer(mux)
 	t.Cleanup(func() { close(cp.drop); cp.srv.CloseClientConnections(); cp.srv.Close() })
 	return cp
 }
 
-// delivery is the delivery endpoint.
+// delivery is the endpoint for one report.
 func (cp *reportCP) delivery(w http.ResponseWriter, r *http.Request) {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
@@ -184,13 +204,94 @@ func (cp *reportCP) delivery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no", cp.status)
 		return
 	}
+	sid := r.PathValue("id")
+	if cp.answer[sid] != "" {
+		http.Error(w, cp.answer[sid], http.StatusConflict)
+		return
+	}
 	var d deliveryReport
 	if r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&d) != nil {
 		http.Error(w, "bad", http.StatusBadRequest)
 		return
 	}
-	cp.got[r.PathValue("id")] = append(cp.got[r.PathValue("id")], d)
+	cp.got[sid] = append(cp.got[sid], d)
+	cp.order = append(cp.order, sid)
 	_, _ = io.WriteString(w, `{"accepted":true}`)
+}
+
+// batch is the endpoint for the reports of many sessions.
+func (cp *reportCP) batch(w http.ResponseWriter, r *http.Request) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	if cp.noBatch || cp.status == http.StatusNotFound {
+		cp.posts++
+		http.NotFound(w, r)
+		return
+	}
+	if cp.status != 0 {
+		cp.posts++
+		http.Error(w, "no", cp.status)
+		return
+	}
+	var b deliveryBatch
+	if r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&b) != nil {
+		cp.posts++
+		http.Error(w, "bad", http.StatusBadRequest)
+		return
+	}
+	if len(b.Reports) == 0 {
+		cp.hellos++
+	} else {
+		cp.posts++
+	}
+	cp.sizes = append(cp.sizes, len(b.Reports))
+	results := make([]map[string]string, len(b.Reports))
+	for i, x := range b.Reports {
+		status := cp.answer[x.Session]
+		if status == "" {
+			status = "accepted"
+			cp.got[x.Session] = append(cp.got[x.Session], deliveryReport{Service: b.Service, Instance: b.Instance, Recorded: x.Recorded, Delivered: x.Delivered,
+				Dropped: x.Dropped, Buffered: x.Buffered, DeliveredTotal: b.DeliveredTotal, LastError: x.LastError, Final: x.Final})
+			cp.order = append(cp.order, x.Session)
+		}
+		results[i] = map[string]string{"session": x.Session, "status": status}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+}
+
+// seen returns the counters of the requests: those that carried reports or
+// were refused, the accepted batches without reports, and the reports of
+// every accepted batch.
+func (cp *reportCP) seen() (posts, hellos int, sizes []int) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return cp.posts, cp.hellos, append([]int(nil), cp.sizes...)
+}
+
+// streams returns what every stream opened so far announced.
+func (cp *reportCP) streams() []string {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return append([]string(nil), cp.announced...)
+}
+
+// reportCount is the number of reports received, of all sessions.
+func (cp *reportCP) reportCount() int {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return len(cp.order)
+}
+
+func (cp *reportCP) set404(noBatch bool, status int) {
+	cp.mu.Lock()
+	cp.noBatch, cp.status = noBatch, status
+	cp.mu.Unlock()
+}
+
+func (cp *reportCP) setAnswer(sid, status string) {
+	cp.mu.Lock()
+	cp.answer[sid] = status
+	cp.mu.Unlock()
 }
 
 // all returns the reports received, by session.
@@ -223,10 +324,10 @@ func (cp *reportCP) last(sid string) deliveryReport {
 	return deliveryReport{}
 }
 
+// postCount is the number of requests that carried reports or were refused.
 func (cp *reportCP) postCount() int {
-	cp.mu.Lock()
-	defer cp.mu.Unlock()
-	return cp.posts
+	posts, _, _ := cp.seen()
+	return posts
 }
 
 // reportEnv is a recorder, an exporter, a subscriber and a reporter with
@@ -249,7 +350,17 @@ const (
 
 func newReportEnv(t *testing.T, state string, mut func(*ExporterConfig)) *reportEnv {
 	t.Helper()
-	e := &reportEnv{t: t, col: newTestCollector(t), cp: newReportCP(t, state)}
+	e := newReportEnvOn(t, newReportCP(t, state), mut)
+	// The reporter has said that its reports arrive: from here on a test
+	// counts the requests it causes itself.
+	eventually(t, "the reporter has said hello", func() bool { _, hellos, _ := e.cp.seen(); return hellos == 1 })
+	return e
+}
+
+// newReportEnvOn is newReportEnv against a control plane the test prepared.
+func newReportEnvOn(t *testing.T, cp *reportCP, mut func(*ExporterConfig), tune ...func(*reporterConfig)) *reportEnv {
+	t.Helper()
+	e := &reportEnv{t: t, col: newTestCollector(t), cp: cp}
 	cfg := ExporterConfig{CollectorURL: e.col.srv.URL, FlushInterval: 2 * time.Millisecond, RetryBackoff: time.Millisecond,
 		MaxCooldown: 20 * time.Millisecond, HTTPTimeout: time.Second}
 	if mut != nil {
@@ -257,10 +368,14 @@ func newReportEnv(t *testing.T, state string, mut func(*ExporterConfig)) *report
 	}
 	e.rec = NewRecorder(64)
 	e.exp = NewExporter(e.rec, cfg)
-	e.sub = NewSubscriberFor(e.cp.srv.URL, "svc", "raw-instance")
-	e.rep = newReporter(e.rec, e.exp, e.sub, "svc", "svc-1-abcdef", reporterConfig{Tick: 5 * time.Millisecond,
+	e.sub = newSubscriber(e.cp.srv.URL, "svc", "raw-instance", "svc-1-abcdef")
+	rcfg := reporterConfig{Tick: 5 * time.Millisecond,
 		Interval: testInterval, FirstDelay: testFirstDelay, DrainFlush: 50 * time.Millisecond, KickEvery: 20 * time.Millisecond,
-		RetryBase: 20 * time.Millisecond})
+		RetryBase: 20 * time.Millisecond, DrainRetry: 5 * time.Millisecond}
+	for _, f := range tune {
+		f(&rcfg)
+	}
+	e.rep = newReporter(e.rec, e.exp, e.sub, "svc", "svc-1-abcdef", rcfg)
 	e.t.Cleanup(func() {
 		e.exp.Close(10 * time.Millisecond)
 		if !e.rep.stopped() {
@@ -424,55 +539,165 @@ func TestReporterRetriesDeliveryWhileDraining(t *testing.T) {
 	}
 }
 
-// An older control plane has no delivery endpoint and answers 404: the
-// reporter goes quiet, without a log line, until the stream is opened again
-// (the control plane may have been upgraded meanwhile).
+// A control plane from before delivery reports has neither endpoint and
+// answers 404: the reporter goes quiet, without a log line, and the stream
+// no longer announces that this process reports. It asks again when the
+// stream is opened anew (the control plane may have been upgraded meanwhile).
 func TestReporterFallsSilentOn404(t *testing.T) {
-	e := newReportEnv(t, `{"active":["s1","s2"]}`, nil)
-	e.cp.setStatus(http.StatusNotFound)
+	out := logTo(t)
+	cp := newReportCP(t, `{"active":["s1","s2"]}`)
+	cp.set404(false, http.StatusNotFound)
+	e := newReportEnvOn(t, cp, nil)
+	// The stream is opened anew without the announcement, once.
+	eventually(t, "a stream that does not announce reports", func() bool { s := cp.streams(); return len(s) == 2 && s[0] == "svc-1-abcdef" && s[1] == "" })
+	eventually(t, "the batch endpoint was asked for at both connects", func() bool { posts, _, _ := cp.seen(); return posts == 2 })
 	e.record("s1", 1)
 	e.record("s2", 1)
-	eventually(t, "a first attempt", func() bool { return e.cp.postCount() == 1 })
+	// One attempt at the per-session endpoint, then nothing.
+	eventually(t, "an attempt at the older endpoint", func() bool { posts, _, _ := cp.seen(); return posts == 3 })
 	e.record("s1", 5)
 	time.Sleep(testInterval + 100*time.Millisecond)
-	if n := e.cp.postCount(); n != 1 {
-		t.Fatalf("%d requests to a control plane that answered 404, want 1", n)
+	if posts, _, _ := cp.seen(); posts != 3 || len(cp.streams()) != 2 {
+		t.Fatalf("%d requests to a control plane that answered 404, want 3 (%d streams)", posts, len(cp.streams()))
 	}
-	// Recording and export are not affected.
+	// Recording and export are not affected, and nothing is logged.
 	if a := e.rec.accounts(); a["s1"] != (account{recorded: 6, delivered: 6}) || a["s2"] != (account{recorded: 1, delivered: 1}) {
 		t.Fatalf("accounts %+v", a)
 	}
+	if logged := out.String(); strings.Contains(logged, "delivery reports") {
+		t.Fatalf("logged about a control plane without the endpoint:\n%s", logged)
+	}
 
-	// The same after a reconnect, with one more attempt...
-	e.cp.drop <- struct{}{}
-	eventually(t, "another attempt after the reconnect", func() bool { return e.cp.postCount() == 2 })
+	// The same after a reconnect, with one more round of attempts...
+	cp.drop <- struct{}{}
+	eventually(t, "another round after the reconnect", func() bool { posts, _, _ := cp.seen(); return posts == 5 })
 	time.Sleep(testInterval + 100*time.Millisecond)
-	if n := e.cp.postCount(); n != 2 {
-		t.Fatalf("%d requests, want 2", n)
+	if posts, _, _ := cp.seen(); posts != 5 {
+		t.Fatalf("%d requests, want 5", posts)
 	}
 	// ...and reports resume when the endpoint is there: everything, also
-	// what did not change since.
-	e.cp.setStatus(0)
-	e.cp.drop <- struct{}{}
+	// what did not change since, and the stream announces them again.
+	cp.set404(false, 0)
+	cp.drop <- struct{}{}
 	e.settled("s1", deliveryReport{Recorded: 6, Delivered: 6})
 	e.settled("s2", deliveryReport{Recorded: 1, Delivered: 1})
+	eventually(t, "a stream that announces reports again", func() bool { s := cp.streams(); return s[len(s)-1] == "svc-1-abcdef" })
 }
 
-// 409: the session is finished or being sealed. Nothing more is sent for
-// it; other sessions are.
-func TestReporterStopsOn409(t *testing.T) {
-	e := newReportEnv(t, `{"active":["s1","s2"]}`, nil)
-	e.cp.setStatus(http.StatusConflict)
-	e.record("s1", 1)
-	eventually(t, "an attempt", func() bool { return e.cp.postCount() == 1 })
-	e.cp.setStatus(0)
-	e.record("s1", 1)
-	e.record("s2", 1)
-	e.settled("s2", deliveryReport{Recorded: 1, Delivered: 1})
-	time.Sleep(testInterval + 100*time.Millisecond)
-	if got := e.cp.reports("s1"); len(got) != 0 || e.cp.postCount() != 2 {
-		t.Fatalf("reports of a session the control plane closed: %+v (%d requests)", got, e.cp.postCount())
+// A control plane that knows the per-session endpoint only (one from before
+// the batch): every report goes there, a request each and Burst of them per
+// pass, the draining sessions first, and the stream does not announce this
+// process: such a control plane would take the announcement for a promise to
+// report every draining session, which this SDK does not keep.
+func TestReporterFallsBackToOneReportPerRequest(t *testing.T) {
+	var active, draining []string
+	for i := range 40 {
+		active = append(active, fmt.Sprintf(`"s%02d"`, i))
+		if i%4 == 0 {
+			draining = append(draining, fmt.Sprintf(`"s%02d"`, i))
+		}
 	}
+	cp := newReportCP(t, `{"active":[`+strings.Join(active, ",")+`],"draining":[`+strings.Join(draining, ",")+`]}`)
+	cp.set404(true, 0)
+	col := newTestCollector(t)
+	rec := NewRecorder(256)
+	exp := NewExporter(rec, ExporterConfig{CollectorURL: col.srv.URL, FlushInterval: time.Hour})
+	sub := newSubscriber(cp.srv.URL, "svc", "raw", "svc-1")
+	rep := manualReporter(rec, exp, sub, "svc", "svc-1", reporterConfig{Tick: time.Hour, Burst: 6})
+	t.Cleanup(func() { exp.Close(10 * time.Millisecond); rep.close(10 * time.Millisecond); sub.Close() })
+	eventually(t, "the active set", func() bool { return sub.Ready() && sub.streaming.Load() })
+	pass := rep.pass // the reporter's own loop never runs one (Tick)
+	pass()           // asks for the batch endpoint: 404
+	eventually(t, "a stream that does not announce reports", func() bool {
+		s := cp.streams()
+		return len(s) == 2 && s[1] == "" && sub.streaming.Load()
+	})
+	pass() // asks again on the new stream
+	if posts, hellos, _ := cp.seen(); posts != 2 || hellos != 0 {
+		t.Fatalf("%d requests, %d batches accepted", posts, hellos)
+	}
+	for i := range 40 {
+		rec.Record(core.Event{SessionID: fmt.Sprintf("s%02d", i), Kind: core.KindAPIIn, LocalSeq: seqBase + uint64(i)})
+	}
+	if !exp.Flush(5 * time.Second) {
+		t.Fatal("flush")
+	}
+	pass()
+	if n := cp.reportCount(); n != 6 {
+		t.Fatalf("%d reports in one pass, want 6", n)
+	}
+	for sid := range cp.all() {
+		if !strings.Contains(strings.Join(draining, ","), `"`+sid+`"`) {
+			t.Fatalf("session %s was reported before the draining ones", sid)
+		}
+	}
+	for range 10 {
+		pass()
+	}
+	if got := cp.all(); len(got) != 40 {
+		t.Fatalf("%d sessions reported, want all 40", len(got))
+	}
+	if s := cp.streams(); len(s) != 2 {
+		t.Fatalf("streams %q", s)
+	}
+	// A session that is finished: its endpoint answers 409, and nothing more
+	// is sent for it.
+	cp.setAnswer("s04", "closed")
+	rec.Record(core.Event{SessionID: "s04", Kind: core.KindAPIIn, LocalSeq: seqBase + 100})
+	rec.Record(core.Event{SessionID: "s08", Kind: core.KindAPIIn, LocalSeq: seqBase + 101})
+	if !exp.Flush(5 * time.Second) {
+		t.Fatal("flush")
+	}
+	before, _, _ := cp.seen()
+	for range 3 { // both drain: a change is reported at once
+		pass()
+	}
+	if posts, _, _ := cp.seen(); posts != before+2 || len(cp.reports("s04")) != 1 || len(cp.reports("s08")) != 2 {
+		t.Fatalf("%d requests after a 409, want 2 (s04 %d reports, s08 %d)", posts-before, len(cp.reports("s04")), len(cp.reports("s08")))
+	}
+}
+
+// The control plane says of every report of a batch what became of it. For a
+// session that is finished or being sealed nothing more is sent; the other
+// sessions of the batch are not affected.
+func TestReporterStopsOnAClosedSession(t *testing.T) {
+	for _, status := range []string{"closed", "unknown", "invalid"} {
+		t.Run(status, func(t *testing.T) {
+			e := newReportEnv(t, `{"active":["s1","s2"]}`, nil)
+			e.cp.setAnswer("s1", status)
+			e.record("s1", 1)
+			e.record("s2", 1)
+			e.settled("s2", deliveryReport{Recorded: 1, Delivered: 1})
+			before, _, _ := e.cp.seen()
+			e.record("s1", 1)
+			e.cp.setAnswer("s1", "")
+			time.Sleep(testInterval + 100*time.Millisecond)
+			if posts, _, _ := e.cp.seen(); len(e.cp.reports("s1")) != 0 || posts != before {
+				t.Fatalf("reports of a session the control plane closed: %+v (%d more requests)", e.cp.reports("s1"), posts-before)
+			}
+		})
+	}
+	// A session that already keeps the reports of as many instances as it
+	// can ("full"): the control plane judges the refused report by what it
+	// says, so the reporter goes on telling it of changes, at its usual pace.
+	f := newReportEnv(t, `{"active":["s1"]}`, nil)
+	f.cp.setAnswer("s1", "full")
+	f.record("s1", 1)
+	eventually(t, "a first report", func() bool { return f.cp.postCount() == 1 })
+	time.Sleep(60 * time.Millisecond)
+	if n := f.cp.postCount(); n != 1 {
+		t.Fatalf("%d requests for a report that did not change, want 1", n)
+	}
+	f.record("s1", 1)
+	eventually(t, "the change is reported", func() bool { return f.cp.postCount() == 2 })
+
+	// A report the control plane could not store is sent again.
+	e := newReportEnv(t, `{"active":["s1"]}`, nil)
+	e.cp.setAnswer("s1", "failed")
+	e.record("s1", 1)
+	eventually(t, "attempts", func() bool { posts, _, _ := e.cp.seen(); return posts >= 3 })
+	e.cp.setAnswer("s1", "")
+	e.settled("s1", deliveryReport{Recorded: 1, Delivered: 1})
 }
 
 // A control plane that fails is retried, and the report that gets through
@@ -528,4 +753,15 @@ func TestRuntimeStopSendsFinalReport(t *testing.T) {
 	if got.Service != "orders" || got.Instance != inst || got.Recorded != 1 || got.Dropped != 1 || got.Buffered != 0 || !got.Final {
 		t.Fatalf("report at Stop %+v, want one dropped event of instance %s", got, inst)
 	}
+}
+
+// manualReporter is a reporter whose passes the test runs itself: its own
+// loop, which runs one on every tick and whenever the stream is opened, is
+// stopped. close works as on any other.
+func manualReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instance string, cfg reporterConfig) *reporter {
+	r := newReporter(rec, exp, sub, service, instance, cfg)
+	close(r.stop)
+	<-r.done
+	r.stop = make(chan struct{})
+	return r
 }
