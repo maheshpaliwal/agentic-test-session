@@ -1,6 +1,10 @@
 package redisx
 
-import "strings"
+import (
+	"maps"
+	"slices"
+	"strings"
+)
 
 // Spec describes one Redis command: whether it mutates state and where its
 // keys live in the argument vector (args[0] is the command name). It follows
@@ -276,3 +280,6 @@ func atoi(v any) int {
 	}
 	return n
 }
+
+// Names returns the names of the commands in the classification table, sorted.
+func Names() []string { return slices.Sorted(maps.Keys(commands)) }

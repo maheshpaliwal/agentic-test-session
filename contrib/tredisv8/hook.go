@@ -97,7 +97,7 @@ type hook struct{ redisx.Tracer }
 func newHook(c redis.Cmdable, opts []Option) *hook {
 	h := &hook{redisx.NewTracer()}
 	h.Reader, h.Nil, h.Reply, h.PoppedKey = asReader(c), redis.Nil, replyOf, poppedKey
-	h.TxFailed = redis.TxFailedErr
+	h.TxFailed, h.FixedErrs = redis.TxFailedErr, []error{redis.ErrClosed}
 	// The caller's ctx carries its own op (v8 passes the Before ctx to After):
 	// image reads must neither be traced nor finish that op.
 	h.ImageCtx = func(ctx context.Context) context.Context {

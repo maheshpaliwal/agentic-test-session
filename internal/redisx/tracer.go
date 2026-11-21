@@ -3,6 +3,8 @@ package redisx
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,6 +53,7 @@ type Tracer struct {
 	Reader    Reader                                // nil disables images
 	Nil       error                                 // the client's "key does not exist" error
 	TxFailed  error                                 // the client's "EXEC aborted: a watched key changed" error
+	FixedErrs []error                               // client errors with a fixed text (closed client, pool timeout)
 	Reply     func(Cmd) (v any, scalar, ok bool)    // reply of the common command types
 	PoppedKey func(Cmd) string                      // key a multi-key pop popped from, "" if unknown
 	ImageCtx  func(context.Context) context.Context // optional extra context setup for image reads
@@ -72,17 +75,19 @@ func Skipped(ctx context.Context) bool {
 
 // Op is one in-flight command span plus what is needed to build mutations.
 type Op struct {
-	span    *core.Span
-	session string // keys the hash of masked key names
-	spec    Spec
-	args    []any
-	masked  []string // args with credentials/values masked, index-aligned
-	name    string
-	keys    []int
-	before  map[int]core.PayloadRef // before-images, by arg index
-	snaps   map[int]*snap           // what the before-image reads saw, for the diff
-	imaged  []int                   // arg indices of keys under image capture
-	after   []int                   // subset of imaged whose after-image this op reads
+	span      *core.Span
+	session   string // scopes the hash of masked key names
+	spec      Spec
+	args      []any
+	masked    []string // args as they are recorded, index-aligned
+	sensitive bool     // an argument is recorded masked, or a key is sensitive
+	sensKey   bool     // a key is sensitive: no value of any of the command's keys is read
+	name      string
+	keys      []int
+	before    map[int]core.PayloadRef // before-images, by arg index
+	snaps     map[int]*snap           // what the before-image reads saw, for the diff
+	imaged    []int                   // arg indices of keys under image capture
+	after     []int                   // subset of imaged whose after-image this op reads
 }
 
 // batch is the image-read allowance of one pipeline, or of one command
@@ -239,30 +244,21 @@ func (t *Tracer) begin(ctx context.Context, cmd Cmd, pipeline bool, b *batch) *O
 		kind = core.KindCacheWrite
 	}
 	sc, _ := core.FromContext(ctx)
+	masked, sensKey, sensitive := t.record(sc.SessionID, cmd.Name(), args, keys)
 	first := ""
 	if len(keys) > 0 {
-		first = t.ShowKey(sc.SessionID, Str(args[keys[0]]))
+		first = masked[keys[0]]
 	}
 	_, span := core.Begin(ctx, kind, SpanName(args, first))
 	if span == nil {
 		return nil
 	}
-	masked := t.MaskArgs(cmd.Name(), args, keys)
-	for _, k := range keys {
-		if k < len(masked) {
-			masked[k] = t.ShowKey(sc.SessionID, masked[k])
-		}
-	}
-	if _, known := Lookup(cmd.Name()); !known {
-		for i := 1; i < len(masked); i++ { // any argument may be a key
-			masked[i] = t.ShowKey(sc.SessionID, masked[i])
-		}
-	}
 	span.SetReq(CapArgs(masked))
 	if pipeline {
 		span.SetAttr("pipeline", "true")
 	}
-	o := &Op{span: span, session: sc.SessionID, spec: s, args: args, keys: keys, masked: masked, name: cmd.Name()}
+	o := &Op{span: span, session: sc.SessionID, spec: s, args: args, keys: keys, masked: masked,
+		sensitive: sensitive, sensKey: sensKey, name: cmd.Name()}
 	if IsPublish(cmd.Name()) {
 		// Told apart from a write of a key by the names tqueue gives a publish.
 		span.SetAttr("system", "redis")
@@ -271,6 +267,32 @@ func (t *Tracer) begin(ctx context.Context, cmd Cmd, pipeline bool, b *batch) *O
 		t.beforeImages(ctx, o, b)
 	}
 	return o
+}
+
+// record returns the arguments as they are recorded, index-aligned with args:
+// credentials and values masked by the command's semantics (MaskArgs), then
+// every argument masked as a key name. The second step does not depend on the
+// command: a key that the command table does not list as one (the keys after
+// STREAMS of XREAD, a MATCH or BY pattern, a key handed to a script as ARGV,
+// any argument of a command the tracer does not know) is recorded the way it
+// is as the key of SET. sensKey reports that a key is sensitive, and sensitive
+// that one is or that an argument is not recorded as it was sent.
+func (t *Tracer) record(session, name string, args []any, keys []int) (masked []string, sensKey, sensitive bool) {
+	masked, sensKey = t.MaskArgs(name, args, keys)
+	sensitive = sensKey
+	next := 0 // keys is ascending
+	for i := 1; i < len(masked); i++ {
+		raw := Str(args[i])
+		switch {
+		case next < len(keys) && keys[next] == i:
+			next++
+			masked[i] = t.ShowKey(session, raw)
+		default:
+			masked[i] = t.ShowText(session, masked[i])
+		}
+		sensitive = sensitive || masked[i] != raw
+	}
+	return masked, sensKey, sensitive
 }
 
 func (t *Tracer) ignored(args []any, keys []int) bool {
@@ -291,7 +313,7 @@ func (t *Tracer) ignored(args []any, keys []int) bool {
 func (t *Tracer) beforeImages(ctx context.Context, o *Op, b *batch) {
 	o.before, o.snaps = map[int]core.PayloadRef{}, map[int]*snap{}
 	for _, i := range WrittenKeys(o.name, o.args, o.keys, "") {
-		k := Str(o.args[i])
+		k := Str(o.args[i]) // the key as Redis knows it, not as it is recorded
 		if !matchAny(t.Patterns, k) {
 			continue
 		}
@@ -301,7 +323,7 @@ func (t *Tracer) beforeImages(ctx context.Context, o *Op, b *batch) {
 			}
 			continue
 		}
-		ref, seen, ok := t.beforeImage(ctx, o.span, k, b)
+		ref, seen, ok := t.beforeImage(ctx, o, k, b)
 		if b.pipeline {
 			if b.imaged == nil {
 				b.imaged = map[string]bool{}
@@ -316,24 +338,20 @@ func (t *Tracer) beforeImages(ctx context.Context, o *Op, b *batch) {
 	}
 }
 
-// beforeImage returns the before-image of key and what the read saw (nil for
-// a sensitive key, which is not read).
-func (t *Tracer) beforeImage(ctx context.Context, span *core.Span, key string, b *batch) (core.PayloadRef, *snap, bool) {
-	if t.KeySensitive(key) { // never read a sensitive value just to mask it
-		return core.Payload(core.RedactedValue), nil, true
-	}
+// beforeImage returns the before-image of key and what the read saw.
+func (t *Tracer) beforeImage(ctx context.Context, o *Op, key string, b *batch) (core.PayloadRef, *snap, bool) {
 	if b.reads <= 0 {
-		span.SetAttr("image_skipped", "cap")
+		o.span.SetAttr("image_skipped", "cap")
 		return core.PayloadRef{}, nil, false
 	}
 	b.reads--
 	if expired(b.deadline) {
-		span.SetAttr("image_skipped", "deadline")
+		o.span.SetAttr("image_skipped", "deadline")
 		return core.PayloadRef{}, nil, false
 	}
-	ref, seen, ok := t.image(ctx, key, b.deadline)
+	ref, seen, ok := t.image(ctx, o.session, key, o.sensKey, b.deadline)
 	if !ok {
-		span.SetAttr("image_skipped", "error")
+		o.span.SetAttr("image_skipped", "error")
 	}
 	return ref, seen, ok
 }
@@ -345,31 +363,38 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 		return
 	}
 	defer o.span.End()
-	if err != nil && !errors.Is(err, t.Nil) {
-		o.span.SetErr(o.maskErr(err))
+	miss := err != nil && errors.Is(err, t.Nil)
+	if err != nil && !miss {
+		o.span.SetErr(o.recordedErr(t, err))
 		return
 	}
 	var reply any
 	if err == nil {
 		if v, scalar, ok := t.Reply(cmd); ok {
 			reply = v
-			if v, ok := t.MaskReply(o.name, o.args, o.keys, v, scalar); ok {
-				o.span.SetResp(o.replyKeys(t, v))
+			if v, ok := t.MaskReply(o.session, o.name, o.args, o.keys, v, scalar, o.sensitive); ok {
+				o.span.SetResp(v)
 			}
 		}
 	}
-	if !o.spec.Write || err != nil || NoOp(o.name, reply) || IsPublish(o.name) {
+	name := strings.ToLower(cmd.Name())
+	if !o.spec.Write || IsPublish(name) || miss && !writesOnNil(name, o.args) || NoOp(name, reply) {
 		return // a read, a miss, a write that changed nothing or a message: no mutation
 	}
-	name := strings.ToLower(cmd.Name())
+	if queued(name, o.args, reply) {
+		// Sent between a MULTI and an EXEC that the application issued itself
+		// (Do("multi")): nothing has changed yet, and EXEC or DISCARD decides.
+		o.span.SetAttr("queued", "true")
+		return
+	}
 	popped := ""
 	if IsPop(name) {
 		popped = t.PoppedKey(cmd)
 	}
-	truncated := false // the span is flagged once
+	truncated, concurrent := false, false // the span is flagged once
 	for _, i := range WrittenKeys(name, o.args, o.keys, popped) {
 		key := Str(o.args[i])
-		shown := t.ShowKey(o.session, key)
+		shown := o.masked[i]
 		m := core.Mutation{
 			Store:  "redis",
 			Entity: KeyPattern(shown),
@@ -382,18 +407,24 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 		}
 		switch {
 		case slices.Contains(o.after, i):
-			if t.KeySensitive(key) {
-				// Not read, so whether the value changed is not known.
-				m.After = core.Payload(core.RedactedValue)
-				o.span.SetAttr("diff_skipped", "sensitive_key")
-			} else if expired(deadline) {
+			if expired(deadline) {
 				o.span.SetAttr("image_skipped", "deadline")
-			} else if ref, seen, ok := t.image(ctx, key, deadline); ok {
+			} else if ref, seen, ok := t.image(ctx, o.session, key, o.sensKey, deadline); ok {
 				m.After = ref
+				was := o.snaps[i]
+				if seen.hidden || was != nil && was.hidden {
+					// The value is not read, so whether it changed is not known.
+					o.span.SetAttr("diff_skipped", "sensitive_key")
+					break
+				}
 				var cut bool
-				if m.Diff, cut = diffSnaps(o.snaps[i], seen); cut && !truncated {
+				if m.Diff, cut = diffSnaps(was, seen); cut && !truncated {
 					truncated = true
 					o.span.AddFlag("diff_truncated")
+				}
+				if !concurrent && foreignChange(name, o.args, i, was, seen) {
+					concurrent = true
+					o.span.AddFlag("diff_concurrent")
 				}
 			} else {
 				o.span.SetAttr("image_skipped", "error")
@@ -407,49 +438,137 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 	}
 }
 
-// maskErr masks in err's text the arguments that are recorded masked: a
-// server error can quote them ("unknown command ..., with args beginning
-// with: ...").
-func (o *Op) maskErr(err error) error {
-	text := err.Error()
-	for i := 1; i < len(o.args) && i < len(o.masked); i++ {
-		if raw := Str(o.args[i]); len(raw) >= 4 && raw != o.masked[i] {
-			text = strings.ReplaceAll(text, raw, o.masked[i])
-		}
+// writesOnNil reports whether the command wrote although its reply is nil:
+// GETSET and SET ... GET answer with the old value, which a new key has not.
+// (SET ... XX GET on a key that does not exist answers nil and writes nothing.)
+func writesOnNil(lname string, args []any) bool {
+	switch lname {
+	case "getset":
+		return true
+	case "set":
+		return hasOption(args, 3, "GET") && !hasOption(args, 3, "XX")
 	}
-	if text == err.Error() {
-		return err
-	}
-	return errors.New(text)
+	return false
 }
 
-// replyKeys masks the key names a redacted reply v carries: KEYS and RANDOMKEY
-// return key names, and a multi-key pop names the key it popped from first.
-func (o *Op) replyKeys(t *Tracer, v any) any {
-	show := func(k string) string { return t.ShowKey(o.session, k) }
-	name := strings.ToLower(o.name)
-	switch l := v.(type) {
-	case string:
-		if name == "randomkey" {
-			return show(l)
+// valueReplies are writes that answer with a stored value, which can be any
+// text, "QUEUED" included.
+var valueReplies = map[string]bool{
+	"getset": true, "getdel": true, "getex": true, "lpop": true, "rpop": true, "spop": true, "lmove": true,
+	"rpoplpush": true, "blmove": true, "brpoplpush": true, "hgetdel": true, "hgetex": true, "lindex": true,
+	"eval": true, "evalsha": true, "fcall": true, "json.arrpop": true,
+}
+
+// queued reports whether the reply says the command was queued by a MULTI.
+func queued(lname string, args []any, reply any) bool {
+	s, ok := reply.(string)
+	return ok && s == "QUEUED" && !valueReplies[lname] && !(lname == "set" && hasOption(args, 3, "GET"))
+}
+
+// errWithheld ends the recorded text of an error whose message is not kept.
+const errWithheld = "[text withheld: the command has masked arguments]"
+
+// errCodes are the first words of Redis error replies. Only these are kept of
+// a withheld error: a script chooses the text of its error, first word
+// included.
+var errCodes = map[string]bool{
+	"ERR": true, "WRONGTYPE": true, "NOSCRIPT": true, "MOVED": true, "ASK": true, "CLUSTERDOWN": true,
+	"CROSSSLOT": true, "TRYAGAIN": true, "READONLY": true, "NOAUTH": true, "NOPERM": true, "WRONGPASS": true,
+	"OOM": true, "BUSY": true, "BUSYKEY": true, "BUSYGROUP": true, "NOGROUP": true, "EXECABORT": true,
+	"LOADING": true, "MASTERDOWN": true, "MISCONF": true, "NOREPLICAS": true, "NOTBUSY": true,
+	"UNKILLABLE": true, "NOPROTO": true, "IOERR": true, "UNBLOCKED": true, "DENIED": true, "INPROG": true,
+}
+
+// errPhrases are fixed parts of Redis error messages; the first one found in
+// a withheld message is kept, to say what kind of error it was.
+var errPhrases = []string{
+	"unknown command", "unknown subcommand", "wrong number of arguments", "syntax error",
+	"value is not an integer or out of range", "value is not a valid float", "no such key", "index out of range",
+	"Operation against a key holding the wrong kind of value", "No matching script",
+	"increment or decrement would overflow", "invalid expire time", "timeout is not a float or out of range",
+	"timeout is negative", "invalid cursor", "Error compiling script", "Error running script", "not allowed",
+}
+
+// recordedErr returns err as it is recorded.
+//
+// A command that had a masked argument or a sensitive key keeps only what
+// cannot hold a piece of an argument or of a stored value: the error code
+// from a fixed list (ERR, WRONGTYPE, NOSCRIPT, ...) and, when the message
+// holds one, a phrase from a fixed list ("unknown command"); client-side
+// errors keep a fixed description. Replacing the arguments in the text does
+// not work: Redis quotes a prefix of them ("unknown command 'x', with args
+// beginning with: ..."), and a script can put any part of its KEYS and ARGV,
+// in any form, into the error it raises.
+//
+// The error of any other command is scrubbed like a value, word by word.
+func (o *Op) recordedErr(t *Tracer, err error) error {
+	if !o.sensitive {
+		text := err.Error()
+		if shown := o.scrubWords(t, text); shown != text {
+			return errors.New(shown)
 		}
-	case []string:
-		switch {
-		case name == "keys":
-			for i := range l {
-				l[i] = show(l[i])
-			}
-		case IsPop(name) && len(l) > 0:
-			l[0] = show(l[0])
-		}
-	case []any:
-		if IsPop(name) && len(l) > 0 {
-			if s, ok := l[0].(string); ok {
-				l[0] = show(s)
-			}
+		return err
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
+		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return err // fixed texts
+	case t.TxFailed != nil && errors.Is(err, t.TxFailed):
+		return t.TxFailed
+	}
+	for _, fixed := range t.FixedErrs {
+		if errors.Is(err, fixed) {
+			return fixed
 		}
 	}
-	return v
+	var server interface{ RedisError() }
+	if errors.As(err, &server) {
+		return errors.New(serverErrClass(err.Error()))
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return errors.New("i/o timeout " + errWithheld)
+		}
+		return errors.New("network error " + errWithheld)
+	}
+	return errors.New("error " + errWithheld)
+}
+
+// serverErrClass returns what is kept of the message of a Redis error reply.
+func serverErrClass(msg string) string {
+	out := "error"
+	if code, _, _ := strings.Cut(msg, " "); errCodes[code] {
+		out = code
+	}
+	for _, p := range errPhrases {
+		if strings.Contains(msg, p) {
+			out += " " + p
+			break
+		}
+	}
+	return out + " " + errWithheld
+}
+
+// scrubWords redacts free text that can quote keys and values: it is scrubbed
+// as a value, and each word of it is masked as a key name would be.
+func (o *Op) scrubWords(t *Tracer, text string) string {
+	text = RedactStr(text)
+	const stops = " \t\r\n'\"`,;()"
+	var b strings.Builder
+	for len(text) > 0 {
+		n := strings.IndexAny(text, stops)
+		if n < 0 {
+			n = len(text)
+		}
+		b.WriteString(t.ShowText(o.session, text[:n]))
+		if n < len(text) {
+			b.WriteByte(text[n])
+			n++
+		}
+		text = text[n:]
+	}
+	return b.String()
 }
 
 // afterArgs extracts the value-ish arguments that belong to the key at index i.
@@ -474,11 +593,18 @@ func (o *Op) afterArgs(i int) any {
 const ImageLimit = 1000
 
 // image reads the current value of key by its type, bounded by the image
-// timeout and the phase deadline, with redaction applied. Collections are
-// capped at about ImageLimit elements. It returns the image and what the read
-// saw, for the diff. ok=false means the read failed or timed out: image
+// timeout and the phase deadline, with redaction applied: values are scrubbed,
+// and hash field names and members are masked as key names are (ShowText), so
+// a field reads the same in the arguments, the images and the diff.
+// Collections are capped at about ImageLimit elements. It returns the image
+// and what the read saw, for the diff. A key that does not exist has no image.
+// A sensitive key is asked for its type only: its value is never read just to
+// mask it, and its image is the redaction marker. hide says the same of a key
+// whose name is not sensitive: a command with a sensitive key can move its
+// value to any of its other keys (RENAME, COPY, LMOVE, SMOVE, the *STORE
+// family, a script). ok=false means the read failed or timed out: image
 // capture must never affect the host call.
-func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (core.PayloadRef, *snap, bool) {
+func (t *Tracer) image(ctx context.Context, session, key string, hide bool, deadline time.Time) (core.PayloadRef, *snap, bool) {
 	ctx = context.WithValue(ctx, skipKey{}, true)
 	if t.ImageCtx != nil {
 		ctx = t.ImageCtx(ctx)
@@ -498,12 +624,20 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 		return core.PayloadRef{}, nil, false
 	}
 	seen := &snap{typ: typ}
+	if typ == "none" {
+		return core.PayloadRef{}, seen, true
+	}
+	if hide || t.KeySensitive(key) {
+		seen.hidden = true
+		return core.Payload(core.RedactedValue), seen, true
+	}
+	text := func(s string) string { return t.Text(session, s) }
 	var v any
 	switch typ {
 	case "string":
 		var s string
 		if s, err = t.Reader.Get(ctx, key); err == nil {
-			seen.items = []item{{shown: RedactStr(s), sum: sumOf(s)}}
+			seen.items = []item{{shown: text(s), sum: sumOf(s)}}
 			v = seen.items[0].shown
 		}
 	case "hash":
@@ -517,10 +651,13 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 				}
 				f, shown := kv[i], core.RedactedValue
 				if !NameSensitive(f) {
-					shown = RedactStr(kv[i+1])
+					shown = text(kv[i+1])
 				}
-				m[f] = shown
-				seen.items = append(seen.items, item{name: f, shown: shown, sum: sumOf(kv[i+1])})
+				// Two fields can be recorded alike (KeyMaskFlat): they are told
+				// apart by what is stored, and numbered in the image.
+				name := t.ShowText(session, f)
+				m[uniqueKey(m, name)] = shown
+				seen.items = append(seen.items, item{id: sumOf(f), name: name, shown: shown, sum: sumOf(kv[i+1])})
 			}
 			v = m
 		}
@@ -537,25 +674,25 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 		}
 		for i := range l {
 			sum := sumOf(l[i])
-			l[i] = RedactStr(l[i])
-			seen.items = append(seen.items, item{shown: l[i], sum: sum})
+			l[i] = text(l[i])
+			seen.items = append(seen.items, item{id: sum, shown: l[i], sum: sum})
 		}
 		v = l
 	case "zset":
 		var z []Z
 		if z, err = t.Reader.ZRange(ctx, key, ImageLimit-1); err == nil {
 			seen.capped = len(z) >= ImageLimit
-			m := make(map[string]float64, len(z))
+			m := make(map[string]any, len(z))
 			for _, e := range z {
 				raw := Str(e.Member)
-				member := RedactStr(raw)
-				m[member] = e.Score
-				seen.items = append(seen.items, item{name: member, shown: member, score: e.Score, sum: sumOf(raw)})
+				// Two members can be recorded alike ("token=[REDACTED]"): they
+				// are told apart by what is stored, and numbered in the image.
+				name := text(raw)
+				m[uniqueKey(m, name)] = scoreValue(e.Score)
+				seen.items = append(seen.items, item{id: sumOf(raw), name: name, score: e.Score})
 			}
 			v = m
 		}
-	case "none":
-		return core.PayloadRef{}, seen, true
 	default:
 		v = "<" + typ + ">"
 	}

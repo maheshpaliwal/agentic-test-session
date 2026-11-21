@@ -166,7 +166,7 @@ func TestErrorAndAuthRedaction(t *testing.T) {
 	if ev[1].Err == "" || len(ev[1].Mutations) != 0 {
 		t.Fatalf("%+v", ev[1])
 	}
-	got := (&redisx.Redactor{Capture: true}).MaskArgs("AUTH", []any{"AUTH", "user", "hunter2"}, nil)
+	got, _ := (&redisx.Redactor{Capture: true}).MaskArgs("AUTH", []any{"AUTH", "user", "hunter2"}, nil)
 	if got[2] != "[REDACTED]" {
 		t.Fatal(got)
 	}

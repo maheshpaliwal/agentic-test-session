@@ -106,7 +106,8 @@ var uncertainFlags = map[string]bool{
 	"pk_unknown": true, "pk_not_unique": true, "pk_lookup_failed": true,
 	"after_unavailable": true, "after_from_args": true, "after_failed": true,
 	"image_skipped": true, "image_timeout": true, "image_failed": true, "image_truncated": true, "diff_truncated": true,
-	"upsert_unknown": true,
+	"diff_concurrent": true, // contrib/tredis: the diff holds another client's change
+	"upsert_unknown":  true,
 }
 
 // UncertainFlag reports whether an event flag marks the event's mutations as
