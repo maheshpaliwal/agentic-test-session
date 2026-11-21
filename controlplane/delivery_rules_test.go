@@ -788,8 +788,11 @@ func TestDeliveryUnheardIsJudgedByTheTimeSinceTheLastWord(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
+		// Its silence counts from here: a first heartbeat that is slow on its
+		// way (a quarter of the grace) costs the session nothing.
+		time.Sleep(testGrace / 4)
 		if subs := m.Subscribers(); subs[0].DeliveryUnheard {
-			panic(fmt.Sprintf("marked the moment a session began: %+v", subs))
+			panic(fmt.Sprintf("marked a quarter of the grace after a session began: %+v", subs))
 		}
 		hello(t, m, "orders-api", "o-1") // what the SDK does when it learns of the session
 		e := &deliveryEnv{t: t, m: m, col: col, id: s.ID}

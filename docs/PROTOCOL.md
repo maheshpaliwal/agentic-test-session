@@ -267,11 +267,11 @@ instance's own word does not condemn it and does not acquit it:
 
 An instance that follows the stream and announced that it reports is **unheard** when nothing has arrived of
 it for too long, neither a report for any session nor a heartbeat: none at all since it connected, a tenth of
-the grace (1s) ago or longer; or none for the grace (10s, two heartbeat periods) while the control plane has had
-a session for a tenth of the grace or longer. Without a session an instance sends no heartbeat, so its silence
-then says nothing. The second case is an instance whose reports arrived at first and are refused since: asked
-once per connection ("has it ever been heard of"), it was never named, and with a wrong collector URL its
-sessions were complete.
+the grace (1s) ago or longer; or none for the grace (10s, two heartbeat periods), in all of which the control
+plane had a session. Without a session an instance sends no heartbeat, so its silence counts from the moment
+there is one. The second case is an instance whose reports arrived at first and are refused since: asked once
+per connection ("has it ever been heard of"), it was never named, and with a wrong collector URL its sessions
+were complete.
 
 **Incomplete with nothing missing.** Two cases end `incomplete` although the collector may have every event,
 and stay that way by decision, because the control plane cannot know that nothing is missing without the
@@ -342,9 +342,9 @@ whoever can reach the control plane can make a session unconfirmed (see the limi
 - A service whose events reach no collector and whose reports reach no control plane (a wrong collector URL
   behind a proxy that refuses the reports, from the start or from some moment on): `delivery_unconfirmed` while
   it stays connected, as above, and only the strict gate fails. Three cases in which nothing is known: the
-  session ends less than the grace after the last request of the service that arrived (its silence is not
-  long enough yet); the service polls instead of following the stream; the service is not connected when the
-  session ends.
+  session ends less than the grace after the last request of the service that arrived, or after the control
+  plane's first session following a time without any began (its silence is not long enough yet); the service
+  polls instead of following the stream; the service is not connected when the session ends.
 - An instance that took part and then cannot run or cannot be reached for longer than the grace before its
   report for the session arrived: `incomplete` although the collector may have all its events (see "Incomplete
   with nothing missing"). An instance in that state that took no part is named in `delivery_unconfirmed` of

@@ -304,10 +304,11 @@ func (m *Manager) heartbeatPeriod() time.Duration {
 //
 //   - no report (of any session) and no heartbeat at all since it connected,
 //     DeliveryGrace/10 ago or longer: it sends one when it connects; or
-//   - none for DeliveryGrace, two heartbeat periods, while the control plane
-//     has had a session for DeliveryGrace/10 or longer. Without a session an
-//     instance sends no heartbeat, and its first is due when it learns that
-//     there is one; so its silence says nothing before that.
+//   - none for DeliveryGrace, two heartbeat periods, in all of which the
+//     control plane had a session. Without a session an instance sends no
+//     heartbeat, and its first is due when it learns that there is one; so
+//     its silence counts from then, and a first heartbeat that is slow on its
+//     way costs a session nothing.
 //
 // The third review's F5: the question used to be asked once per connection
 // ("has it ever been heard of"), so an instance whose reports stopped
@@ -319,7 +320,7 @@ func (m *Manager) unheard(sub Subscriber, now time.Time) bool {
 	if sub.heard.IsZero() {
 		return now.Sub(sub.since) >= m.cfg.DeliveryGrace/10
 	}
-	return !m.busySince.IsZero() && now.Sub(m.busySince) >= m.cfg.DeliveryGrace/10 && now.Sub(sub.heard) >= m.cfg.DeliveryGrace
+	return !m.busySince.IsZero() && now.Sub(m.busySince) >= m.cfg.DeliveryGrace && now.Sub(sub.heard) >= m.cfg.DeliveryGrace
 }
 
 // staleReport reports whether d, a report of the instance prev is of, is an
