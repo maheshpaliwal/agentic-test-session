@@ -58,6 +58,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -410,4 +411,75 @@ func mutations(t testing.TB, s *client.Session, f client.MutationFilter) []clien
 		panic(fmt.Sprintf("tsession: mutations of session %s: %v", s.ID, err))
 	}
 	return ms
+}
+
+// EventFilter selects recorded events. A field that is empty matches every event.
+type EventFilter struct {
+	Service string    // the service that recorded the event, as it is named in TSESSION_SERVICE
+	Kind    core.Kind // core.KindAPIIn, core.KindAPIOut, core.KindDBWrite, ...
+	// Name is a part of the event's name: "/orders" matches "POST /orders/17", "INSERT INTO orders" matches
+	// the statement that begins so. The match is exact in case.
+	Name string
+}
+
+func (f EventFilter) match(e *core.Event) bool {
+	return (f.Service == "" || f.Service == e.Service) && (f.Kind == "" || f.Kind == e.Kind) && strings.Contains(e.Name, f.Name)
+}
+
+func (f EventFilter) String() string {
+	var parts []string
+	for _, p := range [][2]string{{"service", f.Service}, {"kind", string(f.Kind)}, {"name containing", f.Name}} {
+		if p[1] != "" {
+			parts = append(parts, p[0]+" "+strconv.Quote(p[1]))
+		}
+	}
+	if len(parts) == 0 {
+		return "any event"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// RequireEvent fails the test unless the session recorded at least one event matching f: that the frontend
+// called the backend, that a query ran, that a job was started. It stops the session first, like the other
+// Require functions, and returns the matches for further checks (how many, their attributes, their order).
+func RequireEvent(t testing.TB, s *client.Session, f EventFilter) []core.Event {
+	t.Helper()
+	evs := events(t, s, f, false)
+	if len(evs) == 0 {
+		t.Errorf("tsession: session %s recorded no event matching %s", s.ID, f)
+		t.FailNow()
+	}
+	return evs
+}
+
+// RequireFailure fails the test unless the session recorded at least one failed event matching f, and returns
+// those events; Event.Err is what went wrong. It is for a test that provokes a failure and checks that the
+// system met it where it should. Such a test cannot also call RequireNoFailures on the same session.
+func RequireFailure(t testing.TB, s *client.Session, f EventFilter) []core.Event {
+	t.Helper()
+	evs := events(t, s, f, true)
+	if len(evs) == 0 {
+		t.Errorf("tsession: session %s recorded no failed event matching %s", s.ID, f)
+		t.FailNow()
+	}
+	return evs
+}
+
+// events stops the session and returns its events matching f; with failed, only those that carry an error.
+func events(t testing.TB, s *client.Session, f EventFilter, failed bool) []core.Event {
+	t.Helper()
+	Stop(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
+	defer cancel()
+	all, err := s.Events(ctx)
+	if err != nil {
+		panic(fmt.Sprintf("tsession: events of session %s: %v", s.ID, err))
+	}
+	var out []core.Event
+	for i := range all {
+		if e := &all[i]; f.match(e) && (!failed || e.Err != "") {
+			out = append(out, *e)
+		}
+	}
+	return out
 }

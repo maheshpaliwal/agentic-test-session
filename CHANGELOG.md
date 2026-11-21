@@ -118,6 +118,9 @@ Rolling back:
 
 ### Added
 
+- `tsessiontest.RequireEvent` and `tsessiontest.RequireFailure` with `tsessiontest.EventFilter` (service, kind,
+  part of the name): assert that a call, a query or a job was recorded, or that a failure the test provoked was
+  met where it should be. Both return the matching events.
 - `thttp` sets the attribute `http.status` (`thttp.StatusAttr`) on a request that was answered with 400 or
   above, on both sides. The status was only in the recorded response, which is cut when the body is large; the
   digest's `code` reads the attribute. Requests that went well carry no such attribute.

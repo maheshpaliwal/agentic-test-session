@@ -280,7 +280,13 @@ sess := tsessiontest.Run(t, client.Options{})   // stopped when the test ends
 // ... drive the system with sess.Header() or sess.Transport(nil) ...
 tsessiontest.RequireNoFailures(t, sess)
 tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", Entity: "orders", Op: "insert"})
+tsessiontest.RequireEvent(t, sess, tsessiontest.EventFilter{Service: "orders-api", Kind: core.KindAPIOut, Name: "/charge"})
 ```
+
+A failed event is one that carries an error: an HTTP 500 or above, a failed query, a failed job. A request that
+was refused (a 404) is not one. A test that provokes a failure asserts on it with `tsessiontest.RequireFailure`
+in place of `RequireNoFailures`. An assertion that does not hold fails its test; a set-up that is broken (no
+control plane) panics, which ends the package's test binary.
 
 Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
 `client.Options.QuiesceSeconds` if your system has no asynchronous work.

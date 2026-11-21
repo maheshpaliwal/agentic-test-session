@@ -38,10 +38,13 @@ func newEnv(t *testing.T) *env {
 			Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "update", Effective: &no}}},
 		{Seq: 3, Service: "worker", Kind: core.KindCacheWrite,
 			Mutations: []core.Mutation{{Store: "redis", Entity: "cart:*", Op: "set"}}},
+		{Seq: 4, Service: "api", Kind: core.KindAPIOut, Name: "POST http://billing.test/charge", Err: "HTTP 503",
+			Attrs: map[string]string{"http.status": "503"}},
+		{Seq: 5, Service: "api", Kind: core.KindAPIOut, Name: "GET http://billing.test/rates"},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(client.EventPage{Events: evs, NextSeq: 4, Sealed: true})
+		json.NewEncoder(w).Encode(client.EventPage{Events: evs, NextSeq: 6, Sealed: true})
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/summary", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(e.sum)
@@ -224,7 +227,7 @@ func TestFailedTestSavesAnArtifact(t *testing.T) {
 		panic(fmt.Sprintf("log does not point at the artifact:\n%s", out))
 	}
 	b, err := os.ReadFile(path)
-	if err != nil || strings.Count(string(b), "\n") != 3 || !strings.Contains(string(b), `"seq":1`) {
+	if err != nil || strings.Count(string(b), "\n") != 5 || !strings.Contains(string(b), `"seq":1`) {
 		panic(fmt.Sprintf("artifact: %q %v", b, err))
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
@@ -271,5 +274,35 @@ func TestFailureIsListedOnce(t *testing.T) {
 	}
 	if !strings.Contains(out, "tracectl digest "+s.ID) {
 		panic(fmt.Sprintf("the pointer to the session is still printed:\n%s", out))
+	}
+}
+
+func TestRequireEventAndFailure(t *testing.T) {
+	e := newEnv(t)
+	s := tsessiontest.Run(t, e.opts)
+	// Did the api call billing? Twice, and the filter's name is a part of the event's.
+	if got := tsessiontest.RequireEvent(t, s, tsessiontest.EventFilter{Service: "api", Kind: core.KindAPIOut, Name: "billing.test"}); len(got) != 2 || got[0].Seq != 4 {
+		panic(fmt.Sprintf("calls to billing: %+v", got))
+	}
+	if got := tsessiontest.RequireEvent(t, s, tsessiontest.EventFilter{}); len(got) != 5 {
+		panic(fmt.Sprintf("the empty filter matched %d of 5 events", len(got)))
+	}
+	failed, out := check(t, func(tb testing.TB) {
+		tsessiontest.RequireEvent(tb, s, tsessiontest.EventFilter{Service: "worker", Kind: core.KindAPIOut})
+	})
+	if !failed || !strings.Contains(out, `recorded no event matching service "worker", kind "api.out"`) {
+		panic(fmt.Sprintf("an event that was not recorded: %v %s", failed, out))
+	}
+
+	// A failure the test provoked: found, with its error; one that did not happen is a failed test.
+	got := tsessiontest.RequireFailure(t, s, tsessiontest.EventFilter{Name: "/charge"})
+	if len(got) != 1 || got[0].Err != "HTTP 503" || got[0].Attrs["http.status"] != "503" {
+		panic(fmt.Sprintf("the failed charge: %+v", got))
+	}
+	failed, out = check(t, func(tb testing.TB) {
+		tsessiontest.RequireFailure(tb, s, tsessiontest.EventFilter{Name: "/rates"}) // recorded, and it went well
+	})
+	if !failed || !strings.Contains(out, `recorded no failed event matching name containing "/rates"`) {
+		panic(fmt.Sprintf("a call that went well taken for a failure: %v %s", failed, out))
 	}
 }
