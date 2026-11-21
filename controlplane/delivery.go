@@ -123,10 +123,10 @@ type DeliveryBatch struct {
 	// Reports holds at most MaxDeliveryBatch entries of at most 4 KiB each.
 	Reports []json.RawMessage `json:"reports"`
 	// Stopped is set by an instance that stopped recording after an internal
-	// error (a loop of its SDK panicked), and says how. Every session that is
-	// ACTIVE or DRAINING when it arrives is incomplete for it, whether the
-	// instance had recorded events for it or not: from then on it recorded
-	// none, and nothing else would show that (see stoppedLocked).
+	// error (a loop of its SDK panicked), and says how. It is noted on every
+	// session that is ACTIVE or DRAINING when it arrives; what the verdict of
+	// such a session makes of it depends on whether anything ties the instance
+	// to the session (see stoppedLocked and stoppedReasons).
 	Stopped string `json:"stopped,omitempty"`
 }
 
@@ -187,6 +187,11 @@ const (
 	// maxDeliveryReasons bounds the instances named in incomplete_reasons and
 	// in delivery_unconfirmed.
 	maxDeliveryReasons = 16
+	// maxStoppedInstances bounds the instances a session keeps the word of
+	// that they stopped recording (Session.StoppedInstances). They are stored
+	// with the session, so there are far fewer of them than of the reports
+	// kept in memory.
+	maxStoppedInstances = 64
 	// maxInstanceProgress bounds Manager.progress.
 	maxInstanceProgress = 4096
 	// maxCountsAsked bounds the instances a drain asks the collector about by
@@ -229,10 +234,6 @@ type deliveryState struct {
 	// of which no report had arrived when the reports were closed (see
 	// silentLocked).
 	silent []Subscriber
-	// stopped holds, per instance that said that it stopped recording while
-	// the session ran, the reason the session is incomplete for (see
-	// stoppedLocked). At most maxDeliveryRefused of them.
-	stopped map[string]string
 }
 
 // instanceProgress is when an instance was last seen to deliver events of any
@@ -316,8 +317,9 @@ func (m *Manager) ReportDeliveries(b DeliveryBatch) ([]DeliveryResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.heardLocked(deliveryKey(service, instance), now, len(reports) > 0)
+	// After the reports of the batch: they are what ties the instance to a session.
 	if why := cleanDeliveryError(b.Stopped); why != "" {
-		m.stoppedLocked(service, instance, why)
+		defer m.stoppedLocked(service, instance, why, now)
 	}
 	for i, r := range reports {
 		if out[i].Status != "" {
@@ -365,28 +367,128 @@ func (m *Manager) heardLocked(key string, now time.Time, reports bool) {
 }
 
 // stoppedLocked notes that an instance said that it stopped recording after
-// an internal error: every session that runs now is incomplete for it. The
-// instance may have taken no part in a session; that cannot be known, since
-// what it would have recorded from now on is what is missing. A session that
-// starts later is not marked: the instance says again when it stops again,
-// and one that stays stopped records nothing and follows no session, like a
-// service that was never connected.
-func (m *Manager) stoppedLocked(service, instance, why string) {
-	key := deliveryKey(service, instance)
-	reason := who(service, instance) + " stopped recording after an internal error (" + why +
-		"), so events of this session it would have recorded since are missing; this is a bug in tsession, and the log of that service has the panic"
-	for id := range m.live {
-		st := m.deliveryStateLocked(id)
-		if _, known := st.stopped[key]; !known && len(st.stopped) >= maxDeliveryRefused {
-			continue // the session is incomplete for a thousand others already
+// an internal error, on every session that runs now. A session that starts
+// later is not marked: the instance says again when it stops again, and one
+// that stays stopped records nothing and follows no session, like a service
+// that was never connected.
+//
+// The note is the caller's own word and proves nothing about a session: an
+// environment has many services that take no part in a given session, and
+// anyone who reaches the control plane can send one in any name. So it does
+// not make a session incomplete by itself. That is decided when the session
+// is judged, by whether anything ties the instance to it (see
+// stoppedReasons).
+//
+// It is stored with the session (Session.StoppedInstances), not kept in
+// memory: a control plane that is restarted between the note and the end of
+// the session must still see it, and a restart is what follows a spent panic
+// budget. A session is written only when the note says something new about
+// it, so an instance that repeats itself every second costs nothing.
+//
+// A session keeps at most maxStoppedInstances notes. When that many are kept,
+// the note of an instance that is known (it follows the active set, or the
+// session has a report of it) takes the place of one that is not: made-up
+// names must not keep the word of a real instance out. That notes were left
+// out is said once (Session.StoppedInstancesMore).
+func (m *Manager) stoppedLocked(service, instance, why string, now time.Time) {
+	n := StoppedInstance{Service: service, Instance: instance, Why: why, At: now.UTC(),
+		Connected: m.reporterConnectedLocked(deliveryKey(service, instance))}
+	noted := 0
+	for id, s := range m.live {
+		list, more, changed := noteStopped(s, m.delivery[id], n)
+		if !changed {
+			continue
 		}
-		if st.stopped == nil {
-			st.stopped = map[string]string{}
+		s.StoppedInstances, s.StoppedInstancesMore = list, more
+		if err := m.putLocked(s); err != nil {
+			m.log.Error("persist the note that a service stopped recording", "id", id, "err", err)
 		}
-		st.stopped[key] = reason
+		noted++
 	}
-	m.log.Error("a service stopped recording after an internal error; the sessions that run now are marked incomplete",
-		"service", service, "instance", instance, "sessions", len(m.live), "why", why)
+	if noted > 0 {
+		m.log.Error("a service says that it stopped recording after an internal error; that is noted on the sessions that run now",
+			"service", service, "instance", instance, "connected", n.Connected, "sessions", noted, "why", why)
+	}
+}
+
+func cmpStopped(a, b StoppedInstance) int {
+	return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance))
+}
+
+// noteStopped adds n to the notes of s, or replaces the note of the same
+// instance when n says something else. It returns the new list (the stored
+// one is shared with copies of the session and never changed in place),
+// whether notes were left out, and whether anything changed. st may be nil.
+func noteStopped(s Session, st *deliveryState, n StoppedInstance) (list []StoppedInstance, more, changed bool) {
+	if st == nil {
+		st = &deliveryState{}
+	}
+	known := func(x StoppedInstance) bool {
+		_, reported := st.reportOf(s, x.Service, x.Instance)
+		return x.Connected || reported
+	}
+	list, more = s.StoppedInstances, s.StoppedInstancesMore
+	if i := slices.IndexFunc(list, func(x StoppedInstance) bool { return cmpStopped(x, n) == 0 }); i >= 0 {
+		old := list[i]
+		if old.Why == n.Why && (old.Connected || !n.Connected) {
+			return list, more, false
+		}
+		n.At, n.Connected = old.At, old.Connected || n.Connected
+		list = slices.Clone(list)
+		list[i] = n
+		return list, more, true
+	}
+	if len(list) >= maxStoppedInstances {
+		i := -1
+		if known(n) {
+			i = slices.IndexFunc(list, func(x StoppedInstance) bool { return !known(x) })
+		}
+		if i < 0 {
+			return list, true, !more
+		}
+		list, more = slices.Delete(slices.Clone(list), i, i+1), true
+	}
+	list = append(slices.Clone(list), n)
+	slices.SortFunc(list, cmpStopped)
+	return list, more, true
+}
+
+// stoppedReasons reads the notes of the instances that said that they stopped
+// recording while the session ran (see stoppedLocked). kept is the report
+// kept for each instance, counts what the collector has.
+//
+//   - Something ties the instance to the session, a delivery report of it or
+//     events of it at the collector: it took part and recorded nothing from
+//     then on, so the session is incomplete (shortfalls).
+//   - Nothing does: it may be a service the session never touched, or a name
+//     somebody made up; it may also be one that stopped before the first
+//     request of the session reached it, and so missed events it should have
+//     recorded. Those cannot be told apart, so it is a warning (unconfirmed).
+//     The instances that followed the active set when they said it come
+//     first: the list is cut (capReasons).
+func stoppedReasons(s Session, kept map[string]Delivery, counts collectorCounts) (shortfalls, unconfirmed []string) {
+	const bug = "; this is a bug in tsession, and the log of that service has the panic"
+	var strangers []string
+	for _, n := range s.StoppedInstances {
+		said := who(n.Service, n.Instance) + " stopped recording after an internal error (" + n.Why + ")"
+		_, reported := kept[deliveryKey(n.Service, n.Instance)]
+		have, ok := counts.of(n.Service, n.Instance)
+		switch {
+		case reported || ok && have > 0:
+			shortfalls = append(shortfalls, said+", so events of this session it would have recorded since are missing"+bug)
+		case n.Connected:
+			unconfirmed = append(unconfirmed, said+" while this session ran; no delivery report and no events of it are known for the session, "+
+				"so whether it took part is unknown: it may have missed events it should have recorded"+bug)
+		default:
+			strangers = append(strangers, said+" while this session ran; it did not follow the control plane then, and no delivery report and no events of it "+
+				"are known for the session, so whether it took part is unknown: it may have missed events it should have recorded"+bug)
+		}
+	}
+	unconfirmed = append(unconfirmed, strangers...)
+	if s.StoppedInstancesMore {
+		unconfirmed = append(unconfirmed, fmt.Sprintf("more than %d instances said that they stopped recording while this session ran; what the others said is not kept", maxStoppedInstances))
+	}
+	return shortfalls, unconfirmed
 }
 
 // heartbeatPeriod is how often an instance that follows the active set is
@@ -1013,7 +1115,9 @@ func unreported(service, instance string, have int64) string {
 //     those events are all it recorded (see unreported);
 //   - a report beyond the ones that are kept that said that events were lost;
 //   - an instance that said, while the session ran, that it stopped recording
-//     after an internal error (see stoppedLocked).
+//     after an internal error, when a report of it or events of it at the
+//     collector tie it to the session (see stoppedReasons). One that nothing
+//     ties to the session is unconfirmed.
 //
 // It is unconfirmed (delivery_unconfirmed, a warning) for what deliveryVerdict
 // lists as such, and for:
@@ -1060,23 +1164,23 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 		silent[key] = struct{}{}
 		shortfalls = append(shortfalls, unreported(sub.Service, sub.DeliveryInstance, have))
 	}
+	// kept is the report of each instance, by its key. It is built once per
+	// judgement: the lock is held here, and looking through the reports again
+	// for every unheard instance (a thousand streams, 1280 reports) stalled
+	// every request to the control plane for seconds.
+	kept := make(map[string]Delivery, len(reports))
+	for _, d := range reports {
+		// The first one counts: a stored report comes before one kept beside.
+		key := deliveryKey(d.Service, d.Instance)
+		if _, dup := kept[key]; !dup {
+			kept[key] = d
+		}
+	}
 	if m.cfg.DeliveryGrace >= 0 {
 		now := time.Now()
 		// stopped: the instance has a report for the session that is not final
 		// and that the verdict above had nothing to say about.
 		stopped := map[string]Delivery{}
-		// kept is the report of each instance, by its key. It is built once
-		// per judgement: the lock is held here, and looking through the reports
-		// again for every unheard instance (a thousand streams, 1280 reports)
-		// stalled every request to the control plane for seconds.
-		kept := make(map[string]Delivery, len(reports))
-		for _, d := range reports {
-			// The first one counts: a stored report comes before one kept beside.
-			key := deliveryKey(d.Service, d.Instance)
-			if _, dup := kept[key]; !dup {
-				kept[key] = d
-			}
-		}
 		for _, sub := range m.unheardLocked(now, func(key string) bool {
 			if _, convicted := silent[key]; convicted {
 				return true
@@ -1126,9 +1230,8 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 			unconfirmed = append(unconfirmed, fmt.Sprintf("the collector's list of instances was cut short and it did not answer for %d connected instance(s) that sent no report, so whether they took part is unknown", n))
 		}
 	}
-	for _, key := range slices.Sorted(maps.Keys(st.stopped)) {
-		shortfalls = append(shortfalls, st.stopped[key])
-	}
+	stoppedShort, stoppedUnknown := stoppedReasons(*s, kept, counts)
+	shortfalls = append(shortfalls, stoppedShort...)
 	if st.refusedShort {
 		shortfalls = append(shortfalls, fmt.Sprintf("more than %d instances reported, and a report of one beyond that said that events were dropped or left undelivered; which instance is not kept",
 			MaxDeliveryInstances+maxDeliveryRefused))
@@ -1139,6 +1242,9 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 	if m.cfg.DeliveryGrace < 0 {
 		shortfalls, unconfirmed = nil, append(shortfalls, unconfirmed...)
 	}
+	// Last, where the cut falls first: a note is anybody's word, and those
+	// that nothing ties to the session must not push out what was found.
+	unconfirmed = append(unconfirmed, stoppedUnknown...)
 	delete(m.delivery, s.ID)
 	s.IncompleteReasons, s.DeliveryUnconfirmed = capReasons(shortfalls), capReasons(unconfirmed)
 	return len(shortfalls) > 0

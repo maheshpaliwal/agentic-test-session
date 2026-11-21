@@ -114,6 +114,30 @@ type Session struct {
 	// delivery confirmed fails on it (tracectl --fail-on-unconfirmed,
 	// tsessiontest.RequireDeliveryConfirmed).
 	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+	// StoppedInstances are the SDK instances that said, while the session
+	// ran, that they stopped recording after an internal error (see
+	// StoppedInstance). The note is kept here, with the session, so that the
+	// verdict still sees it after a restart of the control plane. At most
+	// maxStoppedInstances; StoppedInstancesMore when there were more.
+	StoppedInstances     []StoppedInstance `json:"stopped_instances,omitempty"`
+	StoppedInstancesMore bool              `json:"stopped_instances_more,omitempty"`
+}
+
+// StoppedInstance is the word of one SDK instance that it stopped recording
+// after an internal error while a session ran (DeliveryBatch.Stopped). It is
+// the caller's own word, like a delivery report: what the session's verdict
+// makes of it depends on whether anything ties the instance to the session
+// (see stoppedReasons).
+type StoppedInstance struct {
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance"`
+	// Why is what the instance said last, cleaned and bounded.
+	Why string `json:"why"`
+	// At is when the control plane was first told.
+	At time.Time `json:"at"`
+	// Connected: an instance of that name followed the active set and had
+	// announced delivery reports when the control plane was told.
+	Connected bool `json:"connected,omitempty"`
 }
 
 // ActiveSet is the payload of GET /v1/active and the SSE stream.

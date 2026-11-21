@@ -42,6 +42,12 @@ Extra optional fields (omitted when empty/false):
   line each (at most 16, then "and N more"; see the verdict in "Delivery accounting"). A warning: the session is
   not `incomplete` because of it, and it is not known to be complete. `--fail-on-unconfirmed` and
   `tsessiontest.RequireDeliveryConfirmed` fail on it.
+- `stopped_instances`: `[{"service","instance","why","at","connected"}]`, the SDK instances that said while the
+  session ran that they stopped recording after an internal error (`stopped` of `POST /v1/delivery`): what each
+  said last, when the control plane was first told, and whether an instance of that name followed the stream then.
+  At most 64; `stopped_instances_more` is `true` when more said so. The two lists above say what the control plane
+  made of it. Omitted when there are none, by a control plane before this field, and (the list, not the flag) by
+  `GET /v1/sessions`, like `delivery`.
 
 TTL expiry is not a shortcut: an ACTIVE session past `ttl_seconds` moves to DRAINING (reason=ttl) and goes through
 the normal drain + seal path. A clean seal records `EXPIRED`; if the seal call keeps failing (retried with
@@ -92,14 +98,29 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   without `instance` or with more than 256 reports, and `413` over 1 MiB. `reports` may be empty: the request then
   says only that the instance's reports arrive.
   An optional `stopped` (text, at most 256 bytes are kept) says that the instance stopped recording after an internal
-  error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. Every session that
-  is `ACTIVE` or `DRAINING` when the request arrives is then `incomplete`, with an `incomplete_reasons` entry that
-  names the service and the instance (`... stopped recording after an internal error (...)`), whether the instance
-  had recorded events for it or not: what it would have recorded since is what is missing. The SDK sends it at the
-  panic, every second while its subscriber is being restarted, and once when recording has resumed; when the
-  subscriber stays stopped it sends it once. Sessions started after the last such request are not marked. A control plane that does not know the field ignores it. Like the reports it is the caller's own
-  word: anyone who can reach the control plane can make every running session incomplete with it, as with reports
-  they can one by one.
+  error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. It is noted on
+  every session that is `ACTIVE` or `DRAINING` when the request arrives (`stopped_instances` of the session, stored
+  with it, so a restart of the control plane does not lose it). What the note means for a session is decided when
+  the session ends:
+  - something ties the instance to the session, a delivery report of it for the session or events of it in the
+    collector's counts: the session is `incomplete`, with an `incomplete_reasons` entry that names the service and
+    the instance (`... stopped recording after an internal error (...), so events of this session it would have
+    recorded since are missing`);
+  - nothing does: one line under `delivery_unconfirmed` (`... stopped recording after an internal error (...) while
+    this session ran; ... whether it took part is unknown: it may have missed events it should have recorded`). An
+    environment has many services that take no part in a given session, and the note is the caller's own word, so
+    it alone does not fail a session; the price is that a service that stopped before it recorded its first event
+    of a session is a warning there, which only the strict gate fails on (see "Which gate").
+
+  The SDK sends it at the panic, every second while its subscriber is being restarted, and once when recording has
+  resumed; when the subscriber stays stopped it sends it once. Sessions started after the last such request are not
+  marked. A session keeps the notes of at most 64 instances (what an instance said last replaces what it said
+  before); the note of an instance that follows the stream or has a report for the session takes the place of one
+  that does neither, and that notes were left out is one more `delivery_unconfirmed` line. A control plane that does
+  not know the field ignores it. Like the reports it is the caller's own word: anyone who can reach the control
+  plane can put such a line into `delivery_unconfirmed` of every running session (at most the 16 lines the list
+  holds, after the lines the control plane found itself), and cannot make a session `incomplete` with it that a
+  report in the same name would not.
 - `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,delivered_total,last_error,final} ->
   `{"accepted":true|false}`: one report, for clients that send one session at a time (SDKs use the batch).
   `400` for a body that is not such a report, `413` for one over 4 KiB, `404` unknown session, `409` when the
