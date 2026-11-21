@@ -29,14 +29,17 @@ Extra optional fields (omitted when empty/false):
 - `drain_timed_out`: `true` when the drain ended at `max_drain_seconds` rather than on a quiet collector (such a
   session is `incomplete` even if the seal itself succeeds).
 - `delivery`: the last delivery report of every SDK instance that sent one, sorted by service and instance:
-  `[{"service","instance","recorded","delivered","dropped","buffered","last_error","final","at"}]` (see "Delivery
-  accounting"). Instances that never reported are not listed.
+  `[{"service","instance","recorded","delivered","dropped","buffered","delivered_total","last_error","final","at"}]`
+  (see "Delivery accounting"). Instances that never reported are not listed. Only `GET /v1/sessions/{id}` and the
+  answers of start, stop, abort and rename carry it; the list `GET /v1/sessions` leaves it out (up to 256
+  instances per session) and keeps the two fields below.
 - `incomplete_reasons`: why the control plane itself marked the session incomplete, one line per instance whose
   events did not all reach the collector (at most 16, then "and N more instance(s)"). A session with a reason is
   `incomplete` whatever the collector's seal says, also when a seal succeeds later on a background retry. The
   collector's own findings (dropped and quarantined events, orphaned async work) are not repeated here.
-- `delivery_unconfirmed`: instances whose last report left events undelivered without evidence that they were
-  lost. A warning: the session is not `incomplete` because of it.
+- `delivery_unconfirmed`: instances of which the control plane cannot say whether all their events arrived (see
+  the verdict table in "Delivery accounting"). A warning: the session is not `incomplete` because of it, and it is
+  not known to be complete.
 
 TTL expiry is not a shortcut: an ACTIVE session past `ttl_seconds` moves to DRAINING (reason=ttl) and goes through
 the normal drain + seal path. A clean seal records `EXPIRED`; if the seal call keeps failing (retried with
@@ -77,11 +80,12 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   400 empty name after sanitising; sets `name_auto=false`; same loopback guard, needs `Content-Type: application/json`)
 - `POST /v1/sessions/{id}/stop` -> DRAINING; CP then polls collector drain-status and calls collector seal
 - `POST /v1/sessions/{id}/abort`
-- `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,last_error,final} ->
+- `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,delivered_total,last_error,final} ->
   `{"accepted":true|false}`. Sent by SDKs, see "Delivery accounting". `400` for a body that is not such a report
   (no `instance`, a counter outside 0..2^53, `recorded != delivered + dropped + buffered`), `413` for one over 4 KB,
   `404` unknown session, `409` when the session takes no reports (any more): it is finished, its drain has stopped
-  looking, or it already keeps reports of 256 instances.
+  looking, or it already keeps reports of 256 instances and this is another one (an instance it keeps can still
+  report).
 - `DELETE /v1/sessions/{id}` -> `{"deleted":true,"id":"..."}`; finished sessions only (`409` while CREATED/ACTIVE/
   DRAINING, `404` unknown). The collector is asked first to drop the session's events, seal and bundle; if that
   fails the answer is `502` and the session stays, so the call can be repeated. A session with `seal_pending` can
@@ -95,9 +99,11 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   knows the field flushes the events of such a session and sends its final delivery report; one that does not
   ignores it.
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
-  The SDK sends `X-Tsession-Service` and `X-Tsession-Instance` with the request (optional; shown to operators, not trusted).
-- `GET /v1/subscribers` -> `[{"service","instance","connected_at","generation"}]`: the current followers of the
-  stream, i.e. the connected SDKs. `service`/`instance` are omitted for followers that did not send them.
+  The SDK sends `X-Tsession-Service` and `X-Tsession-Instance` with the request (optional; shown to operators, not trusted),
+  and `X-Tsession-Delivery-Instance` when it sends delivery reports: the instance name of those reports.
+- `GET /v1/subscribers` -> `[{"service","instance","delivery_instance","connected_at","generation"}]`: the current
+  followers of the stream, i.e. the connected SDKs. `service`/`instance`/`delivery_instance` are omitted for
+  followers that did not send them.
   `generation` is the newest active-set `generation` (also on `GET /v1/active` and in every stream message)
   written to that follower: a follower at or past the generation in which a session became active has been sent
   it (sent, not necessarily applied yet).
@@ -124,7 +130,7 @@ recorded for a session and what became of it.
 **Report.** `POST /v1/sessions/{id}/delivery` with `Content-Type: application/json`:
 ```json
 {"service":"orders-api","instance":"host-4711-a1b2c3","recorded":7,"delivered":5,"dropped":0,"buffered":2,
- "last_error":"Post http://collector:7071/v1/ingest: dial tcp: connection refused","final":true}
+ "delivered_total":412,"last_error":"Post http://collector:7071/v1/ingest: dial tcp: connection refused","final":true}
 ```
 - `instance` is the per-process id the events carry (see "SDK runtime hardening notes"), not the name sent with
   the stream: a restarted process is a new instance, and the old one keeps its last report.
@@ -134,6 +140,9 @@ recorded for a session and what became of it.
   it; a resend is counted once, when it is answered). `dropped` counts events lost for good: ring overflow, a
   refusal by the collector (4xx, or `rejected` in a 2xx answer), and what an exporter still held when the process
   shut down. `buffered` is what the instance still holds. `sdk.dropped` events are not counted.
+- `delivered_total` (optional) is what the process delivered for all its sessions together since it started. It
+  rises while the instance gets events of any session through, which is how a drain tells an instance working
+  through a backlog from one that is stuck.
 - `last_error` (optional) is why the instance's last request to the collector failed, empty once one succeeded;
   sent only while events are buffered or dropped. `final` marks a report sent after the instance saw the session
   in `draining` and had delivered everything or had 2s to try, or sent while the process shuts down.
@@ -141,52 +150,112 @@ recorded for a session and what became of it.
   `dropped` is lower than what is stored is an old one and is ignored (`{"accepted":false}`); `final` is never
   taken back. The control plane adds `at`, the time it received the report.
 - What is stored is self-reported and cleaned like the names of the stream: `service` and `instance` printable
-  ASCII, at most 128 bytes; `last_error` printable ASCII, at most 256 bytes, with the userinfo of any URL removed
-  (the SDK already sends it without userinfo and query).
+  ASCII, at most 128 bytes; `last_error` printable ASCII, at most 256 bytes, with every URL in it cut to scheme,
+  host and path (no user name, password, query or fragment; the userinfo ends at the last `@`, so a password that
+  holds `@` or `/` goes whole). The SDK already sends it that way.
 
-**When an SDK reports.** For a session it recorded at least one event for (never otherwise: header mode with no
-traffic sends nothing): once its first events are delivered, or after 1s if they are not; then when the counts
-or the error changed, at most every 5s; when the session turns `draining`, at once if anything changed, and from
-then on at every change, so events recorded during the drain (a worker that is still running) produce a new
-`final` report that replaces the last; and from `runtime.Stop`, after the exporter was closed, with what it could
-not deliver counted as `dropped`. While a draining session has undelivered events the SDK retries the collector
-every second instead of waiting out the exporter's pause. The kill switch does not stop the reports. An account
-is dropped when the session leaves the active set. `404` (a control plane without the endpoint) turns reporting
-off, silently, until the stream is opened again; `409` ends it for that session; other failures are retried.
+**When an SDK reports.** For a session it recorded at least one event for: once its first events are delivered,
+or after 1s if they are not; then when the counts or the error changed, at most every 5s; when the session turns
+`draining`, at once if anything changed, and from then on at every change, so events recorded during the drain (a
+worker that is still running) produce a new `final` report that replaces the last; and from `runtime.Stop`, after
+the exporter was closed, with what it could not deliver counted as `dropped`. While a draining session has
+undelivered events the SDK retries the collector every second instead of waiting out the exporter's pause, sends
+the events of draining sessions before those of the others, and sends the session's report again, at most once a
+second, when only `delivered_total` moved. The kill switch does not stop the reports. An account is dropped when
+the session leaves the active set.
 
-**Drain.** The quiet condition of a drain (see hardening below) additionally requires that no instance that
-reported still has `buffered > 0`. An instance that has had `buffered > 0` for `--delivery-grace` (default 10s)
-without `delivered` advancing is no longer waited for; the grace counts from the stop at the earliest, so an
-instance that was stuck before gets all of it after it was told to flush, and it starts over whenever the
-instance delivers something or reports new events after it held none. Instances that never reported are not
+- **A session it recorded nothing for** is reported once when it turns `draining`, as `{"recorded":0,"final":true}`,
+  by an SDK that follows the stream. Such an SDK sends `X-Tsession-Delivery-Instance` (the `instance` of its
+  reports) when it opens the stream, and the control plane then expects a report from it for every draining
+  session: an instance it hears nothing from is one whose reports do not arrive. The control plane does not store
+  such a report. A running session without events is still never reported.
+- **Without the stream** (the SDK polls `GET /v1/active`) it learns of a drain late or not at all, so its reports
+  do not wait: the first is sent at once, a change at most once a second.
+- **Failures.** `404`/`405` (a control plane without the endpoint) turns reporting off, silently, until the stream
+  is opened again; `409` ends it for that session. Anything else is a failure: no answer, `5xx`, and any other
+  `4xx`, which is what a proxy in between answers when it refuses the POST. The report is retried after 1s, 2s,
+  then every 4s (a refused one: doubling up to 32s), and the outage is logged once, at the first refusal or the
+  second failure in a row, with the control plane's URL without credentials and the status, never the body; at
+  most one outage and its recovery per minute.
+- **Rate.** Reports are sent one request per session, at most 32 per 250ms pass (128 a second), draining sessions
+  first and of those the ones reported longest ago; none after one that failed. There is no batch endpoint.
+- After a reconnect of the stream every report is sent again, changed or not: the control plane behind it may
+  have restarted.
+
+**Drain.** The quiet condition of a drain (see hardening below) additionally requires that
+
+- no instance that reported still *owes* events: with a collector count for the instance (see below),
+  `collector count < recorded - dropped`; without one, `buffered > 0`. An instance that owes events is waited for
+  as long as it gets anywhere, on this session or any other: a report with a higher `delivered` for this session,
+  a higher `delivered_total` in any of its reports, or a higher collector count. One that got nowhere for
+  `--delivery-grace` (default 10s) is no longer waited for. So a session whose events wait behind a backlog of
+  other sessions in the same instance is not sealed while that instance delivers; and
+- every instance that follows the stream and announced that it reports (see above) has reported for the session,
+  or has had the grace to do so, counted from the stop or from when it connected.
+
+The grace counts from the stop at the earliest. Instances that never reported and do not follow the stream are not
 waited for, and `max_drain_seconds` bounds everything as before. When the drain ends (quiet, or timed out) the
-reports are closed: later ones get `409`, and the verdict is made from the last report of every instance:
+reports are closed: later ones get `409`.
 
-| Last report | Verdict |
+**Verdict.** The collector is then asked once more what it has, and every instance's last report `R` is held
+against the collector's count `have` for that `service` and `instance` (drain-status `instances`: the events it
+stored or holds in its reorder window, each counted once, `sdk.dropped` events not counted). The instance's own
+word does not condemn it, and its silence does not acquit it:
+
+| Last report `R` and collector count `have` | Verdict |
 |---|---|
-| `buffered = 0`, `dropped = 0` | nothing (also when it is not `final`: the instance is gone or did not confirm, and nothing is known to be missing) |
-| `dropped > 0` | `incomplete`, with a reason |
-| `buffered > 0`, `final` | `incomplete`, with a reason: the instance knew of the drain and could not deliver within the grace |
-| `buffered > 0`, not `final`, `delivered = 0`, `last_error` set | `incomplete`, with a reason: it never delivered an event of the session, was failing when it last spoke, and went silent |
-| `buffered > 0`, not `final`, otherwise | `delivery_unconfirmed` only: it went silent (killed, or cut off) and may have delivered the rest |
+| `have >= R.recorded`, `R.final` | nothing: complete, whatever the instance believed (it may count as undelivered, or as dropped at shutdown, events the collector stored without the answer getting back) |
+| `have >= R.recorded`, not `final`, `R.dropped = 0`, `have = R.recorded` | nothing |
+| `have > R.recorded`, not `final`, `R.dropped = 0` | `delivery_unconfirmed`: the instance recorded after its last report and stopped reporting; nothing says how much more |
+| otherwise `R.dropped > 0` | `incomplete`, with a reason |
+| otherwise (`have < R.recorded`) | `incomplete`, with a reason, whether `R` is `final` or the instance went silent |
+| an instance that follows the stream, announced that it reports, is still connected and sent no report for the session within the grace | `incomplete`, with a reason: its reports do not arrive, so nothing vouches for its events |
+| a 257th instance reported (`409`) | `delivery_unconfirmed`: "more than 256 instances reported" |
+| the collector has events from an instance that never reported (an older SDK) | nothing |
 
-A reason reads `service orders-api (instance host-4711-a1b2c3): 0 of 7 recorded events reached the collector, 7
-still undelivered (last error: ...)`. `tracectl summary`/`report`/`run` show it and fail `--fail-on-incomplete`
-with it, and `tsessiontest.RequireNoFailures` fails with it. An ABORTED session is not judged.
+Without a collector count (a collector that does not send `instances`, an instance its truncated list leaves out,
+or no drain-status answer at all) the instance's word is all there is: `dropped > 0`, or `final` with
+`buffered > 0`, is `incomplete`; `buffered > 0` without `final` is `delivery_unconfirmed`.
 
-**Compatibility.** An SDK older than the reports sends none: its sessions drain and seal as before, and its
-undelivered events stay invisible. A control plane older than the endpoint answers `404` and never sends
-`draining`: a newer SDK then records and exports as before. The fields are optional in both directions, in the
-API and in the `--store-file` files.
+A reason reads `service orders-api (instance host-4711-a1b2c3): 0 of 7 recorded events reached the collector (last
+error: ...)`, with `, N dropped by the SDK` and `; the instance stopped reporting before the session ended` where
+they apply; the first number is the collector's. Both lists hold at most 16 instances, then "and N more
+instance(s)". `tracectl summary`/`run` (header line and `delivery` lines), `report` (Markdown, and JUnit
+properties `incomplete`, `incomplete_reason`, `delivery_unconfirmed`), `digest` and the dashboard show both;
+`--fail-on-incomplete` and `tsessiontest.RequireNoFailures` fail on `incomplete`, and
+`tsessiontest.RequireDeliveryConfirmed` fails on `delivery_unconfirmed`. An ABORTED session is not judged. With
+`--delivery-grace 0` nothing is waited for and every shortfall is listed as `delivery_unconfirmed`.
 
-**Limits.** A service that never connected to the control plane, or whose SDK is older, cannot be seen. An
-instance that is killed (no `runtime.Stop`) is judged on its last report, which can be up to 5s old: events it
-recorded after it are not known. The verdict is about delivery to the collector, not about what the collector
-did with the events. The endpoint is unauthenticated, like stop, abort and kill: whoever can reach the control
-plane (see hardening below: loopback or an allowed Host, no cross-site browser request) can post a report for a
-running session and so mark it incomplete, hold its drain for up to the grace per report (bounded by
-`max_drain_seconds`), or, by claiming an instance's name with higher counters, hide that instance's shortfall. It
-cannot touch finished sessions, and a session keeps at most 256 instances of at most 4 KB per report.
+**Compatibility.** Every field is optional in both directions, in the API and in the `--store-file` files.
+
+| | Behaviour |
+|---|---|
+| SDK without reports | sessions drain and seal as before; its undelivered events stay invisible |
+| SDK that reports but sends neither `delivered_total` nor `X-Tsession-Delivery-Instance` | judged against the collector like any other; a backlog of other sessions is not seen as progress (the grace applies per session), and its silence is not noticed |
+| control plane without the endpoint | answers `404`, never sends `draining`: the SDK records and exports as before |
+| collector without `instances` in drain-status | the verdict rests on the instances' own reports (see above) |
+| control plane that does not know `instances` | ignores it |
+
+**Limits.**
+- An instance that is killed (no `runtime.Stop`) after a report that was in order, with events recorded since
+  that reached nobody: its last report and the collector agree, and no count shows the loss. A report is at most
+  5s old, 1s while the session drains. If some of the later events did arrive, the session is
+  `delivery_unconfirmed`; if none did, it is complete and wrong.
+- A service that never connected to the control plane, or whose SDK is older, cannot be seen. One that polls
+  (no stream) is not expected to report: if it recorded events and none of its reports arrives, nothing is known.
+- An instance that follows the stream but cannot run (stopped in a debugger, a host that lost its network without
+  the connection closing) reports nothing: a session that ends meanwhile is `incomplete` for it, also when it
+  recorded nothing.
+- The verdict is about delivery to the collector, not about what the collector did with the events.
+- **The endpoint is unauthenticated**, like stop, abort and kill: whoever can reach the control plane (see
+  hardening below: loopback or an allowed Host, no cross-site browser request) can post a report for a running
+  session. Counters only rise, so a forged report replaces the real one of the instance it names and the real one
+  is then ignored. What that buys: a forged report **cannot make an incomplete session complete** (the verdict
+  compares it with the collector, which has what it has); it **can** make a complete session incomplete, hold a
+  drain up to `max_drain_seconds` (by reporting a rising `delivered` or `delivered_total`), fill the 256 instances
+  of a session (the session is then `delivery_unconfirmed`), and, with a "nothing recorded" report in the name of
+  a connected instance, hide that this instance's own reports do not arrive. It cannot touch finished sessions. A
+  report is at most 4 KB.
 
 ### Control plane hardening
 - Every endpoint except `GET /healthz` (static `ok`, any Host) passes `core.LoopbackGuard`: Host must be loopback or in
@@ -196,8 +265,9 @@ cannot touch finished sessions, and a session keeps at most 256 instances of at 
 - `ttl_seconds`, `quiesce_seconds`, `max_drain_seconds`: 0/omitted = default, otherwise 1..604800 (7 days); anything else is 400.
 - Drain quiescence uses only the control plane's monotonic clock: drain-status is quiet once `pending==0` and none of
   `event_count`, `last_event_unix_ns`, `received_unix_ns`, `dropped_events` changed for `quiesce_seconds`. Collector timestamps are
-  opaque change tokens, never compared with local time. A drain also waits for SDK instances that reported
-  undelivered events (see "Delivery accounting"), on the same clock.
+  opaque change tokens, never compared with local time. A drain also waits for SDK instances that still owe the
+  collector events and are getting somewhere, and for the report of every connected instance (see "Delivery
+  accounting"), on the same clock.
 - Seal is retried (backoff, bounded by a 30s budget, each attempt capped by the remaining budget); on exhaustion the session ends
   `SEALED` with `incomplete=true`, `seal_error` and `seal_pending` (also for TTL expiry).
 - A pending seal keeps being retried in the background (the collector seal is idempotent): from the periodic sweep and
@@ -295,7 +365,12 @@ cannot touch finished sessions, and a session keeps at most 256 instances of at 
       the dashboard proxy accept that (Go's 1 MB request-header limit); a reverse proxy in front of them may not
       (nginx allows 8 KB by default), so raise its limit or ask for fewer ids per request.
 - Internal (control plane -> collector):
-  - `GET /v1/internal/sessions/{id}/drain-status` -> `{"pending":n,"last_event_unix_ns":n,"event_count":n,"dropped_events":n}`
+  - `GET /v1/internal/sessions/{id}/drain-status` -> `{"pending":n,"last_event_unix_ns":n,"event_count":n,"dropped_events":n,"instances":[{"service","instance","events":n}]}`.
+    `instances` is what the collector has of the session from every SDK instance, by the `service` and `instance`
+    of the events, sorted: events it stored and events still in the reorder window, each counted once however often
+    it was sent, `sdk.dropped` events not counted. It is always present (`[]` for a session without events); at
+    most 512 instances are listed, and `"instances_truncated":true` says that there were more. A control plane
+    that does not know the field ignores it.
   - `POST /v1/internal/sessions/{id}/seal` -> flushes window, resolves tx `effective`, marks orphans, writes bundle -> `{"incomplete":bool,"orphaned":[spanIDs],"bundle_uri":""}`
   - `DELETE /v1/internal/sessions/{id}` -> `{"deleted":true,"session_id":"..."}`; drops buffered and stored events,
     the seal, cached views and the bundle directory. Idempotent (unknown id is `200`). Events arriving for the id
@@ -600,7 +675,10 @@ HTTP bodies that have no structural redactor (multipart, XML, binary types) are 
 - An event leaves the exporter ring only when the collector answered 2xx or refused it for good (a 4xx other than 413/429, or an encode error: dropped and counted in `sdk.dropped`). Connection errors, 5xx and 429 keep it buffered; it is resent with the same `local_seq` (so the collector deduplicates) after a growing pause (`FlushInterval` doubling up to `MaxCooldown`, default 5s). During an outage events are lost only when the ring is full: new events are dropped and counted. `Flush` returns false if events are still buffered when its timeout ends.
 - One failing session does not hold up the others of the same process. A failed answer that names sessions of the request (`failed_sessions`) is not an outage: the named sessions are left out of the following requests and retried on their own pause (the same doubling up to `MaxCooldown`), oldest events first, so the events of one session are always sent in the order they were recorded; the other sessions are sent first and without a pause. The events of the sessions such an answer does not name are resolved only when it says `accepted + duplicates > 0` and is not `failed_sessions_truncated`; otherwise they are sent again. Everything stays in the ring meanwhile: there is no second buffer and no new limit, so a failing session costs ring space and nothing else. A failed answer that names no session of the request (an older collector, a 429, no answer) is an outage as before, and so are two requests in a row for sessions that were not failing of which the collector took nothing: the pass ends and the next one waits.
 - A session that kept failing while other sessions were accepted over at least `MaxCooldown` is held until the collector accepts it again. Held changes one thing: when the ring is full and an event of another session arrives, the newest buffered event of a held session (looked for among the newest 1024 events, and never one that was already sent, since the collector may have it) is dropped and counted for that session instead of the new event. A full ring still loses exactly one event per new event, and without a held session it drops the new event as before. `Flush` returns false while a failing session has events buffered, and `Close` discards them with the ring.
-- Every process reports to the control plane what it recorded per session and what became of it (delivered, dropped, still buffered), see "Delivery accounting". The counts are kept in the ring under the lock `Record` already takes; nothing is counted, and nothing sent, for a process that records no event.
+- Every process reports to the control plane what it recorded per session and what became of it (delivered, dropped, still buffered), see "Delivery accounting". The counts are kept in the ring under the lock `Record` already takes; nothing is counted for a process that records no event, and such a process sends one small report per session
+  that drains while it follows the stream. An account whose session left the active set while the ring still
+  held its events is kept until they are gone, so an event recorded later cannot make `delivered` exceed
+  `recorded`.
 - Remote HLC values more than 10 minutes ahead of local physical time are ignored (not merged).
 - Header propagation by the patched default transport: `TSESSION_PROPAGATE_HOSTS` (comma-separated host suffixes; empty = all) and `TSESSION_NO_PROPAGATE_HOSTS` (always wins). Excluded hosts are still recorded as `api.out`, with attr `propagated=false`.
 - SSE (`text/event-stream`) and hijacked `api.in` spans end at first write/hijack with attr `stream=true`.

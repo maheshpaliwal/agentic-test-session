@@ -37,9 +37,10 @@ type Config struct {
 	// keeps its SealError and is no longer retried.
 	SealPendingBudget time.Duration
 	HeartbeatPeriod   time.Duration // SSE heartbeat; default 15s
-	// DeliveryGrace is how long a drain waits for an SDK instance that
-	// reported undelivered events and delivers none (see delivery.go); after
-	// it the session is sealed and marked incomplete for them. It must be
+	// DeliveryGrace is how long a drain waits for an SDK instance that still
+	// owes the collector events and gets nowhere, and for the report of a
+	// connected instance (see delivery.go); after it the session is sealed
+	// and marked incomplete for them. It must be
 	// longer than an SDK needs to notice that its collector is back (an
 	// exporter pass and its cooldown). Default 10 TimeUnits; negative turns
 	// the check off: reports are stored, nothing is waited for and no session
