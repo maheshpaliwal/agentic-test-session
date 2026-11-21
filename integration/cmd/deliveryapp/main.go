@@ -17,6 +17,7 @@ import (
 	_ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/thttp"
 )
 
@@ -57,6 +58,19 @@ func main() {
 			sp.End()
 		}
 		_, _ = io.WriteString(w, "done\n")
+	})
+	// POST /fault?site=NAME&times=N makes the SDK inside this process panic at
+	// the fault point NAME the next N times it gets there (N below zero:
+	// every time), for the tests of what a panic in the SDK does to its host.
+	mux.HandleFunc("POST /fault", func(w http.ResponseWriter, r *http.Request) {
+		site := r.URL.Query().Get("site")
+		times, err := strconv.Atoi(r.URL.Query().Get("times"))
+		if site == "" || err != nil {
+			http.Error(w, "site and times are required", http.StatusBadRequest)
+			return
+		}
+		faultpoint.PanicAt(site, times)
+		_, _ = io.WriteString(w, "armed\n")
 	})
 	srv := &http.Server{Addr: listen, Handler: thttp.Handler(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("deliveryapp listening on http://%s", listen)
