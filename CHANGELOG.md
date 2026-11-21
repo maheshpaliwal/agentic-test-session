@@ -69,6 +69,13 @@ Rolling back:
 
 ### Added
 
+- **`tracectl digest <id|name>`**: a whole session in one bounded answer for an AI agent or a person: the
+  verdict, the failures with where they sit in the call tree, what changed (with uncertain records marked) and
+  the call tree with repeated siblings collapsed (`40x`). It never exceeds `--max-bytes` (default 16384) and
+  says what it left out and which command prints it. Markdown, or JSON with schema `tsession.digest/v1`
+  (`docs/DIGEST.md`); takes the `--fail-on-*` gates; `tracectl run --digest FILE` writes it after the seal.
+  Recorded text is quoted as data and stripped of control characters; that protects the structure of the
+  output, not a model's judgement of what the text says.
 - **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
   entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
   `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;

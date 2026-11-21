@@ -3,6 +3,7 @@ package integration
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -93,6 +94,29 @@ func TestE2E_ExampleAppBinary(t *testing.T) {
 	if n := len(named(evs, core.KindAPIOut, "/receipts")); n != 1 {
 		t.Errorf("api.out /receipts = %d, want 1", n)
 	}
+	// tracectl digest against the real services: one bounded answer that names
+	// the request, in both formats.
+	tracectl := buildBinary(t, t.TempDir(), "tracectl", ".", "./cmd/tracectl")
+	digest := func(args ...string) string {
+		t.Helper()
+		argv := append([]string{"--cp", in.cpSrv.URL, "--collector", in.colSrv.URL, "digest", s.ID}, args...)
+		out, err := exec.Command(tracectl, argv...).Output()
+		if err != nil {
+			t.Fatalf("tracectl digest %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+	if md := digest(); len(md) > 16384 || !strings.Contains(md, "### Verdict") || !strings.Contains(md, "/orders") ||
+		!strings.Contains(md, "orders-bin") || !strings.Contains(md, "### Mutations") {
+		t.Errorf("digest of a real session (%d bytes):\n%s", len(md), md)
+	}
+	var dj struct {
+		Schema string `json:"schema"`
+	}
+	if js := digest("--format", "json", "--max-bytes", "4096"); len(js) > 4096 || json.Unmarshal([]byte(js), &dj) != nil || dj.Schema != "tsession.digest/v1" {
+		t.Errorf("JSON digest of a real session (%d bytes): %s", len(js), js)
+	}
+
 	// no session => no events
 	before := len(col.sessions(t))
 	doReq(t, "POST", base+"/orders", orderBody{SKU: "widget", Qty: 1, Customer: "bin-none"}, nil)
