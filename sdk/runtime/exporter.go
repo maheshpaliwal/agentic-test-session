@@ -36,9 +36,11 @@ type ExporterConfig struct {
 	// ReachCheck is how often an exporter that has nothing to send asks the
 	// collector whether it is there (GET /healthz), so that a CollectorURL
 	// that leads nowhere shows before the first event of the first session
-	// (see checkCollector). Zero: never, which is what an Exporter made with
-	// NewExporter does; Start sets 30s. While the last check failed it is
-	// asked again every reachRetry at the latest.
+	// (see checkCollector). Zero or less: never, which is what an Exporter
+	// made with NewExporter does. Start turns zero into 30s, so a negative
+	// value is how a service started with Start switches the check off.
+	// While the last check failed it is asked again every reachRetry at the
+	// latest.
 	ReachCheck time.Duration
 }
 

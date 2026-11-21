@@ -113,6 +113,19 @@ default one hour) must be longer than the command takes, or the session expires 
 `TSESSION_ARTIFACT_DIR` makes `sdk/client/tsessiontest` save the session of a failed test into that directory;
 use an absolute path.
 
+## The SDK's collector check
+
+A service started with `runtime.Start` (or the `autoinit` import) asks its collector's `/healthz` when it starts
+and every 30 seconds while it has nothing to send, and tells the control plane what it found; `tracectl doctor`
+shows a service that cannot reach its collector. It is never asked per event. Any HTTP answer but a 5xx counts as
+reached. Two cases to know:
+
+- A proxy in front of the collector that accepts ingest and answers `/healthz` with 502 or 503 shows as
+  `CANNOT REACH COLLECTOR` for as long as the service is idle, although events would arrive.
+- `runtime.Config.Exporter.ReachCheck` sets the period; a negative value turns the check off (zero means the
+  default of 30 s). There is no environment variable for it. An `Exporter` made with `runtime.NewExporter` does
+  not check unless `ReachCheck` is set.
+
 ## Health and panics
 
 `GET /healthz` of the collector and the control plane answers `200 ok`. A panic in one of their background
