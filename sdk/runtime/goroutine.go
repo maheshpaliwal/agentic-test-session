@@ -24,19 +24,28 @@ var (
 // a panic in one must not end it (the rule of core.Recover, for goroutines):
 // the panic is logged, at most loopRestarts+1 times in the life of the loop,
 // and the loop is started again with backoff. When the restarts are used up
-// it stays stopped, stopped is called (it may be nil) and the log says what
-// no longer works; the host goes on untouched.
+// it stays stopped and the log says what no longer works; the host goes on
+// untouched.
 //
 // stop is the loop's own stop signal, done runs when its goroutine ends.
+// panicked (it may be nil) is told of every panic, before it is logged, so
+// that a log that panics cannot keep it from being told; final says that the
+// loop stays stopped.
 //
 // The log names the type of the panic value and, for a panic of the Go
 // runtime, its text; any other value is not printed, since it may quote
 // what an encoder or a transport of the host put into it. The stack has no
 // arguments.
-func startLoop(name, consequence string, stop <-chan struct{}, loop, done, stopped func()) {
+func startLoop(name, consequence string, stop <-chan struct{}, loop, done func(), panicked func(final bool)) {
 	gosafe.Go(gosafe.Options{
 		Name: name, Restarts: loopRestarts, Backoff: loopBackoff, MaxBackoff: loopMaxBackoff, Stop: stop, Done: done,
 		OnPanic: func(p gosafe.Panic) {
+			if panicked != nil {
+				func() {
+					defer func() { _ = recover() }() // the log below is still written
+					panicked(p.RestartIn == 0)
+				}()
+			}
 			what := p.Type
 			if p.Runtime {
 				what += ": " + p.Value
@@ -45,9 +54,6 @@ func startLoop(name, consequence string, stop <-chan struct{}, loop, done, stopp
 				log.Printf("tsession: error: the %s goroutine panicked (%s) and is restarted in %s (restart %d of %d); the application is not affected. "+
 					"This is a bug in tsession, please report it with this stack:\n%s", name, what, p.RestartIn, p.N, loopRestarts, p.Stack)
 				return
-			}
-			if stopped != nil {
-				stopped()
 			}
 			log.Printf("tsession: error: the %s goroutine panicked %d times (%s) and stays stopped: %s until the process is restarted; "+
 				"the application is not affected. This is a bug in tsession, please report it with this stack:\n%s", name, p.N, what, consequence, p.Stack)

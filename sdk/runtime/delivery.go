@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 )
 
@@ -54,6 +55,11 @@ type deliveryBatch struct {
 	Instance       string        `json:"instance"`
 	DeliveredTotal uint64        `json:"delivered_total"`
 	Reports        []batchReport `json:"reports"`
+	// Stopped is set when this process stopped recording after an internal
+	// error, and says how (see Subscriber.panicked). The control plane marks
+	// the sessions that run when it hears this incomplete; one that does not
+	// know the field ignores it.
+	Stopped string `json:"stopped,omitempty"`
 }
 
 // batchReport is one report of a batch: a deliveryReport without what the
@@ -311,7 +317,14 @@ type due struct {
 //
 // The set read here is the raw one: under the kill switch IsActive is false
 // for every session, and what was recorded before must still be accounted.
+//
+// When the subscriber panicked this process has stopped recording and does
+// not know the set (snapshot.blind). The control plane is told (see
+// Subscriber.panicked), also when nothing else is due. Until the set is
+// known again no account is forgotten, and what was recorded before is
+// reported on like that of a running session.
 func (r *reporter) pass() {
+	faultpoint.Hit("reporter.pass")
 	accts := r.rec.accounts()
 	sn := r.sub.snap.Load()
 	if sn != r.urgentOf {
@@ -334,7 +347,7 @@ func (r *reporter) pass() {
 			r.retryAt = time.Time{}
 		}
 	}
-	hello := streaming && r.mode == modeBatch && (r.hello || r.beat(sn, now))
+	hello := r.mode == modeBatch && (streaming && (r.hello || r.beat(sn, now)) || r.sub.stopNote.Load() != nil)
 	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
 		return
 	}
@@ -342,7 +355,7 @@ func (r *reporter) pass() {
 	stuck, turned, urgent := false, false, false
 	var todo []due
 	for sid, a := range accts {
-		if _, live := sn.active[sid]; !live {
+		if _, live := sn.active[sid]; !live && !sn.blind {
 			r.rec.forget(sid)
 			delete(accts, sid)
 			continue
@@ -476,6 +489,10 @@ const (
 // failed, or the control plane does not know the endpoint.
 func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 	b := deliveryBatch{Service: r.service, Instance: r.instance, DeliveredTotal: total, Reports: make([]batchReport, len(chunk))}
+	note := r.sub.stopNote.Load()
+	if note != nil {
+		b.Stopped = *note
+	}
 	for i, x := range chunk {
 		b.Reports[i] = batchReport{Session: x.sid, Recorded: x.d.Recorded, Delivered: x.d.Delivered, Dropped: x.d.Dropped,
 			Buffered: x.d.Buffered, LastError: x.d.LastError, Final: x.d.Final}
@@ -502,6 +519,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 			}
 		}
 		r.hello, r.beatAt = false, time.Now()
+		r.sub.stopNote.CompareAndSwap(note, nil) // told; a newer note stays
 		r.sub.setAnnounce(true)
 		r.up()
 		return true
@@ -664,7 +682,7 @@ func (r *reporter) close(timeout time.Duration) {
 	var last []batchReport
 	for sid, a := range r.rec.accounts() {
 		st := r.sessions[sid]
-		if _, live := sn.active[sid]; !live || st != nil && st.closed {
+		if _, live := sn.active[sid]; !live && !sn.blind || st != nil && st.closed {
 			continue
 		}
 		d := r.report(a, true, total)

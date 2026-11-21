@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 )
 
@@ -43,6 +44,10 @@ type snapshot struct {
 	// heartbeat is how often the control plane asked to hear from this
 	// process while the set names a session; zero when it did not say.
 	heartbeat time.Duration
+	// blind: this is not a set of the control plane. The subscriber panicked
+	// and names no session until it has fetched the set anew (see panicked):
+	// nothing is recorded, and nothing follows from a session not being named.
+	blind bool
 }
 
 // Subscriber tracks the control plane's active set and implements
@@ -72,6 +77,10 @@ type Subscriber struct {
 	// signalled for each, and when the set names a session after naming none.
 	connects atomic.Uint64
 	opened   chan struct{}
+	// stopNote is what the reporter still has to tell the control plane
+	// about this process having stopped recording (see panicked); nil when
+	// there is nothing to tell.
+	stopNote atomic.Pointer[string]
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -107,11 +116,29 @@ func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscr
 	}
 	s.snap.Store(&snapshot{})
 	s.announce.Store(reportsAs != "")
-	// Without it the last active set would stand for good: stopped for good,
-	// the subscriber says that nothing is active, and recording ends.
-	startLoop("subscriber", "nothing more is recorded", ctx.Done(), func() { s.run(ctx) },
-		func() { close(s.done) }, func() { s.snap.Store(&snapshot{}) })
+	startLoop("subscriber", "nothing more is recorded", ctx.Done(), func() { s.run(ctx) }, func() { close(s.done) }, s.panicked)
 	return s
+}
+
+// panicked is told of every panic of the subscriber's loop. Recording stops
+// at once, at the first panic and not only when the loop stays stopped: the
+// set this process has is no longer followed, so a session that ended or a
+// kill switch that was thrown would go unnoticed for as long as the restarts
+// take. It resumes when the loop, started again, has fetched the set anew.
+//
+// A service that silently stopped recording would leave its sessions
+// complete with its events missing. So the reporter, which goes on, tells
+// the control plane (stopNote), and that marks the sessions that run now
+// incomplete.
+func (s *Subscriber) panicked(final bool) {
+	old := s.snap.Load()
+	s.snap.Store(&snapshot{blind: true, reports: old.reports, heartbeat: old.heartbeat})
+	note := "its subscriber panicked; it records again once it has fetched the active sessions anew"
+	if final {
+		note = "its subscriber panicked repeatedly and stays stopped; it records nothing more until the service is restarted"
+	}
+	s.stopNote.Store(&note)
+	s.wake()
 }
 
 // setAnnounce says whether the stream names the instance this process sends
@@ -200,6 +227,7 @@ func (s *Subscriber) Close() {
 }
 
 func (s *Subscriber) apply(a activeSet) {
+	faultpoint.Hit("subscriber.apply")
 	sn := &snapshot{active: set.Of(a.Active...), draining: set.Of(a.Draining...), exclusive: a.Exclusive, kill: a.Kill,
 		bindings: core.NewBindingSet(a.Bindings), reports: a.DeliveryReports,
 		heartbeat: time.Duration(max(a.DeliveryHeartbeatMs, 0)) * time.Millisecond}

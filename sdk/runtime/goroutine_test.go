@@ -140,6 +140,10 @@ func TestExporterThatAlwaysPanicsStaysStoppedAfterItsRestarts(t *testing.T) {
 	if strings.Contains(logs, "hunter2") {
 		t.Errorf("the log carries the panic value:\n%s", logs)
 	}
+	// The delivery reports of the sessions say why their events do not arrive.
+	if msg := exp.lastError(); !strings.Contains(msg, "the SDK's exporter stopped after an internal error") {
+		t.Errorf("the exporter's last error after it gave up: %q", msg)
+	}
 }
 
 func goroutinesBefore() int { return goruntime.NumGoroutine() }
@@ -154,7 +158,11 @@ func TestStartLoopTellsTheOwnerWhenItStaysStopped(t *testing.T) {
 	done := make(chan struct{})
 	var none []int
 	startLoop("subscriber", "nothing more is recorded", nil, func() { _ = none[len(out.String())+1] },
-		func() { dones.Add(1); close(done) }, func() { stopped.Add(1) })
+		func() { dones.Add(1); close(done) }, func(final bool) {
+			if final {
+				stopped.Add(1)
+			}
+		})
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -171,7 +179,11 @@ func TestStartLoopTellsTheOwnerWhenItStaysStopped(t *testing.T) {
 	// is not told that it stays stopped.
 	stop, done2 := make(chan struct{}), make(chan struct{})
 	loopBackoff, loopMaxBackoff = time.Hour, time.Hour
-	startLoop("exporter", "x", stop, func() { panic("once") }, func() { close(done2) }, func() { stopped.Add(1) })
+	startLoop("exporter", "x", stop, func() { panic("once") }, func() { close(done2) }, func(final bool) {
+		if final {
+			stopped.Add(1)
+		}
+	})
 	for deadline := time.Now().Add(10 * time.Second); panicLines(out.String()) != loopRestarts+2; time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
 			panic("the panic was not logged")

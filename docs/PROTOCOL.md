@@ -91,6 +91,14 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   more than 4 KiB), with `error`; `failed` (it could not be stored: send it again). The request itself is `400`
   without `instance` or with more than 256 reports, and `413` over 1 MiB. `reports` may be empty: the request then
   says only that the instance's reports arrive.
+  An optional `stopped` (text, at most 256 bytes are kept) says that the instance stopped recording after an internal
+  error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. Every session that
+  is `ACTIVE` or `DRAINING` when the request arrives is then `incomplete`, with an `incomplete_reasons` entry that
+  names the service and the instance (`... stopped recording after an internal error (...)`), whether the instance
+  had recorded events for it or not: what it would have recorded since is what is missing. Sessions started later
+  are not marked. A control plane that does not know the field ignores it. Like the reports it is the caller's own
+  word: anyone who can reach the control plane can make every running session incomplete with it, as with reports
+  they can one by one.
 - `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,delivered_total,last_error,final} ->
   `{"accepted":true|false}`: one report, for clients that send one session at a time (SDKs use the batch).
   `400` for a body that is not such a report, `413` for one over 4 KiB, `404` unknown session, `409` when the

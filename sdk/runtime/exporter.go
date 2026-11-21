@@ -143,7 +143,14 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		drops:    map[string]core.Event{},
 	}
 	startLoop("exporter", "recorded events are no longer sent to the collector (they are dropped as the buffer fills)",
-		e.stop, e.loop, func() { close(e.done) }, nil)
+		e.stop, e.loop, func() { close(e.done) }, func(final bool) {
+			if final {
+				// The reporter goes on: the sessions' delivery reports say why
+				// their events did not arrive.
+				msg := "the SDK's exporter stopped after an internal error (it panicked repeatedly); restart the service"
+				e.lastErr.Store(&msg)
+			}
+		})
 	return e
 }
 
