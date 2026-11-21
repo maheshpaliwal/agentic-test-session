@@ -63,12 +63,27 @@ type Carrier interface {
 	Set(key, val string)
 }
 
+// PresenceCarrier is a Carrier that can tell a key it does not hold from one
+// it holds with a value Get returns as "": an empty value, or one that is not
+// text (an SQS attribute of type Binary, an AMQP header holding a number).
+// WriteTraceparent asks it whether the carrier has a traceparent, so that an
+// application's is left alone whatever its value. A carrier whose values are
+// always non-empty strings need not implement it.
+type PresenceCarrier interface {
+	Carrier
+	// Has reports whether the carrier holds key, whatever its value.
+	Has(key string) bool
+}
+
 // MapCarrier is a Carrier backed by a map; keys are stored lowercase. Queue
 // wrappers use it for message headers and side-channel records.
 type MapCarrier map[string]string
 
 // Get implements Carrier.
 func (m MapCarrier) Get(k string) string { return m[strings.ToLower(k)] }
+
+// Has implements PresenceCarrier.
+func (m MapCarrier) Has(k string) bool { _, ok := m[strings.ToLower(k)]; return ok }
 
 // Set implements Carrier.
 func (m MapCarrier) Set(k, v string) { m[strings.ToLower(k)] = v }
@@ -78,6 +93,12 @@ type HTTPHeaderCarrier http.Header
 
 // Get implements Carrier.
 func (h HTTPHeaderCarrier) Get(k string) string { return http.Header(h).Get(k) }
+
+// Has implements PresenceCarrier: a header sent with an empty value counts.
+func (h HTTPHeaderCarrier) Has(k string) bool {
+	_, ok := h[http.CanonicalHeaderKey(k)]
+	return ok
+}
 
 // Set implements Carrier.
 func (h HTTPHeaderCarrier) Set(k, v string) { http.Header(h).Set(k, v) }
@@ -109,7 +130,7 @@ func Inject(ctx context.Context, c Carrier) {
 // It sets KeyTraceparent to tp only when that cannot destroy a value the
 // application wrote:
 //
-//   - c has no traceparent, or
+//   - c has no traceparent (the key is not there: see PresenceCarrier), or
 //   - c's traceparent equals the trace context in the x-tsession-traceparent c
 //     held before this call: tsession wrote both and they were copied here
 //     together (a consumer that republishes a message with its headers, a
@@ -117,13 +138,20 @@ func Inject(ctx context.Context, c Carrier) {
 //     would hand a stale parent to a reader that knows only traceparent; or
 //   - Config.OverwriteTraceparent is set.
 //
-// Any other traceparent belongs to the application and is left as it is.
+// Any other traceparent belongs to the application and is left as it is,
+// whatever it holds: an empty value, or one that is not text.
 func WriteTraceparent(c Carrier, tp, hlc string) {
 	app := c.Get(KeyTraceparent)
+	absent := app == ""
+	if absent {
+		if p, ok := c.(PresenceCarrier); ok {
+			absent = !p.Has(KeyTraceparent)
+		}
+	}
 	own, _, _ := strings.Cut(c.Get(KeyTSessionTraceparent), ownSep)
 	c.Set(KeyTSessionTraceparent, tp+ownSep+hlc)
 	c.Set(KeyHLC, hlc)
-	if app == "" || app == own || cfg.Load().OverwriteTraceparent {
+	if absent || (app != "" && app == own) || cfg.Load().OverwriteTraceparent {
 		c.Set(KeyTraceparent, tp)
 	}
 }

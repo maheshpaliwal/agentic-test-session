@@ -26,6 +26,10 @@ func (c amqpCarrier) Get(key string) string {
 	return ""
 }
 
+// Has implements core.PresenceCarrier: a header of any type counts, so an
+// application traceparent that is neither a string nor bytes is left alone.
+func (c amqpCarrier) Has(key string) bool { _, ok := c[strings.ToLower(key)]; return ok }
+
 func (c amqpCarrier) Set(key, val string) { c[strings.ToLower(key)] = val }
 
 // AMQPChannel is satisfied by *amqp.Channel.

@@ -24,6 +24,16 @@ func (c kafkaCarrier) Get(key string) string {
 	return ""
 }
 
+// Has implements core.PresenceCarrier: a header with an empty value counts.
+func (c kafkaCarrier) Has(key string) bool {
+	for _, h := range *c.h {
+		if strings.EqualFold(h.Key, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c kafkaCarrier) Set(key, val string) {
 	key = strings.ToLower(key)
 	for i, h := range *c.h {

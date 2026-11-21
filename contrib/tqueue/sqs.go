@@ -88,7 +88,11 @@ func (c sqsCarrier) Set(key, val string) {
 type sqsAttrs map[string]types.MessageAttributeValue
 
 func (c sqsAttrs) Get(key string) string { return sqsCarrier(c).direct(strings.ToLower(key)) }
-func (c sqsAttrs) Set(key, val string)   { sqsCarrier(c).Set(key, val) }
+
+// Has implements core.PresenceCarrier: an attribute of type Binary or Number
+// named traceparent is the application's as much as a String one.
+func (c sqsAttrs) Has(key string) bool { return has(c, strings.ToLower(key)) }
+func (c sqsAttrs) Set(key, val string) { sqsCarrier(c).Set(key, val) }
 
 // stale reports which carrier attributes c already has from an earlier
 // publish: a compact attribute that holds a session id (an application

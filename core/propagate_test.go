@@ -254,6 +254,62 @@ func TestWriteTraceparentReplacesCopyOfOwnKey(t *testing.T) {
 	}
 }
 
+// binaryCarrier is a carrier like SQS message attributes or an AMQP table: a
+// key can hold a value that is not text, which Get cannot return.
+type binaryCarrier struct {
+	MapCarrier
+	binary map[string][]byte
+}
+
+func (c binaryCarrier) Has(k string) bool {
+	_, ok := c.binary[k]
+	return ok || c.MapCarrier.Has(k)
+}
+
+func (c binaryCarrier) Set(k, v string) { delete(c.binary, k); c.MapCarrier.Set(k, v) }
+
+// Whether the carrier has a traceparent is a question about the key, not
+// about what Get makes of its value.
+func TestInjectLeavesTraceparentThatIsNotText(t *testing.T) {
+	ctx, sc := propSetup(t, Config{})
+
+	bin := binaryCarrier{MapCarrier{}, map[string][]byte{KeyTraceparent: {1, 2, 3}}}
+	Inject(ctx, bin)
+	if _, text := bin.MapCarrier[KeyTraceparent]; text || len(bin.binary[KeyTraceparent]) != 3 {
+		t.Errorf("binary traceparent replaced: %v %v", bin.MapCarrier, bin.binary)
+	}
+	if ownOf(bin) != tpOf(sc) {
+		t.Errorf("own key not written: %v", bin.MapCarrier)
+	}
+
+	empty := MapCarrier{KeyTraceparent: ""}
+	Inject(ctx, empty)
+	if empty[KeyTraceparent] != "" || ownOf(empty) != tpOf(sc) {
+		t.Errorf("empty traceparent: %v", empty)
+	}
+
+	h := http.Header{"Traceparent": {""}}
+	Inject(ctx, HTTPHeaderCarrier(h))
+	if v := h.Values("Traceparent"); len(v) != 1 || v[0] != "" || ownOf(HTTPHeaderCarrier(h)) != tpOf(sc) {
+		t.Errorf("empty traceparent header: %v", h)
+	}
+
+	// An empty traceparent beside no own key is not "equal to the own key".
+	c := MapCarrier{KeyTraceparent: "", KeyTSessionTraceparent: ""}
+	Inject(ctx, c)
+	if c[KeyTraceparent] != "" {
+		t.Errorf("empty traceparent and own key: %v", c)
+	}
+
+	// The setting replaces it like any other.
+	Configure(Config{Service: "svc", Enabled: true, OverwriteTraceparent: true})
+	bin = binaryCarrier{MapCarrier{}, map[string][]byte{KeyTraceparent: {1, 2, 3}}}
+	Inject(ctx, bin)
+	if bin.MapCarrier[KeyTraceparent] != tpOf(sc) || len(bin.binary) != 0 {
+		t.Errorf("overwrite setting: %v %v", bin.MapCarrier, bin.binary)
+	}
+}
+
 func TestBeginIngressParentFromOwnKey(t *testing.T) {
 	_, sc := propSetup(t, Config{})
 	rec := &MemRecorder{}

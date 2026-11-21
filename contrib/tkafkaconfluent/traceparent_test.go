@@ -72,6 +72,25 @@ func TestProduceKeepsApplicationTraceparent(t *testing.T) {
 	assertWorker(t, rec, pub)
 }
 
+// A traceparent header the application sent with no value is still its own.
+func TestProduceLeavesEmptyApplicationTraceparent(t *testing.T) {
+	rec, ctx := setup(t)
+	p := &fakeProducer{}
+	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("orders")}, Value: []byte(`{}`),
+		Headers: []kafka.Header{{Key: "traceparent"}}}
+	if err := Produce(ctx, p, msg, nil); err != nil {
+		t.Fatal(err)
+	}
+	sent := p.got[0]
+	if v, n := hdr(sent.Headers, "traceparent"); n != 1 || v != "" {
+		t.Fatalf("empty application traceparent is now %q (%d headers)", v, n)
+	}
+	if err := Consume(context.Background(), sent, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertWorker(t, rec, pubs(rec)[0])
+}
+
 func TestProduceWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	rec, ctx := setup(t)
 	p := &fakeProducer{}

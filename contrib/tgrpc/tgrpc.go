@@ -40,6 +40,9 @@ func (c mdCarrier) Get(key string) string {
 	return ""
 }
 
+// Has implements core.PresenceCarrier: a key sent with an empty value counts.
+func (c mdCarrier) Has(key string) bool { return len(c.md.Get(strings.ToLower(key))) > 0 }
+
 func (c mdCarrier) Set(key, val string) { c.md.Set(strings.ToLower(key), val) }
 
 // mdAttrs adapts incoming metadata to core.Attributes for session bindings:

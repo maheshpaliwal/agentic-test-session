@@ -3,6 +3,7 @@ package tqueue
 import (
 	"context"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -269,7 +270,53 @@ func TestKafkaOverwriteTraceparentSetting(t *testing.T) {
 	}
 }
 
+// A traceparent header the application sent with no value is still its own.
+func TestKafkaLeavesEmptyApplicationTraceparent(t *testing.T) {
+	off := false
+	for name, opts := range map[string]KafkaOptions{"span per message": {}, "one span per batch": {PerMessageSpans: &off}} {
+		t.Run(name, func(t *testing.T) {
+			rec, ctx := setup(t, true)
+			w := &batchWriter{}
+			msg := kafka.Message{Topic: "a", Value: []byte(`{}`), Headers: []kafka.Header{{Key: "traceparent"}}}
+			if err := ProduceMessagesOpts(ctx, w, opts, msg); err != nil {
+				t.Fatal(err)
+			}
+			got := w.calls[0][0]
+			if tp := kafkaHeaders(got, "traceparent"); len(tp) != 1 || tp[0] != "" {
+				t.Fatalf("empty application traceparent is now %q", tp)
+			}
+			if err := ConsumeMessage(context.Background(), got, noop); err != nil {
+				t.Fatal(err)
+			}
+			assertLastWorker(t, rec, lastPub(t, rec))
+		})
+	}
+}
+
 // ---- AMQP ----
+
+// An AMQP header can hold any field type. A traceparent that is neither a
+// string nor bytes is the application's all the same.
+func TestAMQPLeavesTraceparentThatIsNotText(t *testing.T) {
+	for name, app := range map[string]any{"int32": int32(7), "table": amqp.Table{"v": appTP}, "nil": nil, "empty string": ""} {
+		t.Run(name, func(t *testing.T) {
+			rec, ctx := setup(t, true)
+			ch := &fakeAMQP{}
+			in := amqp.Publishing{Body: []byte(`{}`), Headers: amqp.Table{"traceparent": app}}
+			if err := PublishAMQP(ctx, ch, "ex", "k", false, false, in); err != nil {
+				t.Fatal(err)
+			}
+			got := ch.got[0].Headers
+			if !reflect.DeepEqual(got["traceparent"], app) {
+				t.Fatalf("application traceparent %v (%T) is now %v (%T)", app, app, got["traceparent"], got["traceparent"])
+			}
+			if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: got, RoutingKey: "k", DeliveryTag: 1}, 0, noop); err != nil {
+				t.Fatal(err)
+			}
+			assertLastWorker(t, rec, lastPub(t, rec))
+		})
+	}
+}
 
 func TestAMQPKeepsApplicationTraceparent(t *testing.T) {
 	for name, app := range map[string]any{"string": appTP, "bytes": []byte(appTP)} {
@@ -479,6 +526,41 @@ func TestSQSReadByOlderConsumer(t *testing.T) {
 				t.Fatalf("older consumer links to %s/%s; the note says the application's ids", trace, span)
 			}
 		})
+	}
+}
+
+// An application attribute named traceparent that is not a String (SQS also
+// has Binary and Number) is left alone in every form, and counts as the
+// message's traceparent when the form is chosen.
+func TestSQSLeavesTraceparentThatIsNotAString(t *testing.T) {
+	for name, app := range map[string]types.MessageAttributeValue{
+		"binary": {DataType: aws.String("Binary"), BinaryValue: []byte{1, 2, 3}},
+		"number": {DataType: aws.String("Number"), StringValue: aws.String("7")},
+		"empty":  {DataType: aws.String("String")},
+	} {
+		for n := 1; n <= maxSQSAttrs; n++ { // application attributes, traceparent among them
+			form := map[bool]string{true: "full", false: "compact"}[n <= 7]
+			if n == maxSQSAttrs {
+				form = "none"
+			}
+			t.Run(name+", "+strconv.Itoa(n)+" attrs", func(t *testing.T) {
+				rec, ctx := setup(t, true)
+				in := fill(n - 1)
+				in["traceparent"] = app
+				sent := sqsSend(t, ctx, in, SQSOptions{})
+				if !reflect.DeepEqual(sent["traceparent"], app) {
+					t.Fatalf("application traceparent is now %s %q", aws.ToString(sent["traceparent"].DataType), aws.ToString(sent["traceparent"].StringValue))
+				}
+				if got := sqsForm(sent); got != form {
+					t.Fatalf("form %q, want %q", got, form)
+				}
+				if form == "none" {
+					return
+				}
+				sqsConsume(t, sent, SQSOptions{})
+				assertLastWorker(t, rec, lastPub(t, rec))
+			})
+		}
 	}
 }
 
