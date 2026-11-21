@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/maheshpaliwal/agentic-test-session/controlplane"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client/tsessiontest"
 )
@@ -72,6 +73,20 @@ func TestRequireDeliveryConfirmed(t *testing.T) {
 		t.Fatalf("RequireDeliveryConfirmed: failed=%v output %q", failed, out)
 	}
 
+	// The report says that everything was delivered, and nothing but the
+	// report: the collector is one that does not count per instance. That is
+	// not a confirmation.
+	failed, out = check(t, func(tb testing.TB) {
+		s = tsessiontest.Run(t, e.opts)
+		reportDelivery(t, s, e.opts.BaseURL, `{"service":"batch","instance":"b-1","recorded":5,"delivered":5,"final":true}`)
+		tsessiontest.RequireDeliveryConfirmed(tb, s)
+	})
+	if !failed || !strings.Contains(out, "the collector does not count events per instance") {
+		t.Fatalf("RequireDeliveryConfirmed with a collector that does not count: failed=%v output %q", failed, out)
+	}
+
+	// The collector has what the report says: confirmed.
+	e.counts.Store(&[]controlplane.InstanceCount{{Service: "batch", Instance: "b-1", Events: 5}})
 	failed, out = check(t, func(tb testing.TB) {
 		s = tsessiontest.Run(t, e.opts)
 		reportDelivery(t, s, e.opts.BaseURL, `{"service":"batch","instance":"b-1","recorded":5,"delivered":5,"final":true}`)

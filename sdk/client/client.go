@@ -146,8 +146,11 @@ type Info struct {
 	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
 	// DeliveryUnconfirmed names instances of which the control plane cannot
 	// say whether all their events arrived: one that recorded more after its
-	// last report and then stopped reporting, say. A warning: the session is
-	// not Incomplete because of it, and it is not known to be complete.
+	// last report and then stopped reporting, say, or one that follows the
+	// control plane and whose reports never arrive. A warning: the session is
+	// not Incomplete because of it, and it is not known to be complete
+	// (tsessiontest.RequireDeliveryConfirmed and tracectl's
+	// --fail-on-unconfirmed fail on it).
 	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
 
@@ -525,6 +528,11 @@ type Subscriber struct {
 	// none.
 	DeliveryInstance string    `json:"delivery_instance,omitempty"`
 	ConnectedAt      time.Time `json:"connected_at"`
+	// LastDeliveryReport is when a delivery report of the process last
+	// reached the control plane (it sends one when it connects); zero when
+	// none has since it connected. A process that names a DeliveryInstance
+	// and stays at zero cannot get its reports through.
+	LastDeliveryReport time.Time `json:"last_delivery_report,omitzero"`
 	// Generation is the newest version of the active set sent to it.
 	Generation uint64 `json:"generation"`
 }

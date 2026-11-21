@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/maheshpaliwal/agentic-test-session/controlplane"
@@ -21,6 +22,9 @@ import (
 type env struct {
 	opts client.Options
 	sum  client.Summary
+	// counts is what the collector says it has per SDK instance; nil makes it
+	// one that does not count (an older collector).
+	counts atomic.Pointer[[]controlplane.InstanceCount]
 }
 
 func newEnv(t *testing.T) *env {
@@ -43,7 +47,11 @@ func newEnv(t *testing.T) *env {
 		json.NewEncoder(w).Encode(e.sum)
 	})
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(controlplane.DrainStatus{})
+		st := controlplane.DrainStatus{}
+		if c := e.counts.Load(); c != nil {
+			st.Instances = *c
+		}
+		json.NewEncoder(w).Encode(st)
 	})
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(controlplane.SealResult{})

@@ -242,3 +242,80 @@ func TestOfflineEntitiesCarryUncertainty(t *testing.T) {
 		t.Fatalf("a change without flags must not carry the field: %s", b)
 	}
 }
+
+// An export carries the session's verdict on its first line (the control
+// plane's: events that never reached the collector show in no event). The
+// opened session has it, so what reads the file gives the verdict it gives
+// the live session. The review's F4: `report --fail-on-incomplete` exited 3
+// on a session and 0 on its export.
+func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
+	evs := []core.Event{
+		{SessionID: "ts_v", Seq: 1, SpanID: "a", Service: "inventory", Kind: core.KindAPIIn, Name: "POST /reserve", StartNs: 1e9, EndNs: 2e9},
+		{SessionID: "ts_v", Seq: 2, SpanID: "b", ParentID: "a", Service: "inventory", Kind: core.KindCacheRead, Name: "GET stock", StartNs: 1e9, EndNs: 2e9},
+	}
+	const reason = "service orders-api (instance o-1): 0 of 7 recorded events reached the collector, 7 dropped by the SDK"
+	const warn = "service batch (instance b-1): the collector has 5 events, more than the 3 of the instance's last report"
+	write := func(name string, meta *core.ExportSession, metaOn int) string {
+		t.Helper()
+		var b strings.Builder
+		for i := range evs {
+			m := meta
+			if i != metaOn {
+				m = nil
+			}
+			line, err := core.ExportLine(&evs[i], m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Write(line)
+			b.WriteByte('\n')
+		}
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	open := func(file string) Session {
+		t.Helper()
+		h, err := New(Config{Open: []string{file}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+		var s Session
+		_, b := get(t, srv.URL, "/api/cp/v1/sessions/ts_v")
+		if err := json.Unmarshal(b, &s); err != nil {
+			t.Fatalf("%s %v", b, err)
+		}
+		// The collector's own view of the events is not changed by it.
+		_, b = get(t, srv.URL, "/api/col/v1/sessions/ts_v/summary")
+		if !strings.Contains(string(b), `"incomplete":false`) || !strings.Contains(string(b), `"event_count":2`) {
+			t.Fatalf("summary: %s", b)
+		}
+		return s
+	}
+
+	meta := &core.ExportSession{State: "SEALED", Incomplete: true, IncompleteReasons: []string{reason}, DeliveryUnconfirmed: []string{warn},
+		DrainTimedOut: true, MaxDrainSeconds: 60}
+	for _, on := range []int{0, 1} { // on the first line; a reader does not insist on which
+		s := open(write("verdict.ndjson", meta, on))
+		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason || len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != warn ||
+			!s.DrainTimedOut || s.MaxDrainSeconds != 60 || s.State != "SEALED" || s.Name != "verdict" {
+			t.Fatalf("session opened from an export with a verdict (on line %d): %+v", on+1, s)
+		}
+	}
+	// A session that was complete says so, and stays complete.
+	if s := open(write("fine.ndjson", &core.ExportSession{State: "SEALED"}, 0)); s.Incomplete || len(s.IncompleteReasons)+len(s.DeliveryUnconfirmed) != 0 || s.DrainTimedOut {
+		t.Fatalf("a complete session: %+v", s)
+	}
+	// A seal that failed.
+	if s := open(write("seal.ndjson", &core.ExportSession{State: "SEALED", Incomplete: true, SealError: "collector unavailable"}, 0)); !s.Incomplete || s.SealError != "collector unavailable" {
+		t.Fatalf("a failed seal: %+v", s)
+	}
+	// An export from before the verdict was carried: judged on its events.
+	if s := open(writeExport(t, "old.ndjson", evs...)); s.Incomplete || len(s.IncompleteReasons) != 0 {
+		t.Fatalf("an export without a verdict: %+v", s)
+	}
+}

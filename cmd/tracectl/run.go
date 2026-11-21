@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] " +
+	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed] " +
 		"[--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.

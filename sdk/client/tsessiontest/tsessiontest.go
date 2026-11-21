@@ -315,8 +315,16 @@ func RequireNoFailures(t testing.TB, s *client.Session) {
 
 // RequireDeliveryConfirmed fails the test if the control plane could not tell, for some service instance,
 // whether all its events reached the collector: an instance that recorded more after its last delivery
-// report and then stopped reporting (it was killed, say). The session is not incomplete for that, so
-// RequireNoFailures passes. It stops the session first, like RequireNoFailures, and can be called after it.
+// report and then stopped reporting (it was killed, say), or one that follows the control plane and whose
+// delivery reports never arrive (a proxy refuses them), so that nothing says whether it took part. The
+// session is not incomplete for that, so RequireNoFailures passes. It stops the session first, like
+// RequireNoFailures, and can be called after it.
+//
+// It is the strict form of the delivery check (`tracectl ... --fail-on-unconfirmed` is the same for a
+// CLI gate). Use it where every connected service is yours and expected to work: a test environment of
+// your own, a CI job that starts its services. Do not use it in a large shared environment: one service
+// of another team whose reports are blocked then fails every test of yours, and anything that can reach
+// the control plane can make a session unconfirmed (docs/PROTOCOL.md, "Limits").
 func RequireDeliveryConfirmed(t testing.TB, s *client.Session) {
 	t.Helper()
 	Stop(t, s)

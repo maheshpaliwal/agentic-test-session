@@ -132,8 +132,14 @@ func (r doctorReport) print(w io.Writer) {
 			unnamed++
 			continue
 		}
-		fmt.Fprintf(w, "  %-24s %-28s connected %s\n", clip(s.Service, 24), clip(s.Instance, 28),
+		fmt.Fprintf(w, "  %-24s %-28s connected %s", clip(s.Service, 24), clip(s.Instance, 28),
 			time.Since(s.ConnectedAt).Round(time.Second))
+		// It said that it sends delivery reports, and none has arrived since
+		// it connected (it sends one at once): something refuses them.
+		if s.DeliveryInstance != "" && s.LastDeliveryReport.IsZero() && time.Since(s.ConnectedAt) > 2*time.Second {
+			fmt.Fprint(w, "  NO DELIVERY REPORTS: none has arrived from it; its log says why")
+		}
+		fmt.Fprintln(w)
 	}
 	if unnamed > 0 {
 		fmt.Fprintf(w, "  %d unnamed (an older SDK, or another client following the active set)\n", unnamed)

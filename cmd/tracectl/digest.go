@@ -25,7 +25,7 @@ import (
 // model: the verdict and the failures first, then what changed, then the call
 // tree with repeated work collapsed. docs/DIGEST.md describes both formats.
 const (
-	digestArgs = "<id|name> [--format markdown|json] [--max-bytes N] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]"
+	digestArgs = "<id|name> [--format markdown|json] [--max-bytes N] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed]"
 
 	digestSchema = "tsession.digest/v1"
 	// digestNotice is the fixed line that tells a reader how to take the
@@ -707,11 +707,23 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 			{"tracectl events " + id + " --errors", "the failed events"},
 		},
 	}
+	// The reasons are part of the verdict and always stay; what is cut of
+	// them (a long one shortened, the unconfirmed beyond the first few) is
+	// counted, and "omitted" says where to read them whole.
+	reasonsCut := 0
+	reason := func(text string) string {
+		short := dataText(text, reasonMax)
+		// Shortened here, or before it got here (the report's own bound).
+		if short != dataText(text, len(text)+1) || strings.HasSuffix(text, "…") {
+			reasonsCut++
+		}
+		return short
+	}
 	switch {
 	case src.rep.incomplete:
 		d.Verdict.Recording = "incomplete"
-		for _, reason := range src.rep.reasons {
-			d.Verdict.Reasons = append(d.Verdict.Reasons, dataText(reason, reasonMax))
+		for _, r := range src.rep.reasons {
+			d.Verdict.Reasons = append(d.Verdict.Reasons, reason(r))
 		}
 	case info.State == "":
 		d.Verdict.Recording = "unknown"
@@ -719,9 +731,10 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	for i, w := range info.DeliveryUnconfirmed {
 		if i == digestMaxUnconfirmed {
 			d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, fmt.Sprintf("and %d more", len(info.DeliveryUnconfirmed)-i))
+			reasonsCut += len(info.DeliveryUnconfirmed) - i
 			break
 		}
-		d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, dataText(w, reasonMax))
+		d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, reason(w))
 	}
 	switch {
 	case len(src.failures) > 0:
@@ -750,7 +763,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	// The notes are sized before anything is chosen: as if every section
 	// had been cut.
 	note := func(k digestKept) []dOmitted {
-		return k.notes(id, len(src.failures), len(src.entities), len(src.lines), cut)
+		return k.notes(id, len(src.failures), len(src.entities), len(src.lines), cut, reasonsCut)
 	}
 	d.Omitted = note(digestKept{failLevel: detailLeast, mutLevel: detailLeast})
 	room := target - len(r.render(d))
@@ -839,13 +852,16 @@ type digestKept struct {
 }
 
 // notes says what is missing and which command prints it.
-func (k digestKept) notes(id string, failures, entities, lines, counts int) []dOmitted {
+func (k digestKept) notes(id string, failures, entities, lines, counts, reasons int) []dOmitted {
 	out := []dOmitted{}
 	add := func(section, what string, get ...string) {
 		for i := range get {
 			get[i] = "tracectl " + strings.Replace(get[i], "ID", id, 1)
 		}
 		out = append(out, dOmitted{Section: section, What: what, Get: get})
+	}
+	if reasons > 0 {
+		add("verdict", fmt.Sprintf("%d of the reasons why the recording is incomplete or unconfirmed are shortened or not listed", reasons), "status ID")
 	}
 	if counts > 0 {
 		add("counts", fmt.Sprintf("%d smaller entries of the counts", counts), "summary ID --json")

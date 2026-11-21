@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	reportArgs = "<id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]"
+	reportArgs = "<id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed]"
 
 	reportMaxRows     = 50   // rows of a Markdown table
 	junitMaxCases     = 1000 // test cases made from trace roots

@@ -39,13 +39,14 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	return g.check(s.Info(), sum, len(sum.Failures))
 }
 
-// gates are the --fail-on-* checks of summary, report and run.
-type gates struct{ onError, onIncomplete, onEmpty bool }
+// gates are the --fail-on-* checks of summary, report, digest and run.
+type gates struct{ onError, onIncomplete, onEmpty, onUnconfirmed bool }
 
 func (g *gates) register(fs *flag.FlagSet) {
 	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
 	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined/undelivered events, orphaned async work, a failed seal)")
 	fs.BoolVar(&g.onEmpty, "fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
+	fs.BoolVar(&g.onUnconfirmed, "fail-on-unconfirmed", false, "exit 3 when the control plane could not tell whether every event of every service instance reached the collector (delivery_unconfirmed); for environments where every connected service is yours")
 }
 
 // check returns a checkError naming every gate the session fails; failures
@@ -69,6 +70,13 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
 		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+	}
+	switch {
+	case !g.onUnconfirmed:
+	case len(info.DeliveryUnconfirmed) > 0:
+		failed = append(failed, "delivery is unconfirmed ("+strings.Join(info.DeliveryUnconfirmed, "; ")+")")
+	case info.State == "" && !g.onIncomplete:
+		failed = append(failed, "the control plane no longer knows this session, so whether its delivery was confirmed is unknown")
 	}
 	if g.onEmpty && sum.EventCount == 0 {
 		failed = append(failed, emptySession)

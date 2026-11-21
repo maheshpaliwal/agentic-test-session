@@ -20,7 +20,8 @@ import (
 const maxExportLine = 64 << 20
 
 // NewOffline serves sessions read from files written by `tracectl export`
-// (one event per line). Each file becomes one read-only, sealed session named
+// (one event per line, the session's verdict on the first: see
+// core.ExportSession). Each file becomes one read-only, sealed session named
 // after the file, so a run can be opened without the services that recorded
 // it: attach the export to a failed CI job and open it locally. The read
 // endpoints answer as the real services do, so tracectl reads the file too.
@@ -46,8 +47,9 @@ func loadExport(path string) (*demoSess, error) {
 	}
 	defer f.Close()
 	var evs []core.Event
-	seqs := map[uint64]int{} // seq -> line that holds it
-	torn := false            // the previous line did not parse
+	var meta *core.ExportSession // the session's verdict, on the line of an event (the first)
+	seqs := map[uint64]int{}     // seq -> line that holds it
+	torn := false                // the previous line did not parse
 	var tornErr error
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), maxExportLine)
@@ -73,6 +75,9 @@ func loadExport(path string) (*demoSess, error) {
 			return nil, fmt.Errorf("%s:%d: seq %d was already used on line %d", path, line, e.Seq, first)
 		}
 		seqs[e.Seq] = line
+		if meta == nil {
+			meta = core.ExportSessionOf(sc.Bytes())
+		}
 		if len(evs) > 0 && e.SessionID != evs[0].SessionID {
 			return nil, fmt.Errorf("%s:%d: events of two sessions (%s and %s) in one file", path, line, evs[0].SessionID, e.SessionID)
 		}
@@ -111,10 +116,18 @@ func loadExport(path string) (*demoSess, error) {
 	// To the nanosecond: a recording is often shorter than a second, and whole
 	// seconds would show its duration as zero.
 	start, end := time.Unix(0, first).UTC(), time.Unix(0, last).UTC()
-	return &demoSess{
-		Session: Session{ID: cv.id, Name: name, Mode: controlplane.ModeHeader, State: controlplane.StateSealed, InitiatedBy: "file",
-			CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped, Incomplete: cv.incomplete},
-		events: evs, sealed: true, file: cv, path: path}, nil
+	sess := Session{ID: cv.id, Name: name, Mode: controlplane.ModeHeader, State: controlplane.StateSealed, InitiatedBy: "file",
+		CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped, Incomplete: cv.incomplete}
+	// What the control plane knew and the events do not show: that events
+	// never reached the collector, that the drain ran out of time, that the
+	// seal failed. An export from before the verdict was carried has none,
+	// and the session is then judged on its events alone.
+	if meta != nil {
+		sess.Incomplete = sess.Incomplete || meta.Incomplete
+		sess.IncompleteReasons, sess.DeliveryUnconfirmed = meta.IncompleteReasons, meta.DeliveryUnconfirmed
+		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
+	}
+	return &demoSess{Session: sess, events: evs, sealed: true, file: cv, path: path}, nil
 }
 
 // readOnlyAPI refuses everything that would change a session, and says that
