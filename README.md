@@ -117,6 +117,24 @@ tracectl list --limit 20                     # the newest sessions
 Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
 `3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
 
+## Using it from an AI agent
+
+```bash
+tracectl run --name my-run --digest digest.md -- ./run-e2e.sh   # record the tests; or: start, run them, stop --wait
+tracectl digest my-run --fail-on-error --fail-on-incomplete --fail-on-empty   # the one call to read the result
+tracectl show my-run 17                                         # then drill down: one event in full
+tracectl history my-run postgres orders 42                      # every change to one row
+```
+
+`digest` is the whole session in at most `--max-bytes` (default 16384): verdict and counts, each failure with its
+root request and ancestors, mutations per entity (changed fields, transaction outcome, flags; `UNCERTAIN` marks
+an incomplete key or row image), and the call tree with repeated siblings collapsed (`40x` is an N+1). What did
+not fit is listed under "Omitted" with the command that prints it. Recorded text is quoted as data and cannot
+alter the digest's structure; a model can still be swayed by what it says. `--format json` prints one JSON
+object (schema `tsession.digest/v1`); `summary`, `events`, `entities`, `history`, `trace`, `show` and `diff`
+take `--json`. Exit statuses are those above: `0` from the `digest` line means no failed events, complete, not
+empty. A live session works too and says so. Details: [`docs/DIGEST.md`](docs/DIGEST.md).
+
 ## Go tests and CI
 
 `sdk/client/tsessiontest` ties a session to a test and asserts on what it recorded:
