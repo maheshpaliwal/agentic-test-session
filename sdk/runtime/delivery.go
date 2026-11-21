@@ -177,6 +177,19 @@ type reporter struct {
 	connects uint64
 	failures int
 	failedAt time.Time // when the last report failed
+	// failingSince is when the first of the failures in a row happened, moved
+	// forward by the time without a session in which nothing was tried: since
+	// when the control plane has been waiting for a word of this process in
+	// vain. askNow: the stream was opened anew for these failures (see
+	// failed), and the first set of the new one has not arrived yet (see
+	// pass). idleAt is when the active set last went from naming a session to
+	// none.
+	failingSince time.Time
+	askNow       bool
+	idleAt       time.Time
+	// refused: the last report was refused (a 4xx), not lost. It is not sent
+	// again while no session runs (see pass).
+	refused  bool
 	retryAt  time.Time // no report before this, after a failed one (see paused)
 	kickedAt time.Time
 	urgentOf *snapshot // the active set whose draining sessions the exporter was told of
@@ -310,6 +323,13 @@ type due struct {
 // arriving in the middle of a session is noticed. A process that follows no
 // session sends nothing.
 //
+// A request that was refused (a 4xx: a proxy on the way, a rule someone has
+// to change) is not sent again while the active set names no session. Nobody
+// waits for a word of this process then, and a fleet of idle services that
+// each ask every few seconds, for as long as the refusal lasts, is load for
+// nothing. It is tried again when a session begins, at once, and once on
+// every stream that is opened: what is behind a new stream may take it.
+//
 // While the stream is down this process learns of a drain late, from a poll,
 // or not at all. Its reports then do not wait for FirstDelay or Interval:
 // what the control plane was not told before it seals a session, it cannot
@@ -336,7 +356,14 @@ func (r *reporter) pass() {
 		r.exp.setUrgent(sn.draining)
 	}
 	if c := r.sub.connects.Load(); c != r.connects {
-		r.connects, r.mode, r.hello = c, modeBatch, true
+		r.connects, r.mode, r.hello, r.refused = c, modeBatch, true, false
+		if r.askNow {
+			// The stream this process opened anew itself (see failed): the
+			// control plane names a connection it has not heard of within a
+			// second, so it is asked at once, whatever the pause has grown
+			// to. If the outage is just over, nothing is named.
+			r.askNow, r.retryAt = false, time.Time{}
+		}
 		for _, st := range r.sessions {
 			st.resend = true
 		}
@@ -350,9 +377,24 @@ func (r *reporter) pass() {
 		// was nothing to send, and nothing to end it) is over.
 		if r.busy = busy; busy {
 			r.retryAt = time.Time{}
+			if r.failures > 0 {
+				// The time without a session since the last failure: nothing
+				// was tried in it, and nobody waited for a word of this
+				// process. It is not time in which the reports failed.
+				from := r.idleAt
+				if r.failedAt.After(from) {
+					from = r.failedAt
+				}
+				r.failingSince = r.failingSince.Add(now.Sub(from))
+			}
+		} else {
+			r.idleAt = now
 		}
 	}
-	hello := r.mode == modeBatch && (streaming && (r.hello || r.beat(sn, now)) || r.sub.stopNote.Load() != nil)
+	// arrive: the control plane is to be told that the reports of this
+	// process arrive. Not while it refuses them and has no session.
+	arrive := streaming && (r.hello || r.beat(sn, now)) && (!r.refused || r.busy || sn.blind)
+	hello := r.mode == modeBatch && (arrive || r.sub.stopNote.Load() != nil)
 	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
 		return
 	}
@@ -611,18 +653,48 @@ func (r *reporter) noEndpoint(code int) bool {
 // paused). The outage is logged once: at the first refusal, and at the second
 // failure in a row otherwise (a single lost request is retried without a
 // word).
+//
+// When the reports have failed for a whole grace of the control plane (two
+// heartbeat periods: a request is made when that time is up, and it fails
+// too) on a stream on which they arrived before, the stream is opened anew.
+// The control plane does not name an instance it has heard of and that is
+// silent now unless something ties it to the session: such an instance is
+// frozen or idle far more often than cut off. One it has never heard of on
+// its connection is named, in every session, and that is what this process
+// becomes: connected, and never heard of. A process that is frozen cannot do
+// that, and one whose reports fail for less than the grace does not.
+// (Opening the stream anew when the outage is first noticed, after two
+// failures, would name every instance behind an endpoint that is merely slow.)
+//
+// Once per outage: on the new stream nothing has arrived (hello), and a
+// process whose reports never arrived is what the control plane takes it for
+// already. Opening that stream anew would only take the process off the
+// control plane's list for a moment, and give it another grace in the drain
+// of a session it took part in (a new connection is a sign of life).
 func (r *reporter) failed(code int) {
-	refused := code/100 == 4
+	r.refused = code/100 == 4
 	r.failures++
 	steps := 2
-	if refused {
+	if r.refused {
 		steps = 5
 	}
 	r.failedAt = time.Now()
+	if r.failures == 1 {
+		r.failingSince = r.failedAt
+	}
 	// Never longer than a heartbeat period: when the outage is over, the
 	// control plane hears of this process as soon as it would of a healthy one.
-	r.retryAt = r.failedAt.Add(min(r.cfg.RetryBase<<min(r.failures-1, steps), r.period(r.sub.snap.Load())))
-	if r.down || !refused && r.failures < 2 {
+	period := r.period(r.sub.snap.Load())
+	r.retryAt = r.failedAt.Add(min(r.cfg.RetryBase<<min(r.failures-1, steps), period))
+	if !r.hello && !r.askNow && r.mode == modeBatch {
+		if grace := r.failingSince.Add(2 * period); !r.failedAt.Before(grace) {
+			r.askNow = true
+			r.sub.reopen()
+		} else if grace.Before(r.retryAt) {
+			r.retryAt = grace // the request that says whether the grace went by without a word
+		}
+	}
+	if r.down || !r.refused && r.failures < 2 {
 		return
 	}
 	r.down = true
@@ -639,7 +711,7 @@ func (r *reporter) failed(code int) {
 
 // up notes that the control plane answered a report.
 func (r *reporter) up() {
-	r.failures = 0
+	r.failures, r.askNow, r.refused = 0, false, false
 	if r.down {
 		r.down = false
 		if r.outageLogged {

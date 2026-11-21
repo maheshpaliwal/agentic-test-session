@@ -605,9 +605,12 @@ func TestDelivery_HealthyRunsRepeated(t *testing.T) {
 // out), while its collector URL is wrong. Nothing of what it records for a
 // session reaches anybody. The control plane used to ask only whether a
 // report of the service had ever arrived, so the session was complete,
-// without a line anywhere. The service now heartbeats while a session runs,
-// and one that has not been heard of for the grace is named: the session says
-// delivery_unconfirmed, and the strict gate fails.
+// without a line anywhere. The service now heartbeats while a session runs.
+// When its requests have failed for the grace it opens its stream anew, and
+// the control plane names a connection it has never heard of: the session
+// says delivery_unconfirmed, and the strict gate fails. (The fourth review: the
+// control plane used to name every instance that was silent for the grace,
+// and so named idle ones that were frozen for a few seconds.)
 func TestDelivery_ReportsThatStopArrivingAreNotASilentMiss(t *testing.T) {
 	e := newDeliveryBase(t)
 	var block atomic.Bool
@@ -633,14 +636,15 @@ func TestDelivery_ReportsThatStopArrivingAreNotASilentMiss(t *testing.T) {
 				return failed(err)
 			}
 		}
-		// The grace (10s): two heartbeats of orders-api do not arrive.
-		time.Sleep(11 * time.Second)
+		// The requests of orders-api fail for the grace (10s), it opens its
+		// stream anew, and is named a second after it connected.
+		time.Sleep(13 * time.Second)
 		return e.finish(s, 12)
 	})
 	for _, r := range runs {
 		if r.info.Incomplete || len(r.info.IncompleteReasons) != 0 || r.got != 6 || len(r.info.DeliveryUnconfirmed) != 1 ||
 			!strings.Contains(r.info.DeliveryUnconfirmed[0], "service orders-api (instance ") ||
-			!strings.Contains(r.info.DeliveryUnconfirmed[0], "neither a delivery report nor a heartbeat of it has arrived for ") ||
+			!strings.Contains(r.info.DeliveryUnconfirmed[0], "no delivery report of it has arrived since it connected") ||
 			!strings.Contains(r.info.DeliveryUnconfirmed[0], "the collector has no events from it for this session") {
 			t.Errorf("want orders-api under delivery_unconfirmed, and nothing else: %s", r)
 		}

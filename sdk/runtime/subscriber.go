@@ -66,8 +66,10 @@ type Subscriber struct {
 	// (see setAnnounce).
 	reportsAs string
 	announce  atomic.Bool
-	// streamCancel ends the stream that is open, nil when none is.
+	// streamCancel ends the stream that is open, nil when none is. again: it
+	// was ended on purpose, to open another (see reopen).
 	streamCancel atomic.Pointer[context.CancelFunc]
+	again        atomic.Bool
 	snap         atomic.Pointer[snapshot]
 	ready        atomic.Bool
 	streaming    atomic.Bool
@@ -166,7 +168,18 @@ func (s *Subscriber) setAnnounce(on bool) {
 	if s.reportsAs == "" || s.announce.Swap(on) == on {
 		return
 	}
+	s.reopen()
+}
+
+// reopen ends the stream that is open; the loop opens another at once,
+// without the pause and the poll that follow a stream that broke. To the
+// control plane this process is then a new connection, of which it has heard
+// nothing yet (see reporter.failed), and for the moment between the two it is
+// not connected at all: a session whose drain ends in that moment does not
+// look at it. Nothing happens while no stream is open.
+func (s *Subscriber) reopen() {
 	if cancel := s.streamCancel.Load(); cancel != nil {
+		s.again.Store(true)
 		(*cancel)()
 	}
 }
@@ -272,6 +285,9 @@ func (s *Subscriber) run(ctx context.Context) {
 		got := s.stream(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if s.again.Swap(false) {
+			continue // ended on purpose (see reopen): nothing is wrong with it
 		}
 		if got {
 			backoff = 200 * time.Millisecond

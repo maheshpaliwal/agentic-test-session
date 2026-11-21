@@ -282,15 +282,18 @@ func TestReporterSaysThatItsReportsArrive(t *testing.T) {
 	}
 	e.cp.drop <- struct{}{}
 	eventually(t, "again after the reconnect", func() bool { _, hellos, _ := e.cp.seen(); return hellos == 2 })
-	// Refused: it is retried, and logged like any report that does not arrive.
+	// Refused: it is logged like any report that does not arrive, and retried
+	// when a session begins (not before: see
+	// TestReporterDoesNotRetryARefusedReportWithoutASession).
 	out := logTo(t)
 	e.cp.setStatus(http.StatusForbidden)
 	e.cp.drop <- struct{}{}
-	eventually(t, "attempts", func() bool { return e.cp.postCount() >= 2 })
+	eventually(t, "an attempt", func() bool { return e.cp.postCount() >= 1 })
 	if logged := out.String(); strings.Count(logged, "cannot send delivery reports") != 1 || !strings.Contains(logged, "HTTP 403") {
 		panic(fmt.Sprintf("log:\n%s", logged))
 	}
 	e.cp.setStatus(0)
+	e.cp.set(`{"active":["someone-elses"]}`)
 	eventually(t, "it arrives", func() bool { _, hellos, _ := e.cp.seen(); return hellos == 3 })
 }
 
