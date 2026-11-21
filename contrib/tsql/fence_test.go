@@ -60,11 +60,11 @@ func TestCaptureFenceAutocommitSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	fenceWant(t, f,
-		"BEGIN READ ONLY; SET LOCAL statement_timeout = 500",
+		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id = 2 LIMIT 51",
 		"ROLLBACK",
 		fenceUpdate,
-		"BEGIN READ ONLY; SET LOCAL statement_timeout = 500",
+		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id IN ($1)",
 		"ROLLBACK",
 	)
@@ -111,7 +111,8 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 			"ROLLBACK TO SAVEPOINT ts_capture", "RELEASE SAVEPOINT ts_capture",
 		}
 		// the one attempt: the closing pair of the first capture, under its savepoint
-		first := append([]string{}, one[:3]...)
+		// (the first fence of a transaction also asks for its isolation level)
+		first := []string{one[0], isoAsk, one[2]}
 		first = append(first, "ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture")
 		first = append(first, one[3:]...)
 		fenceWant(t, f, append(first, one...)...)
@@ -122,13 +123,13 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 	t.Run("autocommit", func(t *testing.T) {
 		f, got := run(t, true, false)
 		one := []string{
-			"BEGIN READ ONLY", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id = 2 LIMIT 51", "ROLLBACK",
+			"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id = 2 LIMIT 51", "ROLLBACK",
 			fenceUpdate,
-			"BEGIN READ ONLY", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id IN ($1)", "ROLLBACK",
+			"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id IN ($1)", "ROLLBACK",
 		}
 		// the one attempt: the opening pair, outside any transaction, then a
 		// ROLLBACK in case its BEGIN did run
-		first := append([]string{"BEGIN READ ONLY; SET LOCAL statement_timeout = 500", "ROLLBACK"}, one...)
+		first := append([]string{"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500", "ROLLBACK"}, one...)
 		fenceWant(t, f, append(first, one...)...)
 		if _, want := run(t, false, false); got != want {
 			t.Fatalf("recorded:\n%s\nwith multi-statement support:\n%s", got, want)
@@ -162,7 +163,7 @@ func TestCaptureFenceSendsNothingAfterRefusalInAbortedTx(t *testing.T) {
 	if _, err := tx.ExecContext(ctx, fenceUpdate); err == nil {
 		t.Fatal("the application's statement must fail")
 	}
-	fenceWant(t, f, "SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", fenceUpdate)
+	fenceWant(t, f, "SAVEPOINT ts_capture; "+isoAsk, fenceUpdate)
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	if e := ws[len(ws)-1]; !hasFlag(e, "image_failed") {
 		t.Fatalf("flags %v", e.Flags)
@@ -170,7 +171,9 @@ func TestCaptureFenceSendsNothingAfterRefusalInAbortedTx(t *testing.T) {
 }
 
 // Any other failure of the opening text inside a transaction may have left
-// the savepoint behind with its subtransaction aborted: the fence is closed.
+// the savepoint behind with its subtransaction aborted. The transaction no
+// longer takes a statement then, which is how tsql knows, and the fence is
+// closed. (When it still does, see TestFenceThatNeverOpenedTouchesNothing.)
 func TestCaptureFenceClosesAfterFailedOpenInTx(t *testing.T) {
 	_, ctx := setup(t)
 	fail := false
@@ -199,10 +202,11 @@ func TestCaptureFenceClosesAfterFailedOpenInTx(t *testing.T) {
 		t.Fatalf("COMMIT: %v", err)
 	}
 	fenceWant(t, f,
-		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500",
+		"SAVEPOINT ts_capture; "+isoAsk,
+		"SHOW transaction_isolation",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		fenceUpdate,
-		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500",
+		"SAVEPOINT ts_capture; "+isoAsk, // the first one was not answered
 		"SELECT * FROM t WHERE id IN ($1)",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 	)

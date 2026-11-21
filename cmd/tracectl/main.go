@@ -38,12 +38,15 @@ session lifecycle (control plane):
 
 record a command (control plane and collector):
   run [start's session flags, except --id-only] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
-      [--report FILE [--format markdown|junit]] [--timeout D] -- <command> [args...]
+      [--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D] -- <command> [args...]
                                 start a session, run the command with the session id in $TSESSION_ID, stop
                                 the session, wait for the seal (at most --timeout, default 2m) and print the
                                 summary. The command is not run through a shell. Its stdin, stdout and stderr
                                 pass through; tracectl prints to stderr only and writes the report to FILE.
+                                --digest FILE writes what "digest" prints (JSON if FILE ends in .json).
                                 The session is stopped and sealed also when the command fails.
+                                A Go test joins the session with tsessiontest.Ambient or client.AttachEnv;
+                                tsessiontest.Run still starts a session of its own per test.
                                 The command runs in a process group of its own (it cannot read from the
                                 terminal) and needs a --ttl longer than its runtime (default 1h).
                                 SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on to the command's group, a
@@ -79,6 +82,17 @@ session results (collector):
   report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
                                 a CI report: Markdown for a job summary (default) or JUnit XML, with
                                 each failure traced to its root request; --fail-on flags as in summary
+  digest <id|name> [--format markdown|json] [--max-bytes N] [-o FILE] [--fail-on-error] [--fail-on-incomplete]
+         [--fail-on-empty]      the whole session in one bounded answer, for an AI agent or a paste into a
+                                model: verdict and counts, every failure with its root request and
+                                ancestors, mutations per entity with changed fields, tx outcome and
+                                flags, and the call tree with repeated siblings collapsed ("40x": an
+                                N+1). Never more than --max-bytes (default 16384, at least 4096): the
+                                tree is cut first, then mutation detail, then failure detail, and
+                                "Omitted" names the command that prints what is missing. Recorded text
+                                is shown as quoted data. --format json (or --json) prints one line,
+                                schema tsession.digest/v1 (docs/DIGEST.md). Works on a live session
+                                and says so; --fail-on flags as in summary
   diff <id|name a> <id|name b> [--json] [--fail-on-diff] [--ignore-counts]
                                 what differs in b (candidate) from a (baseline): failures, mutations,
                                 events, first divergence; --fail-on-diff exits 3 when anything differs
@@ -134,6 +148,7 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"show":         (*cli).show,
 	"export":       (*cli).export,
 	"diff":         (*cli).diff,
+	"digest":       (*cli).digest,
 	"report":       (*cli).report,
 	"kill":         (*cli).kill,
 	"doctor":       (*cli).doctor,

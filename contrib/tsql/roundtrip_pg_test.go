@@ -70,9 +70,14 @@ type rtCall struct {
 type rtDriver struct {
 	legacy bool
 	hook   func(via, q string) // called before a statement is forwarded
+	// rewrite, when set, is asked about every Exec before it is forwarded: it
+	// returns the text to send instead, or an error to return without
+	// sending anything (a statement that never reached the server).
+	rewrite func(q string) (string, error)
 
 	mu    sync.Mutex
-	calls []rtCall
+	calls []rtCall // with the name of tsql's savepoint as "ts_capture" (fenceNorm)
+	raw   []string // the texts as sent
 }
 
 func (d *rtDriver) add(via, q string) {
@@ -80,7 +85,8 @@ func (d *rtDriver) add(via, q string) {
 		d.hook(via, q)
 	}
 	d.mu.Lock()
-	d.calls = append(d.calls, rtCall{via, q})
+	d.raw = append(d.raw, q)
+	d.calls = append(d.calls, rtCall{via, fenceNorm(q)})
 	d.mu.Unlock()
 }
 
@@ -138,6 +144,12 @@ func (c *rtConn) PrepareContext(ctx context.Context, q string) (driver.Stmt, err
 	return c.in.PrepareContext(ctx, q)
 }
 func (c *rtConn) ExecContext(ctx context.Context, q string, a []driver.NamedValue) (driver.Result, error) {
+	if c.d.rewrite != nil {
+		var err error
+		if q, err = c.d.rewrite(q); err != nil {
+			return nil, err
+		}
+	}
 	c.d.add("exec", q)
 	return c.in.ExecContext(ctx, q, a)
 }

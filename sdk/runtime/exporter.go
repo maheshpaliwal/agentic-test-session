@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 // ExporterConfig tunes batching and retry. Zero values get defaults.
@@ -28,10 +30,15 @@ type ExporterConfig struct {
 }
 
 // Exporter ships batches from a Recorder to the collector from a single
-// background goroutine. A batch leaves the ring only once the collector
+// background goroutine. An event leaves the ring only once the collector
 // accepted it or refused it for good; while the collector is unreachable or
-// answers 5xx/429 the batch stays buffered and is retried with backoff, so
-// events are lost only when the ring overflows.
+// answers 5xx/429 it stays buffered and is retried with backoff, so events
+// are lost only when the ring overflows.
+//
+// A collector that fails single sessions says which (failed_sessions in the
+// body of a failed request). Those sessions are then left out of the batches
+// and retried on their own backoff, so the others keep flowing; their events
+// stay in the ring like everything else. See drain.
 type Exporter struct {
 	cfg    ExporterConfig
 	rec    *Recorder
@@ -46,6 +53,8 @@ type Exporter struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// Everything below is touched by the export goroutine only.
+
 	failures int
 	nextTry  time.Time
 	// down and refusalLogged make the exporter say once when delivery stops,
@@ -54,14 +63,35 @@ type Exporter struct {
 	outageLogged  bool      // the current outage was logged, so its recovery is too
 	lastOutageLog time.Time // when an outage was last logged
 	refusalLogged bool
+	heldLogged    bool      // sessions being held were logged, so their release is too
+	lastHeldLog   time.Time // when held sessions were last logged
 
-	// pending is the unresolved rest of the batch being exported: the first
-	// pendingRing events are still at the front of the ring, the others are
-	// sdk.dropped events taken from the recorder. It is resent unchanged (same
-	// local_seq, so the collector deduplicates) until it is resolved. Only the
-	// export goroutine touches these.
-	pending     []core.Event
-	pendingRing int
+	// failing are the sessions the collector failed by name and has not
+	// accepted since.
+	failing map[string]*failingSession
+	// drops are the sdk.dropped events taken from the recorder and not
+	// delivered yet, one per session. Each is resent unchanged (same
+	// local_seq, so the collector deduplicates) until it is resolved.
+	drops map[string]core.Event
+	// freshFrom is a ring id below which every buffered event belongs to a
+	// failing session, so that a pass need not walk over them again.
+	freshFrom uint64
+	pass      uint64 // number of the current drain pass
+	left      int    // events the last pass had to leave in the ring
+}
+
+// failingSession is the state of a session the collector failed by name.
+type failingSession struct {
+	failures int
+	nextTry  time.Time
+	pass     uint64 // the last pass that sent its events
+	// okFirst and okLast are the first and the last time the collector
+	// accepted events of other sessions since this one began to fail, with no
+	// outage in between.
+	okFirst, okLast time.Time
+	// held is set once the others were accepted for MaxCooldown while this
+	// session kept failing. It lasts until the session is accepted.
+	held bool
 }
 
 // NewExporter starts the export goroutine.
@@ -100,6 +130,8 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		flushReq: make(chan chan bool),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+		failing:  map[string]*failingSession{},
+		drops:    map[string]core.Event{},
 	}
 	go e.loop()
 	return e
@@ -122,75 +154,353 @@ func (e *Exporter) loop() {
 			return
 		case <-t.C:
 			if time.Now().After(e.nextTry) {
-				e.drain()
+				e.drain(false)
 			}
 		case <-e.rec.wake:
-			if time.Now().After(e.nextTry) {
-				e.drain()
+			// The ring is half full. When part of that is events of failing
+			// sessions, which a pass cannot send, every new event wakes the
+			// exporter: wait for a batch worth of others, or for the ticker.
+			if time.Now().After(e.nextTry) && (e.left == 0 || e.rec.Len() >= e.left+e.cfg.BatchSize) {
+				e.drain(false)
 			}
 		case ack := <-e.flushReq:
-			ack <- e.drain() // buffered: never blocks on a caller that gave up
+			ack <- e.drain(true) // buffered: never blocks on a caller that gave up
 		}
 	}
 }
 
-// drain exports batches until nothing is left to send (true) or the collector
-// fails transiently (false). In the second case the unsent events stay in the
-// ring and the next pass is delayed by a growing cooldown.
-func (e *Exporter) drain() bool {
+const (
+	// maxBarren is how many requests in a row of one pass may fail for
+	// every session they hold before the pass treats it as an outage.
+	maxBarren = 2
+	// maxFreshRun is how many batches of sessions that are not failing a
+	// pass sends before it looks at the failing ones that are due.
+	maxFreshRun = 16
+)
+
+// drain is one export pass. It sends batches until nothing is left to send
+// (true) or the collector fails (false). An event stays in the ring until it
+// is resolved, and every request is built from the ring again, so a resend
+// carries the same events with the same local_seq.
+//
+// What a failed request means depends on what the collector says:
+//
+//   - It names no session of the request (an older collector, a 429, no
+//     answer at all): an outage. The pass ends and the next one is delayed
+//     by a growing cooldown, as it always was.
+//   - It names sessions: those are failing. They are left out of the
+//     following requests and retried when their own backoff has passed (the
+//     same schedule as the cooldown), oldest events first, so one session's
+//     events are always sent in the order they were recorded. If the answer
+//     also counts accepted or duplicate events, the events of the sessions
+//     it does not name are resolved; otherwise they are sent again.
+//
+// Sessions that are not failing go first, so a failing one cannot delay them
+// by more than its own request. A failing session costs nothing but ring
+// space; only one that kept failing while others were accepted for
+// MaxCooldown is held, which makes its newest unsent events the ones a full
+// ring drops (see Recorder.evictLocked). force retries every failing session
+// regardless of its backoff (Flush).
+func (e *Exporter) drain(force bool) bool {
+	e.pass++
+	accepted, barren, freshRun := false, 0, 0
 	for {
-		if len(e.pending) == 0 {
-			e.pending = e.rec.Peek(e.cfg.BatchSize)
-			e.pendingRing = len(e.pending)
-			e.pending = append(e.pending, e.rec.TakeDrops()...)
-			if len(e.pending) == 0 {
-				return true
+		select {
+		case <-e.stop:
+			return false
+		default:
+		}
+		// Sessions that are not failing go first, but may not keep the
+		// failing ones from being retried for a whole pass under load.
+		var b *batch
+		if freshRun >= maxFreshRun {
+			b, freshRun = e.retryBatch(force), 0
+		}
+		if b == nil {
+			if b = e.freshBatch(); b != nil {
+				freshRun++
+			} else if b = e.retryBatch(force); b == nil {
+				break
 			}
 		}
-		hadRing := e.pendingRing > 0
-		done, lost, ok := e.send(e.pending)
-		ring := min(done, e.pendingRing)
-		e.rec.Commit(ring)
-		e.pendingRing -= ring
-		e.rec.AddDrops(lost)
-		e.pending = e.pending[done:]
-		if len(e.pending) == 0 {
-			e.pending = nil // release the batch
-		}
-		// A refused batch that held only sdk.dropped events had its counts
-		// returned to the recorder, which would hand them straight back: pause
-		// like for a transient failure instead of spinning.
-		refusedDrops := ok && !hadRing && len(lost) > 0
-		if ok && len(lost) > 0 && !e.refusalLogged {
+		e.send(b, b.all())
+		lost := e.resolve(b)
+		if !b.total && len(lost) > 0 && !e.refusalLogged {
 			e.refusalLogged = true
 			log.Printf("tsession: the collector at %s refused events and they were dropped; check that TSESSION_COLLECTOR_URL points at a tsession collector of a matching version", DisplayURL(e.cfg.CollectorURL))
 		}
-		if !ok || refusedDrops {
-			if !ok && !e.down {
-				// A wrong collector URL otherwise shows up only as an empty
-				// session. At most one outage (and its recovery) is logged
-				// per outageLogGap, so a flapping collector cannot flood the
-				// host's log.
-				e.down = true
-				if now := time.Now(); e.lastOutageLog.IsZero() || now.Sub(e.lastOutageLog) >= outageLogGap {
-					e.lastOutageLog, e.outageLogged = now, true
-					log.Printf("tsession: cannot deliver events to the collector at %s; they stay buffered and are retried, and are dropped when the buffer fills", DisplayURL(e.cfg.CollectorURL))
-				}
+		switch {
+		case b.total:
+			e.cooldown(true)
+			return false
+		case len(b.ids) == 0 && len(lost) > 0:
+			// A refused batch that held only sdk.dropped events had its counts
+			// returned to the recorder, which would hand them straight back:
+			// pause like for an outage instead of spinning.
+			e.cooldown(false)
+			e.left = e.rec.Len()
+			return e.left == 0 && len(e.drops) == 0
+		case b.accepted:
+			accepted, barren = true, 0
+			e.up()
+		case !b.retry:
+			// Every session of the request failed. One such request can be a
+			// batch that happened to hold only failing sessions; several in a
+			// row are an outage in which the collector names what it fails.
+			if barren++; barren >= maxBarren {
+				e.cooldown(true)
+				return false
 			}
-			e.failures++
-			cd := e.cfg.FlushInterval << min(e.failures, 6)
-			e.nextTry = time.Now().Add(min(cd, e.cfg.MaxCooldown))
-			return ok
 		}
-		if e.down {
-			e.down = false
-			if e.outageLogged {
-				e.outageLogged = false
-				log.Printf("tsession: delivering events to the collector at %s again", DisplayURL(e.cfg.CollectorURL))
+	}
+	if barren > 0 && !accepted {
+		e.noteDown()
+	}
+	e.left = e.rec.Len()
+	return e.left == 0 && len(e.drops) == 0 && !e.rec.dropsPending()
+}
+
+// batch is one request's worth of events and what became of them.
+type batch struct {
+	evs   []core.Event
+	ids   []uint64 // ring ids of evs[:len(ids)]; the others are sdk.dropped events
+	retry bool     // holds failing sessions that were due, not fresh ones
+	state []eventState
+	// failed are the sessions the collector named as failed.
+	failed set.Set[string]
+	// accepted says that the collector took events; total that a request
+	// failed without the collector blaming a session.
+	accepted, total bool
+}
+
+type eventState uint8
+
+const (
+	eventPending   eventState = iota // still to be delivered
+	eventDelivered                   // accepted by the collector
+	eventLost                        // refused for good
+)
+
+func (b *batch) all() []int {
+	idx := make([]int, len(b.evs))
+	for i := range idx {
+		idx[i] = i
+	}
+	return idx
+}
+
+func (b *batch) mark(idx []int, st eventState) {
+	for _, i := range idx {
+		b.state[i] = st
+	}
+}
+
+// freshBatch takes the oldest events of the sessions that are not failing.
+// Nil means there are none.
+func (e *Exporter) freshBatch() *batch {
+	fresh := func(sid string) bool { return e.failing[sid] == nil }
+	b := &batch{}
+	b.evs, b.ids, e.freshFrom = e.rec.take(e.freshFrom, e.cfg.BatchSize, fresh)
+	return e.ready(b, fresh)
+}
+
+// retryBatch takes the oldest events of the failing sessions that are due
+// (all of them with force) and were not tried in this pass. Nil means there
+// are none.
+func (e *Exporter) retryBatch(force bool) *batch {
+	now := time.Now()
+	due := func(sid string) bool {
+		f := e.failing[sid]
+		return f != nil && f.pass != e.pass && (force || !now.Before(f.nextTry))
+	}
+	anyDue := false
+	for sid := range e.failing {
+		anyDue = anyDue || due(sid)
+	}
+	if !anyDue {
+		return nil // leave the ring alone
+	}
+	// Sent events cannot be dropped to make room (see Recorder.evictLocked):
+	// a retry marks at most a quarter of the ring.
+	b := &batch{retry: true}
+	b.evs, b.ids, _ = e.rec.take(0, min(e.cfg.BatchSize, max(1, len(e.rec.buf)/4)), due)
+	if e.ready(b, due) != nil {
+		return b
+	}
+	// A due session with nothing buffered is not failing any more. An event
+	// of it that is recorded from now on is found like any new one.
+	held := false
+	for sid, f := range e.failing {
+		if due(sid) {
+			delete(e.failing, sid)
+			held = held || f.held
+		}
+	}
+	if held {
+		e.syncHeld()
+	}
+	return nil
+}
+
+// ready completes a batch with the sdk.dropped events of the sessions want
+// accepts: those taken earlier and not delivered yet, and new ones for the
+// counts the recorder holds. It returns nil for a batch without events.
+func (e *Exporter) ready(b *batch, want func(sid string) bool) *batch {
+	for _, d := range e.rec.takeDrops(func(sid string) bool {
+		_, taken := e.drops[sid]
+		return !taken && want(sid)
+	}) {
+		e.drops[d.SessionID] = d
+	}
+	for sid, d := range e.drops {
+		if want(sid) {
+			b.evs = append(b.evs, d)
+		}
+	}
+	if len(b.evs) == 0 {
+		return nil
+	}
+	b.state, b.failed = make([]eventState, len(b.evs)), set.Set[string]{}
+	return b
+}
+
+// resolve gives the batch back to the recorder (what was delivered or
+// refused leaves the ring, the rest stays) and updates the failing sessions.
+// It returns the events that were refused for good, already counted as drops.
+func (e *Exporter) resolve(b *batch) (lost []core.Event) {
+	var gone []uint64
+	// sent are the sessions of the batch; open those with an unresolved
+	// event, took those with a delivered one.
+	sent, open, took := set.Set[string]{}, set.Set[string]{}, set.Set[string]{}
+	for i := range b.evs {
+		sid := b.evs[i].SessionID
+		sent.Add(sid)
+		if b.state[i] == eventPending {
+			open.Add(sid)
+			continue
+		}
+		if b.state[i] == eventDelivered {
+			took.Add(sid)
+		} else {
+			lost = append(lost, b.evs[i])
+		}
+		if i < len(b.ids) {
+			gone = append(gone, b.ids[i])
+		} else {
+			delete(e.drops, sid)
+		}
+	}
+	e.rec.settle(b.ids, gone)
+	e.rec.AddDrops(lost)
+
+	now := time.Now()
+	heldChanged := false
+	for sid := range sent {
+		f := e.failing[sid]
+		switch {
+		case b.failed.Has(sid):
+			if f == nil {
+				f = &failingSession{}
+				e.failing[sid] = f
 			}
+			f.failures++
+			f.nextTry = now.Add(e.backoff(f.failures))
+			// Held only now that it failed again: the others were accepted
+			// for long enough before that.
+			if !f.held && !f.okFirst.IsZero() && f.okLast.Sub(f.okFirst) >= e.cfg.MaxCooldown {
+				f.held, heldChanged = true, true
+			}
+		case f != nil && took.Has(sid) && !open.Has(sid):
+			// Accepted again. Its other events may lie anywhere in the ring.
+			delete(e.failing, sid)
+			e.freshFrom = 0
+			heldChanged = heldChanged || f.held
+			continue
 		}
-		e.failures = 0
-		e.nextTry = time.Time{}
+		if f != nil {
+			f.pass = e.pass
+		}
+	}
+	// Whether the collector accepts other sessions while these fail.
+	for _, f := range e.failing {
+		switch {
+		case b.accepted:
+			if f.okFirst.IsZero() {
+				f.okFirst = now
+			}
+			f.okLast = now
+		case !f.held && (b.total || !b.retry):
+			f.okFirst, f.okLast = time.Time{}, time.Time{}
+		}
+	}
+	if heldChanged {
+		e.syncHeld()
+	}
+	return lost
+}
+
+// backoff is the pause after the n-th failure in a row, for the collector as
+// a whole and for a single failing session alike.
+func (e *Exporter) backoff(n int) time.Duration {
+	return min(e.cfg.FlushInterval<<min(n, 6), e.cfg.MaxCooldown)
+}
+
+// cooldown delays the next pass. outage says that the collector failed (and
+// not merely refused drop counts), which is logged.
+func (e *Exporter) cooldown(outage bool) {
+	if outage {
+		e.noteDown()
+	}
+	e.failures++
+	e.nextTry = time.Now().Add(e.backoff(e.failures))
+}
+
+// noteDown records that nothing is being delivered. A wrong collector URL
+// otherwise shows up only as an empty session. At most one outage (and its
+// recovery) is logged per outageLogGap, so a flapping collector cannot flood
+// the host's log.
+func (e *Exporter) noteDown() {
+	if e.down {
+		return
+	}
+	e.down = true
+	if now := time.Now(); e.lastOutageLog.IsZero() || now.Sub(e.lastOutageLog) >= outageLogGap {
+		e.lastOutageLog, e.outageLogged = now, true
+		log.Printf("tsession: cannot deliver events to the collector at %s; they stay buffered and are retried, and are dropped when the buffer fills", DisplayURL(e.cfg.CollectorURL))
+	}
+}
+
+// up records that the collector accepted events.
+func (e *Exporter) up() {
+	if e.down {
+		e.down = false
+		if e.outageLogged {
+			e.outageLogged = false
+			log.Printf("tsession: delivering events to the collector at %s again", DisplayURL(e.cfg.CollectorURL))
+		}
+	}
+	e.failures = 0
+	e.nextTry = time.Time{}
+}
+
+// syncHeld tells the recorder which sessions are held, and logs when the
+// first becomes held and when none is left, at most once per outageLogGap.
+// Session ids are not logged.
+func (e *Exporter) syncHeld() {
+	held := map[string]struct{}{}
+	for sid, f := range e.failing {
+		if f.held {
+			held[sid] = struct{}{}
+		}
+	}
+	e.rec.setHeld(held)
+	switch now := time.Now(); {
+	case len(held) > 0 && !e.heldLogged && (e.lastHeldLog.IsZero() || now.Sub(e.lastHeldLog) >= outageLogGap):
+		e.lastHeldLog, e.heldLogged = now, true
+		log.Printf("tsession: the collector at %s keeps failing some sessions while it accepts others; their events stay buffered and are retried, and are the first to be dropped when the buffer fills", DisplayURL(e.cfg.CollectorURL))
+	case len(held) == 0 && e.heldLogged:
+		e.heldLogged = false
+		log.Printf("tsession: the collector at %s accepts all sessions again", DisplayURL(e.cfg.CollectorURL))
 	}
 }
 
@@ -214,40 +524,65 @@ const (
 	postTooLarge             // 413: bisect
 	postPermanent            // refused for good (4xx, encode error): drop
 	postTransient            // unreachable, 5xx, 429: keep and retry later
+	postFailed               // 5xx or 429 that names the sessions it failed
 )
 
-// send ships batch in order. done is the length of the prefix that is
-// resolved: delivered, or refused for good and returned in lost (to be counted
-// as drops). ok is false when a transient failure stopped it; batch[done:] is
-// then still to be sent. A 413 bisects the batch so one oversize event only
-// drops itself.
-func (e *Exporter) send(batch []core.Event) (done int, lost []core.Event, ok bool) {
-	switch e.post(batch) {
-	case postOK:
-		return len(batch), nil, true
-	case postTooLarge:
-		if len(batch) == 1 {
-			switch e.post([]core.Event{oversizeStub(batch[0])}) {
-			case postOK:
-				return 1, nil, true
-			case postTransient:
-				return 0, nil, false
-			}
-			return 1, batch, true
-		}
-		mid := len(batch) / 2
-		done, lost, ok = e.send(batch[:mid])
-		if !ok {
-			return done, lost, false
-		}
-		d2, l2, ok := e.send(batch[mid:])
-		// lost may alias batch: cap it so the append cannot write into batch.
-		return done + d2, append(lost[:len(lost):len(lost)], l2...), ok
-	case postPermanent:
-		return len(batch), batch, true
-	default:
-		return 0, nil, false
+// answer is what one request came to.
+type answer struct {
+	result postResult
+	// With postFailed: the sessions of the request the collector named,
+	// whether it took events of others, and whether that resolves the events
+	// of every session it did not name.
+	failed          set.Set[string]
+	took, tookOther bool
+}
+
+// send ships the events of b at idx in order and records what became of
+// each: delivered, refused for good, or still pending. It reports false when
+// a request failed without the collector blaming a session; the rest is then
+// not sent. A 413 bisects, so one oversize event only drops itself.
+func (e *Exporter) send(b *batch, idx []int) bool {
+	// A session that failed earlier in this batch is not sent again in it:
+	// its later events must not overtake the ones that failed.
+	if len(b.failed) > 0 {
+		idx = slicex.Filter(idx, func(i int) bool { return !b.failed.Has(b.evs[i].SessionID) })
 	}
+	if len(idx) == 0 {
+		return true
+	}
+	evs := b.evs // the usual case: the whole batch
+	if len(idx) < len(evs) {
+		evs = slicex.Map(idx, func(i int) core.Event { return b.evs[i] })
+	}
+	a := e.post(evs)
+	if a.result == postTooLarge {
+		if len(idx) > 1 {
+			mid := len(idx) / 2
+			return e.send(b, idx[:mid]) && e.send(b, idx[mid:])
+		}
+		if a = e.post([]core.Event{oversizeStub(evs[0])}); a.result == postTooLarge {
+			a.result = postPermanent
+		}
+	}
+	switch a.result {
+	case postOK:
+		b.accepted = true
+		b.mark(idx, eventDelivered)
+	case postFailed:
+		for sid := range a.failed {
+			b.failed.Add(sid)
+		}
+		b.accepted = b.accepted || a.took
+		if a.tookOther {
+			b.mark(slicex.Filter(idx, func(i int) bool { return !a.failed.Has(b.evs[i].SessionID) }), eventDelivered)
+		}
+	case postPermanent:
+		b.mark(idx, eventLost)
+	default:
+		b.total = true
+		return false
+	}
+	return true
 }
 
 // oversizeStub replaces an event the collector refuses as too large with a
@@ -263,10 +598,21 @@ func oversizeStub(ev core.Event) core.Event {
 	}
 }
 
-func (e *Exporter) post(batch []core.Event) postResult {
+// ingestAnswer is what the exporter reads of an ingest response body.
+type ingestAnswer struct {
+	Accepted   int `json:"accepted"`
+	Duplicates int `json:"duplicates"`
+	Rejected   int `json:"rejected"`
+	// On a failed request: the sessions it failed, and whether more failed
+	// than are listed.
+	FailedSessions          map[string]string `json:"failed_sessions"`
+	FailedSessionsTruncated bool              `json:"failed_sessions_truncated"`
+}
+
+func (e *Exporter) post(batch []core.Event) answer {
 	body, err := e.cfg.Encoder.Encode(batch)
 	if err != nil {
-		return postPermanent // encoding is deterministic; retrying will not help
+		return answer{result: postPermanent} // encoding is deterministic; retrying will not help
 	}
 	inst := core.GetConfig().Instance
 	backoff := e.cfg.RetryBackoff
@@ -275,13 +621,13 @@ func (e *Exporter) post(batch []core.Event) postResult {
 			select {
 			case <-time.After(backoff):
 			case <-e.stop:
-				return postTransient
+				return answer{result: postTransient}
 			}
 			backoff *= 2
 		}
 		req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, e.cfg.CollectorURL+"/v1/ingest", bytes.NewReader(body))
 		if err != nil {
-			return postPermanent // malformed collector URL; retrying will not help
+			return answer{result: postPermanent} // malformed collector URL; retrying will not help
 		}
 		req.Header.Set("Content-Type", e.cfg.Encoder.ContentType())
 		req.Header.Set("X-TSession-Instance", inst)
@@ -289,35 +635,75 @@ func (e *Exporter) post(batch []core.Event) postResult {
 		if err != nil {
 			continue
 		}
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		rb, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()
+		var ir ingestAnswer
+		parsed := rerr == nil && json.Unmarshal(rb, &ir) == nil
 		switch {
 		case resp.StatusCode/100 == 2:
-			var ir struct {
-				Rejected int `json:"rejected"`
+			if parsed {
+				e.countRejected(batch, ir.Rejected, nil)
 			}
-			if json.Unmarshal(rb, &ir) == nil && ir.Rejected > 0 {
-				// Not counted for batches made only of sdk.dropped events, or a
-				// collector that rejects them would feed itself forever.
-				for i := range batch {
-					if batch[i].Kind != core.KindSDKDropped {
-						e.rec.AddDropCount(batch[i].SessionID, uint64(ir.Rejected))
-						break
-					}
-				}
-			}
-			return postOK
+			return answer{result: postOK}
 		case resp.StatusCode == http.StatusRequestEntityTooLarge:
-			return postTooLarge
+			return answer{result: postTooLarge}
 		case resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusTooManyRequests:
-			return postPermanent
+			return answer{result: postPermanent}
+		}
+		if !parsed {
+			continue
+		}
+		if a, ok := failedSessions(batch, ir); ok {
+			if a.tookOther {
+				e.countRejected(batch, ir.Rejected, a.failed)
+			}
+			return a // the sessions' own backoff is the retry
 		}
 	}
-	return postTransient
+	return answer{result: postTransient}
+}
+
+// failedSessions reads a failed request's answer for the sessions it blames.
+// ok is false when it names no session of the batch: that is an outage, not
+// the failure of a session. The events of the sessions it does not name are
+// resolved (tookOther) only when the answer leaves no doubt: it counts events
+// as accepted or duplicate, which a collector counts for the sessions that
+// did not fail only, and its list of failed sessions is complete. A session
+// is never taken to be accepted merely because it is not named.
+func failedSessions(batch []core.Event, ir ingestAnswer) (a answer, ok bool) {
+	a = answer{result: postFailed, failed: set.Set[string]{}}
+	others := false
+	for i := range batch {
+		if _, named := ir.FailedSessions[batch[i].SessionID]; named {
+			a.failed.Add(batch[i].SessionID)
+		} else {
+			others = true
+		}
+	}
+	a.took = others && ir.Accepted+ir.Duplicates > 0
+	a.tookOther = a.took && !ir.FailedSessionsTruncated
+	return a, len(a.failed) > 0
+}
+
+// countRejected adds the events the collector rejected, in an answer that
+// took events of the batch, to the drop count of the first session it took.
+// It does not count for batches made only of sdk.dropped events, or a
+// collector that rejects them would feed itself forever.
+func (e *Exporter) countRejected(batch []core.Event, rejected int, failed set.Set[string]) {
+	if rejected <= 0 {
+		return
+	}
+	for i := range batch {
+		if batch[i].Kind != core.KindSDKDropped && !failed.Has(batch[i].SessionID) {
+			e.rec.AddDropCount(batch[i].SessionID, uint64(rejected))
+			return
+		}
+	}
 }
 
 // Flush exports everything buffered and reports whether the ring was emptied
-// within timeout. While the collector is failing it keeps trying, pausing
+// within timeout. While the collector is failing, as a whole or for single
+// sessions, it keeps trying (every failing session on each pass), pausing
 // RetryBackoff between passes, and returns false when the time is up with
 // events still buffered (they stay buffered for the background loop).
 func (e *Exporter) Flush(timeout time.Duration) bool {

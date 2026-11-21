@@ -47,7 +47,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("dashboard: %v", err)
 	}
-	log.Printf("dashboard on http://%s - %s", *listen, mode)
+	// The address that was bound, not the one asked for: with port 0 they differ.
+	base := "http://" + ln.Addr().String()
+	log.Printf("dashboard on %s - %s", base, mode)
+	if *demo || len(open) > 0 {
+		// These sessions answer in the shapes of the real services, so the
+		// CLI reads them with the commands it uses on live ones.
+		log.Printf("tracectl reads these sessions too (list, summary, events, trace, entities, history, show, report, digest, diff):")
+		log.Printf("  tracectl --cp %s/api/cp --collector %s/api/col list", base, base)
+	}
 	if err := svc.ServeOn(ctx, srv, ln, 3*time.Second, nil); err != nil {
 		log.Fatal(err)
 	}

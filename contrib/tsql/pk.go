@@ -34,6 +34,9 @@ var pkTTL = 30 * time.Second
 type pkCache struct {
 	mu sync.Mutex
 	m  map[string]pkEntry
+	// nosys are the tables whose rows could not be read with their xmax (a
+	// view has none), and when that was seen; see upsert.go.
+	nosys map[string]time.Time
 }
 
 // pkEntry is the outcome of looking one table up: its key columns in key
@@ -100,7 +103,33 @@ func (p *pkCache) failed(table string) {
 func (p *pkCache) reset() {
 	p.mu.Lock()
 	clear(p.m)
+	clear(p.nosys)
 	p.mu.Unlock()
+}
+
+// noSys reports whether table was found to have no xmax to read. Like a key,
+// that is trusted for pkTTL: the name may come to mean another table.
+func (p *pkCache) noSys(table string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at, ok := p.nosys[table]
+	if ok && time.Since(at) > pkTTL {
+		delete(p.nosys, table)
+		return false
+	}
+	return ok
+}
+
+func (p *pkCache) setNoSys(table string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.nosys) >= maxPKTables {
+		clear(p.nosys)
+	}
+	if p.nosys == nil {
+		p.nosys = map[string]time.Time{}
+	}
+	p.nosys[table] = time.Now()
 }
 
 // The catalog queries return one row per key column, in key order. The

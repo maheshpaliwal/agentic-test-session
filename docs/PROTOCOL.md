@@ -144,6 +144,19 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   `X-TSession-Instance`). Idempotent on `(session_id, instance, local_seq)`. Returns
   `{"accepted":n,"duplicates":m,"rejected":r,"rejected_reasons":{...}}` (the last two are omitted when zero). Events for sessions the
   collector doesn't know are accepted (CP/collector may race) but still stored.
+- A request can hold events of several sessions, and each session is taken or failed on its own. When at least one
+  session fails, the status is that of the first failed session in id order (`500` storage, `503` buffer full or
+  shutting down), whether or not other sessions were taken, and the body is
+  `{"error":"...","accepted":n,"duplicates":m,"failed_sessions":{"<session id>":"storage"|"backpressure"|"shutdown"},"failed_sessions_truncated":true}`
+  (plus `rejected*` as above). A failed session counts nothing: `accepted` and `duplicates` are the events of the
+  sessions that did not fail, so they are zero when every session failed. A client may therefore conclude from
+  such an answer, and only from one with `accepted + duplicates > 0` and without `failed_sessions_truncated`, that
+  the events of every session the answer does not name are done (taken, or counted in `rejected`); those of the
+  named sessions must be sent again. Sending the whole request again is always correct: what was taken comes back
+  as `duplicates`. The list holds at most 32 sessions; when more failed, `failed_sessions_truncated` is `true`
+  (omitted otherwise) and a session that is not named may have failed too. The body carries session ids and
+  counts, never event data. A collector older than this field answers the same statuses with `{"error":"..."}`
+  only, and a client that does not know the field loses nothing by ignoring it.
 - Ordering: the collector holds each event for a reorder window (default 500ms) after it arrives and assigns `Seq`
   (1..N, gapless, single writer per session) ordered by `(EndHLC, Service, LocalSeq)`.
   **Seq = completion order.** Tree/nesting comes from `ParentID`/`LinkIDs`, not Seq. Each event is held for one
@@ -158,7 +171,7 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count,uncertain}`; `pk` is the key as
     canonical JSON (`{}` when it is not known). `uncertain` (optional, omitted when 0) counts the mutations whose
     event carries a flag saying the recorded key or row image is incomplete or uncertain: `pk_unknown`,
-    `pk_not_unique`, `pk_lookup_failed`, `after_unavailable`, `after_from_args`, `after_failed`, `returning_partial`,
+    `pk_not_unique`, `pk_lookup_failed`, `upsert_unknown`, `after_unavailable`, `after_from_args`, `after_failed`,
     `image_skipped`, `image_timeout`, `image_failed`, `image_truncated`, `diff_truncated` (a flag with a reason,
     `image_skipped:deadline`, counts as its base name; `core.UncertainFlag`)
   - `GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}` ->
@@ -248,7 +261,8 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
 
 ### Collector hardening (v1.1)
 - **Ingest response**: `200 {"accepted","duplicates","rejected","rejected_reasons":{reason:n}}` (`rejected*` omitted when zero) unless the whole
-  body exceeds `MaxBodyBytes` (413, default 32MB) or storage fails (500; 503 when a session's buffer is full). A message
+  body exceeds `MaxBodyBytes` (413, default 32MB) or storage fails for at least one session (500; 503 when a session's
+  buffer is full; the body then names the failed sessions, see `POST /v1/ingest` above). A message
   larger than `--max-message-bytes` (`TSESSION_COLLECTOR_MAX_MESSAGE_BYTES`, default 4MB, applies to each encoded
   protobuf message) is rejected alone (`oversize_message`); other reasons: `invalid_proto`, `invalid_session_id`.
   The old `--max-line-bytes` / `TSESSION_COLLECTOR_MAX_LINE_BYTES` still work as deprecated aliases and log a warning.
@@ -492,7 +506,9 @@ HTTP bodies that have no structural redactor (multipart, XML, binary types) are 
 ### SDK runtime hardening notes
 - `Instance` is always made unique per process start: a user-supplied `TSESSION_INSTANCE` is kept as a prefix and `-<pid>-<6 hex>` is appended (collector dedupes on `(Instance, LocalSeq)`).
 - Default exporter flush interval is 100ms (collector reorder window default: 500ms). A 413 from `/v1/ingest` bisects the batch; a single oversize event is replaced by a stub (ids/kind/name kept, `Flags=["oversize_dropped"]`). `rejected` in the ingest response is added to the `sdk.dropped` counters.
-- A batch leaves the exporter ring only when the collector answered 2xx or refused it for good (a 4xx other than 413/429, or an encode error: dropped and counted in `sdk.dropped`). Connection errors, 5xx and 429 keep the batch buffered; it is resent unchanged (same `local_seq`, so the collector deduplicates) with a growing pause (`FlushInterval` doubling up to `MaxCooldown`, default 5s). During an outage events are lost only when the ring is full: new events are dropped and counted. `Flush` returns false if events are still buffered when its timeout ends.
+- An event leaves the exporter ring only when the collector answered 2xx or refused it for good (a 4xx other than 413/429, or an encode error: dropped and counted in `sdk.dropped`). Connection errors, 5xx and 429 keep it buffered; it is resent with the same `local_seq` (so the collector deduplicates) after a growing pause (`FlushInterval` doubling up to `MaxCooldown`, default 5s). During an outage events are lost only when the ring is full: new events are dropped and counted. `Flush` returns false if events are still buffered when its timeout ends.
+- One failing session does not hold up the others of the same process. A failed answer that names sessions of the request (`failed_sessions`) is not an outage: the named sessions are left out of the following requests and retried on their own pause (the same doubling up to `MaxCooldown`), oldest events first, so the events of one session are always sent in the order they were recorded; the other sessions are sent first and without a pause. The events of the sessions such an answer does not name are resolved only when it says `accepted + duplicates > 0` and is not `failed_sessions_truncated`; otherwise they are sent again. Everything stays in the ring meanwhile: there is no second buffer and no new limit, so a failing session costs ring space and nothing else. A failed answer that names no session of the request (an older collector, a 429, no answer) is an outage as before, and so are two requests in a row for sessions that were not failing of which the collector took nothing: the pass ends and the next one waits.
+- A session that kept failing while other sessions were accepted over at least `MaxCooldown` is held until the collector accepts it again. Held changes one thing: when the ring is full and an event of another session arrives, the newest buffered event of a held session (looked for among the newest 1024 events, and never one that was already sent, since the collector may have it) is dropped and counted for that session instead of the new event. A full ring still loses exactly one event per new event, and without a held session it drops the new event as before. `Flush` returns false while a failing session has events buffered, and `Close` discards them with the ring.
 - Remote HLC values more than 10 minutes ahead of local physical time are ignored (not merged).
 - Header propagation by the patched default transport: `TSESSION_PROPAGATE_HOSTS` (comma-separated host suffixes; empty = all) and `TSESSION_NO_PROPAGATE_HOSTS` (always wins). Excluded hosts are still recorded as `api.out`, with attr `propagated=false`.
 - SSE (`text/event-stream`) and hijacked `api.in` spans end at first write/hijack with attr `stream=true`.

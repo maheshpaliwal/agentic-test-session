@@ -13,6 +13,7 @@ type config struct {
 	pkCols       map[string][]string
 	defaultPK    []string
 	pkLookup     bool // read primary keys from the catalog
+	upsertBefore bool // read the row an upsert can update before it runs
 	maxRows      int  // rows captured for images / returning
 	sampleRows   int  // rows captured as a read sample
 	maxArgs      int
@@ -22,16 +23,17 @@ type config struct {
 
 func defaultConfig() *config {
 	return &config{
-		images:     true,
-		skipTables: map[string]struct{}{},
-		pkCols:     map[string][]string{},
-		defaultPK:  []string{"id"},
-		pkLookup:   true,
-		maxRows:    50,
-		sampleRows: 5,
-		maxArgs:    64,
-		maxArgLen:  256,
-		captureTO:  500 * time.Millisecond,
+		images:       true,
+		skipTables:   map[string]struct{}{},
+		pkCols:       map[string][]string{},
+		defaultPK:    []string{"id"},
+		pkLookup:     true,
+		upsertBefore: true,
+		maxRows:      50,
+		sampleRows:   5,
+		maxArgs:      64,
+		maxArgLen:    256,
+		captureTO:    500 * time.Millisecond,
 	}
 }
 
@@ -102,6 +104,16 @@ func WithDefaultPK(cols ...string) Option {
 // With it off, and always with WithImages(false), keys come from
 // WithPKColumns and WithDefaultPK only.
 func WithPKLookup(on bool) Option { return func(c *config) { c.pkLookup = on } }
+
+// WithUpsertBefore toggles the read of the row an upsert can update before
+// the statement runs (default true; see "Upserts" in the package
+// documentation). It is one capture: three round trips on Postgres, one on
+// MySQL. With it off, Postgres still tells a row the upsert inserted and
+// nothing has locked since (recorded as with it on); every other row is
+// recorded with its new values only, no before image and no diff, under the
+// flag "upsert_unknown". On MySQL every upsert is then flagged
+// "upsert_unknown".
+func WithUpsertBefore(on bool) Option { return func(c *config) { c.upsertBefore = on } }
 
 // WithMaxImageRows caps rows captured per statement for images (default 50).
 // Statements affecting more rows are flagged "image_truncated".

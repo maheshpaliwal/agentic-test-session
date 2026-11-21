@@ -152,18 +152,27 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		c.log.Error("ingest", "err", err)
+		// The status is that of the first failed session, as it always was. The
+		// body adds what an exporter needs to resend only the failed sessions.
+		res.FailedSessions, res.FailedSessionsTruncated = ir.FailedSessions, ir.FailedSessionsTruncated
+		code, msg := http.StatusInternalServerError, "storage error"
 		switch {
 		case errors.Is(err, errBackpressure):
-			writeErr(w, http.StatusServiceUnavailable, errors.New("session buffer full, retry later"))
-			return
+			code, msg = http.StatusServiceUnavailable, "session buffer full, retry later"
 		case errors.Is(err, errSeqClosed):
-			writeErr(w, http.StatusServiceUnavailable, errors.New("collector is shutting down, retry later"))
-			return
+			code, msg = http.StatusServiceUnavailable, "collector is shutting down, retry later"
 		}
-		writeErr(w, http.StatusInternalServerError, errors.New("storage error"))
+		writeJSON(w, code, ingestFailure{Error: msg, IngestResult: res})
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// ingestFailure is the body of a failed ingest: the error, and the result so
+// far. It carries session ids and counts, never event data.
+type ingestFailure struct {
+	Error string `json:"error"`
+	IngestResult
 }
 
 // resolvePage applies tx outcomes and orphan flags to one page of a session's

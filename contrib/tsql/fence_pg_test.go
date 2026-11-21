@@ -138,7 +138,7 @@ func TestPGFactMultiStatementFence(t *testing.T) {
 	rtMustExec(t, c, "ROLLBACK")
 
 	// autocommit
-	rtMustExec(t, c, "BEGIN READ ONLY; SET LOCAL statement_timeout = 100")
+	rtMustExec(t, c, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 100")
 	if err := sleep(); err == nil || !strings.Contains(err.Error(), "57014") {
 		t.Fatalf("pg_sleep under the fence: %v, want a statement timeout", err)
 	}

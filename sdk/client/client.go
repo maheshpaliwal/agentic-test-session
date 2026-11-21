@@ -3,6 +3,10 @@
 // session recorded from the collector (Summary, Events, Mutations, History,
 // Trace, Export). Subscribers and Session.WaitPropagated report which
 // services are connected and whether they were sent a new session.
+//
+// A handle to a session comes from Start (a new session), Attach (an existing
+// one, by id), AttachEnv (the one a surrounding `tracectl run` put in
+// TSESSION_ID) or Detached (by id, without asking the control plane).
 package client
 
 import (
@@ -226,6 +230,48 @@ func Attach(ctx context.Context, o Options, id string) (*Session, error) {
 	s := newSession(o, Info{ID: id})
 	if _, err := s.Get(ctx); err != nil {
 		return nil, err
+	}
+	return s, nil
+}
+
+// SessionEnv names the environment variable in which `tracectl run -- <command>`
+// gives its command the id of the session it started: the ambient session.
+// Nothing joins that session by itself; the command tags its requests with it
+// (see AttachEnv).
+const SessionEnv = "TSESSION_ID"
+
+// ErrNoSessionEnv is returned by AttachEnv when SessionEnv is unset or empty:
+// the process was not started by `tracectl run`.
+var ErrNoSessionEnv = errors.New("tsession: " + SessionEnv + " is not set (no surrounding `tracectl run`)")
+
+// AttachEnv returns a handle to the ambient session, the one named by
+// SessionEnv, so that code run by `tracectl run` can tag its requests with it:
+//
+//	sess, err := client.AttachEnv(ctx, client.Options{})
+//	httpClient := &http.Client{Transport: sess.Transport(nil)}
+//
+// It fails with ErrNoSessionEnv when the variable is not set, and with another
+// error when the control plane does not know the session or the session is
+// not ACTIVE (a session that is not active records nothing). Of o only the
+// URLs, HTTPClient and PollInterval are used; `tracectl run` passes the URLs
+// it was given on its command line to the command in TSESSION_CONTROLPLANE_URL
+// and TSESSION_COLLECTOR_URL, which an empty Options picks up.
+//
+// The session belongs to whoever started it: do not Stop, Abort or Delete it.
+// It is still recording, so what Summary, Events and Mutations return is a
+// moment's view of everything the whole command has done so far, with
+// transaction outcomes and asynchronous work unresolved until the seal.
+func AttachEnv(ctx context.Context, o Options) (*Session, error) {
+	id := os.Getenv(SessionEnv)
+	if id == "" {
+		return nil, ErrNoSessionEnv
+	}
+	s, err := Attach(ctx, o, id)
+	if err != nil {
+		return nil, fmt.Errorf("tsession: session %q named by %s: %w", id, SessionEnv, err)
+	}
+	if st := s.Info().State; st != "ACTIVE" {
+		return nil, fmt.Errorf("tsession: session %s named by %s is %s, not ACTIVE: it records nothing", id, SessionEnv, st)
 	}
 	return s, nil
 }

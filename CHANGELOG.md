@@ -18,6 +18,23 @@ Before deploying:
   for an `UPDATE` whose row cannot be read back. Tests that assert on recorded keys or diffs of tables keyed by
   something other than `id` will see different values, and the database user needs to read the catalog
   (`pg_index`, `information_schema`); `WithPKLookup(false)` restores the old key choice.
+- `tsql` records binary primary-key values in hex (`\xfffe0001`; beyond 64 bytes a prefix plus
+  `...[N bytes sha256:…]`), so that different rows no longer share a key; text keys are kept whole up to 1024
+  bytes. Events recorded earlier show a binary key as `<3 bytes>` and file under a different key. Note that the
+  bytes of a binary key are now in the recording, where before only their length was.
+- `controlplane.NewFileStore` takes options (`NewFileStore(path, opts ...FileStoreOption)`); code that holds it
+  as a `func(string)` value no longer compiles. In package `dashboard`, `Session` and `Binding` are now the
+  `controlplane` types (`CreatedAt` is a `time.Time`, not a string), and `BuildTrace`, `Node`, `EntityRef` and
+  `EntityMutation` are gone.
+- Recorded inbound request headers now include `x-tsession-traceparent`, which changes payload sizes and
+  saved exports.
+- The SDK exporter keeps events until the collector accepts them: `Flush` returns false while events are
+  buffered, and `runtime.Stop` with an unreachable collector takes its full 2s. Events reach the collector's
+  store 0.5 to 1s after arrival at the default window (it was up to 0.5s). Test teardowns and tests that read
+  results at once may need to wait (`Session.StopAndWait` does).
+- `tsql` records an upsert that updated a row with op `update`, where it recorded `upsert`. An assertion that
+  filters on `Op: "upsert"` (for example `tsessiontest.RequireMutation`) no longer matches those rows, and
+  `ON CONSTRAINT` upserts lose their image and carry `upsert_unknown`.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -69,6 +86,17 @@ Rolling back:
 
 ### Added
 
+- `tracectl start --id-only` prints just the session id, for scripts; `tracectl doctor --require-services N`
+  exits 3 with fewer connected SDK instances (a CI preflight).
+- **`tracectl digest <id|name>`**: a whole session in one bounded answer for an AI agent or a person: the
+  verdict, the failures with where they sit in the call tree, what changed (with uncertain records marked) and
+  the call tree with repeated siblings collapsed (`40x`). It never exceeds `--max-bytes` (default 16384) and
+  says what it left out and which command prints it. Markdown, or JSON with schema `tsession.digest/v1`
+  (`docs/DIGEST.md`); takes the `--fail-on-*` gates; `tracectl run --digest FILE` writes it after the seal.
+  Recorded text is quoted as data and stripped of control characters; that protects the structure of the
+  output, not a model's judgement of what the text says.
+  Failures that did the same thing in the same place are listed once with a count, so 300 requests failing
+  the same way take one line, not the whole budget.
 - **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
   entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
   `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;
@@ -82,6 +110,11 @@ Rolling back:
   cannot read from the terminal. SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on, and the session is stopped
   and sealed after them; a control plane that cannot be reached is asked again until `--timeout`. Signal
   handling is untested on Windows.
+- **Go tests under `tracectl run`.** `client.AttachEnv` returns the session named in `TSESSION_ID`, and
+  `tsessiontest.Ambient(t, o)` joins it from a test without stopping it. `tsessiontest.Run` still starts one
+  session per test and ignores the variable. There are no assertions on the shared session: its verdict exists
+  only once `tracectl run` has sealed it, so `tsessiontest.Stop` and `Require*` fail the test when given that
+  session and never stop it. An empty header-mode session makes `tracectl run` say why.
 - **Delete and retention.** `DELETE /v1/sessions/{id}` on the control plane, `tracectl delete` and a two-click
   Delete in the dashboard remove a finished session with its events, seal and bundle. The collector's
   `--retention` (`TSESSION_COLLECTOR_RETENTION`, off by default) deletes a session that long after its seal, or
@@ -134,6 +167,8 @@ Rolling back:
 
 ### Changed
 
+- Dashboard `-demo` and `-open`: the session list without `limit` is oldest first, as on the control plane, and
+  an unknown session reads as empty on the collector side instead of `404`.
 - `tracectl history` for an entity the session did not change exits 1 and names what was looked up; it used to
   print `0 mutation(s)` and exit 0.
 - **Redaction is stricter.** Sensitive names also match as whole words (`user[password]`,
@@ -153,7 +188,8 @@ Rolling back:
   during an outage. `Flush` returns false while events are buffered, and `runtime.Stop` with an unreachable
   collector takes its full 2s.
 - **Control plane file store** (`--store-file`). Changes are appended to `<file>.journal` instead of rewriting
-  the whole file under the session lock; finished sessions past retention live in `<file>.archive` with a small
+  the whole file under the session lock (the journal is new; `<file>.archive` already existed); finished sessions
+  past retention live in `<file>.archive` with a small
   index in memory and are read on demand (one file descriptor stays open); deleting an archived session
   overwrites its line in place. Snapshots are fsynced; torn lines and leftover temp files are tolerated; damaged
   archive lines are saved to `<file>.archive.corrupt` and reported at start; an archived session that cannot be
@@ -179,12 +215,52 @@ Rolling back:
   `rows_redacted_conservatively`, `diff_truncated`.
 - The dashboard proxy forwards `DELETE` for exactly `/v1/sessions/{id}` on the control plane: anyone who can
   reach the dashboard can delete finished sessions. The kill switch and the collector's internal API stay
-  blocked.
+  blocked. The proxy also serves `GET /metrics` of both services and the control plane's
+  `GET /v1/subscribers` (the names of connected services) to anyone who can reach the dashboard.
 - The collector has a read timeout of one minute per request and the servers close idle connections after two
-  minutes (the dashboard after one).
+  minutes.
 
 ### Fixed
 
+- An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record
+  in `tracectl digest`, `history`, `entities` and the dashboard, although its row image is read separately and
+  is complete. The flag `returning_partial` describes the statement, not the image, and no longer counts as
+  uncertain.
+- `tsql`: an upsert (`INSERT ... ON CONFLICT DO UPDATE`) that updated an existing row was recorded like an
+  insert, every column as new; with a conflict target other than the primary key it could be filed under a row
+  that was never written. It is now recorded as an `update` with the row's earlier values and a diff of the
+  changed fields, a multi-row upsert as one mutation per row, and an upsert whose outcome cannot be known under
+  the new flag `upsert_unknown`, with no diff. A traced Postgres upsert takes 7 round trips instead of 4
+  (`WithUpsertBefore(false)` keeps 4 and records updates as `upsert_unknown`). Not flagged: another connection
+  updating the same row between the reads. On a table whose AFTER INSERT trigger inserts a row referencing the
+  new one, every inserting upsert is `upsert_unknown`. The MySQL path has only run against a fake.
+- Dashboard: `-demo` and `-open FILE` answered several read endpoints in shapes of their own, so `tracectl` and
+  the Go client could not read them. They now answer as the control plane and collector do, which makes every
+  read command (`summary`, `events`, `trace`, `entities`, `history`, `show`, `report`, `digest`) work on an
+  exported run: `dashboard -open run.ndjson` prints the `tracectl --cp ... --collector ...` flags to use.
+  `tracectl export` through these backends no longer drops the first event. Tests in `integration/` compare
+  each endpoint with the real services. A refused write on an opened file names the file.
+- `tsql` on Postgres: nothing is read inside a SERIALIZABLE transaction however the level was set (`BEGIN` or
+  `START TRANSACTION ... ISOLATION LEVEL`, `SET TRANSACTION`, session characteristics, a connection, role or
+  database default); it was only detected through `BeginTx`, and two concurrent inserting transactions that
+  commit untraced could fail with 40001 when traced. The autocommit capture's own transaction is READ COMMITTED.
+  Still true: under REPEATABLE READ a capture can take the transaction's snapshot a moment before the
+  application's first statement would have.
+- `tsql`: an `UPDATE` whose before image is missing records no diff (it listed every column as new). In one
+  failure path the capture fence rolled back to a savepoint it had not taken, which could undo the
+  application's own work; the savepoint is now named per connection (`ts_capture_<random>`).
+- SDK: one session the collector keeps failing no longer blocks delivery of the other sessions in the same
+  process. Its events stay buffered and are retried on their own; once it has kept failing for a while as others
+  were accepted, a full buffer drops its newest unsent events before another session loses any. Measured over
+  30 s with three healthy sessions and one failing at 100 events/s each: healthy events lost went from 3780 to 0.
+  Until that point is reached, and for a failing session that alone fills the buffer, healthy sessions can still
+  lose events, fewer than before. Failures the collector does not attribute to a session (timeouts, proxy
+  errors) remain whole-request outages. With the buffer full and a session held, recording an event costs up to
+  about 30 µs instead of tens of nanoseconds.
+- Collector: a failed ingest request names the sessions it failed (`failed_sessions`, at most 32, and
+  `failed_sessions_truncated`), and a failed session counts no accepted events. New counters
+  `tsession_collector_ingest_failed_sessions_total{cause}` and `tsession_collector_ingest_partial_failures_total`.
+  An older SDK ignores the new fields and behaves as before.
 - `sdk/client` and `tracectl`: an error or `doctor` line that names a service URL no longer shows the URL's user
   name, password or query (a token there ended up in CI logs). New `client.DisplayURL` and
   `client.ScrubURLError` for callers that print such errors themselves.
@@ -213,8 +289,7 @@ Rolling back:
   the application's transaction, or in autocommit a read-only transaction that made the application's write
   fail. The fence is now closed under its own deadline.
 - `tracectl report`: a session with no events is headed **Empty**, not **Passed**; with `--fail-on-empty` the
-  job summary used to say "Passed" on a failed job. `tracectl start --id-only` prints just the id for scripts,
-  and `tracectl doctor --require-services N` exits 3 with fewer connected services (a CI preflight).
+  job summary used to say "Passed" on a failed job.
 - `tsessiontest`: a failed event reported by `RequireNoFailures` is no longer printed a second time when the
   test ends.
 - Collector: an ingest racing with shutdown could panic (send on a closed channel); it now gets `503`. A seal

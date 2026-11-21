@@ -31,7 +31,7 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 		{Seq: 5, SpanID: "e", Service: "api", Kind: core.KindDBWrite, Flags: []string{"pk_unknown"}, Mutations: stock(nil)},
 		{Seq: 6, SpanID: "f", Service: "api", Kind: core.KindDBWrite, Mutations: stock(map[string]any{"sku": "clean"})},
 		// One flagged statement that changed two rows: the flag is the event's, so both count.
-		{Seq: 7, SpanID: "g", Service: "api", Kind: core.KindDBWrite, Flags: []string{"returning_partial"},
+		{Seq: 7, SpanID: "g", Service: "api", Kind: core.KindDBWrite, Flags: []string{"after_from_args"},
 			Mutations: append(stock(map[string]any{"sku": "m1"}), stock(map[string]any{"sku": "m2"})...)},
 	}
 

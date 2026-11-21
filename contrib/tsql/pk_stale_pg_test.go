@@ -148,3 +148,37 @@ func TestPGPKDefaultKeySharedByTheRowsWritten(t *testing.T) {
 		}
 	}
 }
+
+// A session default set inside a transaction and undone by a rollback to a
+// savepoint is not the session's default: later transactions run at READ
+// COMMITTED and their writes must be captured, not skipped as SERIALIZABLE.
+func TestPGSerializableDefaultUndoneBySavepointRollback(t *testing.T) {
+	rtFenceTable(t)
+	rec, ctx := setup(t)
+	db := rtOpen(t, &rtDriver{})
+	db.SetMaxOpenConns(1)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"SAVEPOINT a", "SET default_transaction_isolation = 'serializable'", "ROLLBACK TO SAVEPOINT a"} {
+		if _, err := tx.ExecContext(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rtShow(t, db, "SHOW default_transaction_isolation"); got != "read committed" {
+		t.Fatalf("test setup: the default is %q", got)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	e := rtWrite(t, rec, tx, ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "x", 1)
+	if len(e.Flags) != 0 || len(e.Mutations) != 1 || len(e.Mutations[0].Diff) != 1 {
+		t.Fatalf("flags %v mutations %+v", e.Flags, e.Mutations)
+	}
+}

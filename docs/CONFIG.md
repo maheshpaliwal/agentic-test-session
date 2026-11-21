@@ -90,8 +90,10 @@ Prefer the variables for connection strings: flag values show up in the process 
 | `--collector` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` |
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
-command only. Nothing reads it by itself: the command sends it as the `x-tsession-id` header (or uses a binding
-or `--mode exclusive`, which need no id). When `--cp` or `--collector` were given on the command line, the
+command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or
+uses a binding or `--mode exclusive`, which need no id). In Go, `client.AttachEnv` and `tsessiontest.Ambient`
+read `TSESSION_ID` and return that session for tagging requests; `tsessiontest.Run` does not read it and starts
+a session per test, as it does without `tracectl run`. When `--cp` or `--collector` were given on the command line, the
 command also gets them as `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`. The session's TTL (`--ttl`,
 default one hour) must be longer than the command takes, or the session expires under it.
 
@@ -113,6 +115,8 @@ value.
 | `tsession_collector_buffered_events` | gauge | none | Events waiting in reorder windows, not yet in the store. |
 | `tsession_collector_deleted_sessions_total` | counter | `cause`: `api`, `retention` | Sessions deleted, by cause (api or retention). |
 | `tsession_collector_ingest_errors_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Ingest requests that failed, by cause (backpressure, shutdown or storage). |
+| `tsession_collector_ingest_failed_sessions_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Sessions whose events an ingest request could not take, by cause (backpressure, shutdown or storage). |
+| `tsession_collector_ingest_partial_failures_total` | counter | none | Ingest requests that failed for some of their sessions and were accepted for the others. |
 | `tsession_collector_ingested_events_total` | counter | `result`: `accepted`, `duplicate` | Events received by ingest, by result (accepted or duplicate). |
 | `tsession_collector_quarantined_events_total` | counter | none | Poison events isolated and dropped because the store kept rejecting them. |
 | `tsession_collector_rejected_events_total` | counter | `reason`: `invalid_session_id`, `invalid_proto`, `oversize_message` | Events refused by ingest, by reason. |

@@ -69,7 +69,7 @@
   /* Event flags that say the recorded key or row image of the event's mutations is incomplete or uncertain.
      Mirrors core.UncertainFlag (the collector counts the same flags in an entity's `uncertain`). */
   const UNCERTAIN = { pk_unknown: 1, pk_not_unique: 1, pk_lookup_failed: 1, after_unavailable: 1, after_from_args: 1, after_failed: 1,
-    returning_partial: 1, image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1 };
+    image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1, upsert_unknown: 1 };
   const uncertainFlag = (f) => UNCERTAIN[flagBase(f)] === 1;
   // How many entries of an entity history carry such a flag (entries of an older collector have no flags: 0).
   const uncertainCount = (ms) => (ms || []).filter((m) => m && Array.isArray(m.flags) && m.flags.some(uncertainFlag)).length;

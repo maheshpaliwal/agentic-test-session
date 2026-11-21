@@ -205,7 +205,7 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 	// statement; from then on the connection is known to take two statements
 	// in one text.
 	want := []string{
-		"SAVEPOINT ts_capture", "SET LOCAL statement_timeout = 500", "SELECT *",
+		"SAVEPOINT ts_capture", isoAsk, "SELECT *",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture", "UPDATE t",
 		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", "SELECT *",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
@@ -245,7 +245,7 @@ func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 	}
 	want := []string{
 		"SAVEPOINT ts_capture",
-		"SET LOCAL statement_timeout = 500",
+		isoAsk,
 		"SELECT * FROM t WHERE id = $1 LIMIT 51",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		"DELETE FROM t WHERE id = $1",
@@ -286,7 +286,7 @@ func TestMySQLCaptureInTxHasNoSavepoint(t *testing.T) {
 	tx, _ := db.BeginTx(ctx, nil)
 	tx.ExecContext(ctx, "UPDATE t SET a = ? WHERE id = ?", 1, 2)
 	tx.Commit()
-	if s := sqls(f.RawCalls()); strings.Contains(s, "SAVEPOINT") || strings.Contains(s, "BEGIN READ ONLY") {
+	if s := sqls(f.RawCalls()); strings.Contains(s, "SAVEPOINT") || strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") {
 		t.Fatalf("mysql must not use savepoints:\n%s", s)
 	}
 }
@@ -518,7 +518,7 @@ func TestRawBeginIsTreatedAsOpenTx(t *testing.T) {
 	db.ExecContext(ctx, "BEGIN")
 	db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2")
 	s := sqls(f.RawCalls())
-	if strings.Contains(s, "BEGIN READ ONLY") || !strings.Contains(s, "SAVEPOINT ts_capture") {
+	if strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") || !strings.Contains(s, "SAVEPOINT ts_capture") {
 		t.Fatalf("capture inside a hand-written BEGIN must use a savepoint:\n%s", s)
 	}
 	f.mu.Lock()
@@ -526,7 +526,7 @@ func TestRawBeginIsTreatedAsOpenTx(t *testing.T) {
 	f.mu.Unlock()
 	db.ExecContext(ctx, "COMMIT")
 	db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2")
-	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY") {
+	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") {
 		t.Fatalf("after COMMIT capture runs in its own read-only tx:\n%s", s)
 	}
 }

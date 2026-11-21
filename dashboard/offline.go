@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/controlplane"
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
@@ -22,7 +22,8 @@ const maxExportLine = 64 << 20
 // NewOffline serves sessions read from files written by `tracectl export`
 // (one event per line). Each file becomes one read-only, sealed session named
 // after the file, so a run can be opened without the services that recorded
-// it: attach the export to a failed CI job and open it locally.
+// it: attach the export to a failed CI job and open it locally. The read
+// endpoints answer as the real services do, so tracectl reads the file too.
 func NewOffline(paths []string) (*Demo, error) {
 	d := &Demo{now: time.Now, readOnly: true}
 	for _, p := range paths {
@@ -88,40 +89,52 @@ func loadExport(path string) (*demoSess, error) {
 	}
 	slicex.SortBy(evs, func(e core.Event) uint64 { return e.Seq })
 	var first, last int64
-	dropped := 0
 	for i := range evs {
 		if s := evs[i].StartNs; s > 0 && (first == 0 || s < first) {
 			first = s
 		}
 		last = max(last, evs[i].EndNs)
-		if evs[i].Kind == core.KindSDKDropped {
-			if n, err := strconv.Atoi(evs[i].Attrs["count"]); err == nil && n > 0 {
-				dropped += n
-			}
-		}
 	}
 	if first == 0 {
 		first = last
 	}
+	// The collector's view of the session. The events are served as they are:
+	// they were read from the collector, so they already carry transaction
+	// outcomes and the orphaned flag. What the seal held besides them is
+	// worked out the way the collector does it: the jobs no worker finished
+	// and the events the SDKs dropped.
+	open, dropped := ledger(evs)
+	cv := &colView{id: evs[0].SessionID, evs: evs, sealed: true, pending: open, dropped: dropped,
+		// A file cut short mid-line (an interrupted export) still opens; what it holds is not everything.
+		incomplete: len(open) > 0 || dropped > 0 || torn}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	// To the nanosecond: a recording is often shorter than a second, and whole
 	// seconds would show its duration as zero.
-	start, end := time.Unix(0, first).UTC().Format(time.RFC3339Nano), time.Unix(0, last).UTC().Format(time.RFC3339Nano)
+	start, end := time.Unix(0, first).UTC(), time.Unix(0, last).UTC()
 	return &demoSess{
-		Session: Session{ID: evs[0].SessionID, Name: name, Mode: "header", State: "SEALED", InitiatedBy: "file",
-			CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped,
-			// A file cut short mid-line (an interrupted export) still opens; what it holds is not everything.
-			Incomplete: dropped > 0 || torn},
-		events: evs, sealed: true, resolved: true}, nil
+		Session: Session{ID: cv.id, Name: name, Mode: controlplane.ModeHeader, State: controlplane.StateSealed, InitiatedBy: "file",
+			CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped, Incomplete: cv.incomplete},
+		events: evs, sealed: true, file: cv, path: path}, nil
 }
 
-// readOnlyAPI refuses everything that would change a session.
-func readOnlyAPI(next http.Handler) http.Handler {
+// readOnlyAPI refuses everything that would change a session, and says that
+// the session is a file.
+func (d *Demo) readOnlyAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			writeJSON(w, http.StatusMethodNotAllowed, m{"error": "read-only: these sessions were opened from files"})
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		msg := "read-only: this dashboard serves sessions opened from files (dashboard -open); nothing can be started or changed here"
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/v1/sessions/"); ok {
+			id, _, _ := strings.Cut(rest, "/")
+			d.mu.Lock()
+			s := d.find(id)
+			d.mu.Unlock()
+			if s != nil {
+				msg = fmt.Sprintf("read-only: session %s is a file (%s, opened with dashboard -open); it cannot be stopped, aborted, renamed or deleted", id, filepath.Base(s.path))
+			}
+		}
+		writeJSON(w, http.StatusMethodNotAllowed, m{"error": msg})
 	})
 }

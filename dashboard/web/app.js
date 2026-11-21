@@ -66,9 +66,10 @@
     pk_unknown: 'no primary key value found for the row; declare the key with tsql.WithPKColumns', pk_lookup_failed: 'the primary key could not be read from the database catalog',
     pk_not_unique: 'the key columns matched more than one row, so the new values were not recorded; declare the key with tsql.WithPKColumns',
     after_from_args: 'the new values were taken from the statement, not read back from the database',
-    returning_partial: 'the statement returned only some of the row\'s columns',
+    returning_partial: 'the statement\'s RETURNING lists only some columns; the recorded row was read separately',
     oversize_dropped: 'payload dropped for exceeding size limits',
     after_failed: 'reading the row back after the write failed; its new values are not known',
+    upsert_unknown: 'whether this upsert inserted the row or updated one that was there is not known, so no changed fields are listed',
     image_timeout: 'reading the row images took too long and was abandoned', image_failed: 'reading the row images failed',
     image_truncated: 'the statement changed more rows than are captured; only some have images', diff_truncated: 'the list of changed fields was cut short',
     propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };
@@ -1770,17 +1771,17 @@
         const r = await col('/v1/sessions/' + encodeURIComponent(D.id) + '/entities/' + encodeURIComponent(x.store) + '/' + encodeURIComponent(x.entity) + '/' + encodeURIComponent(U.pkRaw(x.pk)));
         if (my !== seqNo) return;
         clear(detail);
-        const ms = asList(r, 'mutations');
-        const rbN = ms.filter((it) => (it.effective !== undefined ? it.effective : (it.mutation || {}).effective) === false).length;
+        /* The collector's history: {store, entity, pk, mutations: [{seq, op, before, after, diff, effective, flags, ...}]}
+           (docs/PROTOCOL.md). Demo mode and opened files answer with the same document. */
+        const ms = r && Array.isArray(r.mutations) ? r.mutations : [];
+        const rbN = ms.filter((it) => it.effective === false).length;
         const unN = U.uncertainCount(ms);
         detail.appendChild(h('div', { class: 'edetail-head' }, tag(x.store), h('h2', { text: x.entity }), span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }),
           tag(ms.length + (ms.length === 1 ? ' mutation' : ' mutations')), rbN ? tag(rbN + ' rolled back', 't-warn', null, 'retry') : null, unN ? tag(unN + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null));
         if (!ms.length) detail.appendChild(emptyState('events', 'No mutations', 'Nothing recorded for this entity.'));
         const rail = h('ol', { class: 'rail', 'aria-label': 'Mutation history, oldest first' });
         ms.forEach((it) => {
-          const m = Object.assign({}, it.mutation || {}, it);
-          delete m.mutation;
-          const eff = it.effective !== undefined ? it.effective : (it.mutation || {}).effective;
+          const m = it, eff = it.effective;
           const ev = it.seq !== undefined ? D.bySeq.get(it.seq) : null;
           const lead = [span('mono', '#' + it.seq), ev ? h('button', { type: 'button', class: 'linkbtn', text: 'open event', onclick: () => openDrawer(D, ev, { focus: false }) }) : null];
           const mu = Object.assign({ store: x.store, entity: x.entity, pk: x.pk }, m, { effective: eff });
