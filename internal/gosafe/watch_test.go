@@ -197,6 +197,31 @@ func TestPanicBudgetEndsTheServiceOnce(t *testing.T) {
 	}
 }
 
+// A loop that works every ten minutes and panics every time would never
+// have five panics in ten minutes: Cover widens the window to six of its
+// runs, and the fifth panic in a row spends the budget.
+func TestCoverWidensTheWindowForALoopThatRunsSeldom(t *testing.T) {
+	const every = 10 * time.Minute
+	now := time.Now()
+	w := NewWatch(nil)
+	for i := range 3 * PanicBudget {
+		if w.count(now.Add(time.Duration(i) * every)) {
+			panic(fmt.Sprintf("without Cover, panic %d of a loop that runs every %s spent the budget", i+1, every))
+		}
+	}
+	w = NewWatch(nil)
+	w.Cover(time.Second) // a loop that runs often does not narrow it
+	w.Cover(every)
+	for i := range PanicBudget {
+		if got := w.count(now.Add(time.Duration(i) * (every + 30*time.Second))); got != (i == PanicBudget-1) {
+			panic(fmt.Sprintf("panic %d of a loop that runs every %s: spent=%v", i+1, every, got))
+		}
+	}
+	if !strings.Contains(w.Degraded(), "5 panics of background goroutines within 1h0m0s") {
+		panic(w.Degraded())
+	}
+}
+
 // Slog says which panic was the last one.
 func TestSlogSaysThatTheBudgetIsSpent(t *testing.T) {
 	var buf bytes.Buffer

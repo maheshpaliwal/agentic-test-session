@@ -124,7 +124,8 @@ tolerate it: a container is unhealthy only after a minute of failed checks.
 
 A loop that panics every time must not leave a service that looks alive and does nothing. The loops a service cannot
 do without (collector: `janitor`, `retention`; control plane: `sweep`) share a **panic budget**: 5 panics within 10
-minutes (`gosafe.PanicBudget`, `gosafe.PanicBudgetWindow`; constants, not settings). The panic that uses it up is
+minutes (`gosafe.PanicBudget`, `gosafe.PanicBudgetWindow`; constants, not settings; the window is six retention
+sweeps when those are more than 100 s apart, so a sweep that panics every time is found out). The panic that uses it up is
 logged, `/healthz` answers `503 degraded: the panic budget is spent: ...`, and the service shuts down in order (as on
 SIGTERM, within 20 s) and **exits with status 1**, so that whatever supervises it starts it again with clean state.
 Run the services under something that restarts them (`restart: on-failure` in Compose, a Deployment, systemd).

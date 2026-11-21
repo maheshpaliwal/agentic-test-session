@@ -19,6 +19,10 @@ const (
 	// it. A panic now and then never gets there: the backoff alone spaces
 	// the panics of one loop that panics every time at 100ms, 200ms, 400ms,
 	// 800ms, so five of them take a second and a half.
+	//
+	// A loop that does its work only now and then (a retention sweep every
+	// ten minutes) and panics every time would never have that many panics
+	// in the window: see Watch.Cover.
 	PanicBudget       = 5
 	PanicBudgetWindow = 10 * time.Minute
 )
@@ -45,6 +49,16 @@ type Watch struct {
 // that is part of another process; the Watch then stays degraded.
 func NewWatch(spent func(reason string)) *Watch {
 	return &Watch{budget: PanicBudget, window: PanicBudgetWindow, spent: spent, waiting: map[string]int{}}
+}
+
+// Cover widens the window of the panic budget so that it holds PanicBudget
+// runs, and one more, of a loop that does its work every interval: a loop
+// that panics every time it works is then found out however seldom that is.
+// Call it before the loop is started.
+func (w *Watch) Cover(interval time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.window = max(w.window, time.Duration(w.budget+1)*interval)
 }
 
 // Degraded says why the service is not healthy, "" when it is: a goroutine

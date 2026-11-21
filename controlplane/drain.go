@@ -120,6 +120,7 @@ func (m *Manager) countPanic(goroutine string) { m.tel.panics.With(goroutine).In
 // the panic budget (gosafe.PanicBudget): a sweep that panics every time ends
 // the service instead of leaving one that looks alive and does nothing.
 func (m *Manager) RunInBackground(ctx context.Context) {
+	m.watch.Cover(m.cfg.SweepInterval)
 	gosafe.Go(gosafe.Options{Name: "sweep", Restarts: -1, Stop: ctx.Done(), Watch: m.watch, Budget: true, OnPanic: m.onPanic(nil)},
 		func() { m.Run(ctx) })
 }

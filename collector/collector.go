@@ -145,6 +145,7 @@ func New(st store.Store, cfg Config) *Collector {
 		// say): without it nothing is ever deleted for age. Its panics count
 		// against the panic budget: a loop that panics every time ends the
 		// service instead of leaving one that looks alive and deletes nothing.
+		c.watch.Cover(cfg.RetentionInterval)
 		gosafe.Go(gosafe.Options{Name: "retention", Restarts: -1, Stop: c.stop, Done: func() { close(c.retention) }, Watch: c.watch, Budget: true,
 			OnPanic: c.tel.onPanic(c.log)}, c.retentionLoop)
 	} else {
