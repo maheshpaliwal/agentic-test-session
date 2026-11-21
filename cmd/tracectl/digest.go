@@ -215,6 +215,11 @@ type dFailure struct {
 	// are normalised.
 	Count   int    `json:"count,omitempty"`
 	LastSeq uint64 `json:"last_seq,omitempty"`
+	// FirstError is the error of the first of Count events as it was
+	// recorded, when normalising took something out of it: the host that
+	// refused the connection, the status, the key. Left out at the shorter
+	// detail levels.
+	FirstError string `json:"first_error,omitempty"`
 	// Path is the chain of ancestors, the root request first; empty for a
 	// failed root. PathOmitted steps were left out after the first one.
 	Path        []dStep `json:"path"`
@@ -510,7 +515,11 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 			g := &src.failures[at]
 			if g.Count == 0 {
 				g.Count = 1
+				raw := g.Error
 				g.Name, g.Error = dataText(normalizeName(g.Name), digestNameMax), dataText(normalizeName(g.Error), digestErrMax)
+				if raw != g.Error {
+					g.FirstError = raw
+				}
 			}
 			g.Count, g.LastSeq = g.Count+1, f.Seq
 			continue
@@ -663,7 +672,7 @@ func failureAt(f dFailure, level int) dFailure {
 	if level == detailLeast {
 		name, errMax, keep = 60, 80, 1
 	}
-	f.Name, f.Error = clip(f.Name, name), clip(f.Error, errMax)
+	f.Name, f.Error, f.FirstError = clip(f.Name, name), clip(f.Error, errMax), ""
 	if n := len(f.Path); n > keep {
 		path := []dStep{f.Path[0]}
 		if keep == 2 {
@@ -1011,7 +1020,11 @@ func mdStep(seq uint64, service, kind, name string) string {
 
 func mdFailure(b *strings.Builder, f *dFailure) {
 	if f.Count > 1 {
-		fmt.Fprintf(b, "%dx %s #%d..#%d ERR %s\n", f.Count, mdStep(f.Seq, f.Service, f.Kind, f.Name), f.Seq, f.LastSeq, mdQuote(f.Error))
+		first := ""
+		if f.FirstError != "" {
+			first = " (the first: " + mdQuote(f.FirstError) + ")"
+		}
+		fmt.Fprintf(b, "%dx %s #%d..#%d ERR %s%s\n", f.Count, mdStep(f.Seq, f.Service, f.Kind, f.Name), f.Seq, f.LastSeq, mdQuote(f.Error), first)
 	} else {
 		fmt.Fprintf(b, "%s ERR %s\n", mdStep(f.Seq, f.Service, f.Kind, f.Name), mdQuote(f.Error))
 	}

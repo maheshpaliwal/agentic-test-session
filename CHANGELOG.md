@@ -116,6 +116,9 @@ Rolling back:
 
 ### Added
 
+- `tracectl digest`: failures merged into one entry keep the first one's error as it was recorded
+  (`(the first: "dial tcp 10.0.0.7:8080: connect: connection refused")`, `first_error` in JSON), so the host or
+  key that normalising takes out is still there. Left out when the budget is tight.
 - `tracectl digest`: a change that was rolled back names the failed event of its transaction (`ROLLED BACK (its
   transaction failed at #12)`, `rolled_back_by` in JSON). A digest read with `--cp` or `--collector` on the
   command line says that its drill-down commands need the same flags (`drill_down_note`).

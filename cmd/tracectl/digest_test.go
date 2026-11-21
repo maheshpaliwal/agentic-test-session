@@ -934,3 +934,27 @@ func TestDigestSaysThatDrillDownNeedsTheURLFlags(t *testing.T) {
 		panic("the JSON digest read with --cp lacks the note")
 	}
 }
+
+// Failures that are merged lose the values normalising takes out; the entry
+// keeps the first one's error as recorded, where the host or the key is.
+func TestDigestKeepsTheFirstErrorOfMergedFailures(t *testing.T) {
+	env := newReportEnv(t,
+		core.Event{Seq: 1, Service: "front", Kind: core.KindAPIOut, Name: "POST /work", StartNs: 1, EndNs: 2,
+			Err: "dial tcp 127.0.0.1:18282: connect: connection refused"},
+		core.Event{Seq: 2, Service: "front", Kind: core.KindAPIOut, Name: "POST /work", StartNs: 3, EndNs: 4,
+			Err: "dial tcp 127.0.0.1:18283: connect: connection refused"},
+		core.Event{Seq: 3, Service: "front", Kind: core.KindAPIOut, Name: "GET /same", StartNs: 5, EndNs: 6, Err: "refused"},
+		core.Event{Seq: 4, Service: "front", Kind: core.KindAPIOut, Name: "GET /same", StartNs: 7, EndNs: 8, Err: "refused"})
+	_, out, _ := env.tc("digest", reportID, "--json")
+	d := checkDigestJSON(t, out)
+	if len(d.Failures) != 2 || d.Failures[0].Count != 2 || d.Failures[0].FirstError != "dial tcp 127.0.0.1:18282: connect: connection refused" ||
+		d.Failures[0].Error == d.Failures[0].FirstError {
+		panic(fmt.Sprintf("merged with different values: %+v", d.Failures))
+	}
+	// Nothing was taken out of the second pair's error: it is not repeated.
+	if d.Failures[1].Count != 2 || d.Failures[1].FirstError != "" {
+		panic(fmt.Sprintf("merged with equal text: %+v", d.Failures[1]))
+	}
+	_, md, _ := env.tc("digest", reportID)
+	wantAll(t, checkDigestMarkdown(t, md)["### Failures"], `(the first: "dial tcp 127.0.0.1:18282: connect: connection refused")`)
+}
