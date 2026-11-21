@@ -70,6 +70,7 @@ Prefer the variables for connection strings: flag values show up in the process 
 | `--default-ttl` | `TSESSION_CP_DEFAULT_TTL` | `3600` | Default session time limit, in seconds. |
 | `--allowed-hosts` | `TSESSION_CP_ALLOWED_HOSTS` | loopback only | Extra Host values accepted. |
 | `--allowed-origins` | `TSESSION_CP_ALLOWED_ORIGINS` | none | Browser origins allowed to call the API. |
+| `--delivery-grace` | `TSESSION_CP_DELIVERY_GRACE` | `10s` | How long a drain waits for a service that reported undelivered events and delivers none, before the session is sealed incomplete (see "Delivery accounting" in PROTOCOL.md). Keep it above the SDK's request timeout plus retry interval (3s with the defaults). `0` turns the check off: reports are still stored and shown, and no session is marked incomplete because of them. |
 
 ## Dashboard (`cmd/dashboard`)
 
