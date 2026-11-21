@@ -35,6 +35,11 @@ Before deploying:
 - `tsql` records an upsert that updated a row with op `update`, where it recorded `upsert`. An assertion that
   filters on `Op: "upsert"` (for example `tsessiontest.RequireMutation`) no longer matches those rows, and
   `ON CONSTRAINT` upserts lose their image and carry `upsert_unknown`.
+- Redis recordings change: secret-looking key parts are masked by default (entities and keys read
+  `session:#...`; `tredis.WithKeyMask(tredis.KeyMaskOff)` restores the names), `PUBLISH` no longer appears as a
+  changed key, `pipeline_size` and `pipeline_index` no longer count `MULTI`/`EXEC`, `HVALS` replies are always
+  masked, and `*` in `WithBeforeImage`, `WithIgnoreKeys` and the other key patterns now also matches `/`. A
+  malformed `WithMaskKeys` or `WithRedactKeys` pattern panics when the option is applied.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -86,6 +91,21 @@ Rolling back:
 
 ### Added
 
+- **Redis writes carry a diff** when before-images are on (`tredis.WithBeforeImage`): the value of a string,
+  per field of a hash, per member of a sorted set, `added`/`removed` for a set, by index for a list. It adds no
+  round trips. Collections beyond the image cap get a partial diff or none, flagged `diff_truncated`; a diff
+  that holds something the command cannot have done (another client wrote in between) is flagged
+  `diff_concurrent`. A redacted value that changed is listed as `[REDACTED] -> [REDACTED]`. `MULTI`/`EXEC`
+  spans carry `transaction` and `transaction_outcome`.
+- **Secret-looking parts of Redis key names are masked** (`tredis`, `tredisv8`) in arguments, replies, images,
+  diffs, span names and errors: `session:<token>` is recorded as `session:#<12 hex>`. The default
+  (`KeyMaskHash`) is a hash keyed by a random secret of the process that is never written anywhere, so it
+  cannot be recomputed from an export; the price is that the same key reads differently in another service or
+  after a restart. `KeyMaskFlat` records `[REDACTED]`, `KeyMaskSession` a hash that is the same across services
+  but can be guessed for short tokens, `KeyMaskOff` nothing; `WithMaskKeys` adds patterns. Which names count as
+  secret is a heuristic (all-lower-case tokens, e-mail addresses and phone numbers as key parts are not
+  caught): the list for your environment is a decision for whoever owns its data policy. A test puts a random
+  secret into random commands and checks that no part of it reaches a recorded event.
 - `tracectl start --id-only` prints just the session id, for scripts; `tracectl doctor --require-services N`
   exits 3 with fewer connected SDK instances (a CI preflight).
 - **`tracectl digest <id|name>`**: a whole session in one bounded answer for an AI agent or a person: the
@@ -222,6 +242,13 @@ Rolling back:
 
 ### Fixed
 
+- `tredis`: values that were recorded although the key or field is sensitive: the reply of `SET ... GET`,
+  `HVALS`, `CONFIG GET` of credentials, `ACL`, and the value moved by `RENAME`. The error of a command with a
+  masked argument keeps its code and kind only, since Redis and scripts quote arguments in error text.
+  `PUBLISH` no longer records a changed key; `GETSET` on a new key is a mutation; a command queued by a raw
+  `MULTI` is not. Members of a sorted set that redact alike are kept apart, and infinite scores are recorded.
+- Every wrapper that records nothing when created before the SDK starts now says so (`tredis.Wrap`,
+  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`); only `thttp.Handler` did.
 - `tsql`: `DO`, `CALL` and `EXECUTE` were recorded as reads. They are writes whose row changes tsql cannot
   see, recorded as `db.write` with the new flag `effects_unknown` and no mutations.
 - An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record
