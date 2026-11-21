@@ -105,6 +105,19 @@ func (s StaticSessions) IsActive(id string) bool { return s.Active[id] }
 // Exclusive implements SessionSet.
 func (s StaticSessions) Exclusive() (string, bool) { return s.ExclusiveID, s.ExclusiveID != "" }
 
+// AnyActive implements AnyActiver.
+func (s StaticSessions) AnyActive() bool {
+	if s.ExclusiveID != "" {
+		return true
+	}
+	for _, on := range s.Active {
+		if on {
+			return true
+		}
+	}
+	return false
+}
+
 // BindingKeys lists the attribute keys the bindings need extracted.
 func (s StaticSessions) BindingKeys() []BindingKey { return NewBindingSet(s.Bindings).Keys() }
 

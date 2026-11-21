@@ -40,6 +40,9 @@ func (c mdCarrier) Get(key string) string {
 	return ""
 }
 
+// Has implements core.PresenceCarrier: a key sent with an empty value counts.
+func (c mdCarrier) Has(key string) bool { return len(c.md.Get(strings.ToLower(key))) > 0 }
+
 func (c mdCarrier) Set(key, val string) { c.md.Set(strings.ToLower(key), val) }
 
 // mdAttrs adapts incoming metadata to core.Attributes for session bindings:
@@ -71,7 +74,13 @@ func beginIngress(ctx context.Context, method string) (context.Context, *core.Sp
 // core.RedactAny. Redaction happens here, on the full message, in addition to
 // the structural pass core.Payload applies later. Non-JSON output is scrubbed
 // with core.RedactText.
-func toJSON(m any) json.RawMessage {
+func toJSON(m any) (out json.RawMessage) {
+	// A message whose own marshalling panics must not take the RPC down.
+	defer func() {
+		if recover() != nil {
+			out, _ = json.Marshal("<unmarshalable>")
+		}
+	}()
 	var raw []byte
 	if pm, ok := m.(proto.Message); ok {
 		if b, err := protojson.Marshal(pm); err == nil {
@@ -103,6 +112,7 @@ func toJSON(m any) json.RawMessage {
 }
 
 func finish(span *core.Span, req, resp any, err error) {
+	defer core.Recover() // recording must never break the RPC
 	span.SetReq(req)
 	if resp != nil {
 		span.SetResp(resp)

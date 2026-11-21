@@ -46,6 +46,12 @@ type Config struct {
 	// StoreTimeout bounds each store call the sequencer makes outside a
 	// request (window flushes, catch-up, poison-event probes); default 30s.
 	StoreTimeout time.Duration
+	// ShutdownTimeout bounds, in total, the flushing of reorder windows that
+	// Close does: store calls still running that long after Close began are
+	// cancelled and the events they carried are lost (and logged). Sessions
+	// flush concurrently, so a session whose store calls hang does not use up
+	// the time of the others. Default 15s.
+	ShutdownTimeout time.Duration
 	// AllowedHosts are extra Host header values accepted besides loopback
 	// (e.g. docker service names).
 	AllowedHosts []string
@@ -65,7 +71,8 @@ type Config struct {
 // later). Anything shorter regularly inverts parent/child Seq order.
 func DefaultConfig() Config {
 	return Config{Window: 500 * time.Millisecond, MaxBodyBytes: 32 << 20, MaxMessageBytes: 4 << 20,
-		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000, StoreTimeout: 30 * time.Second}
+		IdleEvict: 5 * time.Minute, MaxBufferedEvents: 100000, StoreTimeout: 30 * time.Second,
+		ShutdownTimeout: 15 * time.Second}
 }
 
 // Collector wires the store, sequencer and HTTP handlers together.
@@ -80,10 +87,14 @@ type Collector struct {
 	vmu   sync.Mutex
 	views map[string]*viewEntry
 	vtick uint64
+	vgen  uint64 // bumped by every delete; a view built across one is not cached
 
 	stopOnce  sync.Once
 	stop      chan struct{} // closed by Close
 	retention chan struct{} // closed when the retention loop has exited
+
+	sweepMu    sync.Mutex
+	sweepAfter string // where the next retention sweep resumes; "" is the start
 }
 
 // New builds a Collector over st.
@@ -101,6 +112,9 @@ func New(st store.Store, cfg Config) *Collector {
 	}
 	if cfg.StoreTimeout <= 0 {
 		cfg.StoreTimeout = d.StoreTimeout
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = d.ShutdownTimeout
 	}
 	if cfg.Window < 0 {
 		cfg.Window = 0
@@ -149,8 +163,9 @@ func ParseCIDR(s string) (*net.IPNet, error) {
 }
 
 // Close stops the sequencer goroutines after flushing every session's reorder
-// window. Stop the HTTP server first: an ingest that races with Close fails
-// with a storage error (which the SDK retries).
+// window, for at most Config.ShutdownTimeout in total. Stop the HTTP server
+// first: an ingest that races with Close fails with a storage error (which
+// the SDK retries).
 func (c *Collector) Close() {
 	c.stopOnce.Do(func() { close(c.stop) })
 	<-c.retention
@@ -271,6 +286,8 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	if !validID.MatchString(id) {
 		return errBadID
 	}
+	ctx, cancel := c.seq.bound(ctx)
+	defer cancel()
 	var err error
 	if !c.seq.with(id, true, false, func(a *sessionActor) { err = a.purge(ctx) }) {
 		return errSeqClosed
@@ -280,8 +297,10 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	}
 	c.seq.drop(id)
 	c.seq.forgetQuarantine(id)
+	c.seq.forgetStatus(id)
 	c.vmu.Lock()
 	delete(c.views, id)
+	c.vgen++
 	c.vmu.Unlock()
 	if c.cfg.BundleDir != "" {
 		// validID admits no path separators and no leading dot, so the join
@@ -303,8 +322,18 @@ func (c *Collector) retentionLoop() {
 		case <-c.stop:
 			return
 		case now := <-t.C:
+			// A sweep in flight ends when the collector is closed.
 			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.StoreTimeout)
+			swept := make(chan struct{})
+			go func() {
+				select {
+				case <-c.stop:
+					cancel()
+				case <-swept:
+				}
+			}()
 			n, err := c.PurgeExpired(ctx, now)
+			close(swept)
 			cancel()
 			if err != nil {
 				c.log.Warn("retention sweep", "err", err)
@@ -316,20 +345,77 @@ func (c *Collector) retentionLoop() {
 	}
 }
 
+// retentionPage is how many sessions a retention sweep asks a
+// store.ExpiredLister for at a time.
+const retentionPage = 256
+
 // PurgeExpired deletes the sessions whose retention has run out as of now and
 // returns how many were deleted. It is what the retention loop runs; with
 // Config.Retention unset it does nothing.
+//
+// A store.ExpiredLister is asked only for the sessions that may be due, a
+// page at a time until there are no more, so one call still deletes every
+// due session. A call that ends early (ctx, or the store failing to list)
+// leaves the rest to the next call, which carries on after the last session
+// this one looked at instead of starting over: sessions that cannot be
+// deleted do not keep the ones behind them waiting. Having reached the end,
+// such a call goes round once more from the start for the sessions before
+// the point it began at. Any other store is listed whole.
 func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
 	if c.cfg.Retention <= 0 {
 		return 0, nil
 	}
-	sessions, err := c.st.ListSessions(ctx)
-	if err != nil {
-		return 0, err
-	}
 	cutoff := now.Add(-c.cfg.Retention)
+	el, ok := c.st.(store.ExpiredLister)
+	if !ok {
+		sessions, err := c.st.ListSessions(ctx)
+		if err != nil {
+			return 0, err
+		}
+		n, _, err := c.purge(ctx, sessions, cutoff)
+		return n, err
+	}
+	c.sweepMu.Lock()
+	defer c.sweepMu.Unlock()
 	n := 0
 	var firstErr error
+	wrap := c.sweepAfter != "" // began mid-way: the sessions before that point are still owed
+	for ctx.Err() == nil {
+		page, err := el.ListExpired(ctx, cutoff, c.sweepAfter, retentionPage)
+		if err == nil && len(page) > 0 && page[len(page)-1].ID <= c.sweepAfter {
+			err = fmt.Errorf("store listed session %s after %s", page[len(page)-1].ID, c.sweepAfter)
+		}
+		if err != nil {
+			firstErr = cmp.Or(firstErr, err)
+			break
+		}
+		d, last, err := c.purge(ctx, page, cutoff)
+		n += d
+		firstErr = cmp.Or(firstErr, err)
+		if last < len(page) {
+			// Cut short: the next sweep resumes behind the last session tried.
+			if last > 0 {
+				c.sweepAfter = page[last-1].ID
+			}
+			break
+		}
+		if len(page) < retentionPage {
+			c.sweepAfter = ""
+			if wrap {
+				wrap = false
+				continue
+			}
+			break
+		}
+		c.sweepAfter = page[len(page)-1].ID
+	}
+	return n, firstErr
+}
+
+// purge deletes those of sessions that are expired at cutoff, stopping when
+// ctx ends. It returns how many it deleted, how many it got through and the
+// first error.
+func (c *Collector) purge(ctx context.Context, sessions []store.SessionInfo, cutoff time.Time) (n, tried int, firstErr error) {
 	for _, s := range sessions {
 		expired, err := c.expired(ctx, s, cutoff)
 		if err == nil && expired {
@@ -340,11 +426,12 @@ func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("session %s: %w", s.ID, err)
 		}
+		tried++
 		if ctx.Err() != nil {
 			break
 		}
 	}
-	return n, firstErr
+	return n, tried, firstErr
 }
 
 func (c *Collector) expired(ctx context.Context, s store.SessionInfo, cutoff time.Time) (bool, error) {
@@ -369,6 +456,8 @@ func (c *Collector) Seal(ctx context.Context, id string) (res SealResult, err er
 	if !validID.MatchString(id) {
 		return SealResult{}, errBadID
 	}
+	ctx, cancel := c.seq.bound(ctx)
+	defer cancel()
 	if !c.seq.with(id, true, true, func(a *sessionActor) { res, err = c.sealLocked(ctx, a) }) {
 		err = errSeqClosed
 	}

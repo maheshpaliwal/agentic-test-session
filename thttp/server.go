@@ -21,6 +21,7 @@ type tracedHandler struct{ http.Handler }
 // When the SDK is disabled, or h is already wrapped, h is returned as is.
 func Handler(h http.Handler) http.Handler {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("thttp.Handler")
 		return h
 	}
 	if _, ok := h.(*tracedHandler); ok {
@@ -66,7 +67,8 @@ func serve(h http.Handler, w http.ResponseWriter, r *http.Request) {
 	var once sync.Once
 	finish := func(rec any, stream bool) {
 		once.Do(func() {
-			route := r2.Pattern // set by ServeMux on r2 during routing
+			defer core.Recover() // recording must never break the request
+			route := r2.Pattern  // set by ServeMux on r2 during routing
 			if route != "" {
 				if strings.Contains(route, " ") {
 					span.SetName(route)
@@ -94,7 +96,7 @@ func serve(h http.Handler, w http.ResponseWriter, r *http.Request) {
 			}
 			span.SetResp(message{Status: status, Headers: redactHeaders(w.Header()),
 				Body: rw.cap.body(w.Header().Get("Content-Type")), BodySize: rw.cap.size()})
-			if reqCap.truncated || rw.cap.truncated {
+			if reqCap.cut() || rw.cap.cut() {
 				span.AddFlag("truncated")
 			}
 			span.End()

@@ -54,12 +54,9 @@ func (f *fakeDB) benchDrain() (raw, app int) {
 	f.mu.Unlock()
 	raw = len(cs)
 	for _, c := range cs {
-		switch {
-		case c.SQL == "BEGIN READ ONLY", c.SQL == "ROLLBACK", strings.Contains(c.SQL, "SAVEPOINT ts_capture"),
-			strings.Contains(c.SQL, "set_config('statement_timeout'"):
-			continue
+		if !isFence(c.SQL) {
+			app++
 		}
-		app++
 	}
 	return
 }

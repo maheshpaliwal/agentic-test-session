@@ -1,11 +1,24 @@
 // Package autoinit enables the tsession SDK when imported for side effects:
 //
-//	import _ "tsession/sdk/autoinit"
+//	import _ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"
 //
-// It does nothing unless TSESSION_ENABLED=true.
+// It does nothing unless TSESSION_ENABLED is exactly "true". The settings are
+// read from TSESSION_SERVICE, TSESSION_INSTANCE, TSESSION_CONTROLPLANE_URL and
+// TSESSION_COLLECTOR_URL (see docs/PROTOCOL.md for the rest).
+//
+// The wrappers (thttp.Handler, tsql.Register, ...) decide once, when they are
+// called, whether the SDK is on. Call them from main or from functions it
+// calls, which run after every package's init. A package that wraps in a
+// package-level variable or an init function must import autoinit itself:
+// the order of imports in a source file does not decide initialisation order.
+//
+// When TSESSION_ENABLED is set, it logs one line at start saying whether the
+// SDK records and where it sends; it logs nothing when the variable is unset.
 package autoinit
 
 import (
+	"cmp"
+	"log"
 	"os"
 	"strings"
 
@@ -14,11 +27,20 @@ import (
 )
 
 func init() {
-	if os.Getenv("TSESSION_ENABLED") != "true" {
+	switch v := os.Getenv("TSESSION_ENABLED"); {
+	case v == "true":
+	case v == "":
+		return
+	default:
+		log.Printf("tsession: disabled: TSESSION_ENABLED is %q, and only \"true\" enables the SDK", v)
 		return
 	}
-	_ = runtime.Start(runtime.Config{
-		Service:               os.Getenv("TSESSION_SERVICE"),
+	service := os.Getenv("TSESSION_SERVICE")
+	if service == "" {
+		log.Print("tsession: TSESSION_SERVICE is not set; this service's events will carry no service name")
+	}
+	err := runtime.Start(runtime.Config{
+		Service:               service,
 		Instance:              os.Getenv("TSESSION_INSTANCE"),
 		ControlPlaneURL:       os.Getenv("TSESSION_CONTROLPLANE_URL"),
 		CollectorURL:          os.Getenv("TSESSION_COLLECTOR_URL"),
@@ -26,8 +48,21 @@ func init() {
 		PropagateHosts:        splitList(os.Getenv("TSESSION_PROPAGATE_HOSTS")),
 		BindPriority:          core.ParseBindPriority(os.Getenv("TSESSION_BIND_PRIORITY")),
 		NoPropagate:           splitList(os.Getenv("TSESSION_NO_PROPAGATE_HOSTS")),
+		OverwriteTraceparent:  envTrue("TSESSION_OVERWRITE_TRACEPARENT"),
 	})
+	if err != nil {
+		log.Printf("tsession: disabled: %v", err)
+		return
+	}
+	// The URLs can carry credentials: log them without userinfo and query.
+	log.Printf("tsession: enabled for service %q (control plane %s, collector %s)", service,
+		runtime.DisplayURL(cmp.Or(os.Getenv("TSESSION_CONTROLPLANE_URL"), "http://127.0.0.1:7070")),
+		runtime.DisplayURL(cmp.Or(os.Getenv("TSESSION_COLLECTOR_URL"), "http://127.0.0.1:7071")))
 }
+
+// envTrue reports whether the variable is exactly "true", the only value that
+// switches a setting on (as for TSESSION_ENABLED).
+func envTrue(name string) bool { return os.Getenv(name) == "true" }
 
 func splitList(s string) []string {
 	var out []string

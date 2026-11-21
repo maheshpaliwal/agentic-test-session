@@ -26,6 +26,10 @@ type stmtTrace struct {
 	argVals []any  // rendered (masked) args, shared by the request and the read summary
 	flagged map[string]bool
 
+	pk        []string // primary-key columns of the statement's table
+	pkCatalog bool     // pk is the catalog's own spelling (see lookupPK)
+	aborted   bool     // the key lookup found the transaction aborted: no capture can run
+
 	retAll   bool // result rows are full-row RETURNING * images
 	before   []img
 	beforeOK bool
@@ -59,11 +63,14 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 	if info.Kind.IsWrite() {
 		kind = core.KindDBWrite
 	}
-	sqlText := redactSQL(query, info)
-	_, sp := core.Begin(ctx, kind, capSQL(sqlText, 2000))
+	_, sp := core.Begin(ctx, kind, "")
 	if sp == nil {
 		return nil
 	}
+	// Redaction walks the whole statement; it only happens once there is a
+	// span to put the text on.
+	sqlText := redactSQL(query, info)
+	sp.SetName(capSQL(sqlText, 2000))
 	t = &stmtTrace{c: c, cfg: c.cfg, span: sp, ctx: ctx, info: info, query: query, sqlText: sqlText, args: args, write: info.Kind.IsWrite()}
 	t.store = c.cfg.store
 	if t.store == "" {
@@ -76,6 +83,7 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 			t.store = "sql"
 		}
 	}
+	t.pk, t.pkCatalog = c.knownPK(info)
 	t.skip = c.cfg.skipped(info.Schema, info.Table)
 	for _, tb := range info.Tables {
 		if c.cfg.skipped("", tb) {
@@ -104,7 +112,17 @@ func (c *conn) startTrace(ctx context.Context, query string, args []driver.Named
 	return t
 }
 
+// doExec runs an Exec-path statement. A statement whose ctx belongs to no
+// active session is neither parsed nor redacted: it goes straight to the
+// driver and only its transaction control, if any, is noted.
 func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValue, run func() (driver.Result, error)) (driver.Result, error) {
+	if !core.Active(ctx) {
+		res, err := run()
+		if err == nil {
+			c.trackTxUntraced(query)
+		}
+		return res, err
+	}
 	info, ok := c.parse(query)
 	var t *stmtTrace
 	if ok {
@@ -117,10 +135,14 @@ func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValu
 		}
 		return res, err
 	}
+	safe(t.lookupPK)
 	safe(t.preImage)
 	res, err := run()
 	if err == nil {
 		c.trackTx(info.Tx)
+		c.noteSchema(info)
+	} else {
+		c.pks.drop(info.TableSQL) // the table may not exist yet: what the lookup said about it is not kept
 	}
 	safe(func() { t.finishExec(res, err) })
 	t.span.End()
@@ -129,7 +151,15 @@ func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValu
 
 // doQuery runs a Query-path statement. run receives the (possibly rewritten)
 // query text and may return a release func to call when the rows are closed.
+// Outside an active session it does as little as doExec.
 func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedValue, canRewrite bool, run func(q string) (driver.Rows, func(), error)) (driver.Rows, error) {
+	if !core.Active(ctx) {
+		r, rel, err := run(query)
+		if err == nil {
+			c.trackTxUntraced(query)
+		}
+		return wrapPlain(r, rel), err
+	}
 	info, ok := c.parse(query)
 	var t *stmtTrace
 	if ok {
@@ -142,6 +172,7 @@ func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedVal
 		}
 		return wrapPlain(r, rel), err
 	}
+	safe(t.lookupPK)
 	safe(t.preImage)
 	q := query
 	if canRewrite {
@@ -149,12 +180,14 @@ func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedVal
 	}
 	r, rel, err := run(q)
 	if err != nil {
+		c.pks.drop(info.TableSQL)
 		t.setErr(err)
 		t.span.End()
 		return nil, err
 	}
 	c.trackTx(info.Tx)
-	rw := &rows{inner: r, release: rel, onClose: t.finishRows, pkCols: t.cfg.pk(t.info.Schema, t.info.Table)}
+	c.noteSchema(info)
+	rw := &rows{inner: r, release: rel, onClose: t.finishRows, pkCols: t.pk}
 	switch {
 	case t.write:
 		rw.cap = t.cfg.maxRows
@@ -193,6 +226,10 @@ func (t *stmtTrace) preImage() {
 	if !t.write || !t.cfg.images || t.skip || (in.Kind != mutation.Update && in.Kind != mutation.Delete) {
 		return
 	}
+	if t.aborted {
+		t.flag("image_failed")
+		return
+	}
 	q, idx, reason := in.ImageSelect(t.cfg.maxRows + 1)
 	if reason != "" {
 		t.flag("image_skipped")
@@ -221,7 +258,7 @@ func (t *stmtTrace) preImage() {
 
 // capture runs a capture query and translates its outcome into span flags.
 func (t *stmtTrace) capture(q string, vals []driver.Value, limit int, failFlag string) ([]img, bool) {
-	rs, st := t.c.capture(t.ctx, t.pg(), q, vals, limit, t.cfg.pk(t.info.Schema, t.info.Table))
+	rs, st := t.c.capture(t.ctx, t.pg(), q, vals, limit, t.pk)
 	switch st {
 	case capOK:
 		return rs, true
@@ -295,7 +332,7 @@ func (t *stmtTrace) finishRows(r *rows) {
 	}
 	if !t.skip {
 		rs.Args = core.Payload(t.argVals)
-		pkCols := t.cfg.pk(t.info.Schema, t.info.Table)
+		pkCols := t.pk
 		for _, row := range r.data {
 			if pk := pkOf(row, pkCols); pk != nil && len(rs.PKs) < 20 {
 				rs.PKs = append(rs.PKs, pkString(pk, pkCols))

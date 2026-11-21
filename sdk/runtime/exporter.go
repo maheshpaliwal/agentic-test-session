@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -18,21 +20,24 @@ type ExporterConfig struct {
 	CollectorURL  string
 	BatchSize     int           // events per POST (default 256)
 	FlushInterval time.Duration // default 100ms
-	MaxRetries    int           // extra attempts per batch (default 2)
+	MaxRetries    int           // extra attempts per batch in one pass (default 2)
 	RetryBackoff  time.Duration // first backoff, doubles (default 100ms)
-	MaxCooldown   time.Duration // pause after a failed batch, capped (default 5s)
+	MaxCooldown   time.Duration // cap on the pause between passes while the collector is failing (default 5s)
 	HTTPTimeout   time.Duration // per request (default 2s)
 	Encoder       BatchEncoder  // wire format (default ProtobufEncoder)
 }
 
-// Exporter drains a Recorder and ships batches to the collector from a single
-// background goroutine.
+// Exporter ships batches from a Recorder to the collector from a single
+// background goroutine. A batch leaves the ring only once the collector
+// accepted it or refused it for good; while the collector is unreachable or
+// answers 5xx/429 the batch stays buffered and is retried with backoff, so
+// events are lost only when the ring overflows.
 type Exporter struct {
 	cfg    ExporterConfig
 	rec    *Recorder
 	client *http.Client
 
-	flushReq chan chan struct{}
+	flushReq chan chan bool
 	stop     chan struct{}
 	done     chan struct{}
 	once     sync.Once
@@ -43,6 +48,20 @@ type Exporter struct {
 
 	failures int
 	nextTry  time.Time
+	// down and refusalLogged make the exporter say once when delivery stops,
+	// once when it resumes, and once when the collector refuses events.
+	down          bool
+	outageLogged  bool      // the current outage was logged, so its recovery is too
+	lastOutageLog time.Time // when an outage was last logged
+	refusalLogged bool
+
+	// pending is the unresolved rest of the batch being exported: the first
+	// pendingRing events are still at the front of the ring, the others are
+	// sdk.dropped events taken from the recorder. It is resent unchanged (same
+	// local_seq, so the collector deduplicates) until it is resolved. Only the
+	// export goroutine touches these.
+	pending     []core.Event
+	pendingRing int
 }
 
 // NewExporter starts the export goroutine.
@@ -78,7 +97,7 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		cfg:      cfg,
 		rec:      rec,
 		client:   &http.Client{Timeout: cfg.HTTPTimeout, Transport: newPlainTransport()},
-		flushReq: make(chan chan struct{}),
+		flushReq: make(chan chan bool),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -110,57 +129,124 @@ func (e *Exporter) loop() {
 				e.drain()
 			}
 		case ack := <-e.flushReq:
-			e.drain()
-			close(ack)
+			ack <- e.drain() // buffered: never blocks on a caller that gave up
 		}
 	}
 }
 
-// drain sends batches until the ring is empty or a batch fails.
-func (e *Exporter) drain() {
+// drain exports batches until nothing is left to send (true) or the collector
+// fails transiently (false). In the second case the unsent events stay in the
+// ring and the next pass is delayed by a growing cooldown.
+func (e *Exporter) drain() bool {
 	for {
-		batch := e.rec.Drain(e.cfg.BatchSize)
-		if len(batch) == 0 {
-			return
+		if len(e.pending) == 0 {
+			e.pending = e.rec.Peek(e.cfg.BatchSize)
+			e.pendingRing = len(e.pending)
+			e.pending = append(e.pending, e.rec.TakeDrops()...)
+			if len(e.pending) == 0 {
+				return true
+			}
 		}
-		if failed := e.send(batch); len(failed) > 0 {
-			e.rec.AddDrops(failed)
+		hadRing := e.pendingRing > 0
+		done, lost, ok := e.send(e.pending)
+		ring := min(done, e.pendingRing)
+		e.rec.Commit(ring)
+		e.pendingRing -= ring
+		e.rec.AddDrops(lost)
+		e.pending = e.pending[done:]
+		if len(e.pending) == 0 {
+			e.pending = nil // release the batch
+		}
+		// A refused batch that held only sdk.dropped events had its counts
+		// returned to the recorder, which would hand them straight back: pause
+		// like for a transient failure instead of spinning.
+		refusedDrops := ok && !hadRing && len(lost) > 0
+		if ok && len(lost) > 0 && !e.refusalLogged {
+			e.refusalLogged = true
+			log.Printf("tsession: the collector at %s refused events and they were dropped; check that TSESSION_COLLECTOR_URL points at a tsession collector of a matching version", DisplayURL(e.cfg.CollectorURL))
+		}
+		if !ok || refusedDrops {
+			if !ok && !e.down {
+				// A wrong collector URL otherwise shows up only as an empty
+				// session. At most one outage (and its recovery) is logged
+				// per outageLogGap, so a flapping collector cannot flood the
+				// host's log.
+				e.down = true
+				if now := time.Now(); e.lastOutageLog.IsZero() || now.Sub(e.lastOutageLog) >= outageLogGap {
+					e.lastOutageLog, e.outageLogged = now, true
+					log.Printf("tsession: cannot deliver events to the collector at %s; they stay buffered and are retried, and are dropped when the buffer fills", DisplayURL(e.cfg.CollectorURL))
+				}
+			}
 			e.failures++
 			cd := e.cfg.FlushInterval << min(e.failures, 6)
 			e.nextTry = time.Now().Add(min(cd, e.cfg.MaxCooldown))
-			return
+			return ok
+		}
+		if e.down {
+			e.down = false
+			if e.outageLogged {
+				e.outageLogged = false
+				log.Printf("tsession: delivering events to the collector at %s again", DisplayURL(e.cfg.CollectorURL))
+			}
 		}
 		e.failures = 0
 		e.nextTry = time.Time{}
 	}
 }
 
+// outageLogGap is the least time between two logged outages.
+const outageLogGap = time.Minute
+
+// DisplayURL returns raw in a form that is safe to log: without userinfo,
+// query or fragment, any of which can carry a credential.
+func DisplayURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<unparseable URL>"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
+
 type postResult int
 
 const (
-	postOK postResult = iota
-	postTooLarge
-	postFailed
+	postOK        postResult = iota
+	postTooLarge             // 413: bisect
+	postPermanent            // refused for good (4xx, encode error): drop
+	postTransient            // unreachable, 5xx, 429: keep and retry later
 )
 
-// send ships batch and returns the events that were lost (to be counted as
-// drops). A 413 bisects the batch so one oversize event only drops itself.
-func (e *Exporter) send(batch []core.Event) []core.Event {
+// send ships batch in order. done is the length of the prefix that is
+// resolved: delivered, or refused for good and returned in lost (to be counted
+// as drops). ok is false when a transient failure stopped it; batch[done:] is
+// then still to be sent. A 413 bisects the batch so one oversize event only
+// drops itself.
+func (e *Exporter) send(batch []core.Event) (done int, lost []core.Event, ok bool) {
 	switch e.post(batch) {
 	case postOK:
-		return nil
+		return len(batch), nil, true
 	case postTooLarge:
 		if len(batch) == 1 {
-			stub := oversizeStub(batch[0])
-			if e.post([]core.Event{stub}) == postOK {
-				return nil
+			switch e.post([]core.Event{oversizeStub(batch[0])}) {
+			case postOK:
+				return 1, nil, true
+			case postTransient:
+				return 0, nil, false
 			}
-			return batch
+			return 1, batch, true
 		}
 		mid := len(batch) / 2
-		return append(e.send(batch[:mid]), e.send(batch[mid:])...)
+		done, lost, ok = e.send(batch[:mid])
+		if !ok {
+			return done, lost, false
+		}
+		d2, l2, ok := e.send(batch[mid:])
+		// lost may alias batch: cap it so the append cannot write into batch.
+		return done + d2, append(lost[:len(lost):len(lost)], l2...), ok
+	case postPermanent:
+		return len(batch), batch, true
 	default:
-		return batch
+		return 0, nil, false
 	}
 }
 
@@ -180,7 +266,7 @@ func oversizeStub(ev core.Event) core.Event {
 func (e *Exporter) post(batch []core.Event) postResult {
 	body, err := e.cfg.Encoder.Encode(batch)
 	if err != nil {
-		return postFailed // encoding is deterministic; retrying will not help
+		return postPermanent // encoding is deterministic; retrying will not help
 	}
 	inst := core.GetConfig().Instance
 	backoff := e.cfg.RetryBackoff
@@ -189,13 +275,13 @@ func (e *Exporter) post(batch []core.Event) postResult {
 			select {
 			case <-time.After(backoff):
 			case <-e.stop:
-				return postFailed
+				return postTransient
 			}
 			backoff *= 2
 		}
 		req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, e.cfg.CollectorURL+"/v1/ingest", bytes.NewReader(body))
 		if err != nil {
-			return postFailed
+			return postPermanent // malformed collector URL; retrying will not help
 		}
 		req.Header.Set("Content-Type", e.cfg.Encoder.ContentType())
 		req.Header.Set("X-TSession-Instance", inst)
@@ -224,31 +310,48 @@ func (e *Exporter) post(batch []core.Event) postResult {
 		case resp.StatusCode == http.StatusRequestEntityTooLarge:
 			return postTooLarge
 		case resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusTooManyRequests:
-			return postFailed // permanent; retrying will not help
+			return postPermanent
 		}
 	}
-	return postFailed
+	return postTransient
 }
 
-// Flush asks the exporter to drain now and waits up to timeout.
+// Flush exports everything buffered and reports whether the ring was emptied
+// within timeout. While the collector is failing it keeps trying, pausing
+// RetryBackoff between passes, and returns false when the time is up with
+// events still buffered (they stay buffered for the background loop).
 func (e *Exporter) Flush(timeout time.Duration) bool {
-	ack := make(chan struct{})
-	select {
-	case e.flushReq <- ack:
-	case <-e.done:
-		return false
-	case <-time.After(timeout):
-		return false
-	}
-	select {
-	case <-ack:
-		return true
-	case <-time.After(timeout):
-		return false
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		ack := make(chan bool, 1)
+		select {
+		case e.flushReq <- ack:
+		case <-e.done:
+			return false
+		case <-deadline.C:
+			return false
+		}
+		select {
+		case ok := <-ack:
+			if ok {
+				return true
+			}
+		case <-deadline.C:
+			return false
+		}
+		select {
+		case <-time.After(e.cfg.RetryBackoff):
+		case <-e.done:
+			return false
+		case <-deadline.C:
+			return false
+		}
 	}
 }
 
-// Close flushes (bounded by timeout) and stops the goroutine.
+// Close flushes (bounded by timeout) and stops the goroutine. Events the
+// collector did not accept by then are discarded with the exporter.
 func (e *Exporter) Close(timeout time.Duration) {
 	e.once.Do(func() {
 		e.Flush(timeout)

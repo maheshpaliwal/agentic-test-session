@@ -56,6 +56,19 @@ type Store interface {
 	Close() error
 }
 
+// ExpiredLister is an optional Store capability: finding the sessions a
+// retention sweep may delete without listing every session. A store without
+// it is swept from ListSessions.
+type ExpiredLister interface {
+	// ListExpired returns, in ID order, up to limit sessions with ID > after
+	// that ListSessions would list and that are sealed before cutoff or,
+	// never sealed, have their last event before cutoff. It must not leave
+	// such a session out, but may return one that is not due: the collector
+	// checks each before deleting it. Only ID, Sealed and LastNs are set.
+	// Fewer than limit sessions means there are none after the last one.
+	ListExpired(ctx context.Context, cutoff time.Time, after string, limit int) ([]SessionInfo, error)
+}
+
 // TxResult reports whether e decides a transaction and, if so, whether the
 // transaction's writes took effect. A commit event that carries Err or
 // Attrs["commit_failed"]=="true" did NOT commit; a rollback never commits

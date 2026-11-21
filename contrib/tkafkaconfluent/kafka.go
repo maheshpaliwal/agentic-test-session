@@ -71,6 +71,16 @@ func (c *headerCarrier) Get(key string) string {
 	return ""
 }
 
+// Has implements core.PresenceCarrier: a header with an empty value counts.
+func (c *headerCarrier) Has(key string) bool {
+	for _, h := range *c.h {
+		if strings.EqualFold(h.Key, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *headerCarrier) Set(key, val string) {
 	key = strings.ToLower(key)
 	for i, h := range *c.h {
@@ -112,6 +122,11 @@ func bodyParams(b []byte) any {
 		dec.UseNumber()
 		var v any
 		if dec.Decode(&v) == nil {
+			// A body that is one JSON string is text: the value sits inside a
+			// larger recorded object, where nothing scrubs string leaves later.
+			if s, ok := v.(string); ok {
+				return core.RedactText(s)
+			}
 			return core.RedactAny(v)
 		}
 	}

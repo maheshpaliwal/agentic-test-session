@@ -2,7 +2,8 @@
 
 ## Setup
 Go 1.25+ (the workspace pins 1.26). Clone, then `make build vet unit`. `make it` runs the integration suite and
-needs throwaway Postgres and Redis (`integration/scripts/it.sh`).
+starts its own throwaway Postgres and Redis from local binaries (`integration/scripts/it.sh`; set `PGBIN` /
+`REDIS_BIN` if they are not at the Homebrew default paths).
 
 ## Ground rules
 - A change stays inside one module's `go.mod`. The root module is stdlib-only; heavy dependencies belong in
@@ -19,4 +20,4 @@ needs throwaway Postgres and Redis (`integration/scripts/it.sh`).
 - Use synthetic data in tests and examples: no real credentials, hostnames, customer data or employer-specific names.
 
 ## Pull requests
-Run `make vet lint race` and `gofmt -l .` first (CI runs the same). Describe the behaviour change and how you tested it.
+Run `make vet lint race` and `gofmt -l .` first (CI runs `make fmt-check vet lint race`). Describe the behaviour change and how you tested it.

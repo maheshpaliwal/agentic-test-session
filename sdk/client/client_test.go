@@ -57,6 +57,22 @@ func TestLifecycle(t *testing.T) {
 	if sc, ok := core.ExtractSpanContext(core.HTTPHeaderCarrier(h)); !ok || len(sc.TraceID) != 32 || len(sc.SpanID) != 16 || sc.HLC == 0 {
 		t.Fatalf("bad propagation headers: %v", h)
 	}
+	if tp := h.Get(core.KeyTraceparent); tp == "" || h.Get(core.KeyTSessionTraceparent) != tp+";"+h.Get(core.KeyHLC) {
+		t.Fatalf("want traceparent, and %s holding it and the clock: %v", core.KeyTSessionTraceparent, h)
+	}
+	// A traceparent from the test's own tracing is kept; injecting again
+	// replaces only what the client wrote.
+	const appTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	h2 := http.Header{}
+	h2.Set(core.KeyTraceparent, appTP)
+	s.Inject(h2)
+	if h2.Get(core.KeyTraceparent) != appTP || h2.Get(core.KeyTSessionTraceparent) == "" {
+		t.Fatalf("caller's traceparent not kept: %v", h2)
+	}
+	s.Inject(h)
+	if tp := h.Get(core.KeyTraceparent); h.Get(core.KeyTSessionTraceparent) != tp+";"+h.Get(core.KeyHLC) {
+		t.Fatalf("second Inject left a stale traceparent: %v", h)
+	}
 
 	info, err := s.StopAndWait(ctx)
 	if err != nil || info.State != "SEALED" || info.BundleURI != "mem://b" {
@@ -172,5 +188,40 @@ func TestRenameAndAutoName(t *testing.T) {
 	s2, err := client.Start(ctx, client.Options{BaseURL: base, InitiatedBy: "tester"})
 	if err != nil || !s2.Info().NameAuto || !strings.HasPrefix(s2.Info().Name, "tester ") {
 		t.Fatalf("%+v %v", s2.Info(), err)
+	}
+}
+
+func TestKillSwitch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	o := client.Options{BaseURL: setup(t)}
+	s, err := client.Start(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on, err := client.KillSwitch(ctx, o); err != nil || on {
+		t.Fatalf("a new control plane: on=%v %v", on, err)
+	}
+	for _, want := range []bool{true, true, false} { // setting it twice is not an error
+		if err := client.SetKill(ctx, o, want); err != nil {
+			t.Fatal(err)
+		}
+		if on, err := client.KillSwitch(ctx, o); err != nil || on != want {
+			t.Fatalf("after SetKill(%v): on=%v %v", want, on, err)
+		}
+	}
+	// The switch stops recording, not the session.
+	if info, err := s.Get(ctx); err != nil || info.State != "ACTIVE" {
+		t.Fatalf("%+v %v", info, err)
+	}
+
+	// Errors carry the control plane's status.
+	down := httptest.NewServer(http.NotFoundHandler())
+	defer down.Close()
+	if err := client.SetKill(ctx, client.Options{BaseURL: down.URL}, true); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("SetKill against a server without the endpoint: %v", err)
+	}
+	if on, err := client.KillSwitch(ctx, client.Options{BaseURL: down.URL}); err == nil || on {
+		t.Fatalf("KillSwitch against a server without the endpoint: on=%v %v", on, err)
 	}
 }

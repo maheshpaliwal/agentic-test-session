@@ -210,6 +210,7 @@ func TestSealPermanentFailureEndsSealedWithError(t *testing.T) {
 
 func TestRetentionPrunesButFileStoreStillReads(t *testing.T) {
 	fs, err := NewFileStore(filepath.Join(t.TempDir(), "s.json"))
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +238,7 @@ func TestRetentionPrunesButFileStoreStillReads(t *testing.T) {
 	}
 	// restart: archived sessions remain readable
 	fs2, err := NewFileStore(fs.path)
+	closeLater(t, fs2)
 	if err != nil {
 		t.Fatal(err)
 	}

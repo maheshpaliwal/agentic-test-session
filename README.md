@@ -3,44 +3,180 @@
 Session-scoped tracing and data-mutation capture for **test environments**.
 
 Start a *session*, exercise the system, stop the session. tsession then shows, for that session only, what ran,
-in what order, across which services, and which rows, keys and documents changed (before and after).
+in what order, across which services, and which rows, keys and documents changed.
 
-It is not a general-purpose APM: traffic outside a session is not recorded.
+It is not a general-purpose APM: traffic outside a session is not recorded. It records request and response
+payloads, masked by field name only, so run it against test data. See [`SECURITY.md`](SECURITY.md).
 
-## Quick start
-
-Requires Go 1.25+.
+## Try it
 
 ```bash
-# UI with synthetic data, nothing else needed
-go run ./cmd/dashboard -demo            # http://127.0.0.1:7072
+go run ./cmd/dashboard -demo            # http://127.0.0.1:7072, synthetic data, nothing else needed
+```
 
-# Real stack, three terminals
+![Sessions list](docs/images/sessions.png)
+![Timeline grouped by trigger](docs/images/timeline.png)
+![Call tree](docs/images/call-tree.png)
+![Entity mutation history](docs/images/entities.png)
+
+## Run the stack
+
+Building this repository needs Go 1.26 (`go.work`); importing the modules needs Go 1.25+.
+
+```bash
+# three terminals
 go run ./collector/cmd/collector        # :7071
 go run ./cmd/controlplane               # :7070
 go run ./cmd/dashboard                  # :7072
 
-# Or everything in containers (Postgres + Redis + all services)
+# or everything in containers (Postgres + Redis + all services)
 cp docker/.env.example docker/.env      # synthetic dev values; edit before use
-make up && make demo && make down
+make up                                 # then open http://127.0.0.1:7072
+make down                               # when finished; this also deletes the recorded data
 ```
 
-Instrument a service:
+To move a port: `--listen` (collector, control plane), `-listen` (dashboard). Then point the services and
+`tracectl` at the new addresses with `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`, the control plane
+at the collector with `--collector-url`, and the dashboard at both with `-control-plane` and `-collector`. Run the collector
+from a directory you choose: it writes sealed bundles to `./bundles` there.
+
+## Instrument a service
 
 ```go
 import (
-    "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit" // configures itself from TSESSION_* env vars
+    _ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit" // starts the SDK from TSESSION_* env vars
     "github.com/maheshpaliwal/agentic-test-session/thttp"
 )
 
-handler := thttp.Handler(mux)               // inbound: attribution + capture
-client  := thttp.Client(http.DefaultClient) // outbound: propagation
+func main() {
+    handler := thttp.Handler(mux)               // inbound: attribution + capture
+    client  := thttp.Client(http.DefaultClient) // outbound: propagation
+    // ...
+}
 ```
 
-Then start a session (dashboard, `tracectl start`, or `POST /v1/sessions`) and send traffic with
-`x-tsession-id: <id>`, or with an attribute bound to the session (user-id header, JWT claim, cookie, query
-param; see [`docs/BINDING.md`](docs/BINDING.md)). Only the first instrumented hop needs it; the session
-propagates downstream, including through message queues.
+```bash
+TSESSION_ENABLED=true \
+TSESSION_SERVICE=orders-api \
+TSESSION_CONTROLPLANE_URL=http://127.0.0.1:7070 \
+TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
+  ./orders-api
+```
+
+- Wrap handlers and clients inside `main` or functions it calls. The wrappers decide once, when called, whether
+  the SDK is on; a package that wraps at init time must itself import `autoinit`.
+- `autoinit` also traces `http.DefaultTransport`. `thttp.Client` sends session headers to every host it calls,
+  third parties included; `TSESSION_PROPAGATE_HOSTS` and `TSESSION_NO_PROPAGATE_HOSTS` apply only to the default
+  transport.
+- Other wrappers live under `contrib/`: gRPC, SQL, Redis (go-redis v8 and v9), Mongo, DynamoDB, queues (Kafka,
+  SQS, AMQP). Each package's doc comment shows its setup.
+- `contrib/tsql` supports Postgres and MySQL only. It reads each table's primary key from the database catalog
+  (once per table per `sql.DB`, refreshed every 30 seconds), so rows are recorded under their real key whatever it is called. Declare the key
+  with `tsql.WithPKColumns` for a table without a primary key or a view. Flags on a write say what could not
+  be captured: `pk_unknown` (no key value was found for the row), `after_unavailable` (an updated row could not
+  be read back, so the record has its before image and no diff), `pk_not_unique` (the key columns matched more
+  than one row, so no new values were recorded) and `pk_lookup_failed` (the catalog could not be read). The package doc has the details.
+
+## Record a session
+
+```bash
+go install ./cmd/tracectl                # puts tracectl on your PATH; or: go run ./cmd/tracectl <command>
+
+tracectl doctor                          # both services answer; which services are connected
+                                         # (CI preflight: --require-services N exits 3 with fewer than N
+                                         #  connected SDK instances; replicas count one each)
+ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
+curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
+tracectl stop my-run --wait              # drains async work, then seals
+```
+
+`stop`, `abort`, `rename` and `wait` print the session as JSON; `status` adds `name:` and `bindings:` lines after
+it, so it is not pure JSON. With `--short` all five print one line, `<id> <STATE>`, followed by ` incomplete`
+when the session is.
+
+A request joins a session through `x-tsession-id: <id>`, or through an attribute bound to the session (user-id
+header, JWT claim, cookie, query parameter; see [`docs/BINDING.md`](docs/BINDING.md)). Only the first
+instrumented hop needs it; the session propagates downstream, including through message queues. A session
+started with `--mode exclusive` records every request while it runs.
+
+## Read the results
+
+```bash
+tracectl summary my-run                      # counts, mutations, failures
+tracectl events my-run --kind 'db.*' --errors
+tracectl entities my-run                     # what the session changed; "N uncertain" = incomplete key or image
+tracectl history my-run postgres orders 42   # every change to one row, with diffs and the event's flags
+tracectl history my-run postgres items order_id=7,sku=a   # composite key; or the JSON that entities prints
+tracectl history my-run postgres orders --unknown-key     # changes recorded without a key
+tracectl trace my-run --errors               # call tree, only branches that failed
+tracectl show my-run 17                      # one event in full: request, response, mutations
+tracectl diff nightly-ok nightly-failed      # what differs between two runs
+tracectl list --limit 20                     # the newest sessions
+```
+
+Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
+`3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
+
+## Go tests and CI
+
+`sdk/client/tsessiontest` ties a session to a test and asserts on what it recorded:
+
+```go
+sess := tsessiontest.Run(t, client.Options{})   // stopped when the test ends
+// ... drive the system with sess.Header() or sess.Transport(nil) ...
+tsessiontest.RequireNoFailures(t, sess)
+tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", Entity: "orders", Op: "insert"})
+```
+
+Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
+`client.Options.QuiesceSeconds` if your system has no asynchronous work.
+
+`sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
+`Trace`).
+
+```bash
+# one line: start a session, run the tests with its id in $TSESSION_ID, stop, wait for the seal, print the summary
+tracectl run --name my-run --fail-on-error --fail-on-incomplete --fail-on-empty --report tsession.md -- ./run-e2e.sh
+# Exit status: the command's own if it failed (128+n if killed by signal n); else 1 if the session could not be
+# stopped, sealed or read; else 3 if a gate failed; else 0. The session is stopped and sealed either way.
+# stdout is the command's: tracectl prints to stderr and writes the report (replacing FILE; --format junit for XML).
+# The command runs in its own process group, so it cannot read from the terminal; give --ttl more than its runtime.
+
+# or step by step, on a session that has been stopped
+# gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included, or a session
+# the control plane no longer knows), or no events at all
+tracectl report my-run --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
+tracectl report my-run --format junit -o tsession-junit.xml
+# Limit: the gates see what reached the collector. A service that could not deliver its events (wrong
+# TSESSION_COLLECTOR_URL) says so only in its own log, and the session still passes if another service recorded.
+
+# keep a run after the job is gone: export it, then open the file without the services
+tracectl export my-run -o run.ndjson
+go run ./cmd/dashboard -open run.ndjson
+
+# or let failed Go tests save theirs
+TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
+```
+
+An export holds recorded payloads, masked by field name only. Treat it like test data, not as something safe to
+share; whether it may go to CI storage is a question for your own data-handling policy. The opened session is
+named after the file.
+
+## The session is empty?
+
+1. `tracectl doctor` lists the service as connected. If not: `TSESSION_ENABLED` must be exactly `true`, and the
+   service logs `tsession: enabled ...` at start when it is.
+2. The handlers were wrapped after the SDK started (see "Instrument a service"). If not, the service still
+   shows as connected, and logs `tsession: thttp.Handler was called before the SDK started` at start.
+3. In containers, the control plane and collector accept loopback Host names only. Add the service names with
+   `--allowed-hosts`; the 403 response names the rejected host.
+4. The request carried `x-tsession-id` (the id, not the name) or a bound attribute, and was sent after the
+   session started.
+5. The service can reach the collector. `doctor` only shows that it follows the control plane; a service that
+   cannot deliver logs `tsession: cannot deliver events to the collector at ...`.
+
+A failed event is one that returned an error or an HTTP status of 500 or above; a 4xx response is recorded
+but does not count as a failure.
 
 ## How it works
 
@@ -53,52 +189,19 @@ propagates downstream, including through message queues.
 
 | Component | Role |
 |---|---|
-| **SDK** (`core/`, `sdk/`) | In-process recorder. Follows the control plane's active set, buffers events, exports batches. Never fails or blocks the host. |
-| **Wrappers** (`thttp/`, `contrib/*`) | HTTP, gRPC, SQL, Redis (go-redis v8 and v9), Mongo, DynamoDB, queues (Kafka, SQS, AMQP). Mutations are captured with before/after images and transaction outcome. |
+| **SDK** (`core/`, `sdk/`) | In-process recorder. Follows the control plane's active set, buffers events, exports batches. Fail-open: recording errors never reach the host, and the work it adds inside a session is bounded. |
+| **Wrappers** (`thttp/`, `contrib/*`) | Record calls and, per row, key or document, mutations. Before/after images where the store allows (SQL and DynamoDB by default, Redis opt-in, Mongo for findAndModify), with the transaction outcome for SQL. |
 | **Control plane** (`controlplane/`) | Session lifecycle (`CREATED → ACTIVE → DRAINING → SEALED`, plus `ABORTED`/`EXPIRED`), bindings, names, TTL. |
 | **Collector** (`collector/`) | Idempotent ingest, ordering, trace tree, entity views, storage. |
 | **Dashboard** (`dashboard/`) | Timeline, call tree, entity history with diffs. No build step, no external requests. |
 | **tracectl** (`cmd/tracectl`) | CLI for sessions and results. |
 
-Wire contract, endpoints and hardening rules: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+Every setting and its default: [`docs/CONFIG.md`](docs/CONFIG.md). Wire contract, endpoints and hardening rules:
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
-## Dashboard
+## Storage and retention
 
-Screenshots from `go run ./cmd/dashboard -demo` (synthetic data).
-
-![Sessions list](docs/images/sessions.png)
-![Timeline grouped by trigger](docs/images/timeline.png)
-![Call tree](docs/images/call-tree.png)
-![Entity mutation history](docs/images/entities.png)
-
-## Reading results
-
-The CLI and the Go client read the same collector API as the dashboard.
-
-```bash
-tracectl stop my-run --wait
-tracectl summary my-run                      # counts, mutations, failures
-tracectl events my-run --kind 'db.*' --errors
-tracectl entities my-run                     # what the session changed
-tracectl history my-run postgres orders 42   # every change to one row, with diffs
-tracectl export my-run -o run.ndjson
-
-# CI gate: exit 3 on failed events or an incomplete session
-tracectl summary my-run --fail-on-error --fail-on-incomplete
-```
-
-```go
-sess, _ := client.Start(ctx, client.Options{Name: "checkout"})
-// ... drive the system with sess.Header() or sess.Transport(nil) ...
-if _, err := sess.StopAndWait(ctx); err != nil { t.Fatal(err) }
-
-sum, _ := sess.Summary(ctx)
-if len(sum.Failures) > 0 { t.Fatalf("failures: %+v", sum.Failures) }
-```
-
-## Storage
-
-Choose the collector's backend with `--store` (or `TSESSION_COLLECTOR_STORE`):
+The collector's backend is chosen with `--store` (or `TSESSION_COLLECTOR_STORE`):
 
 | `--store` | Use it for | Settings |
 |---|---|---|
@@ -108,20 +211,29 @@ Choose the collector's backend with `--store` (or `TSESSION_COLLECTOR_STORE`):
 | `dynamodb` | AWS | `--dynamo-table`, `--dynamo-region`, `--dynamo-endpoint`, `--dynamo-create-table` |
 
 Prefer the `TSESSION_COLLECTOR_*` environment variables for connection strings; flag values show up in the
-process list. The `dynamodb` backend has only been tested against an in-process fake, not a real DynamoDB.
+process list. The `dynamodb` backend has only been tested against an in-process fake, not a real DynamoDB. `make it` and CI
+run Postgres and Redis only: the `mongo` store and `tsql` on MySQL are not exercised there, and the MySQL
+primary-key lookup has never run against a live server.
 
-Sessions are kept until removed:
-
-- `--retention 168h` (`TSESSION_COLLECTOR_RETENTION`) deletes sessions that long after their seal. Default `0`
-  keeps everything.
-- `tracectl delete <id|name>` removes one finished session.
+- **Collector events** are kept until removed. `--retention 168h` (`TSESSION_COLLECTOR_RETENTION`) deletes
+  sessions that long after their seal; the default `0` keeps everything.
+- **Sealed bundles**: the collector also writes each sealed session's events to `--bundle-dir`
+  (`TSESSION_COLLECTOR_BUNDLE_DIR`, default `./bundles` in its working directory; empty disables). These files
+  hold recorded payloads.
+- **The control plane's session list** lives in memory by default: finished sessions disappear from
+  `tracectl list` and the dashboard after `--retention` (`TSESSION_CP_RETENTION`, default 24h) and on restart,
+  even though the collector still has their events. `tracectl` can still read those by session id (not by
+  name). Run the control plane with `--store-file FILE` (`TSESSION_CP_STORE`) to keep the list.
+- `tracectl delete <id|name>` removes one finished session from both.
 
 ## Operations
 
 - `GET /metrics` on the collector and control plane (Prometheus text format). A scraper in another container
   needs its Host value in `--allowed-hosts`.
-- On SIGINT/SIGTERM the collector writes buffered events to the store before exiting.
-- Every binary accepts `-version`.
+- On SIGINT/SIGTERM the collector writes buffered events to the store, for up to 15s.
+- `tracectl kill on` stops recording in every service, for every session, at once; `tracectl kill off` resumes it
+  and `tracectl kill status` (or `tracectl doctor`) shows the state.
+- `collector`, `controlplane` and `dashboard` accept `-version`; `tracectl version` prints tracectl's.
 - `POST /v1/ingest` accepts protobuf only, so `curl` with a JSON body does not work; see
   [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
@@ -132,7 +244,8 @@ make build     # every module in the workspace
 make lint      # staticcheck
 make unit      # unit tests
 make race      # unit tests under the race detector
-make it        # integration suite (needs throwaway Postgres/Redis, see integration/scripts/it.sh)
+make it        # integration suite; starts its own Postgres and Redis from local binaries
+               # (set PGBIN / REDIS_BIN; the defaults are Homebrew paths)
 ```
 
 More in [`CONTRIBUTING.md`](CONTRIBUTING.md). Packages under `internal/` are not stable.

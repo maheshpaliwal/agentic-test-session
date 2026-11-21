@@ -24,9 +24,10 @@
   function fmtNs(ns) {
     if (typeof ns !== 'number' || !isFinite(ns)) return '-';
     const a = Math.abs(ns);
-    if (a >= 1e9) return (ns / 1e9).toFixed(2) + ' s';
-    if (a >= 1e6) return (ns / 1e6).toFixed(1) + ' ms';
-    if (a >= 1e3) return (ns / 1e3).toFixed(0) + ' µs';
+    // The thresholds sit where the smaller unit would round up to 1000, so 1 ms never reads "1000 µs".
+    if (a >= 999.95e6) return (ns / 1e9).toFixed(2) + ' s';
+    if (a >= 999.5e3) return (ns / 1e6).toFixed(1) + ' ms';
+    if (a >= 999.5) return (ns / 1e3).toFixed(0) + ' µs';
     return Math.round(ns) + ' ns';
   }
   // Relative time computed from ms values (difference of two large ns doubles loses less than a ms).
@@ -49,8 +50,12 @@
     const o = parsePK(pk);
     if (o === null || typeof o !== 'object') return String(o);
     const k = Object.keys(o).sort();
-    return k.length ? k.map((x) => x + '=' + (typeof o[x] === 'object' ? JSON.stringify(o[x]) : o[x])).join(', ') : '{}';
+    return k.length ? k.map((x) => x + '=' + (typeof o[x] === 'object' ? JSON.stringify(o[x]) : o[x])).join(', ') : '(key unknown)';
   }
+  const hasPayload = (p) => !!p && (p.inline !== undefined || !!p.blob_hash);
+  /* An update whose row could not be read back: the before image is known, the new values are not. Its diff, if an
+     older SDK sent one, lists every field as removed and must not be shown. Mirrors core.Mutation.AfterUnavailable. */
+  const afterUnavailable = (mu) => !!mu && mu.op === 'update' && hasPayload(mu.before) && !hasPayload(mu.after);
   // Canonical form used in URL paths (the collector accepts the canonical JSON string).
   function pkRaw(pk) {
     if (pk === undefined || pk === null) return '';
@@ -58,6 +63,16 @@
     if (typeof pk === 'object') { const o = {}; Object.keys(pk).sort().forEach((k) => { o[k] = pk[k]; }); return JSON.stringify(o); }
     return String(pk);
   }
+
+  // "image_skipped:deadline" is the flag image_skipped with a reason.
+  const flagBase = (f) => String(f).split(':')[0];
+  /* Event flags that say the recorded key or row image of the event's mutations is incomplete or uncertain.
+     Mirrors core.UncertainFlag (the collector counts the same flags in an entity's `uncertain`). */
+  const UNCERTAIN = { pk_unknown: 1, pk_not_unique: 1, pk_lookup_failed: 1, after_unavailable: 1, after_from_args: 1, after_failed: 1,
+    returning_partial: 1, image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1 };
+  const uncertainFlag = (f) => UNCERTAIN[flagBase(f)] === 1;
+  // How many entries of an entity history carry such a flag (entries of an older collector have no flags: 0).
+  const uncertainCount = (ms) => (ms || []).filter((m) => m && Array.isArray(m.flags) && m.flags.some(uncertainFlag)).length;
 
   const unresolvedMut = (e) => !!e && (e.mutations || []).some((m) => m.effective === null || m.effective === undefined);
   const hasUnresolved = (events) => events.some(unresolvedMut);
@@ -320,8 +335,230 @@
   // One-line "3 db.read · 5 db.write" summary of a group's counts.
   const chipsText = (g) => g.chips.map((c) => c.n + ' ' + c.label).join(' · ');
 
-  const api = { entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
-    mergeEvents, ndjson, sessionWarnings };
+  /* ---------- copy as curl ----------
+     Everything below is built from recorded traffic and ends up pasted into a terminal, so no
+     recorded byte is emitted outside quotes and nothing that could act as a curl option is passed through. */
+  const CURL_SKIP = { host: 1, 'content-length': 1, connection: 1, 'accept-encoding': 1, 'transfer-encoding': 1, traceparent: 1 };
+  const curlSkipped = (name) => { const n = name.toLowerCase(); return CURL_SKIP[n] === 1 || n.indexOf('x-tsession-') === 0; };
+  const HDR_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/; // RFC 9110 token
+  const CTL = /[\u0000-\u001f\u007f-\u009f]/;
+  const CTL_NOT_LF = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const MARK_Q = '%5BREDACTED%5D'; // the marker as the recorder writes it into a query string
+  const hex2 = (n) => (n < 16 ? '0' : '') + n.toString(16);
+  // POSIX single quotes: everything is literal; an embedded quote closes, escapes and reopens.
+  function shQuote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
+  // bash/zsh $'...': backslash, quote and every control character are escaped (C1 controls as their UTF-8 bytes).
+  // '!' is escaped too, because some shells run history expansion inside $'...'.
+  // A quote is written as \x27, never as \': a shell without $'...' (dash, POSIX sh) reads the text as one
+  // ordinary single-quoted word, and a literal quote character in it would end that word and let the rest run
+  // as a command.
+  function shAnsi(s) {
+    return "$'" + s.replace(/[\\'!\u0000-\u001f\u007f-\u009f]/g, (c) => {
+      if (c === '\\') return '\\\\';
+      if (c === "'") return '\\x27';
+      if (c === '\n') return '\\n';
+      if (c === '\r') return '\\r';
+      if (c === '\t') return '\\t';
+      const n = c.charCodeAt(0);
+      return n < 0x80 ? '\\x' + hex2(n) : '\\xc2\\x' + hex2(n);
+    }) + "'";
+  }
+  function utf8Len(s) { return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : s.length; }
+  const curlList = (names) => names.filter((n, i) => names.indexOf(n) === i).join(', ');
+  /* curl command for an HTTP event (api.in / api.out) whose request payload has a method and a URL
+     or path; null otherwise. notes says what was changed and why the command may not replay as is. */
+  function curlFor(e) {
+    if (!e || (e.kind !== 'api.in' && e.kind !== 'api.out') || !e.req) return null;
+    const p = e.req.inline;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return null; // absent, or cut by the inline cap
+    const method = p.method, url = typeof p.url === 'string' && p.url ? p.url : p.path;
+    if (typeof method !== 'string' || !/^[A-Za-z]+$/.test(method)) return null;
+    if (typeof url !== 'string' || !url || CTL.test(url)) return null;
+    const absolute = /^https?:[/][/]/i.test(url); // written without a double slash: the asset test reads one as an external URL
+    if (!absolute && url[0] !== '/') return null; // neither a URL nor a path; curl could read it as an option
+    const notes = [];
+    let first = 'curl ' + (method === 'HEAD' ? '--head' : '-X ' + method);
+    if (/[[\]{}]/.test(url)) first += ' --globoff';
+    first += ' ' + (absolute ? '' : '"$BASE_URL"') + shQuote(url);
+    const parts = [first];
+    if (!absolute) notes.push('The recorded URL has no scheme or host: set BASE_URL first, for example export BASE_URL=http://127.0.0.1:8080.');
+
+    const skipped = [], dropped = [], redactedH = [];
+    let hasType = false;
+    const hs = p.headers && typeof p.headers === 'object' && !Array.isArray(p.headers) ? p.headers : {};
+    Object.keys(hs).forEach((name) => {
+      const label = JSON.stringify(name.length > 40 ? name.slice(0, 40) + '…' : name);
+      if (!HDR_NAME.test(name)) { dropped.push(label); return; }
+      if (curlSkipped(name)) { skipped.push(name); return; }
+      (Array.isArray(hs[name]) ? hs[name] : [hs[name]]).forEach((v) => {
+        if (typeof v !== 'string' || CTL.test(v)) { dropped.push(label); return; }
+        if (v.indexOf(MARK) >= 0) redactedH.push(name);
+        if (name.toLowerCase() === 'content-type') hasType = true;
+        parts.push('-H ' + shQuote(v === '' ? name + ';' : name + ': ' + v)); // "Name;" is how curl sends an empty header
+      });
+    });
+    if (skipped.length) notes.push('Left out headers that curl sets itself or that would attribute the replay to the recorded session: ' + curlList(skipped) + '.');
+    if (dropped.length) notes.push('Dropped headers whose name or value cannot be passed to a shell safely: ' + curlList(dropped) + '.');
+
+    let bodyRedacted = false;
+    const body = p.body;
+    if (body !== undefined && body !== null && body !== '') {
+      const text = typeof body === 'string' ? body : JSON.stringify(body);
+      if (text.indexOf('\u0000') >= 0) notes.push('The body contains a NUL byte, which no shell argument can carry: it was left out.');
+      else {
+        const ansi = CTL_NOT_LF.test(text);
+        parts.push('--data-raw ' + (ansi ? shAnsi(text) : shQuote(text)));
+        if (ansi) notes.push("The body has control characters, so it is quoted as $'...': run the command in bash or zsh.");
+        if (!hasType) notes.push('No Content-Type header was recorded: curl will send application/x-www-form-urlencoded.');
+        bodyRedacted = text.indexOf(MARK) >= 0;
+        const flagged = !!e.req.truncated || (e.flags || []).indexOf('truncated') >= 0;
+        if (typeof body === 'string' && (body === '<binary>' || /^<[^<>]{1,80}, \d+ bytes>$/.test(body))) notes.push('Not replayable as is: the body was not recorded, only the placeholder ' + body + '.');
+        else if (typeof body === 'string' && flagged && typeof p.body_size === 'number' && p.body_size > utf8Len(body)) notes.push('Not replayable as is: the body is truncated (' + utf8Len(body) + ' of ' + p.body_size + ' bytes recorded).');
+        else if (e.req.truncated) notes.push('Not replayable as is: the body is truncated.');
+      }
+    }
+    const urlRedacted = url.indexOf(MARK) >= 0 || url.indexOf(MARK_Q) >= 0;
+    if (redactedH.length) notes.push('Not replayable as is: redacted headers still hold ' + MARK + ' (' + curlList(redactedH) + '). Put the real values back.');
+    if (urlRedacted) notes.push('Not replayable as is: the URL holds redacted values (' + MARK + ').');
+    if (bodyRedacted) notes.push('Not replayable as is: the body holds redacted values (' + MARK + ').');
+    if (e.req.redacted && !redactedH.length && !urlRedacted && !bodyRedacted) notes.push('The recorder masked sensitive values in this request: the replay may differ from the original.');
+    return { command: parts.join(' \\\n  '), notes: notes };
+  }
+
+  // connectedText says which services are connected to the control plane, for
+  // the "no events yet" state: an empty session looks the same whether the
+  // service is not connected or simply got no traffic. subs is the reply of
+  // GET /v1/subscribers; anything that is not an array (endpoint missing,
+  // request failed) gives '' so nothing is claimed.
+  function connectedText(subs) {
+    if (!Array.isArray(subs)) return '';
+    if (!subs.length) return 'No instrumented service is connected to the control plane, so nothing can be recorded. Start the service with TSESSION_ENABLED=true and point its TSESSION_CONTROLPLANE_URL at the control plane.';
+    const counts = new Map();
+    let unnamed = 0;
+    for (const s of subs) {
+      const name = s && typeof s.service === 'string' ? s.service : '';
+      if (!name) unnamed++;
+      else counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const names = Array.from(counts.keys()).sort();
+    const shown = names.slice(0, 8).map((n) => (counts.get(n) > 1 ? n + ' (' + counts.get(n) + ')' : n));
+    if (names.length > shown.length) shown.push((names.length - shown.length) + ' more');
+    if (unnamed) shown.push(unnamed + ' unnamed');
+    return 'Connected to the control plane: ' + shown.join(', ') + '.';
+  }
+
+  /* ---------- the session list, loaded a page at a time ----------
+     The control plane lists sessions newest first by creation time, then id (docs/PROTOCOL.md).
+     The page keeps the sessions it has loaded in that order and merges what it fetches into them. */
+  const PAGE_DEFAULT = 200, PAGE_MAX = 1000;
+  // Page size from the #/?page=N parameter; anything else gives the default.
+  function pageSize(v) {
+    const n = /^\d+$/.test(String(v || '')) ? Number(v) : 0;
+    return n >= 1 && n <= PAGE_MAX ? n : PAGE_DEFAULT;
+  }
+  // Query string of a list request. before is the cursor of the previous page.
+  function listQuery(o) {
+    const q = ['limit=' + o.limit];
+    if (o.state) q.push('state=' + encodeURIComponent(o.state));
+    if (o.before) q.push('before=' + encodeURIComponent(o.before));
+    return '?' + q.join('&');
+  }
+  // A count sent in a response header: a non-negative integer, or null when absent or malformed.
+  function headerCount(v) { return typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null; }
+  /* The collector's event counts are asked for by session id (GET /v1/sessions?ids=, docs/PROTOCOL.md): what a
+     refresh costs the collector follows the sessions shown, not everything it stores.
+     idChunks: the distinct ids, split into the requests they take. One request carries at most PAGE_MAX ids,
+     the collector's limit and the largest page, so a page is always one request. */
+  function idChunks(ids, size) {
+    const n = size >= 1 ? Math.min(size, PAGE_MAX) : PAGE_MAX, uniq = Array.from(new Set(ids)), out = [];
+    for (let i = 0; i < uniq.length; i += n) out.push(uniq.slice(i, i + n));
+    return out;
+  }
+  // Query string of a count request for ids (one chunk of idChunks).
+  function idsQuery(ids) { return '?ids=' + ids.map(encodeURIComponent).join(','); }
+  /* The counts (a Map of id -> {event_count, service_count}) after the answer to a request for the ids in asked.
+     list is the answer's array, or null when the request failed. unanswered is its X-Tsession-Unanswered header:
+     how many of the ids the collector could not look up (null when the header is absent).
+     An asked id in the answer takes the answer's numbers. One that is missing has no events when the collector
+     answered for every id; when it did not (or the request failed) the id keeps what it had and is returned in
+     missing, to be asked again. Sessions in the answer that were not asked for are ignored: a collector older
+     than the ids parameter answers with every session it holds. */
+  function mergeCounts(counts, asked, list, unanswered) {
+    const out = new Map(counts), missing = [];
+    if (!Array.isArray(list)) return { counts: out, missing: Array.from(new Set(asked)) };
+    const got = new Map();
+    list.forEach((x) => { if (x && typeof x.id === 'string') got.set(x.id, x); });
+    new Set(asked).forEach((id) => {
+      const x = got.get(id);
+      if (x) out.set(id, x.service_count === undefined ? { event_count: x.event_count } : { event_count: x.event_count, service_count: x.service_count });
+      else if (unanswered > 0) missing.push(id);
+      else out.delete(id);
+    });
+    return { counts: out, missing: missing };
+  }
+  // created_at as [milliseconds, nanoseconds below the second]. The fraction is compared by itself:
+  // timestamps come with zero to nine fractional digits, which neither Date nor a string compare orders.
+  function createdParts(v) {
+    const m = /^(.*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(String(v || ''));
+    const ms = m ? Date.parse(m[1] + (m[3] || 'Z')) : NaN;
+    return [isNaN(ms) ? -Infinity : ms, m && m[2] ? Number((m[2] + '00000000').slice(0, 9)) : 0];
+  }
+  // Sort order of the list: newest first, the id deciding between sessions created at the same instant.
+  function sessionOrder(a, b) {
+    const x = createdParts(a.created_at), y = createdParts(b.created_at);
+    if (x[0] !== y[0]) return x[0] < y[0] ? 1 : -1;
+    if (x[1] !== y[1]) return x[1] < y[1] ? 1 : -1;
+    const i = String(a.id), j = String(b.id);
+    return i === j ? 0 : i < j ? 1 : -1;
+  }
+  // The loaded rows after a refresh of the first page. page is the newest sessions as the server
+  // has them now and more says whether it has older ones. Rows as new as the page are replaced by
+  // it (one that is not on it any more was deleted or left the filter); rows older than the page
+  // were loaded with "Load more" and stay as they are. older is how many of those there are.
+  // When the page ends above the newest loaded row (more sessions arrived than a page holds, as
+  // after the tab was in the background), sessions in between may not be loaded: the list would
+  // have a hole that "Load more" never fills, so it starts over from the page.
+  function mergeFirstPage(rows, page, more) {
+    const fresh = page.slice().sort(sessionOrder);
+    if (!more) return { rows: fresh, older: 0 };
+    if (!fresh.length) return { rows: rows || [], older: (rows || []).length };
+    const last = fresh[fresh.length - 1];
+    if (!rows || !rows.length || sessionOrder(last, rows[0]) < 0) return { rows: fresh, older: 0 };
+    const older = rows.filter((s) => sessionOrder(last, s) < 0);
+    return { rows: fresh.concat(older), older: older.length };
+  }
+  // The loaded rows with more sessions merged in by id (a later copy replaces an earlier one).
+  function mergeRows(rows, more) {
+    const byId = new Map();
+    (rows || []).concat(more).forEach((s) => byId.set(s.id, s));
+    return Array.from(byId.values()).sort(sessionOrder);
+  }
+  // The line under the page title. o: loaded (sessions loaded), shown (of those, passing the search),
+  // total (matching the state filter on the server; null if unknown), more (older ones not loaded),
+  // state (the state filter, '' for none). Search only ever looks at loaded sessions, and says so
+  // whenever that is not all of them.
+  // below (optional) is how many loaded rows sit under the first page: the periodic refresh covers
+  // the first page and running sessions only, and the line says so while such rows are shown.
+  function listSummary(o) {
+    const plural = (n) => n + ' session' + (n === 1 ? '' : 's');
+    const kind = o.state ? o.state + ' ' : '';
+    const stale = o.below > 0 ? ' Finished sessions below the newest page are not refreshed; reload the page to update them.' : '';
+    if (!o.more) {
+      if (o.shown === o.loaded) return (o.state ? plural(o.loaded).replace(' ', ' ' + kind) : plural(o.loaded)) + (stale ? '.' + stale : '');
+      return o.shown + ' of ' + o.loaded + ' ' + kind + 'sessions' + (stale ? '.' + stale : '');
+    }
+    const scope = 'the newest ' + o.loaded + (o.total !== null && o.total >= o.loaded ? ' of ' + o.total : '') + ' ' + kind + 'sessions';
+    if (o.shown === o.loaded) return 'Showing ' + scope + '. Search looks only at the sessions that are loaded.' + stale;
+    return o.shown + ' match among ' + scope + '. Search looks only at the sessions that are loaded: load more to search older ones.' + stale;
+  }
+  // The notice shown when the control plane left sessions out of a list because it could not read them.
+  function unreadableText(n) {
+    return n + ' archived session' + (n === 1 ? '' : 's') + ' could not be read by the control plane and ' + (n === 1 ? 'is' : 'are') +
+      ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
+  }
+
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
+    mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
 })(typeof window !== 'undefined' ? window : globalThis);

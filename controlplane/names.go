@@ -70,12 +70,23 @@ func bindingMatches(b Binding, ref string) bool {
 	return b.Name == ref || bindingDisplayName(b) == ref
 }
 
+// maxTemplateBytes is how much of a name template is expanded; see
+// ExpandNameTemplate.
+const maxTemplateBytes = 16 << 10
+
 // ExpandNameTemplate expands {bind}, {bind.<name>}, {initiated_by}, {time}
 // (HH:MM:SS UTC) and {date} (YYYY-MM-DD). Unknown placeholders are left
 // as-is; a missing binding expands to "?". Expansion is single-pass.
 func ExpandNameTemplate(name string, bs []Binding, initiatedBy string, now time.Time) string {
 	if !strings.Contains(name, "{") {
 		return name
+	}
+	// A name is cut to MaxNameRunes after expansion, and a placeholder that
+	// expands to a single character is at most about 80 bytes long, so only
+	// the start of a very long template can reach the result. Expanding just
+	// that keeps the cost of a hostile template small and constant.
+	if len(name) > maxTemplateBytes {
+		name = strings.ToValidUTF8(name[:maxTemplateBytes], "")
 	}
 	now = now.UTC()
 	return placeholderRE.ReplaceAllStringFunc(name, func(m string) string {
@@ -139,9 +150,9 @@ func resolveName(name string, bs []Binding, initiatedBy string, now time.Time) (
 func (m *Manager) Rename(id, name string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return Session{}, ErrNotFound
+	s, err := m.stored(id)
+	if err != nil {
+		return Session{}, err
 	}
 	n := SanitizeName(ExpandNameTemplate(name, s.Bindings, SanitizeName(s.InitiatedBy), time.Now()))
 	if n == "" {

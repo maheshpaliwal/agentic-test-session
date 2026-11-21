@@ -153,12 +153,18 @@ type Sample struct {
 }
 
 type gaugeFunc struct {
-	desc   string
-	labels []string
-	fn     func() []Sample
+	desc    string
+	labels  []string
+	fn      func() []Sample
+	counter bool // exposed as a counter: fn never goes down
 }
 
-func (g *gaugeFunc) kind() string { return "gauge" }
+func (g *gaugeFunc) kind() string {
+	if g.counter {
+		return "counter"
+	}
+	return "gauge"
+}
 func (g *gaugeFunc) help() string { return g.desc }
 func (g *gaugeFunc) write(w io.Writer, name string) {
 	samples := g.fn()
@@ -177,6 +183,13 @@ func (g *gaugeFunc) write(w io.Writer, name string) {
 // must be safe for concurrent use and should be cheap.
 func (r *Registry) GaugeFunc(name, help string, fn func() float64) {
 	r.register(name, &gaugeFunc{desc: help, fn: func() []Sample { return []Sample{{Value: fn()}} }})
+}
+
+// CounterFunc registers a counter whose value is read on every scrape, for a
+// count that is kept elsewhere. fn must be safe for concurrent use, cheap, and
+// must never return less than it did before.
+func (r *Registry) CounterFunc(name, help string, fn func() float64) {
+	r.register(name, &gaugeFunc{desc: help, counter: true, fn: func() []Sample { return []Sample{{Value: fn()}} }})
 }
 
 // GaugeVecFunc registers a labelled gauge family computed on every scrape.

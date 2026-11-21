@@ -8,6 +8,19 @@ assert.strictEqual(U.pkLabel('{"b":2,"a":"x"}'), 'a=x, b=2');
 assert.strictEqual(U.pkLabel({ id: 7 }), 'id=7');
 assert.strictEqual(U.pkLabel('42'), '42');
 assert.strictEqual(U.pkLabel('{bad'), '{bad');
+assert.strictEqual(U.pkLabel('{}'), '(key unknown)');
+assert.strictEqual(U.pkLabel(undefined), '');
+
+// An update with a before image and no after image has unknown new values; anything else is diffed as usual.
+const img = { inline: { sku: 'widget', qty: 10 } };
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: img }), true);
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: img, diff: [{ field: 'qty', old: 10 }] }), true); // as sent by an older SDK
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: { blob_hash: 'abc' }, after: {} }), true);
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: img, after: img }), false);
+assert.strictEqual(U.afterUnavailable({ op: 'update', after: img }), false);
+assert.strictEqual(U.afterUnavailable({ op: 'update' }), false);
+assert.strictEqual(U.afterUnavailable({ op: 'delete', before: img }), false);
+assert.strictEqual(U.afterUnavailable(undefined), false);
 assert.strictEqual(U.pkRaw({ b: 1, a: 2 }), '{"a":2,"b":1}');
 assert.strictEqual(U.pkRaw('{"id":1}'), '{"id":1}');
 
@@ -228,5 +241,294 @@ assert.strictEqual(U.entryText(null), '');
 assert.strictEqual(U.bindingText({ source: 'header', name: 'x-user-id', value: 'act_bind_9' }), 'x-user-id: act_bind_9');
 const hay = U.sessionHay({ id: 'ts_1', name: 'N', bindings: [{ source: 'jwt_claim', name: 'sub', value: 'u_123' }] }, en);
 assert.ok(hay.indexOf('u_123') >= 0 && hay.indexOf('drop-zone') >= 0 && hay.indexOf('jwt_claim') >= 0);
+
+// ---------- copy as curl ----------
+const httpEv = (kind, inline, extra) => Object.assign({ kind: kind, req: { inline: inline } }, extra || {});
+const SKIP_NOTE = 'Left out headers that curl sets itself or that would attribute the replay to the recorded session: ';
+const BASE_NOTE = 'The recorded URL has no scheme or host: set BASE_URL first, for example export BASE_URL=http://127.0.0.1:8080.';
+const TYPE_NOTE = 'No Content-Type header was recorded: curl will send application/x-www-form-urlencoded.';
+
+// plain GET (outbound, absolute URL, Go-style header arrays); computed and propagation headers are left out
+const cGet = U.curlFor(httpEv('api.out', { method: 'GET', url: 'https://shipping.example.invalid/v1/labels?id=7',
+  headers: { Accept: ['application/json'], 'Accept-Encoding': ['gzip'], Host: ['shipping.example.invalid'], Traceparent: ['00-aa-bb-01'], 'User-Agent': ['Go-http-client/1.1'], 'X-Tsession-Id': ['ts_1'], 'X-Tsession-Hlc': ['12'] } }));
+assert.strictEqual(cGet.command, [
+  "curl -X GET 'https://shipping.example.invalid/v1/labels?id=7' \\",
+  "  -H 'Accept: application/json' \\",
+  "  -H 'User-Agent: Go-http-client/1.1'"].join('\n'));
+assert.deepStrictEqual(cGet.notes, [SKIP_NOTE + 'Accept-Encoding, Host, Traceparent, X-Tsession-Id, X-Tsession-Hlc.']);
+
+// POST with a JSON body; repeated header values get one -H each
+const cPost = U.curlFor(httpEv('api.out', { method: 'POST', url: 'https://shipping.example.invalid/v1/labels',
+  headers: { 'Content-Type': ['application/json'], 'Content-Length': ['41'], 'X-Tag': ['a', 'b'] }, body: { order_id: 'ord_1001', service: 'ground' }, body_size: 41 }));
+assert.strictEqual(cPost.command, [
+  "curl -X POST 'https://shipping.example.invalid/v1/labels' \\",
+  "  -H 'Content-Type: application/json' \\",
+  "  -H 'X-Tag: a' \\",
+  "  -H 'X-Tag: b' \\",
+  "  --data-raw '{\"order_id\":\"ord_1001\",\"service\":\"ground\"}'"].join('\n'));
+assert.deepStrictEqual(cPost.notes, [SKIP_NOTE + 'Content-Length.']);
+
+// inbound: path-only URL behind a $BASE_URL placeholder; redacted header and body values stay in place (demo data shape)
+const cIn = U.curlFor({ kind: 'api.in', flags: ['redacted'], req: { redacted: true, inline: { method: 'POST', path: '/orders?expand=items',
+  headers: { authorization: '[REDACTED]', 'content-type': 'application/json', 'x-api-key': '[REDACTED]' },
+  body: { customer_id: 'cus_synth_001', payment: { token: '[REDACTED]' } } } } });
+assert.strictEqual(cIn.command, [
+  "curl -X POST \"$BASE_URL\"'/orders?expand=items' \\",
+  "  -H 'authorization: [REDACTED]' \\",
+  "  -H 'content-type: application/json' \\",
+  "  -H 'x-api-key: [REDACTED]' \\",
+  "  --data-raw '{\"customer_id\":\"cus_synth_001\",\"payment\":{\"token\":\"[REDACTED]\"}}'"].join('\n'));
+assert.deepStrictEqual(cIn.notes, [BASE_NOTE,
+  'Not replayable as is: redacted headers still hold [REDACTED] (authorization, x-api-key). Put the real values back.',
+  'Not replayable as is: the body holds redacted values ([REDACTED]).']);
+// a redacted query value, and glob characters in the URL
+const cQ = U.curlFor(httpEv('api.in', { method: 'HEAD', url: '/items?token=%5BREDACTED%5D&ids[]=1' }));
+assert.strictEqual(cQ.command, "curl --head --globoff \"$BASE_URL\"'/items?token=%5BREDACTED%5D&ids[]=1'");
+assert.deepStrictEqual(cQ.notes, [BASE_NOTE, 'Not replayable as is: the URL holds redacted values ([REDACTED]).']);
+
+// hostile input: nothing recorded may leave its quotes
+const hostile = httpEv('api.out', { method: 'PUT', url: 'https://h.example.invalid/a\'b?q=$(id)&r=`id`;x="y"',
+  headers: {
+    'X-Note': ['it\'s "q" `id` $(id); echo $HOME \\ !'],
+    'X-Quote\'Name': ['v'],
+    'X-Empty': [''],
+    'X-Split': ['a\r\nInjected: 1'],
+    'X-Tab': ['a\tb'],
+    'X Bad': ['v'],
+    '@/etc/passwd': ['v'],
+    'X-Colon:': ['v'],
+    'X-Num': [5],
+  }, body: 'a\'b\n$(reboot) `id` "$HOME"' });
+const cHost = U.curlFor(hostile);
+assert.strictEqual(cHost.command, [
+  "curl -X PUT 'https://h.example.invalid/a'\\''b?q=$(id)&r=`id`;x=\"y\"' \\",
+  "  -H 'X-Note: it'\\''s \"q\" `id` $(id); echo $HOME \\ !' \\",
+  "  -H 'X-Quote'\\''Name: v' \\",
+  "  -H 'X-Empty;' \\",
+  "  --data-raw 'a'\\''b\n$(reboot) `id` \"$HOME\"'"].join('\n'));
+assert.deepStrictEqual(cHost.notes, [
+  'Dropped headers whose name or value cannot be passed to a shell safely: "X-Split", "X-Tab", "X Bad", "@/etc/passwd", "X-Colon:", "X-Num".',
+  TYPE_NOTE]);
+// control characters other than a newline in the body: ANSI-C quoting with every special character escaped
+const cAnsi = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', headers: { 'Content-Type': 'text/plain' }, body: 'it\'s\r\n\u001b[201~ \\ ! \u0085\tend' }));
+assert.strictEqual(cAnsi.command, [
+  "curl -X POST 'http://h.example.invalid/' \\",
+  "  -H 'Content-Type: text/plain' \\",
+  "  --data-raw $'it\\x27s\\r\\n\\x1b[201~ \\\\ \\x21 \\xc2\\x85\\tend'"].join('\n'));
+assert.deepStrictEqual(cAnsi.notes, ["The body has control characters, so it is quoted as $'...': run the command in bash or zsh."]);
+const cNul = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', body: 'a\u0000b' }));
+assert.strictEqual(cNul.command, "curl -X POST 'http://h.example.invalid/'");
+assert.deepStrictEqual(cNul.notes, ['The body contains a NUL byte, which no shell argument can carry: it was left out.']);
+// what a real shell makes of the commands: curl is replaced by a function that prints its arguments
+(function shellRoundTrip() {
+  const cp = require('child_process');
+  const argv = (cmd) => {
+    const r = cp.spawnSync('bash', ['-c', 'curl() { printf \'%s\\0\' "$@"; }\n' + cmd], { env: { PATH: process.env.PATH, BASE_URL: 'http://127.0.0.1:1', HOME: '/nonexistent' }, encoding: 'utf8' });
+    if (r.error || r.status !== 0) return null;
+    return r.stdout.split('\u0000').slice(0, -1);
+  };
+  if (!argv("curl 'x'")) { console.log('bash not available: shell round trip skipped'); return; }
+  assert.deepStrictEqual(argv(cHost.command), ['-X', 'PUT', hostile.req.inline.url,
+    '-H', 'X-Note: it\'s "q" `id` $(id); echo $HOME \\ !', '-H', 'X-Quote\'Name: v', '-H', 'X-Empty;', '--data-raw', hostile.req.inline.body]);
+  assert.deepStrictEqual(argv(cAnsi.command), ['-X', 'POST', 'http://h.example.invalid/', '-H', 'Content-Type: text/plain', '--data-raw', 'it\'s\r\n\u001b[201~ \\ ! \u0085\tend']);
+  assert.deepStrictEqual(argv(cIn.command).slice(0, 3), ['-X', 'POST', 'http://127.0.0.1:1/orders?expand=items']);
+})();
+// A shell without $'...' (dash, POSIX sh) must still see exactly one curl invocation: a body with a control
+// character and a quote once ended the quoted word there and ran the rest as a command.
+(function posixShellRunsOneCommand() {
+  const cp = require('child_process');
+  const evil = U.curlFor(httpEv('api.out', { method: 'POST', url: 'http://h.example.invalid/', headers: { 'Content-Type': 'text/plain' }, body: '\u0001\' ; echo INJECTED #' }));
+  assert.ok(evil.command.indexOf("\\'") < 0, 'a backslash-quote must never be emitted: ' + evil.command);
+  for (const sh of ['/bin/dash', '/bin/sh']) {
+    const r = cp.spawnSync(sh, ['-c', 'curl() { echo CURL; }\n' + evil.command], { env: { PATH: process.env.PATH, HOME: '/nonexistent' }, encoding: 'utf8' });
+    if (r.error) { console.log(sh + ' not available: skipped'); continue; }
+    assert.strictEqual(r.stdout, 'CURL\n', sh + ' ran something other than one curl: ' + JSON.stringify(r.stdout));
+  }
+})();
+
+// truncated body: the recorded part stays, the note says how much is missing
+const cTrunc = U.curlFor(httpEv('api.in', { method: 'POST', url: '/bulk', headers: { 'Content-Type': ['application/json'] }, body: '{"items":[{"sku":"A"', body_size: 5000 }, { flags: ['truncated'] }));
+assert.strictEqual(cTrunc.command, [
+  "curl -X POST \"$BASE_URL\"'/bulk' \\",
+  "  -H 'Content-Type: application/json' \\",
+  "  --data-raw '{\"items\":[{\"sku\":\"A\"'"].join('\n'));
+assert.deepStrictEqual(cTrunc.notes, [BASE_NOTE, 'Not replayable as is: the body is truncated (20 of 5000 bytes recorded).']);
+assert.deepStrictEqual(U.curlFor({ kind: 'api.in', req: { truncated: true, inline: { method: 'POST', url: '/bulk', headers: { 'Content-Type': ['text/plain'] }, body: 'abc' } } }).notes,
+  [BASE_NOTE, 'Not replayable as is: the body is truncated.']);
+// a body the recorder replaced by a placeholder
+assert.deepStrictEqual(U.curlFor(httpEv('api.in', { method: 'POST', url: '/upload', headers: { 'Content-Type': ['multipart/form-data; boundary=x'] }, body: '<multipart/form-data, 2048 bytes>', body_size: 2048 })).notes,
+  [BASE_NOTE, 'Not replayable as is: the body was not recorded, only the placeholder <multipart/form-data, 2048 bytes>.']);
+
+// not an HTTP request event, or no usable request payload
+assert.strictEqual(U.curlFor(null), null);
+assert.strictEqual(U.curlFor({ kind: 'db.write', req: { inline: { method: 'GET', url: '/x' } } }), null);
+assert.strictEqual(U.curlFor({ kind: 'queue.publish', req: { inline: { order_id: 'ord_1001' } } }), null);
+assert.strictEqual(U.curlFor({ kind: 'api.in' }), null);
+assert.strictEqual(U.curlFor(httpEv('api.out', { order_id: 'ord_1001', service: 'ground' })), null); // no method or URL recorded
+assert.strictEqual(U.curlFor({ kind: 'api.in', req: { truncated: true, inline: '{"method":"POST","url":"/orders","hea' } }), null); // whole payload cut
+assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET -o /tmp/x', url: '/x' })), null);
+assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET', url: '-o /tmp/x' })), null);
+assert.strictEqual(U.curlFor(httpEv('api.in', { method: 'GET', url: '/x\nrm -rf ~' })), null);
+
+// connectedText: which services are connected, for the empty-session state
+assert.strictEqual(U.connectedText(null), '');
+assert.strictEqual(U.connectedText({ error: 'not found' }), '');
+assert.ok(U.connectedText([]).startsWith('No instrumented service is connected'));
+assert.strictEqual(U.connectedText([{ service: 'worker' }, { service: 'api', instance: 'a1' }, { service: 'api', instance: 'a2' }, {}]),
+  'Connected to the control plane: api (2), worker, 1 unnamed.');
+assert.strictEqual(U.connectedText(Array.from({ length: 10 }, (_, i) => ({ service: 's' + i }))),
+  'Connected to the control plane: s0, s1, s2, s3, s4, s5, s6, s7, 2 more.');
+
+// fmtNs: a value that rounds up to 1000 of a unit is shown in the next unit
+assert.strictEqual(U.fmtNs(1e6), '1.0 ms');
+assert.strictEqual(U.fmtNs(999600), '1.0 ms');
+assert.strictEqual(U.fmtNs(999400), '999 µs');
+assert.strictEqual(U.fmtNs(999.96e6), '1.00 s');
+assert.strictEqual(U.fmtNs(999.6), '1 µs');
+assert.strictEqual(U.fmtNs(500), '500 ns');
+
+// ---------- the session list, a page at a time ----------
+assert.strictEqual(U.pageSize(null), 200);
+assert.strictEqual(U.pageSize('2'), 2);
+assert.strictEqual(U.pageSize('1000'), 1000);
+for (const bad of ['0', '1001', '-1', '2.5', 'x', '', '1e2']) assert.strictEqual(U.pageSize(bad), 200);
+assert.strictEqual(U.listQuery({ limit: 200 }), '?limit=200');
+assert.strictEqual(U.listQuery({ limit: 2, state: 'ACTIVE', before: 'a+b/c=' }), '?limit=2&state=ACTIVE&before=a%2Bb%2Fc%3D');
+assert.strictEqual(U.headerCount('12'), 12);
+assert.strictEqual(U.headerCount('0'), 0);
+for (const bad of [null, undefined, '', '-1', '1.5', 'x', '12abc']) assert.strictEqual(U.headerCount(bad), null);
+
+// event counts are asked for by id: one request per page, never more ids than the collector takes
+assert.deepStrictEqual(U.idChunks([], 200), []);
+assert.deepStrictEqual(U.idChunks(['a', 'b', 'a', 'c'], 200), [['a', 'b', 'c']]);
+assert.deepStrictEqual(U.idChunks(['a', 'b', 'c'], 2), [['a', 'b'], ['c']]);
+{
+  const many = Array.from({ length: 2500 }, (_, i) => 'ts_' + i);
+  for (const size of [1000, 5000, 0, undefined]) assert.deepStrictEqual(U.idChunks(many, size).map((c) => c.length), [1000, 1000, 500]);
+  assert.strictEqual(U.idChunks(many.slice(0, 200), 200).length, 1);
+  // a page of 200 ids of 30 characters is about 6 KB of query
+  const page = Array.from({ length: 200 }, (_, i) => 'ts_' + String(i).padStart(27, '0'));
+  const q = U.idsQuery(page);
+  assert.ok(q.length > 6000 && q.length < 6400, String(q.length));
+  assert.strictEqual(q.split(',').length, 200);
+}
+assert.strictEqual(U.idsQuery(['ts_a', 'ts_b.c-d']), '?ids=ts_a,ts_b.c-d');
+assert.strictEqual(U.idsQuery(['a b', 'c,d']), '?ids=a%20b,c%2Cd');
+{
+  const had = new Map([['a', { event_count: 1 }], ['b', { event_count: 2 }], ['z', { event_count: 9 }]]);
+  // answered for every id: the answer's numbers; an id that is missing has no events; ids not asked keep theirs
+  let m = U.mergeCounts(had, ['a', 'b', 'c'], [{ id: 'a', event_count: 5, sealed: true }, { id: 'c', event_count: 0, service_count: 2 }], 0);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 5 }], ['z', { event_count: 9 }], ['c', { event_count: 0, service_count: 2 }]]);
+  assert.deepStrictEqual(m.missing, []);
+  assert.strictEqual(had.get('a').event_count, 1, 'the input is not modified');
+  // a collector without the ids parameter: no header, every session it holds; the extra ones are ignored
+  m = U.mergeCounts(had, ['a', 'b'], [{ id: 'x', event_count: 7 }, { id: 'a', event_count: 3 }, { id: 'y', event_count: 8 }], null);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 3 }], ['z', { event_count: 9 }]]);
+  assert.deepStrictEqual(m.missing, []);
+  // some ids could not be looked up: a missing id keeps what it had and is asked again
+  m = U.mergeCounts(had, ['a', 'b', 'c'], [{ id: 'a', event_count: 4 }], 1);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 4 }], ['b', { event_count: 2 }], ['z', { event_count: 9 }]]);
+  assert.deepStrictEqual(m.missing, ['b', 'c']);
+  // the request failed: nothing changes, everything is asked again
+  for (const bad of [null, undefined, 'bad gateway', { error: 'x' }]) {
+    m = U.mergeCounts(had, ['a', 'c', 'a'], bad, null);
+    assert.deepStrictEqual(Array.from(m.counts), Array.from(had));
+    assert.deepStrictEqual(m.missing, ['a', 'c']);
+  }
+  // junk in the answer is skipped
+  m = U.mergeCounts(new Map(), ['a'], [null, 3, { event_count: 1 }, { id: 'a', event_count: 2 }], 0);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 2 }]]);
+}
+
+// order: newest first; fractions of a second of any length; the id decides a tie
+const row = (id, at, extra) => Object.assign({ id: id, created_at: at }, extra);
+const ordered = [
+  row('ts_c', '2026-07-08T09:00:01Z'),
+  row('ts_b', '2026-07-08T09:00:00.5Z'),
+  row('ts_a', '2026-07-08T09:00:00.25Z'),
+  row('ts_z', '2026-07-08T09:00:00.123456789Z'),
+  row('ts_y', '2026-07-08T09:00:00.123456788Z'),
+  row('ts_x', '2026-07-08T09:00:00Z'),
+  row('ts_w', '2026-07-08T09:00:00Z'),
+  row('ts_v', '2026-07-08T10:59:59+02:00'), // 08:59:59Z
+  row('ts_u', 'not a time'),
+];
+assert.deepStrictEqual(ordered.slice().reverse().sort(U.sessionOrder).map((s) => s.id), ordered.map((s) => s.id));
+assert.deepStrictEqual([ordered[5], ordered[0], ordered[8], ordered[3], ordered[6], ordered[1], ordered[7], ordered[4], ordered[2]].sort(U.sessionOrder).map((s) => s.id), ordered.map((s) => s.id));
+assert.strictEqual(U.sessionOrder(ordered[5], row('ts_x', '2026-07-08T09:00:00.000Z')), 0);
+
+{
+  const at = (i) => '2026-07-08T09:00:' + String(i).padStart(2, '0') + 'Z';
+  const mk = (i, extra) => row('ts_' + String(i).padStart(2, '0'), at(i), extra);
+  const ids = (rows) => rows.map((s) => s.id).join(' ');
+  // first load
+  let m = U.mergeFirstPage(null, [mk(8), mk(9), mk(7)], true);
+  assert.strictEqual(ids(m.rows), 'ts_09 ts_08 ts_07');
+  assert.strictEqual(m.older, 0);
+  // "Load more" appends the next page; a row that comes again replaces its earlier copy
+  let rows = U.mergeRows(m.rows, [mk(6), mk(5), mk(4), mk(7, { name: 'again' })]);
+  assert.strictEqual(ids(rows), 'ts_09 ts_08 ts_07 ts_06 ts_05 ts_04');
+  assert.strictEqual(rows[2].name, 'again');
+  // refresh: a new session arrived, 08 was deleted, 09 changed; the rows loaded below the page stay
+  m = U.mergeFirstPage(rows, [mk(10), mk(9, { state: 'SEALED' }), mk(7)], true);
+  assert.strictEqual(ids(m.rows), 'ts_10 ts_09 ts_07 ts_06 ts_05 ts_04');
+  assert.strictEqual(m.rows[1].state, 'SEALED');
+  assert.strictEqual(m.older, 3);
+  // refresh whose page reaches the newest loaded row: nothing can be missing in between
+  m = U.mergeFirstPage(rows, [mk(11), mk(10), mk(9)], true);
+  assert.strictEqual(ids(m.rows), 'ts_11 ts_10 ts_09 ts_08 ts_07 ts_06 ts_05 ts_04');
+  assert.strictEqual(m.older, 5);
+  // refresh whose page ends above the newest loaded row: sessions in between may be missing
+  // (here ts_10), so the list starts over from the page instead of keeping a hole
+  m = U.mergeFirstPage(rows, [mk(13), mk(12), mk(11)], true);
+  assert.strictEqual(ids(m.rows), 'ts_13 ts_12 ts_11');
+  assert.strictEqual(m.older, 0);
+  // refresh that returns everything there is: exactly that
+  m = U.mergeFirstPage(rows, [mk(9), mk(4)], false);
+  assert.strictEqual(ids(m.rows), 'ts_09 ts_04');
+  assert.strictEqual(m.older, 0);
+  assert.deepStrictEqual(U.mergeFirstPage(rows, [], false), { rows: [], older: 0 });
+  // an empty page with more behind it (sessions the server could not read) changes nothing
+  assert.strictEqual(U.mergeFirstPage(rows, [], true).rows, rows);
+  // sessions created in the same instant are split by id, like the server does
+  const same = [row('ts_b', at(1)), row('ts_a', at(1))];
+  m = U.mergeFirstPage([row('ts_c', at(1)), same[0], same[1], row('ts_0', at(1))], [row('ts_c', at(1)), same[0]], true);
+  assert.strictEqual(ids(m.rows), 'ts_c ts_b ts_a ts_0');
+  assert.strictEqual(m.older, 2);
+}
+
+assert.strictEqual(U.listSummary({ loaded: 1, shown: 1, total: 1, more: false, state: '' }), '1 session');
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, state: '' }), '5 sessions');
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 2, total: 5, more: false, state: '' }), '2 of 5 sessions');
+assert.strictEqual(U.listSummary({ loaded: 3, shown: 3, total: 3, more: false, state: 'SEALED' }), '3 SEALED sessions');
+assert.strictEqual(U.listSummary({ loaded: 1, shown: 1, total: 1, more: false, state: 'ACTIVE' }), '1 ACTIVE session');
+assert.strictEqual(U.listSummary({ loaded: 3, shown: 1, total: 3, more: false, state: 'SEALED' }), '1 of 3 SEALED sessions');
+assert.strictEqual(U.listSummary({ loaded: 200, shown: 200, total: 12345, more: true, state: '' }),
+  'Showing the newest 200 of 12345 sessions. Search looks only at the sessions that are loaded.');
+assert.strictEqual(U.listSummary({ loaded: 400, shown: 400, total: null, more: true, state: 'SEALED' }),
+  'Showing the newest 400 SEALED sessions. Search looks only at the sessions that are loaded.');
+assert.strictEqual(U.listSummary({ loaded: 200, shown: 3, total: 12345, more: true, state: '' }),
+  '3 match among the newest 200 of 12345 sessions. Search looks only at the sessions that are loaded: load more to search older ones.');
+assert.ok(U.unreadableText(1).startsWith('1 archived session could not be read by the control plane and is missing'));
+assert.ok(U.unreadableText(30).startsWith('30 archived sessions could not be read by the control plane and are missing'));
+
+// listSummary: rows below the first page are not refreshed, and the line says so
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, state: '' }), '5 sessions');
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, state: '', below: 3 }),
+  '5 sessions. Finished sessions below the newest page are not refreshed; reload the page to update them.');
+assert.ok(U.listSummary({ loaded: 400, shown: 400, total: 900, more: true, state: '', below: 200 }).endsWith('reload the page to update them.'));
+assert.ok(!/not refreshed/.test(U.listSummary({ loaded: 200, shown: 200, total: 900, more: true, state: '', below: 0 })));
+
+// Entity history: which event flags mean an uncertain key or row image (mirrors core.UncertainFlag).
+for (const f of ['pk_unknown', 'pk_not_unique', 'pk_lookup_failed', 'after_unavailable', 'after_from_args', 'after_failed', 'returning_partial',
+  'image_skipped', 'image_skipped:deadline', 'image_timeout', 'image_failed', 'image_truncated', 'diff_truncated']) assert.strictEqual(U.uncertainFlag(f), true, f);
+for (const f of ['redacted', 'tx_unresolved', 'orphaned', 'returning_appended', '', ':pk_unknown', 'PK_UNKNOWN', 'constructor', '__proto__', 'toString', undefined, null, 7])
+  assert.strictEqual(U.uncertainFlag(f), false, String(f));
+assert.strictEqual(U.flagBase('image_skipped:deadline'), 'image_skipped');
+assert.strictEqual(U.flagBase('orphaned'), 'orphaned');
+assert.strictEqual(U.uncertainCount([{ flags: ['pk_not_unique', 'after_unavailable'] }, { flags: ['redacted'] }, { flags: ['image_skipped:serializable'] }, {}]), 2);
+// Entries of a collector that predates the field, and anything malformed, count as not uncertain.
+assert.strictEqual(U.uncertainCount([{ seq: 1 }, { flags: null }, { flags: 'pk_unknown' }, null, undefined]), 0);
+assert.strictEqual(U.uncertainCount(undefined), 0);
 
 console.log('util ok');

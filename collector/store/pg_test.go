@@ -155,3 +155,29 @@ func dropTestSchema(schema string) {
 	defer pg.Close()
 	pg.pool.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`) //nolint:errcheck
 }
+
+// Several collectors starting at once on a database that does not have the
+// schema yet must all come up.
+func TestPGConcurrentFirstStart(t *testing.T) {
+	dsn := pgDSN(t)
+	for round := range 5 {
+		schema := fmt.Sprintf("tsession_first_%d", round)
+		dropTestSchema(schema)
+		errs := make(chan error, 8)
+		for range cap(errs) {
+			go func() {
+				pg, err := OpenPGConfig(context.Background(), PGConfig{DSN: dsn, Schema: schema})
+				if err == nil {
+					pg.Close()
+				}
+				errs <- err
+			}()
+		}
+		for range cap(errs) {
+			if err := <-errs; err != nil {
+				t.Errorf("round %d: %v", round, err)
+			}
+		}
+		dropTestSchema(schema)
+	}
+}

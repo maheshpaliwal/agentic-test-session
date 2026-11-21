@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -56,6 +58,8 @@ CREATE TABLE IF NOT EXISTS entity_mutations (
   PRIMARY KEY (session_id, store, entity, pk, seq, ord)
 );
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS quarantined int NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS sessions_sealed_at ON sessions (sealed_at) WHERE sealed;
+CREATE INDEX IF NOT EXISTS sessions_unsealed ON sessions (id COLLATE "C") WHERE NOT sealed;
 `
 
 // DefaultPGSchema is the schema trace tables live in unless configured otherwise.
@@ -106,7 +110,7 @@ func OpenPGConfig(ctx context.Context, cfg PGConfig) (*PG, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = bc.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+qs)
+	err = createSchema(ctx, bc, qs)
 	bc.Close(ctx) //nolint:errcheck
 	if err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -125,6 +129,25 @@ func OpenPGConfig(ctx context.Context, cfg PGConfig) (*PG, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &PG{pool: pool}, nil
+}
+
+// createSchema creates the schema under the migration's advisory lock:
+// CREATE SCHEMA IF NOT EXISTS is not safe against itself, and of several
+// collectors starting together on a new database all but one would fail
+// with a unique violation.
+func createSchema(ctx context.Context, c *pgx.Conn, quoted string) error {
+	tx, err := c.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('tsession.migrate'))`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+quoted); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // migrate runs the DDL under an advisory lock so concurrent collectors
@@ -311,6 +334,44 @@ func (p *PG) ListSessions(ctx context.Context) ([]SessionInfo, error) {
 	for rows.Next() {
 		var si SessionInfo
 		if err := rows.Scan(&si.ID, &si.EventCount, &si.FirstNs, &si.LastNs, &si.Sealed); err != nil {
+			return nil, err
+		}
+		out = append(out, si)
+	}
+	slicex.SortBy(out, func(s SessionInfo) string { return s.ID })
+	return out, rows.Err()
+}
+
+// ListExpired implements ExpiredLister. Sealed sessions are found through the
+// sessions_sealed_at index; the events read are those of the sessions that
+// were never sealed (sessions_unsealed), not of every session. Timestamps are
+// stored to the microsecond, so the seal comparison is inclusive and may
+// return a session sealed within a microsecond of cutoff.
+func (p *PG) ListExpired(ctx context.Context, cutoff time.Time, after string, limit int) ([]SessionInfo, error) {
+	if limit <= 0 {
+		limit = math.MaxInt32
+	}
+	// COLLATE "C" is byte order, whatever the database's collation: the
+	// order the caller pages in.
+	rows, err := p.pool.Query(ctx, `SELECT u.id, u.sealed, u.last_ns FROM (
+		(SELECT s.id, true AS sealed, 0::bigint AS last_ns FROM sessions s
+			WHERE s.sealed AND s.sealed_at <= $2 AND s.id COLLATE "C" > $1
+			AND EXISTS (SELECT 1 FROM session_events e WHERE e.session_id = s.id)
+			ORDER BY s.id COLLATE "C" LIMIT $4)
+		UNION ALL
+		(SELECT s.id, false, l.last_ns FROM sessions s
+			CROSS JOIN LATERAL (SELECT max(e.end_ns) AS last_ns FROM session_events e WHERE e.session_id = s.id) l
+			WHERE NOT s.sealed AND s.id COLLATE "C" > $1 AND l.last_ns > 0 AND l.last_ns < $3
+			ORDER BY s.id COLLATE "C" LIMIT $4)
+		) u ORDER BY u.id COLLATE "C" LIMIT $4`, after, cutoff, cutoff.UnixNano(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionInfo
+	for rows.Next() {
+		var si SessionInfo
+		if err := rows.Scan(&si.ID, &si.Sealed, &si.LastNs); err != nil {
 			return nil, err
 		}
 		out = append(out, si)

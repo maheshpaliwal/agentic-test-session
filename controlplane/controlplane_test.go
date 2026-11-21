@@ -370,6 +370,7 @@ func TestSSEStream(t *testing.T) {
 func TestFileStorePersistenceAndResume(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, err := NewFileStore(path)
+	closeLater(t, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,6 +383,7 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 
 	// "restart": reload and expect the in-flight drain to resume and seal.
 	fs2, err := NewFileStore(path)
+	closeLater(t, fs2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +393,9 @@ func TestFileStorePersistenceAndResume(t *testing.T) {
 	f.set(0, time.Time{}, 0)
 	m2 := newMgr(t, f, func(c *Config) { c.Store = fs2 })
 	waitState(t, m2, s.ID, StateSealed)
+	m2.Close() // the store shows SEALED before the file is rewritten: wait for the drain to return
 	fs3, _ := NewFileStore(path)
+	closeLater(t, fs3)
 	if got, _ := fs3.Get(s.ID); got.State != StateSealed {
 		t.Fatalf("persisted %+v", got)
 	}

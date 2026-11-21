@@ -20,30 +20,78 @@ const usage = `usage: tracectl [--cp URL] [--collector URL] <command> [flags]
 
 session lifecycle (control plane):
   (--name templates: {bind} {bind.<name>} {initiated_by} {time} {date}; with no --name the server auto-names)
-  start [--name N] [--mode header|exclusive] [--ttl S] [--quiesce S] [--max-drain S]
+  start [--name N] [--mode header|exclusive] [--ttl S] [--quiesce S] [--max-drain S] [--id-only]
         [--bind source:name=value]...   source header|jwt|jwt_claim|cookie|query (repeatable;
         not with --mode exclusive). jwt reads an UNVERIFIED token: spoofable, test envs only.
-  rename <id|name> <new name>   (works on sealed sessions; templates allowed)
-  stop <id|name> [--wait] [--timeout D]
-  abort <id|name>               end now, without draining or sealing
+  rename [--short] <id|name> <new name>   (works on sealed sessions; templates allowed)
+  stop <id|name> [--wait] [--timeout D] [--short]
+  abort <id|name> [--short]     end now, without draining or sealing
   delete <id|name>              remove a finished session and everything recorded for it
-  status <id|name>
-  list [--state STATE]
-  wait <id|name> [--timeout D]
+  status <id|name> [--short]
+  list [--state STATE] [--limit N]   all sessions, oldest first; with --limit the newest N
+  wait <id|name> [--timeout D] [--short]
+  (rename, stop, abort and wait print the session as JSON, status adds "name:" and "bindings:" lines
+   after it; with --short all five print one line for scripts: "<id> <STATE>", followed by
+   " incomplete" when the session is)
   watch-docker [--docker BIN]   start/stop sessions from containers labelled tsession.id=<name>
                                 (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)
 
+record a command (control plane and collector):
+  run [start's session flags, except --id-only] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
+      [--report FILE [--format markdown|junit]] [--timeout D] -- <command> [args...]
+                                start a session, run the command with the session id in $TSESSION_ID, stop
+                                the session, wait for the seal (at most --timeout, default 2m) and print the
+                                summary. The command is not run through a shell. Its stdin, stdout and stderr
+                                pass through; tracectl prints to stderr only and writes the report to FILE.
+                                The session is stopped and sealed also when the command fails.
+                                The command runs in a process group of its own (it cannot read from the
+                                terminal) and needs a --ttl longer than its runtime (default 1h).
+                                SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on to the command's group, a
+                                third one kills it; a second signal, once the
+                                command has exited, stops waiting for the seal.
+                                exit status, first that applies: the command's own if it failed (128+n if
+                                signal n killed it; 127 not found and 126 not runnable, no session started);
+                                1 the session could not be stopped, sealed or read; 3 a --fail-on-* check
+                                failed; 0. Bad usage of run exits 2.
+
 session results (collector):
-  summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete]
+  summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
                                 counts, failures and flags; the --fail-on flags exit 3 for CI gates
   events <id|name> [--kind K[,K]] [--service S] [--errors] [--limit N] [--json]
                                 K is a kind (db.write) or a prefix ending in * (db.*)
-  entities <id|name> [--json]   rows/documents/keys the session changed
+  entities <id|name> [--json]   rows/documents/keys the session changed; "N uncertain" counts the
+                                changes whose key or row image is incomplete (history shows the flags)
   history <id|name> <store> <entity> <pk> [--json]
-                                every change to one entity, with diffs and tx outcome
+  history <id|name> <store> <entity> --unknown-key [--json]
+                                every change to one entity, with diffs, tx outcome and the flags of
+                                the event (pk_not_unique, after_unavailable, ...: the recorded key or
+                                row image is incomplete or uncertain).
+                                <pk> is a key that entities lists, typed as the JSON it prints
+                                ('{"order_id":7,"sku":"a"}', keys in any order), as order_id=7,sku=a,
+                                or for a one-column key as the bare value (42). A value holding a
+                                comma or = needs the JSON form; put -- before a pk that starts with -.
+                                --unknown-key (or '' or '{}' as <pk>) reads the changes recorded
+                                without a key.
+  trace <id|name> [--errors] [--depth N] [--json]
+                                the call tree; ~> marks async work a span triggered
+  show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
+  report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
+                                a CI report: Markdown for a job summary (default) or JUnit XML, with
+                                each failure traced to its root request; --fail-on flags as in summary
+  diff <id|name a> <id|name b> [--json] [--fail-on-diff] [--ignore-counts]
+                                what differs in b (candidate) from a (baseline): failures, mutations,
+                                events, first divergence; --fail-on-diff exits 3 when anything differs
 
+  kill on|off|status            the global kill switch: while on, no service records anything, for
+                                any session (kept in memory: a control plane restart turns it off)
+  doctor [--json] [--require-services N]
+                                check that the control plane and collector answer and list the
+                                services connected to the control plane
   version                       print the tracectl version
+
+exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
+             3 a --fail-on-* check failed; run: see above
 
 --cp defaults to $TSESSION_CONTROLPLANE_URL or http://127.0.0.1:7070
 --collector defaults to $TSESSION_COLLECTOR_URL or http://127.0.0.1:7071`
@@ -60,6 +108,7 @@ func (e checkError) Error() string { return e.msg }
 // cli carries what every command needs.
 type cli struct {
 	opts   client.Options
+	stdin  io.Reader // read by the command of run only
 	stdout io.Writer
 	stderr io.Writer
 }
@@ -68,6 +117,7 @@ type cli struct {
 // arguments after the command name.
 var commands = map[string]func(*cli, context.Context, []string) error{
 	"start":        (*cli).start,
+	"run":          (*cli).runCommand,
 	"rename":       (*cli).rename,
 	"stop":         (*cli).stop,
 	"abort":        (*cli).abort,
@@ -80,7 +130,13 @@ var commands = map[string]func(*cli, context.Context, []string) error{
 	"events":       (*cli).events,
 	"entities":     (*cli).entities,
 	"history":      (*cli).history,
+	"trace":        (*cli).trace,
+	"show":         (*cli).show,
 	"export":       (*cli).export,
+	"diff":         (*cli).diff,
+	"report":       (*cli).report,
+	"kill":         (*cli).kill,
+	"doctor":       (*cli).doctor,
 	"version":      (*cli).version,
 }
 
@@ -115,14 +171,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	c := &cli{opts: client.Options{BaseURL: *cp, CollectorURL: *col, InitiatedBy: "api"}, stdout: stdout, stderr: stderr}
+	c := &cli{opts: client.Options{BaseURL: *cp, CollectorURL: *col, InitiatedBy: "api"}, stdin: os.Stdin, stdout: stdout, stderr: stderr}
 	err := cmd(c, ctx, rest)
 	var ce checkError
+	var ee exitError
 	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, flag.ErrHelp):
 		return 0
+	case errors.As(err, &ee):
+		if ee.msg != "" {
+			fmt.Fprintln(stderr, "tracectl:", ee.msg)
+		}
+		return ee.code
 	case errors.As(err, &ce):
 		fmt.Fprintln(stderr, "tracectl:", err)
 		return exitCheckFailed

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -74,9 +75,15 @@ type Entity struct {
 	Entity        string `json:"entity"`
 	PK            string `json:"pk"`
 	MutationCount int    `json:"mutation_count"`
+	// Uncertain counts the mutations whose event carries a flag saying the
+	// recorded row image is incomplete or uncertain (core.UncertainFlag);
+	// omitted when there are none.
+	Uncertain int `json:"uncertain,omitempty"`
 }
 
-// EntityMutation is one entry of an entity's history.
+// EntityMutation is one entry of an entity's history. Flags are the flags of
+// the event that made the change (they describe the event, so every mutation
+// of a multi-row statement carries the same ones).
 type EntityMutation struct {
 	Seq       uint64             `json:"seq"`
 	SpanID    string             `json:"span_id"`
@@ -90,6 +97,7 @@ type EntityMutation struct {
 	Diff      []core.FieldChange `json:"diff,omitempty"`
 	Source    string             `json:"source,omitempty"`
 	Effective *bool              `json:"effective,omitempty"`
+	Flags     []string           `json:"flags,omitempty"`
 }
 
 // EntityHistory is the history response.
@@ -116,7 +124,13 @@ func pkMatches(pk map[string]any, want string) bool {
 	}
 	if len(pk) == 1 {
 		for _, v := range pk {
-			return fmt.Sprint(v) == want
+			if fmt.Sprint(v) == want {
+				return true
+			}
+			// A number decoded from JSON is a float64, which prints as 1e+06
+			// from a million on: accept the plain digits as well.
+			f, ok := v.(float64)
+			return ok && strconv.FormatFloat(f, 'f', -1, 64) == want
 		}
 	}
 	return false
@@ -126,15 +140,22 @@ func pkMatches(pk map[string]any, want string) bool {
 // sorted by store, entity and primary key.
 func ListEntities(evs []core.Event) []Entity {
 	type k struct{ s, e, p string }
-	cnt := map[k]int{}
+	type n struct{ all, uncertain int }
+	cnt := map[k]n{}
 	for i := range evs {
+		uncertain := 0
+		if core.HasUncertainFlag(evs[i].Flags) {
+			uncertain = 1
+		}
 		for _, m := range evs[i].Mutations {
-			cnt[k{m.Store, m.Entity, pkString(m.PK)}]++
+			key := k{m.Store, m.Entity, pkString(m.PK)}
+			c := cnt[key]
+			cnt[key] = n{c.all + 1, c.uncertain + uncertain}
 		}
 	}
 	out := make([]Entity, 0, len(cnt))
-	for key, n := range cnt {
-		out = append(out, Entity{key.s, key.e, key.p, n})
+	for key, c := range cnt {
+		out = append(out, Entity{key.s, key.e, key.p, c.all, c.uncertain})
 	}
 	slices.SortFunc(out, func(a, b Entity) int {
 		return cmp.Or(cmp.Compare(a.Store, b.Store), cmp.Compare(a.Entity, b.Entity), cmp.Compare(a.PK, b.PK))
@@ -156,6 +177,7 @@ func History(evs []core.Event, store, entity, pk string) EntityHistory {
 			h.Mutations = append(h.Mutations, EntityMutation{
 				Seq: e.Seq, SpanID: e.SpanID, Service: e.Service, Kind: e.Kind, TxID: e.TxID, EndNs: e.EndNs,
 				Op: m.Op, Before: m.Before, After: m.After, Diff: m.Diff, Source: m.Source, Effective: m.Effective,
+				Flags: e.Flags,
 			})
 		}
 	}
@@ -261,6 +283,34 @@ func (c *Collector) summary(ctx context.Context, id string, base Summary) (Summa
 	return s, nil
 }
 
+// extend returns the session's stored events up to at least head, reusing
+// the events of a cached view when the store only grew since (or only the
+// seal changed). Anything else, including a store that went backwards, reads
+// the session from the start.
+func (c *Collector) extend(ctx context.Context, id string, old *viewEntry, head uint64) ([]core.Event, error) {
+	if old != nil && old.head > 0 && head >= old.head {
+		if head == old.head {
+			return old.raw, nil
+		}
+		// Read from the cached head itself: if the store no longer holds the
+		// same event there, the session was replaced (deleted and recorded
+		// again) and the cached events must not be spliced onto it.
+		more, err := c.st.Events(ctx, id, old.head, 0)
+		if err != nil {
+			return nil, err
+		}
+		if last := &old.raw[len(old.raw)-1]; len(more) > 1 && sameEvent(&more[0], last) && more[1].Seq == old.head+1 {
+			// The full slice expression forces a copy: old.raw stays as it is.
+			return append(old.raw[:len(old.raw):len(old.raw)], more[1:]...), nil
+		}
+	}
+	return c.st.Events(ctx, id, 0, 0)
+}
+
+func sameEvent(a, b *core.Event) bool {
+	return a.Seq == b.Seq && a.Instance == b.Instance && a.LocalSeq == b.LocalSeq && a.SpanID == b.SpanID
+}
+
 // maxViews bounds the per-session view cache.
 const maxViews = 16
 
@@ -269,7 +319,8 @@ const maxViews = 16
 type viewEntry struct {
 	head     uint64
 	sealedNs int64
-	evs      []core.Event
+	raw      []core.Event // as stored; never modified, so a newer entry can extend it
+	evs      []core.Event // raw with transaction outcomes and orphans resolved
 	used     uint64
 
 	mu    sync.Mutex
@@ -308,8 +359,10 @@ func (v *viewEntry) getSummary(id string) Summary {
 }
 
 // viewOf returns the session's resolved events, recomputing only when a new
-// Seq was stored or the seal changed since the cached copy. Reads never touch
-// the sequencer.
+// Seq was stored or the seal changed since the cached copy. A cached copy is
+// extended with the events stored since, instead of reading the session
+// again, so polling a live session costs one read of each event in total.
+// Reads never touch the sequencer.
 func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	head, err := c.st.Head(ctx, id)
 	if err != nil {
@@ -324,15 +377,16 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 		sealedNs = si.SealedAt.UnixNano() | 1
 	}
 	c.vmu.Lock()
-	if e := c.views[id]; e != nil && e.head == head && e.sealedNs == sealedNs {
+	old, gen := c.views[id], c.vgen
+	if old != nil && old.head == head && old.sealedNs == sealedNs {
 		c.vtick++
-		e.used = c.vtick
+		old.used = c.vtick
 		c.vmu.Unlock()
-		return e, nil
+		return old, nil
 	}
 	c.vmu.Unlock()
 
-	evs, err := c.st.Events(ctx, id, 0, 0)
+	evs, err := c.extend(ctx, id, old, head)
 	if err != nil {
 		return nil, err
 	}
@@ -340,13 +394,19 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	if si != nil {
 		orph = setOf(si.Orphaned)
 	}
-	e := &viewEntry{head: head, sealedNs: sealedNs, evs: resolve(evs, nil, si != nil, orph)}
+	e := &viewEntry{head: head, sealedNs: sealedNs, raw: evs, evs: resolve(evs, nil, si != nil, orph)}
 	if n := len(e.evs); n > 0 {
 		e.head = e.evs[n-1].Seq // never label the entry newer than its content
 	} else {
 		e.head = 0
 	}
 	c.vmu.Lock()
+	if c.vgen != gen {
+		// A session was deleted while this view was being built; it may be
+		// this one, so the view is returned but not cached.
+		c.vmu.Unlock()
+		return e, nil
+	}
 	c.vtick++
 	e.used = c.vtick
 	c.views[id] = e

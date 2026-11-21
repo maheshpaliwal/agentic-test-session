@@ -78,8 +78,20 @@ type Session struct {
 	// Reason is "ttl" when the session was ended by TTL expiry (empty otherwise).
 	Reason string `json:"reason,omitempty"`
 	// SealError is set when the collector seal could not be completed after
-	// bounded retries; the session is then SEALED with Incomplete=true.
+	// bounded retries; the session is then SEALED with Incomplete=true. It is
+	// cleared if a background retry (see SealPending) seals the session later.
 	SealError string `json:"seal_error,omitempty"`
+	// SealPending marks a finished session whose seal failed past
+	// Config.SealRetryBudget and is still being retried in the background.
+	// The session is terminal meanwhile (SDKs have stopped recording). The
+	// marker is cleared when a retry succeeds (SealError is cleared and
+	// BundleURI/Incomplete are filled in), or when Config.SealPendingBudget
+	// runs out (SealError stays).
+	SealPending bool `json:"seal_pending,omitempty"`
+	// DrainTimedOut is true when the drain ended at max_drain_seconds instead
+	// of on a quiet collector. It is kept so that a seal that succeeds late
+	// still reports the session Incomplete.
+	DrainTimedOut bool `json:"drain_timed_out,omitempty"`
 	// Bindings attribute requests carrying a matching attribute to this
 	// session (see docs/BINDING.md). Live only while the session is ACTIVE.
 	Bindings []Binding `json:"bindings,omitempty"`
@@ -92,6 +104,10 @@ type ActiveSet struct {
 	Kill      bool     `json:"kill"`
 	// Bindings lists the bindings of ACTIVE sessions only (not DRAINING).
 	Bindings []ActiveBinding `json:"bindings,omitempty"`
+	// Generation counts the changes to the active set since the control plane
+	// started. Compare it with Subscriber.Generation to see which followers
+	// have been sent this version.
+	Generation uint64 `json:"generation"`
 }
 
 // Errors returned by Manager; the HTTP layer maps them to status codes.
@@ -103,6 +119,10 @@ var (
 	// ErrCollector wraps a failed call to the collector made on behalf of an
 	// API request (HTTP 502).
 	ErrCollector = errors.New("collector request failed")
+	// ErrStore means the store has the session but could not read it (see
+	// CheckedStore). Unlike ErrNotFound it says nothing about the session:
+	// the request can be repeated (HTTP 500).
+	ErrStore = errors.New("session store read failed")
 )
 
 // Store persists sessions. Implementations must be goroutine-safe.
@@ -115,11 +135,39 @@ type Store interface {
 	Delete(id string) error
 }
 
-// Evictor is an optional Store capability: drop a terminal session from the
-// hot in-memory set. Stores with durable backing (FileStore) keep it readable
-// via Get/List; MemStore simply forgets it.
+// Evictor is an optional Store capability: drop terminal sessions from the
+// hot in-memory set, all ids of one call as one batch (a retention sweep
+// makes one call). Ids the store does not hold are ignored. Stores with
+// durable backing (FileStore) keep the sessions readable via Get/List;
+// MemStore simply forgets them.
 type Evictor interface {
-	Evict(id string)
+	Evict(ids ...string)
+}
+
+// SelectiveLister is an optional Store capability, for stores where listing
+// every session is expensive (FileStore reads its archive for it). Both
+// methods return a subset of List, in the same order.
+type SelectiveLister interface {
+	// ListState returns the sessions in the given state.
+	ListState(State) []Session
+	// ListPending returns the sessions a Manager has work for when it starts:
+	// those that were never evicted, and of the evicted ones those that are
+	// not terminal or have SealPending set.
+	ListPending() []Session
+}
+
+// CheckedStore is an optional Store capability, for stores whose reads can
+// fail (FileStore reads archived sessions from a file). Get and List have no
+// error result: in such a store a session that cannot be read is missing from
+// them, which a caller cannot tell from a session that does not exist. A
+// Manager uses GetErr wherever that difference decides what it does.
+type CheckedStore interface {
+	// GetErr is Get with a third result: a non-nil error means the store has
+	// a session with this id and could not read it.
+	GetErr(id string) (Session, bool, error)
+	// ReadErrors is the number of sessions the store has failed to read since
+	// it was opened, through Get, GetErr and the List methods.
+	ReadErrors() int64
 }
 
 // MemStore is the default in-memory Store.
@@ -145,10 +193,13 @@ func (s *MemStore) Delete(id string) error {
 	return nil
 }
 
-// Evict forgets a session (in-memory stores have no archive).
-func (s *MemStore) Evict(id string) {
+// Evict implements Evictor by forgetting the sessions (in-memory stores have
+// no archive).
+func (s *MemStore) Evict(ids ...string) {
 	s.mu.Lock()
-	delete(s.m, id)
+	for _, id := range ids {
+		delete(s.m, id)
+	}
 	s.mu.Unlock()
 }
 

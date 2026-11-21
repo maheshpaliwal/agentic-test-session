@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -19,8 +21,8 @@ import (
 func (c *cli) summary(ctx context.Context, args []string) error {
 	fs := c.flags("summary")
 	asJSON := fs.Bool("json", false, "print the raw summary as JSON")
-	failErr := fs.Bool("fail-on-error", false, "exit 3 when the session recorded failed events")
-	failInc := fs.Bool("fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work)")
+	var g gates
+	g.register(fs)
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -34,18 +36,50 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	} else {
 		printSummary(c.stdout, s.Info(), sum)
 	}
+	return g.check(s.Info(), sum, len(sum.Failures))
+}
+
+// gates are the --fail-on-* checks of summary, report and run.
+type gates struct{ onError, onIncomplete, onEmpty bool }
+
+func (g *gates) register(fs *flag.FlagSet) {
+	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
+	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work, a failed seal)")
+	fs.BoolVar(&g.onEmpty, "fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
+}
+
+// check returns a checkError naming every gate the session fails; failures
+// is the number of failed events the caller found.
+func (g *gates) check(info client.Info, sum client.Summary, failures int) error {
 	var failed []string
-	if *failErr && len(sum.Failures) > 0 {
-		failed = append(failed, fmt.Sprintf("%d failed event(s)", len(sum.Failures)))
+	if g.onError && failures > 0 {
+		failed = append(failed, fmt.Sprintf("%d failed event(s)", failures))
 	}
-	if *failInc && sum.Incomplete {
+	// The control plane knows about a failed seal and a drain that timed out;
+	// the collector's summary does not.
+	switch {
+	case !g.onIncomplete:
+	case sum.Incomplete || info.Incomplete || info.SealError != "":
 		failed = append(failed, "session is incomplete")
+	case info.State == "":
+		// Read through the collector only: whether the seal failed or the
+		// drain timed out is not known, so the gate cannot pass.
+		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+	}
+	if g.onEmpty && sum.EventCount == 0 {
+		failed = append(failed, emptySession)
 	}
 	if len(failed) > 0 {
 		return checkError{msg: "check failed: " + strings.Join(failed, "; ")}
 	}
 	return nil
 }
+
+// emptySession is the --fail-on-empty verdict. A session with no events
+// passes every other check, although it usually means that nothing recorded:
+// the service was not connected, could not reach the collector, or the
+// requests did not carry the session.
+const emptySession = "session recorded no events (see tracectl doctor)"
 
 func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	state := info.State
@@ -203,25 +237,60 @@ func (c *cli) entities(ctx context.Context, args []string) error {
 		printJSON(c.stdout, ents)
 		return nil
 	}
-	for _, e := range ents {
-		fmt.Fprintf(c.stdout, "%-10s %-28s %-30s %d mutation(s)\n", e.Store, clip(e.Entity, 28), clip(e.PK, 30), e.MutationCount)
-	}
-	fmt.Fprintf(c.stdout, "%d entities\n", len(ents))
+	printEntities(c.stdout, ents)
 	return nil
 }
+
+func printEntities(w io.Writer, ents []client.Entity) {
+	for _, e := range ents {
+		pk := e.PK
+		if pk == "{}" || pk == "" { // "{}" is still the value to pass to "history"
+			pk = "{} " + unknownKey
+		}
+		line := fmt.Sprintf("%-10s %-28s %-30s %d mutation(s)", e.Store, clip(e.Entity, 28), clip(pk, 30), e.MutationCount)
+		if e.Uncertain > 0 { // the key or row image of that many is incomplete: "history" shows the flags
+			line += fmt.Sprintf(", %d uncertain", e.Uncertain)
+		}
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintf(w, "%d entities\n", len(ents))
+}
+
+const historyUsage = "usage: tracectl history <id|name> <store> <entity> <pk>   (or --unknown-key in place of <pk>)\n" +
+	"  <pk> as `tracectl entities` lists it ('{\"id\":42}'), as id=42 (a composite key: a=1,b=2) or, for a one-column key, 42"
 
 func (c *cli) history(ctx context.Context, args []string) error {
 	fs := c.flags("history")
 	asJSON := fs.Bool("json", false, "print as JSON")
-	pos, err := parseArgs(fs, args, 4, "<id|name> <store> <entity> <pk>")
+	unknown := fs.Bool("unknown-key", false, "the changes recorded without a key, in place of <pk> (the same as '' or '{}')")
+	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
+	}
+	switch {
+	case len(pos) == 3 && *unknown:
+		pos = append(pos, noKey)
+	case len(pos) == 4 && *unknown && strings.TrimSpace(pos[3]) != "" && pos[3] != noKey:
+		return errors.New("--unknown-key stands in place of <pk>: pass one or the other\n" + historyUsage)
+	case len(pos) != 4:
+		return errors.New(historyUsage)
 	}
 	s, err := resolve(ctx, c.opts, pos[0])
 	if err != nil {
 		return err
 	}
-	h, err := s.History(ctx, pos[1], pos[2], pos[3])
+	// The key is looked up among the session's entities: what was typed may be
+	// a looser spelling than the collector matches, and an entity that is not
+	// there is an error, not an empty history.
+	ents, err := s.Entities(ctx)
+	if err != nil {
+		return err
+	}
+	key, err := resolveKey(ents, pos[1], pos[2], pos[3])
+	if err != nil {
+		return fmt.Errorf("%w\n  `tracectl entities %s` lists what the session changed", err, pos[0])
+	}
+	h, err := s.History(ctx, pos[1], pos[2], key)
 	if err != nil {
 		return err
 	}
@@ -229,7 +298,16 @@ func (c *cli) history(ctx context.Context, args []string) error {
 		printJSON(c.stdout, h)
 		return nil
 	}
-	fmt.Fprintf(c.stdout, "%s/%s %s: %d mutation(s)\n", h.Store, h.Entity, h.PK, len(h.Mutations))
+	printHistory(c.stdout, h)
+	return nil
+}
+
+func printHistory(w io.Writer, h client.EntityHistory) {
+	head := fmt.Sprintf("%s/%s %s: %d mutation(s)", h.Store, h.Entity, h.PK, len(h.Mutations))
+	if n := uncertainCount(h.Mutations); n > 0 {
+		head += fmt.Sprintf(", %d uncertain (see the flags)", n)
+	}
+	fmt.Fprintln(w, head)
 	for _, m := range h.Mutations {
 		outcome := "tx open"
 		switch {
@@ -239,12 +317,19 @@ func (c *cli) history(ctx context.Context, args []string) error {
 		default:
 			outcome = "ROLLED BACK"
 		}
-		fmt.Fprintf(c.stdout, "#%-5d %-8s %-12s %-12s %s\n", m.Seq, m.Op, outcome, clip(m.Service, 12), m.Kind)
+		fmt.Fprintf(w, "#%-5d %-8s %-12s %-12s %s\n", m.Seq, m.Op, outcome, clip(m.Service, 12), m.Kind)
+		if len(m.Flags) > 0 { // of the event, as "show" prints them
+			fmt.Fprintf(w, "       flags: %s\n", clip(strings.Join(m.Flags, ", "), 200))
+		}
+		if m.AfterUnavailable() {
+			// No diff, even one an older SDK sent: it lists every field as removed.
+			fmt.Fprintf(w, "       %s\n", afterUnavailable)
+			continue
+		}
 		for _, d := range m.Diff {
-			fmt.Fprintf(c.stdout, "       %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
+			fmt.Fprintf(w, "       %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
 		}
 	}
-	return nil
 }
 
 // compact renders a diff value on one line.
@@ -266,10 +351,6 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	evs, err := s.Events(ctx)
-	if err != nil {
-		return err
-	}
 	w := c.stdout
 	if *path != "" {
 		f, ferr := os.OpenFile(*path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // events may hold sensitive payloads
@@ -283,18 +364,12 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 		}()
 		w = f
 	}
-	out := bufio.NewWriter(w)
-	enc := json.NewEncoder(out)
-	for i := range evs {
-		if err := enc.Encode(&evs[i]); err != nil {
-			return err
-		}
-	}
-	if err := out.Flush(); err != nil {
+	n, err := s.Export(ctx, w)
+	if err != nil {
 		return err
 	}
 	if *path != "" {
-		fmt.Fprintf(c.stderr, "wrote %d events to %s\n", len(evs), *path)
+		fmt.Fprintf(c.stderr, "wrote %d events to %s\n", n, *path)
 	}
 	return nil
 }

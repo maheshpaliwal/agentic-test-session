@@ -113,3 +113,17 @@ func TestConcurrentUse(t *testing.T) {
 		t.Fatalf("vec lost increments: %d", sum)
 	}
 }
+
+func TestCounterFunc(t *testing.T) {
+	r := New()
+	n := 0.0
+	r.CounterFunc("x_read_errors_total", "Reads that failed.", func() float64 { n += 2; return n })
+	var b strings.Builder
+	if _, err := r.WriteTo(&b); err != nil {
+		t.Fatal(err)
+	}
+	want := "# HELP x_read_errors_total Reads that failed.\n# TYPE x_read_errors_total counter\nx_read_errors_total 2\n"
+	if b.String() != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", b.String(), want)
+	}
+}

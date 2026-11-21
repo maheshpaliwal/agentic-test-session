@@ -17,6 +17,8 @@ Then open http://127.0.0.1:7072.
 | `-collector` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` |
 | `-demo` | `TSESSION_DASHBOARD_DEMO=true` | off |
 | `-allowed-hosts` | `TSESSION_DASHBOARD_ALLOWED_HOSTS` | loopback Host headers only |
+| `-open FILE` | | serve a session written by `tracectl export`, read-only, without other services; repeatable; not with `-demo` |
+| `-version` | | print the version and exit |
 
 ## Server behaviour
 - `/api/cp/*` -> control plane, `/api/col/*` -> collector (prefix stripped). Cookie/Authorization/Origin/Referer/X-Forwarded-* are not forwarded; Set-Cookie and CORS headers are dropped from responses; no CORS headers are added.
@@ -29,7 +31,7 @@ Then open http://127.0.0.1:7072.
   incomplete/dropped badges.
 - Timeline: filters (service, kind, errors, entity, text), click row -> drawer with req/resp (redaction markers highlighted), mutations before/after/diff, reads, ids. Live tail polls `events?from_seq=` every 1.5s while ACTIVE/DRAINING.
 - Call tree: from `/trace`; `linked` worker spans shown in a dashed "async" group, attempts/DLQ badges, duration bars, errors red, publishes without a worker flagged pending (live) or orphaned (sealed).
-- Entities: `/entities` list and per-pk history (seq, op, effective vs rolled back, diff).
+- Entities: `/entities` list and per-pk history (seq, op, effective vs rolled back, diff, the flags of the event). An entity with changes whose key or row image is incomplete shows "N uncertain".
 - Summary: counts computed from events plus the raw collector `/summary`.
 
 ## Trigger-grouped timeline

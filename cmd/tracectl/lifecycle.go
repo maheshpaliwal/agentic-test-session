@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,13 +17,8 @@ import (
 func (c *cli) start(ctx context.Context, args []string) error {
 	fs := c.flags("start")
 	opts := c.opts
-	fs.StringVar(&opts.Name, "name", "", "session name")
-	fs.StringVar(&opts.Mode, "mode", "header", "header|exclusive")
-	fs.IntVar(&opts.TTLSeconds, "ttl", 0, "ttl seconds")
-	fs.IntVar(&opts.QuiesceSeconds, "quiesce", 0, "quiesce seconds")
-	fs.IntVar(&opts.MaxDrainSeconds, "max-drain", 0, "max drain seconds")
-	var binds bindFlags
-	fs.Var(&binds, "bind", "source:name=value (repeatable; header|jwt|jwt_claim|cookie|query)")
+	binds := sessionFlags(fs, &opts)
+	idOnly := fs.Bool("id-only", false, "print only the session id, for scripts: ID=$(tracectl start --id-only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -30,17 +28,55 @@ func (c *cli) start(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *idOnly {
+		_, err = fmt.Fprintln(c.stdout, s.ID)
+		return err
+	}
 	printJSON(c.stdout, s.Info())
 	return nil
 }
 
+// sessionFlags registers the flags that describe a new session, shared by
+// start and run. The bindings are complete once fs is parsed.
+func sessionFlags(fs *flag.FlagSet, opts *client.Options) *bindFlags {
+	fs.StringVar(&opts.Name, "name", "", "session name")
+	fs.StringVar(&opts.Mode, "mode", "header", "header|exclusive")
+	fs.IntVar(&opts.TTLSeconds, "ttl", 0, "ttl seconds")
+	fs.IntVar(&opts.QuiesceSeconds, "quiesce", 0, "quiesce seconds")
+	fs.IntVar(&opts.MaxDrainSeconds, "max-drain", 0, "max drain seconds")
+	binds := &bindFlags{}
+	fs.Var(binds, "bind", "source:name=value (repeatable; header|jwt|jwt_claim|cookie|query)")
+	return binds
+}
+
+// shortFlag registers --short, the same on every command that prints a
+// session: one line "<id> <STATE>" instead of the session as JSON.
+func shortFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("short", false, `print one line "<id> <STATE>" (then " incomplete" if so) instead of the session as JSON`)
+}
+
+// printInfo prints a session as JSON or, when short, as one line for scripts:
+// the id and the state, followed by "incomplete" when the session is.
+func printInfo(w io.Writer, info client.Info, short bool) {
+	if !short {
+		printJSON(w, info)
+		return
+	}
+	line := info.ID + " " + info.State
+	if info.Incomplete {
+		line += " incomplete"
+	}
+	fmt.Fprintln(w, line)
+}
+
 func (c *cli) rename(ctx context.Context, args []string) error {
 	fs := c.flags("rename")
+	short := shortFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return errors.New("usage: tracectl rename <id|name> <new name>")
+		return errors.New("usage: tracectl rename [--short] <id|name> <new name>")
 	}
 	s, err := resolve(ctx, c.opts, fs.Arg(0))
 	if err != nil {
@@ -50,7 +86,7 @@ func (c *cli) rename(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 
@@ -58,6 +94,7 @@ func (c *cli) stop(ctx context.Context, args []string) error {
 	fs := c.flags("stop")
 	wait := fs.Bool("wait", false, "wait until sealed")
 	timeout := fs.Duration("timeout", 2*time.Minute, "wait timeout")
+	short := shortFlag(fs)
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -73,12 +110,14 @@ func (c *cli) stop(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 
 func (c *cli) abort(ctx context.Context, args []string) error {
-	s, err := c.session(ctx, c.flags("abort"), args)
+	fs := c.flags("abort")
+	short := shortFlag(fs)
+	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
 	}
@@ -86,7 +125,7 @@ func (c *cli) abort(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 
@@ -103,11 +142,17 @@ func (c *cli) delete(ctx context.Context, args []string) error {
 }
 
 func (c *cli) status(ctx context.Context, args []string) error {
-	s, err := c.session(ctx, c.flags("status"), args)
+	fs := c.flags("status")
+	short := shortFlag(fs)
+	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
 	}
 	info := s.Info()
+	if *short {
+		printInfo(c.stdout, info, true)
+		return nil
+	}
 	printJSON(c.stdout, info)
 	fmt.Fprintln(c.stdout, "name:", displayName(info))
 	if b := formatBindings(info.Bindings); b != "" {
@@ -119,10 +164,14 @@ func (c *cli) status(ctx context.Context, args []string) error {
 func (c *cli) list(ctx context.Context, args []string) error {
 	fs := c.flags("list")
 	state := fs.String("state", "", "filter by state")
+	limit := fs.Int("limit", 0, "list only the newest N sessions (default: all)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	list, err := client.List(ctx, c.opts, *state)
+	if *limit < 0 {
+		return errors.New("--limit must be a positive number")
+	}
+	list, more, err := listNewest(ctx, c.opts, *state, *limit)
 	if err != nil {
 		return err
 	}
@@ -133,12 +182,44 @@ func (c *cli) list(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintln(c.stdout, line)
 	}
+	if more {
+		fmt.Fprintf(c.stderr, "tracectl: these are the newest %d sessions; there are older ones (raise --limit, or leave it out to list all)\n", len(list))
+	}
 	return nil
+}
+
+// listNewest returns the newest limit sessions (in state, if set), oldest
+// first, and whether there are older ones; with limit 0, all sessions.
+func listNewest(ctx context.Context, o client.Options, state string, limit int) (list []client.Info, more bool, err error) {
+	if limit == 0 {
+		list, err = client.List(ctx, o, state)
+		return list, false, err
+	}
+	const maxPage = 1000 // the most the control plane returns per request
+	for before := ""; len(list) < limit; {
+		page, next, err := client.ListPage(ctx, o, client.ListOptions{State: state, Limit: min(limit-len(list), maxPage), Before: before})
+		if err != nil {
+			return nil, false, err
+		}
+		list = append(list, page...)
+		if before, more = next, next != ""; !more {
+			break
+		}
+	}
+	// Oldest first, like the list without a limit. Sorting here, not relying
+	// on the order of the reply, also serves a control plane that does not
+	// know the limit and answers with all sessions.
+	slices.SortFunc(list, byCreation)
+	if len(list) > limit {
+		list, more = list[len(list)-limit:], true
+	}
+	return list, more, nil
 }
 
 func (c *cli) wait(ctx context.Context, args []string) error {
 	fs := c.flags("wait")
 	timeout := fs.Duration("timeout", 2*time.Minute, "wait timeout")
+	short := shortFlag(fs)
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -149,7 +230,7 @@ func (c *cli) wait(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(c.stdout, info)
+	printInfo(c.stdout, info, *short)
 	return nil
 }
 

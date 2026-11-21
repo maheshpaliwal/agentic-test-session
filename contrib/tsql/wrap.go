@@ -79,7 +79,7 @@ func (d *wrapDriver) Open(name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newConn(c, d.cfg), nil
+	return newConn(c, d.cfg, &pkCache{}), nil // opened without a connector: no handle to share the keys with
 }
 
 func (d *wrapDriver) OpenConnector(name string) (driver.Connector, error) {
@@ -105,6 +105,7 @@ type wrapConnector struct {
 	inner driver.Connector
 	cfg   *config
 	drv   *wrapDriver
+	pks   pkCache // one per sql.DB
 }
 
 func (c *wrapConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -112,7 +113,7 @@ func (c *wrapConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newConn(conn, c.cfg), nil
+	return newConn(conn, c.cfg, &c.pks), nil
 }
 
 func (c *wrapConnector) Driver() driver.Driver { return c.drv }

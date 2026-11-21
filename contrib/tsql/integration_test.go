@@ -8,8 +8,8 @@ package tsql_test
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -115,7 +115,12 @@ func TestPGCapturePermissionErrorKeepsAppTxUsable(t *testing.T) {
 		"CREATE ROLE tsql_limited LOGIN",
 		"GRANT SELECT (id), UPDATE (v), DELETE ON tsql_perm TO tsql_limited")
 	defer pgAdmin(t, "DROP TABLE IF EXISTS tsql_perm", "DROP ROLE IF EXISTS tsql_limited")
-	dsn := strings.Replace(pgDSN(t), "postgres@", "tsql_limited@", 1)
+	u, err := url.Parse(pgDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.User("tsql_limited") // whatever the admin user of the DSN is called
+	dsn := u.String()
 
 	// sanity: without protection a failing extra SELECT really poisons a tx
 	raw, _ := sql.Open("pgx", dsn)

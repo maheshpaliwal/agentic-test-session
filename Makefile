@@ -1,4 +1,9 @@
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo docker-compose)
+# Version stamped into the container binaries (the images are built without .git). A tag name is
+# attacker-influenced text: it is reduced to a safe alphabet here and reaches the compose command
+# through the environment, never by being pasted into a shell command line.
+TSESSION_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | tr -cd 'A-Za-z0-9._+-')
+export TSESSION_VERSION
 DC = DOCKER_BUILDKIT=1 $(COMPOSE) -f docker/docker-compose.yml --env-file docker/.env
 CP ?= http://127.0.0.1:7070
 
@@ -20,7 +25,7 @@ race:
 lint:
 	@fail=0; for d in $(MODDIRS); do echo "== staticcheck $$d"; (cd $$d && $(STATICCHECK) ./...) || fail=1; done; exit $$fail
 fmt-check:
-	@out=$$(gofmt -l . | grep -v '\.pb\.go$$'); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	@out=$$(gofmt -l $(MODDIRS) 2>&1 | grep -v '\.pb\.go$$' | grep -v '/\.claude/'); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 it:
 	cd integration && ./scripts/it.sh all
 test:
@@ -34,7 +39,7 @@ up: env
 down:
 	$(DC) --profile app --profile watch down -v
 demo: up
-	@id=$$(curl -fsS -X POST $(CP)/v1/sessions -d '{"name":"make-demo","mode":"header","initiated_by":"api"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
+	@id=$$(curl -fsS -X POST -H 'Content-Type: application/json' $(CP)/v1/sessions -d '{"name":"make-demo","mode":"header","initiated_by":"api"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
 	echo "session $$id"; curl -fsS $(CP)/v1/active; echo; \
 	curl -fsS -X POST $(CP)/v1/sessions/$$id/stop >/dev/null; echo "stopped; dashboard: http://127.0.0.1:7072"
 

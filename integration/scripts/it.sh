@@ -9,6 +9,13 @@ PG_PORT=55432; REDIS_PORT=56379
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 export TSESSION_IT_PG_DSN="postgres://$(whoami)@127.0.0.1:${PG_PORT}/postgres?sslmode=disable"
 export TSESSION_IT_REDIS_ADDR="127.0.0.1:${REDIS_PORT}"
+export TSESSION_TEST_PG_DSN="$TSESSION_IT_PG_DSN" # contrib/tsql's tests against a real server
+
+run_tests() {
+  (cd "$HERE" && go test -count=1 -v -timeout 300s ./...)
+  (cd "$HERE/../contrib/tsql" && go test -count=1 -tags integration -timeout 300s ./...)
+  (cd "$HERE/../collector" && go test -count=1 -timeout 300s ./store/...)
+}
 
 start() {
   mkdir -p "$IT_DIR"
@@ -33,7 +40,7 @@ stop() {
 case "${1:-}" in
   start) start ;;
   stop) stop ;;
-  test) cd "$HERE" && go test -count=1 -v -timeout 300s ./... ;;
-  all) trap stop EXIT; start; (cd "$HERE" && go test -count=1 -v -timeout 300s ./...) ;;
+  test) run_tests ;;
+  all) trap stop EXIT; start; run_tests ;;
   *) echo "usage: $0 start|stop|test|all" >&2; exit 2 ;;
 esac

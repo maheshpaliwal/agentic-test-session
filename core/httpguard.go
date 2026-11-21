@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -70,7 +71,9 @@ func LoopbackGuard(next http.Handler, cfg GuardConfig) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostOK(r.Host) {
-			http.Error(w, "forbidden host", http.StatusForbidden)
+			// Name the host and the remedy: a client in another container
+			// otherwise sees a bare 403 and an empty session.
+			http.Error(w, fmt.Sprintf("forbidden host %q: this server accepts loopback names only; add the host to its allowed hosts (--allowed-hosts)", r.Host), http.StatusForbidden)
 			return
 		}
 		if !originOK(r.Header.Get("Origin")) {

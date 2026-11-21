@@ -1,5 +1,8 @@
-// Package client is a Go client for the tsession control plane. Test code
-// uses it to start a session, tag outgoing requests, and wait for the seal.
+// Package client is a Go client for tsession. Test code uses it to start and
+// stop sessions on the control plane, tag outgoing requests, and read what a
+// session recorded from the collector (Summary, Events, Mutations, History,
+// Trace, Export). Subscribers and Session.WaitPropagated report which
+// services are connected and whether they were sent a new session.
 package client
 
 import (
@@ -30,7 +33,7 @@ const (
 
 // ErrConflict is returned by Start on HTTP 409: an exclusive session is already
 // running, or a binding is held by another active session (error text carries the conflicting id).
-var ErrConflict = errors.New("tsession: exclusive session already running")
+var ErrConflict = errors.New("tsession: conflicts with a running session")
 
 // Options configure Start. Zero values use control-plane defaults.
 type Options struct {
@@ -117,8 +120,14 @@ type Info struct {
 	Reason string `json:"reason,omitempty"`
 	// SealError is set when the collector could not seal the session; the
 	// session is then SEALED with Incomplete set.
-	SealError string    `json:"seal_error,omitempty"`
-	Bindings  []Binding `json:"bindings,omitempty"`
+	SealError string `json:"seal_error,omitempty"`
+	// SealPending is set while the control plane is still retrying a seal
+	// that failed; SealError and BundleURI change once a retry succeeds.
+	SealPending bool `json:"seal_pending,omitempty"`
+	// DrainTimedOut is set when the drain ended at MaxDrainSeconds with
+	// asynchronous work still outstanding.
+	DrainTimedOut bool      `json:"drain_timed_out,omitempty"`
+	Bindings      []Binding `json:"bindings,omitempty"`
 }
 
 // Done reports whether the session reached a terminal state.
@@ -146,6 +155,33 @@ func baseURL(explicit, env, def string) string {
 	}
 	explicit = cmp.Or(explicit, def)
 	return strings.TrimRight(explicit, "/")
+}
+
+// scrubURL removes what may be a credential from the URL a transport error
+// names: the user name and password of the URL and its query. Such errors
+// are printed by tracectl and by tests, and end up in CI logs. The error is
+// changed in place, so it still unwraps to the cause.
+func scrubURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		ue.URL = DisplayURL(ue.URL)
+	}
+	return err
+}
+
+// ScrubURLError is for callers that make their own requests to the services
+// and print the error: it removes the user name, password and query from the
+// URL a transport error names, in place, and returns err.
+func ScrubURLError(err error) error { return scrubURL(err) }
+
+// DisplayURL is raw as it may be printed: scheme, host and path only. A user
+// name, a password and a query may each be a credential.
+func DisplayURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<unparseable URL>"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
 }
 
 func newSession(o Options, info Info) *Session {
@@ -192,6 +228,15 @@ func Attach(ctx context.Context, o Options, id string) (*Session, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// Detached returns a handle to a session by id without asking the control
+// plane. It is for reading results (Summary, Events, ...) of a session the
+// control plane no longer knows, such as one it forgot after its retention
+// or a restart, while the collector still holds the events. Info is empty
+// apart from the id, and the lifecycle calls (Stop, Wait, ...) will fail.
+func Detached(o Options, id string) *Session {
+	return newSession(o, Info{ID: id})
 }
 
 // Info returns the last fetched session state without a network call.
@@ -287,11 +332,13 @@ func (s *Session) Header() http.Header {
 	return h
 }
 
-// Inject adds x-tsession-id, traceparent and x-tsession-hlc to h.
+// Inject adds x-tsession-id, x-tsession-traceparent and x-tsession-hlc to h.
+// It also sets traceparent, unless h already has one from the caller's own
+// tracing (see core.WriteTraceparent).
 func (s *Session) Inject(h http.Header) {
 	h.Set(core.KeySession, s.ID)
-	h.Set(core.KeyTraceparent, "00-"+core.NewTraceID()+"-"+core.NewSpanID()+"-01")
-	h.Set(core.KeyHLC, strconv.FormatUint(core.HLCNow(), 10))
+	core.WriteTraceparent(core.HTTPHeaderCarrier(h), "00-"+core.NewTraceID()+"-"+core.NewSpanID()+"-01",
+		strconv.FormatUint(core.HLCNow(), 10))
 }
 
 // Transport wraps rt (default http.DefaultTransport) so every request it
@@ -326,24 +373,30 @@ func (s *Session) do(ctx context.Context, method, path string, in, out any) erro
 // (skipped when out is nil). Non-2xx replies become errors carrying the
 // server's message.
 func (s *Session) call(ctx context.Context, base, method, path string, in, out any) error {
+	_, err := s.callHeader(ctx, base, method, path, in, out)
+	return err
+}
+
+// callHeader is call, and returns the headers of a 2xx reply as well.
+func (s *Session) callHeader(ctx context.Context, base, method, path string, in, out any) (http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := s.hc.Do(req)
 	if err != nil {
-		return err
+		return nil, scrubURL(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -365,18 +418,155 @@ func (s *Session) call(ctx context.Context, base, method, path string, in, out a
 			e.Error += " binding " + e.Binding.Source + ":" + e.Binding.Name
 		}
 		if resp.StatusCode == http.StatusConflict && method == http.MethodPost && path == "/v1/sessions" {
-			return fmt.Errorf("%w: %s", ErrConflict, e.Error)
+			return nil, fmt.Errorf("%w: %s", ErrConflict, e.Error)
 		}
-		return fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
+		return nil, fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
-		return nil
+		return resp.Header, nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp.Header, json.NewDecoder(resp.Body).Decode(out)
 }
 
-// List returns sessions known to the control plane, optionally filtered by state.
+// Subscriber is one process following the control plane's active set,
+// normally the SDK inside an instrumented service. Service and Instance are
+// empty for SDKs that do not report them.
+type Subscriber struct {
+	Service     string    `json:"service,omitempty"`
+	Instance    string    `json:"instance,omitempty"`
+	ConnectedAt time.Time `json:"connected_at"`
+	// Generation is the newest version of the active set sent to it.
+	Generation uint64 `json:"generation"`
+}
+
+// Subscribers lists the processes currently connected to the control plane.
+// A service that is missing here cannot record anything.
+func Subscribers(ctx context.Context, o Options) ([]Subscriber, error) {
+	var out []Subscriber
+	return out, newSession(o, Info{}).do(ctx, http.MethodGet, "/v1/subscribers", nil, &out)
+}
+
+// WaitPropagated blocks until every service connected to the control plane
+// has been sent the current set of active sessions, and returns how many are
+// connected. Call it after Start when the very first request must be
+// recorded: a service only records a session once it has heard of it.
+//
+// "Sent" means written to the service's connection; the service applies it a
+// moment later, so this narrows the window to network latency rather than
+// closing it. It returns ctx's error when ctx ends first (a context without
+// a deadline is given one of 30s), and (0, nil) at once against a control
+// plane too old to report delivery. A count of 0 means no service is
+// connected, so nothing was told about the session.
+func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
+	if _, bounded := ctx.Deadline(); !bounded {
+		// A follower that never catches up must not hold a caller forever.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, maxPropagationWait)
+		defer cancel()
+	}
+	connected := 0
+	for {
+		// Read the target again on every pass: a control plane that restarted
+		// counts from zero, and waiting for the old number would never end.
+		var active struct {
+			Generation uint64 `json:"generation"`
+		}
+		if err := s.do(ctx, http.MethodGet, "/v1/active", nil, &active); err != nil {
+			if ctx.Err() != nil {
+				return connected, ctx.Err()
+			}
+			return connected, err
+		}
+		if active.Generation == 0 {
+			return 0, nil
+		}
+		var subs []Subscriber
+		if err := s.do(ctx, http.MethodGet, "/v1/subscribers", nil, &subs); err != nil {
+			switch {
+			case ctx.Err() != nil:
+				return connected, ctx.Err()
+			case strings.Contains(err.Error(), ": 404 "):
+				return 0, nil
+			}
+			return connected, err
+		}
+		connected = len(subs)
+		behind := false
+		for _, sub := range subs {
+			behind = behind || sub.Generation < active.Generation
+		}
+		if !behind {
+			return connected, nil
+		}
+		select {
+		case <-ctx.Done():
+			return connected, ctx.Err()
+		case <-time.After(min(s.poll, 20*time.Millisecond)):
+		}
+	}
+}
+
+// maxPropagationWait bounds WaitPropagated when its context has no deadline.
+const maxPropagationWait = 30 * time.Second
+
+// ListOptions selects the sessions ListPage returns.
+type ListOptions struct {
+	// State and Name keep only the sessions in that state and with exactly
+	// that name; empty means any.
+	State string
+	Name  string
+	// Limit is the page size, 1..1000: the newest matching sessions are
+	// returned, newest first. Zero asks for every matching session, oldest
+	// first, like List.
+	Limit int
+	// Before is the next value ListPage returned for the previous page.
+	Before string
+}
+
+// ListPage returns one page of the sessions known to the control plane:
+// the newest lo.Limit sessions matching lo, newest first, and next, the
+// value to pass as lo.Before for the page after it (empty when there are no
+// older sessions). Unlike List its cost does not grow with the number of
+// sessions the control plane has ever recorded.
+//
+// Paging until next is empty returns no session twice, and every session
+// that exists and matches during the whole run exactly once; a page can hold
+// fewer sessions than lo.Limit while next is set.
+//
+// A control plane older than this call ignores Name, Limit and Before: it
+// returns every session (in lo.State), oldest first, and next is empty. A
+// caller that may talk to one should check the names it gets, and expect
+// more than lo.Limit sessions.
+func ListPage(ctx context.Context, o Options, lo ListOptions) (infos []Info, next string, err error) {
+	q := url.Values{}
+	if lo.State != "" {
+		q.Set("state", lo.State)
+	}
+	if lo.Name != "" {
+		q.Set("name", lo.Name)
+	}
+	if lo.Limit != 0 {
+		q.Set("limit", strconv.Itoa(lo.Limit))
+	}
+	if lo.Before != "" {
+		q.Set("before", lo.Before)
+	}
+	path := "/v1/sessions"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	s := newSession(o, Info{})
+	h, err := s.callHeader(ctx, s.base, http.MethodGet, path, nil, &infos)
+	if err != nil {
+		return nil, "", err
+	}
+	return infos, h.Get("X-Tsession-Next"), nil
+}
+
+// List returns the sessions known to the control plane, oldest first,
+// optionally filtered by state. It returns all of them, which can be many:
+// see ListPage for the newest ones or for the sessions with a given name.
 func List(ctx context.Context, o Options, state string) ([]Info, error) {
 	s := newSession(o, Info{})
 	path := "/v1/sessions"
@@ -388,4 +578,21 @@ func List(ctx context.Context, o Options, state string) ([]Info, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// SetKill turns the control plane's global kill switch on or off. While it
+// is on, every connected SDK records nothing, for any session; sessions keep
+// their state and record again once it is off. The switch is held in the
+// control plane's memory: a restart turns it off.
+func SetKill(ctx context.Context, o Options, on bool) error {
+	return newSession(o, Info{}).do(ctx, http.MethodPost, "/v1/kill", map[string]bool{"kill": on}, nil)
+}
+
+// KillSwitch reports whether the global kill switch is on (see SetKill).
+func KillSwitch(ctx context.Context, o Options) (bool, error) {
+	var active struct {
+		Kill bool `json:"kill"`
+	}
+	err := newSession(o, Info{}).do(ctx, http.MethodGet, "/v1/active", nil, &active)
+	return active.Kill, err
 }

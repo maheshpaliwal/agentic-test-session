@@ -121,3 +121,96 @@ func TestHungStoreIsBounded(t *testing.T) {
 	hs.hang.Store(false)
 	waitFor(t, "retry after the store recovers", func() bool { return len(events(t, c)) == 1 })
 }
+
+// sessionHangStore blocks AppendEvents for one session until the context
+// ends; every other session is served by the wrapped store.
+type sessionHangStore struct {
+	store.Store
+	id      string
+	entered chan struct{} // receives when an append for id starts to hang
+}
+
+func (s *sessionHangStore) AppendEvents(ctx context.Context, id string, evs []core.Event) error {
+	if id != s.id {
+		return s.Store.AppendEvents(ctx, id, evs)
+	}
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Close must return within ShutdownTimeout even when the store hangs (it used
+// to wait out several StoreTimeouts per session), and a session whose store
+// calls hang must not cost the other sessions their final flush.
+func TestCloseIsBoundedWithHungStore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+	}{
+		{"flush at shutdown", time.Hour},            // the hung append starts in Close
+		{"flush already hanging", time.Millisecond}, // the hung append predates Close
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig() // StoreTimeout stays 30s: only the shutdown bound can end the hang
+			cfg.Window = tc.window
+			cfg.ShutdownTimeout = 200 * time.Millisecond
+			mem := store.NewMem()
+			hs := &sessionHangStore{Store: mem, id: "hung", entered: make(chan struct{}, 1)}
+			c := New(hs, cfg)
+			ctx := context.Background()
+			for i, id := range []string{"hung", "ok1", "ok2"} {
+				a, b := ev("a", core.KindAPIIn, 10, uint64(1+10*i)), ev("b", core.KindAPIIn, 20, uint64(2+10*i))
+				a.SessionID, b.SessionID = id, id
+				if r, err := c.Ingest(ctx, "", []core.Event{a, b}); err != nil || r.Accepted != 2 {
+					t.Fatalf("ingest %s: %+v %v", id, r, err)
+				}
+			}
+			if tc.window < time.Hour {
+				select {
+				case <-hs.entered:
+					hs.entered <- struct{}{} // keep the token for the check below
+				case <-time.After(5 * time.Second):
+					t.Fatal("the window flush never reached the store")
+				}
+			}
+			start := time.Now()
+			closed := make(chan struct{})
+			go func() { c.Close(); close(closed) }()
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("Close still blocked after %v with ShutdownTimeout %v", time.Since(start), cfg.ShutdownTimeout)
+			}
+			if d := time.Since(start); d < cfg.ShutdownTimeout {
+				t.Fatalf("Close returned after %v, before the hung flush got its %v", d, cfg.ShutdownTimeout)
+			}
+			select {
+			case <-hs.entered:
+			default:
+				t.Fatal("the hung session's flush was never attempted")
+			}
+			for _, id := range []string{"ok1", "ok2"} {
+				if h, _ := mem.Head(ctx, id); h != 2 {
+					t.Fatalf("%s: %d events stored after Close, want 2", id, h)
+				}
+			}
+			if h, _ := mem.Head(ctx, "hung"); h != 0 {
+				t.Fatalf("hung session stored %d events", h)
+			}
+		})
+	}
+}
+
+func TestShutdownTimeoutDefault(t *testing.T) {
+	if d := DefaultConfig().ShutdownTimeout; d != 15*time.Second {
+		t.Fatalf("DefaultConfig().ShutdownTimeout = %v", d)
+	}
+	c := New(store.NewMem(), Config{})
+	defer c.Close()
+	if d := c.cfg.ShutdownTimeout; d != 15*time.Second {
+		t.Fatalf("zero ShutdownTimeout normalised to %v", d)
+	}
+}

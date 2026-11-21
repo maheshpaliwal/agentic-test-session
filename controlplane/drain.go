@@ -11,12 +11,6 @@ func (d DrainStatus) signature() [5]int64 {
 	return [5]int64{int64(d.Pending), d.LastEventUnixNs, d.ReceivedUnixNs, d.EventCount, d.DroppedEvents}
 }
 
-func (m *Manager) startDrain(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.startDrainLocked(id)
-}
-
 func (m *Manager) startDrainLocked(id string) {
 	ctx, cancel := context.WithCancel(m.rootCtx)
 	m.cancels[id] = cancel
@@ -28,7 +22,9 @@ func (m *Manager) startDrainLocked(id string) {
 }
 
 // drain polls the collector until the session is quiet or max_drain elapses,
-// seals it, and records the outcome.
+// seals it, and records the outcome. A seal that still fails when
+// SealRetryBudget is spent ends the session SEALED with SealError and
+// SealPending, and is retried in the background (see sealretry.go).
 func (m *Manager) drain(ctx context.Context, id string) {
 	s, ok := m.cfg.Store.Get(id)
 	if !ok || m.cfg.Collector == nil {
@@ -95,10 +91,12 @@ func (m *Manager) drain(ctx context.Context, id string) {
 		cur.State = StateExpired
 	}
 	if err != nil {
-		cur.SealError = err.Error()
+		cur.SealError, cur.SealPending = err.Error(), true
 		m.tel.sealFailures.Inc()
+		m.armSealRetryLocked(id, time.Now().Add(m.cfg.PollInterval))
 	}
 	m.tel.finished.With(string(cur.State)).Inc()
+	cur.DrainTimedOut = timedOut
 	cur.Incomplete = timedOut || err != nil || res.Incomplete
 	cur.DroppedEvents = last.DroppedEvents
 	cur.BundleURI = res.BundleURI

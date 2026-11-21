@@ -12,8 +12,9 @@ type config struct {
 	skipTables   map[string]struct{}
 	pkCols       map[string][]string
 	defaultPK    []string
-	maxRows      int // rows captured for images / returning
-	sampleRows   int // rows captured as a read sample
+	pkLookup     bool // read primary keys from the catalog
+	maxRows      int  // rows captured for images / returning
+	sampleRows   int  // rows captured as a read sample
 	maxArgs      int
 	maxArgLen    int
 	captureTO    time.Duration
@@ -25,6 +26,7 @@ func defaultConfig() *config {
 		skipTables: map[string]struct{}{},
 		pkCols:     map[string][]string{},
 		defaultPK:  []string{"id"},
+		pkLookup:   true,
 		maxRows:    50,
 		sampleRows: 5,
 		maxArgs:    64,
@@ -70,7 +72,10 @@ func WithSkipTables(tables ...string) Option {
 	}
 }
 
-// WithPKColumns declares the primary-key columns of a table (default "id").
+// WithPKColumns declares the primary-key columns of a table ("orders" or
+// "schema.orders"). A declared key always wins and the catalog is not asked
+// about that table. It is needed where the key cannot be looked up: a table
+// without a primary key, a view, or a database other than Postgres and MySQL.
 func WithPKColumns(table string, cols ...string) Option {
 	return func(c *config) {
 		lc := make([]string, len(cols))
@@ -81,7 +86,8 @@ func WithPKColumns(table string, cols ...string) Option {
 	}
 }
 
-// WithDefaultPK sets the PK columns assumed for tables without WithPKColumns.
+// WithDefaultPK sets the PK columns assumed for a table that has no
+// WithPKColumns and whose key the catalog did not give (default "id").
 func WithDefaultPK(cols ...string) Option {
 	return func(c *config) {
 		c.defaultPK = nil
@@ -90,6 +96,12 @@ func WithDefaultPK(cols ...string) Option {
 		}
 	}
 }
+
+// WithPKLookup toggles reading a table's primary key from the database
+// catalog (default true; see "Primary keys" in the package documentation).
+// With it off, and always with WithImages(false), keys come from
+// WithPKColumns and WithDefaultPK only.
+func WithPKLookup(on bool) Option { return func(c *config) { c.pkLookup = on } }
 
 // WithMaxImageRows caps rows captured per statement for images (default 50).
 // Statements affecting more rows are flagged "image_truncated".
@@ -150,16 +162,17 @@ func (c *config) skipped(schema, table string) bool {
 	return false
 }
 
-func (c *config) pk(schema, table string) []string {
+// explicitPK returns the key declared for the table with WithPKColumns.
+func (c *config) explicitPK(schema, table string) ([]string, bool) {
 	if v, ok := c.pkCols[strings.ToLower(table)]; ok {
-		return v
+		return v, true
 	}
 	if schema != "" {
 		if v, ok := c.pkCols[strings.ToLower(schema+"."+table)]; ok {
-			return v
+			return v, true
 		}
 	}
-	return c.defaultPK
+	return nil, false
 }
 
 // detectStore guesses the database from a driver name, type name or DSN.

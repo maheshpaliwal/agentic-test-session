@@ -32,7 +32,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
 
   collector:
-    build: {context: .., dockerfile: docker/Dockerfile.collector}
+    build: {context: .., dockerfile: docker/Dockerfile.collector, args: {VERSION: "${TSESSION_VERSION:-}"}}
     environment:
       TSESSION_COLLECTOR_STORE: pg
       TSESSION_COLLECTOR_PG_DSN: postgres://tsession:${TSESSION_DB_PASSWORD}@postgres:5432/tsession?sslmode=disable
@@ -54,7 +54,7 @@ services:
       retries: 20
 
   controlplane:
-    build: {context: .., dockerfile: docker/Dockerfile.controlplane}
+    build: {context: .., dockerfile: docker/Dockerfile.controlplane, args: {VERSION: "${TSESSION_VERSION:-}"}}
     environment:
       TSESSION_COLLECTOR_URL: http://collector:7071
       # Host values accepted besides loopback: SDK/tracectl/dashboard reach it as controlplane[:7070].
@@ -69,7 +69,7 @@ services:
       retries: 20
 
   dashboard:
-    build: {context: .., dockerfile: docker/Dockerfile.dashboard}
+    build: {context: .., dockerfile: docker/Dockerfile.dashboard, args: {VERSION: "${TSESSION_VERSION:-}"}}
     environment:
       TSESSION_CONTROLPLANE_URL: http://controlplane:7070
       TSESSION_COLLECTOR_URL: http://collector:7071

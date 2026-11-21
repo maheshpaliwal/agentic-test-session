@@ -233,12 +233,14 @@ func TestSSEBindingChange(t *testing.T) {
 func TestFileStoreBindingsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.json")
 	fs, _ := NewFileStore(path)
+	closeLater(t, fs)
 	m := newMgr(t, newFakeCollector(t), func(c *Config) { c.Store = fs; c.Retention = time.Millisecond })
 	live, _ := m.Start(StartRequest{TTLSeconds: 600000, Bindings: []Binding{hdr("x-live", "1")}})
 	old, _ := m.Start(StartRequest{Bindings: []Binding{{Source: "cookie", Name: "sid", Value: "z"}}})
 	m.Abort(old.ID)
 	m.Sweep(time.Now().Add(time.Hour)) // evict aborted to archive
 	fs2, err := NewFileStore(path)
+	closeLater(t, fs2)
 	if err != nil {
 		t.Fatal(err)
 	}

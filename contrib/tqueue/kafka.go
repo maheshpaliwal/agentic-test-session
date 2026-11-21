@@ -24,6 +24,16 @@ func (c kafkaCarrier) Get(key string) string {
 	return ""
 }
 
+// Has implements core.PresenceCarrier: a header with an empty value counts.
+func (c kafkaCarrier) Has(key string) bool {
+	for _, h := range *c.h {
+		if strings.EqualFold(h.Key, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c kafkaCarrier) Set(key, val string) {
 	key = strings.ToLower(key)
 	for i, h := range *c.h {
@@ -101,7 +111,7 @@ func produceEach(ctx context.Context, w KafkaWriter, msgs []kafka.Message) (err 
 		if span == nil {
 			continue
 		}
-		span.SetReq(bodyParams(m.Value))
+		span.SetReq(rendered(bodyParams(m.Value)))
 		setAttrs(span, "kafka", m.Topic, nil)
 		core.Inject(sctx, kafkaCarrier{&cp[i].Headers})
 		spans[i] = span
@@ -148,8 +158,22 @@ func produceBatch(ctx context.Context, w KafkaWriter, msgs []kafka.Message) erro
 	return Publish(ctx, info, carrier, func(c context.Context) error {
 		for i := range cp {
 			kc := kafkaCarrier{&cp[i].Headers}
+			// The trace context and the clock go through WriteTraceparent,
+			// which decides per message whether its traceparent is the
+			// application's. carrier was empty, so its traceparent is the
+			// one tsession wrote.
+			// When the publish was not recorded (a nested publish, a session
+			// that ended meanwhile) nothing was injected and the carrier is
+			// empty: the messages then go out untouched.
+			if carrier[core.KeyTraceparent] != "" {
+				core.WriteTraceparent(kc, carrier[core.KeyTraceparent], carrier[core.KeyHLC])
+			}
 			for k, v := range carrier {
-				kc.Set(k, v)
+				switch k {
+				case core.KeyTraceparent, core.KeyTSessionTraceparent, core.KeyHLC:
+				default:
+					kc.Set(k, v)
+				}
 			}
 		}
 		return w.WriteMessages(c, cp...)

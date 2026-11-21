@@ -48,8 +48,44 @@ type fakeDB struct {
 	// an aborted tx fails.
 	abortModel bool
 	aborted    bool
+	// noMulti mimics a driver that prepares every statement: Postgres refuses
+	// a text holding two statements, and that refusal is an error like any other.
+	noMulti bool
 	// slow makes matching queries block (honouring ctx) for the returned duration.
 	slow func(q string) time.Duration
+	// pk answers the catalog lookup of a table's primary key (the argument is
+	// the table as the lookup names it); nil answers "no primary key", so the
+	// default key "id" applies.
+	pk func(table string) result
+}
+
+// noPKLookup keeps the catalog lookup out of tests that assert the exact
+// statements of the image captures.
+var noPKLookup = tsql.WithPKLookup(false)
+
+// isPKLookup reports whether q is the catalog query for a table's primary key.
+func isPKLookup(q string) bool {
+	return strings.Contains(q, "pg_catalog.pg_index") || strings.Contains(q, "information_schema.KEY_COLUMN_USAGE")
+}
+
+// pkRows is the catalog's answer for a table with the given key columns.
+func pkRows(cols ...string) result {
+	r := result{cols: []string{"attname"}}
+	for _, c := range cols {
+		r.rows = append(r.rows, []driver.Value{c})
+	}
+	return r
+}
+
+// PKLookups returns the catalog lookups the fake database saw.
+func (f *fakeDB) PKLookups() []call {
+	var out []call
+	for _, c := range f.RawCalls() {
+		if isPKLookup(c.SQL) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (f *fakeDB) wait(ctx context.Context, q string) error {
@@ -80,23 +116,33 @@ func (f *fakeDB) RawCalls() []call {
 	return append([]call(nil), f.calls...)
 }
 
-// Calls returns the statements without the capture fence.
+// Calls returns the statements without the capture fence and the primary-key
+// lookups.
 func (f *fakeDB) Calls() []call {
 	var out []call
 	for _, c := range f.RawCalls() {
-		switch {
-		case c.SQL == "BEGIN READ ONLY", c.SQL == "ROLLBACK", strings.Contains(c.SQL, "SAVEPOINT ts_capture"),
-			strings.Contains(c.SQL, "set_config('statement_timeout'"):
-			continue
+		if !isFence(c.SQL) && !isPKLookup(c.SQL) {
+			out = append(out, c)
 		}
-		out = append(out, c)
 	}
 	return out
+}
+
+// isFence reports whether q is a statement of the Postgres capture fence.
+func isFence(q string) bool {
+	return strings.HasPrefix(q, "BEGIN READ ONLY") || q == "ROLLBACK" || strings.Contains(q, "SAVEPOINT ts_capture") ||
+		strings.HasPrefix(q, "SET LOCAL statement_timeout")
 }
 
 func (f *fakeDB) answer(q string, args []driver.Value) result {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noMulti && strings.Contains(q, "; ") {
+		if f.abortModel {
+			f.aborted = true
+		}
+		return result{err: errors.New("cannot insert multiple commands into a prepared statement (SQLSTATE 42601)")}
+	}
 	if f.abortModel {
 		if strings.HasPrefix(q, "ROLLBACK TO") {
 			f.aborted = false
@@ -106,10 +152,16 @@ func (f *fakeDB) answer(q string, args []driver.Value) result {
 			return result{err: errors.New("current transaction is aborted, commands ignored until end of transaction block")}
 		}
 	}
-	if f.handler == nil {
-		return result{}
+	var r result
+	switch {
+	case isPKLookup(q):
+		r = pkRows()
+		if f.pk != nil && len(args) > 0 {
+			r = f.pk(fmt.Sprint(args[len(args)-1]))
+		}
+	case f.handler != nil:
+		r = f.handler(q, args)
 	}
-	r := f.handler(q, args)
 	if f.abortModel && r.err != nil {
 		f.aborted = true
 	}
@@ -235,6 +287,13 @@ func values(a []driver.NamedValue) []driver.Value {
 
 var driverSeq atomic.Int64
 
+// uniqueName returns a driver name no earlier call returned. The database/sql
+// registry is process-wide and has no Unregister, so registering a fixed name
+// panics the second time a test runs in one process (go test -count=2).
+func uniqueName(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, driverSeq.Add(1))
+}
+
 // setup enables the SDK with an in-memory recorder and one active session.
 func setup(t *testing.T) (*core.MemRecorder, context.Context) {
 	t.Helper()
@@ -253,7 +312,7 @@ func setup(t *testing.T) (*core.MemRecorder, context.Context) {
 // open registers fake under a unique name and opens it through tsql.
 func open(t *testing.T, f *fakeDB, driverName string, opts ...tsql.Option) *sql.DB {
 	t.Helper()
-	name := fmt.Sprintf("%s-fake-%d", driverName, driverSeq.Add(1))
+	name := uniqueName(driverName + "-fake")
 	sql.Register(name, f)
 	db, err := tsql.Open(name, "dsn", opts...)
 	if err != nil {

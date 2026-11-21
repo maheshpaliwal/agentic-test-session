@@ -3,6 +3,7 @@ package controlplane
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -27,7 +28,15 @@ type Config struct {
 	// SealRetryBudget bounds how long a failing collector seal call is retried
 	// (exponential backoff from PollInterval, capped at 2s); default 30s.
 	SealRetryBudget time.Duration
-	HeartbeatPeriod time.Duration // SSE heartbeat; default 15s
+	// SealRetryMaxInterval caps the backoff between background retries of a
+	// seal that failed past SealRetryBudget (they start at PollInterval and
+	// double after every failure); default 1m.
+	SealRetryMaxInterval time.Duration
+	// SealPendingBudget bounds how long such a seal keeps being retried,
+	// counted from the session's EndedAt; default 24h. After it the session
+	// keeps its SealError and is no longer retried.
+	SealPendingBudget time.Duration
+	HeartbeatPeriod   time.Duration // SSE heartbeat; default 15s
 	// Retention is how long terminal sessions stay in the hot in-memory set
 	// before being evicted from it (still readable if the Store archives them,
 	// e.g. FileStore); default 24h.
@@ -49,8 +58,10 @@ type Manager struct {
 
 	mu      sync.Mutex
 	kill    bool
-	subs    map[chan ActiveSet]struct{}
+	gen     uint64 // bumped on every broadcast; identifies a version of the active set
+	subs    map[chan ActiveSet]Subscriber
 	cancels map[string]context.CancelFunc // in-flight drains
+	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
 
 	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
 	// O(all sessions ever). terminal queues finished sessions for eviction.
@@ -62,9 +73,9 @@ type Manager struct {
 	wg      sync.WaitGroup
 }
 
-// NewManager builds a Manager and resumes the drains that were in flight
-// when a persistent Store was last written. Call Run for TTL expiry and Close
-// when done.
+// NewManager builds a Manager and resumes the drains and the pending seal
+// retries that were in flight when a persistent Store was last written. Call
+// Run for TTL expiry and further seal retries, and Close when done.
 func NewManager(cfg Config) *Manager {
 	if cfg.Store == nil {
 		cfg.Store = NewMemStore()
@@ -87,6 +98,12 @@ func NewManager(cfg Config) *Manager {
 	if cfg.SealRetryBudget <= 0 {
 		cfg.SealRetryBudget = 30 * time.Second
 	}
+	if cfg.SealRetryMaxInterval <= 0 {
+		cfg.SealRetryMaxInterval = time.Minute
+	}
+	if cfg.SealPendingBudget <= 0 {
+		cfg.SealPendingBudget = 24 * time.Hour
+	}
 	if cfg.HeartbeatPeriod <= 0 {
 		cfg.HeartbeatPeriod = 15 * time.Second
 	}
@@ -106,19 +123,45 @@ func NewManager(cfg Config) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		cfg: cfg, log: log,
-		subs:    map[chan ActiveSet]struct{}{},
+		subs:    map[chan ActiveSet]Subscriber{},
 		cancels: map[string]context.CancelFunc{},
+		pending: map[string]*sealRetry{},
 		live:    map[string]Session{},
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
-	// Resume drains that were in flight when a persistent store was last written.
-	for _, s := range cfg.Store.List() {
-		m.indexLocked(s)
-		if s.State == StateDraining {
-			m.startDrain(s.ID)
+	// Resume drains and pending seals that were in flight when a persistent
+	// store was last written. Archived sessions can have a seal pending; the
+	// finished ones need nothing, so a store that can leave them out does.
+	var stored []Session
+	cs, checked := cfg.Store.(CheckedStore)
+	failedBefore := int64(0)
+	if checked {
+		failedBefore = cs.ReadErrors()
+	}
+	if sl, ok := cfg.Store.(SelectiveLister); ok {
+		stored = sl.ListPending()
+	} else {
+		stored = cfg.Store.List()
+	}
+	if checked {
+		if n := cs.ReadErrors() - failedBefore; n > 0 {
+			log.Error("stored sessions could not be read at startup; a drain or a pending seal among them is not resumed until the next start",
+				"sessions", n)
 		}
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range stored {
+		m.indexLocked(s)
+		switch {
+		case s.State == StateDraining:
+			m.startDrainLocked(s.ID)
+		case s.SealPending && s.State.Terminal():
+			m.armSealRetryLocked(s.ID, time.Time{})
+		}
+	}
+	m.retrySealsLocked(time.Now())
 	return m
 }
 
@@ -153,22 +196,28 @@ func (m *Manager) putLocked(s Session) error {
 	return err
 }
 
-// pruneLocked evicts terminal sessions older than Retention from the hot set.
+// pruneLocked evicts terminal sessions older than Retention from the hot set,
+// all of them in one Store call.
 func (m *Manager) pruneLocked(now time.Time) {
-	ev, _ := m.cfg.Store.(Evictor)
 	n := 0
 	for n < len(m.terminal) && now.Sub(m.terminal[n].ended) > m.cfg.Retention {
-		if ev != nil {
-			ev.Evict(m.terminal[n].id)
-		}
 		n++
 	}
-	if n > 0 {
-		m.terminal = append(m.terminal[:0:0], m.terminal[n:]...)
+	if n == 0 {
+		return
 	}
+	if ev, ok := m.cfg.Store.(Evictor); ok {
+		ids := make([]string, n)
+		for i, e := range m.terminal[:n] {
+			ids[i] = e.id
+		}
+		ev.Evict(ids...)
+	}
+	m.terminal = append(m.terminal[:0:0], m.terminal[n:]...)
 }
 
-// Run executes the TTL janitor until ctx is done.
+// Run executes the janitor (TTL expiry, retention, pending seal retries)
+// until ctx is done.
 func (m *Manager) Run(ctx context.Context) {
 	t := time.NewTicker(m.cfg.SweepInterval)
 	defer t.Stop()
@@ -182,7 +231,7 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// Close cancels in-flight drains and waits for them.
+// Close cancels in-flight drains and seal retries and waits for them.
 func (m *Manager) Close() {
 	m.stop()
 	m.wg.Wait()
@@ -255,13 +304,15 @@ func (m *Manager) Start(req StartRequest) (Session, error) {
 }
 
 // Stop moves ACTIVE -> DRAINING and kicks off the drain. Stopping a session
-// that is already DRAINING or SEALED is a no-op returning its current state.
+// that is already DRAINING or SEALED is a no-op returning its current state
+// (a SEALED session with SealPending is sealed by the background retry, not
+// by Stop).
 func (m *Manager) Stop(id string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return Session{}, ErrNotFound
+	s, err := m.stored(id)
+	if err != nil {
+		return Session{}, err
 	}
 	if s.State == StateDraining || s.State == StateSealed {
 		return s, nil
@@ -283,9 +334,9 @@ func (m *Manager) Stop(id string) (Session, error) {
 func (m *Manager) Abort(id string) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return Session{}, ErrNotFound
+	s, err := m.stored(id)
+	if err != nil {
+		return Session{}, err
 	}
 	if s.State == StateAborted {
 		return s, nil
@@ -310,21 +361,46 @@ func (m *Manager) Abort(id string) (Session, error) {
 // seal and bundle, then the control plane forgets it. Only terminal sessions
 // can be deleted (ErrBadState otherwise): stop or abort a running one first.
 // A collector failure leaves the session in place so the call can be retried.
+//
+// A session whose seal is still pending (SealPending) can be deleted too: its
+// seal retries are stopped first, and an attempt already in flight is
+// cancelled and waited for, so that it cannot reach the collector after the
+// delete. If the collector delete then fails, the retries resume.
 func (m *Manager) Delete(ctx context.Context, id string) error {
-	s, ok := m.cfg.Store.Get(id)
-	if !ok {
-		return ErrNotFound
+	m.mu.Lock()
+	s, err := m.stored(id)
+	// A session the store has but cannot read (ErrStore) is an archived one,
+	// and only finished sessions are archived: it can still be deleted, here
+	// and in the collector. Refusing would leave it undeletable until a
+	// restart, which then forgets it while the collector keeps its events.
+	unreadable := errors.Is(err, ErrStore)
+	if err != nil && !unreadable {
+		m.mu.Unlock()
+		return err
 	}
-	if !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+	if !unreadable && !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+		m.mu.Unlock()
 		return fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
+	}
+	inFlight := m.disarmSealRetryLocked(id)
+	m.mu.Unlock()
+	if inFlight != nil {
+		select {
+		case <-inFlight:
+		case <-ctx.Done():
+			m.rearmSealRetry(id)
+			return ctx.Err()
+		}
 	}
 	if m.cfg.Collector != nil {
 		if err := m.cfg.Collector.Delete(ctx, id); err != nil {
+			m.rearmSealRetry(id)
 			return fmt.Errorf("%w: %v", ErrCollector, err)
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.disarmSealRetryLocked(id) // a concurrent Delete that failed may have re-armed it
 	if err := m.cfg.Store.Delete(id); err != nil {
 		return err
 	}
@@ -335,6 +411,8 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 // Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through
 // DRAINING and the normal seal path (reason=ttl); drain() records the final
 // state (EXPIRED on a clean seal, SEALED+incomplete+seal_error otherwise).
+// Sweep also evicts finished sessions past Retention and starts the pending
+// seal retries that are due.
 func (m *Manager) Sweep(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -353,6 +431,7 @@ func (m *Manager) Sweep(now time.Time) {
 		}
 	}
 	m.pruneLocked(now)
+	m.retrySealsLocked(now)
 	if changed {
 		m.broadcastLocked()
 	}
@@ -361,13 +440,37 @@ func (m *Manager) Sweep(now time.Time) {
 // Get returns the session with the given id.
 func (m *Manager) Get(id string) (Session, bool) { return m.cfg.Store.Get(id) }
 
-// List returns sessions, optionally filtered by state ("" = all).
-func (m *Manager) List(state State) []Session {
-	all := m.cfg.Store.List()
-	if state == "" {
-		return all
+// stored returns the session with the given id from the store: ErrNotFound if
+// the store has none, and an error wrapping ErrStore if it has one and could
+// not read it (only a CheckedStore can tell).
+func (m *Manager) stored(id string) (Session, error) {
+	cs, ok := m.cfg.Store.(CheckedStore)
+	if !ok {
+		if s, ok := m.cfg.Store.Get(id); ok {
+			return s, nil
+		}
+		return Session{}, ErrNotFound
 	}
-	return slicex.Filter(all, func(s Session) bool { return s.State == state })
+	s, ok, err := cs.GetErr(id)
+	switch {
+	case err != nil:
+		return Session{}, fmt.Errorf("%w: %v", ErrStore, err)
+	case !ok:
+		return Session{}, ErrNotFound
+	}
+	return s, nil
+}
+
+// List returns sessions, optionally filtered by state ("" = all), oldest
+// first. It produces every one of them: see ListPage for a part.
+func (m *Manager) List(state State) []Session {
+	if state == "" {
+		return m.cfg.Store.List()
+	}
+	if sl, ok := m.cfg.Store.(SelectiveLister); ok {
+		return sl.ListState(state)
+	}
+	return slicex.Filter(m.cfg.Store.List(), func(s Session) bool { return s.State == state })
 }
 
 // SetKill flips the global kill switch: while set, SDKs record nothing.
@@ -395,7 +498,7 @@ func (m *Manager) exclusiveLocked() string {
 }
 
 func (m *Manager) activeLocked() ActiveSet {
-	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill}
+	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen}
 	for _, s := range m.live {
 		a.Active = append(a.Active, s.ID)
 		if s.Mode == ModeExclusive {
@@ -413,12 +516,57 @@ func (m *Manager) activeLocked() ActiveSet {
 	return a
 }
 
+// Subscriber describes one connection following the active set, normally the
+// SDK inside an instrumented service.
+type Subscriber struct {
+	// Service and Instance are what the SDK reported about itself; both are
+	// empty for SDKs that do not send them and for other clients.
+	Service     string    `json:"service,omitempty"`
+	Instance    string    `json:"instance,omitempty"`
+	ConnectedAt time.Time `json:"connected_at"`
+	// Generation is the newest ActiveSet.Generation written to this follower's
+	// connection. A follower at or past the generation in which a session
+	// became active has been sent that session (sent, not necessarily applied).
+	Generation uint64 `json:"generation"`
+	// stream marks a follower served over HTTP, whose deliveries are recorded
+	// as they are written. An in-process follower (Subscribe) receives every
+	// version through its channel and is reported as up to date.
+	stream bool
+}
+
+// Subscribers lists the current followers of the active set, by service and
+// instance. It answers "is my service connected?" when a session stays empty.
+func (m *Manager) Subscribers() []Subscriber {
+	m.mu.Lock()
+	out := make([]Subscriber, 0, len(m.subs))
+	for _, s := range m.subs {
+		if !s.stream {
+			s.Generation = m.gen
+		}
+		out = append(out, s)
+	}
+	m.mu.Unlock()
+	slices.SortFunc(out, func(a, b Subscriber) int {
+		return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance), a.ConnectedAt.Compare(b.ConnectedAt))
+	})
+	return out
+}
+
 // Subscribe returns a channel that receives the current active set
 // immediately and again on every change (slow readers see only the latest).
 func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
+	return m.SubscribeAs("", "")
+}
+
+// SubscribeAs is Subscribe for a follower that identified itself.
+func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func()) {
+	return m.subscribe(service, instance, false)
+}
+
+func (m *Manager) subscribe(service, instance string, stream bool) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
 	m.mu.Lock()
-	m.subs[ch] = struct{}{}
+	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC(), stream: stream}
 	ch <- m.activeLocked()
 	m.mu.Unlock()
 	return ch, func() {
@@ -428,7 +576,18 @@ func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
 	}
 }
 
+// delivered records that the follower behind ch was sent generation gen.
+func (m *Manager) delivered(ch chan ActiveSet, gen uint64) {
+	m.mu.Lock()
+	if s, ok := m.subs[ch]; ok && gen > s.Generation {
+		s.Generation = gen
+		m.subs[ch] = s
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) broadcastLocked() {
+	m.gen++
 	a := m.activeLocked()
 	for ch := range m.subs {
 		select {

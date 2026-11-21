@@ -108,6 +108,15 @@ func TestResultsAPI(t *testing.T) {
 	if len(h.Mutations) != 1 || h.Mutations[0].Effective == nil || *h.Mutations[0].Effective {
 		t.Fatalf("effective flag lost: %+v", h.Mutations)
 	}
+	// A collector that predates the flags sends none: nothing is uncertain.
+	if h.Mutations[0].Flags != nil || h.Mutations[0].Uncertain() || ents[0].Uncertain != 0 {
+		t.Fatalf("old shape: %+v %+v", h.Mutations[0], ents[0])
+	}
+	// The unknown key is "{}" on the wire; an empty one is not a route of the collector.
+	*paths = nil
+	if h, err = s.History(ctx, "postgres", "orders", ""); err != nil || h.PK != "{}" || !strings.HasSuffix((*paths)[0], "/orders/%7B%7D") {
+		t.Fatalf("history of the unknown key: %+v %v (%v)", h, err, *paths)
+	}
 	tr, err := s.Trace(ctx)
 	if err != nil || len(tr.Roots) != 1 || tr.Roots[0].Children[0].Event.SpanID != "kid" {
 		t.Fatalf("trace: %+v %v", tr, err)
@@ -172,5 +181,29 @@ func TestDelete(t *testing.T) {
 	}
 	if _, err := client.Attach(ctx, client.Options{BaseURL: cp.URL}, s.ID); err == nil {
 		t.Fatal("deleted session still attachable")
+	}
+}
+
+// The flags of a history entry and the uncertain count of an entity are
+// optional on the wire: read when the collector sends them.
+func TestEntityUncertaintyDecodes(t *testing.T) {
+	var h client.EntityHistory
+	if err := json.Unmarshal([]byte(`{"store":"postgres","entity":"stock","pk":"{\"sku\":\"w\"}","mutations":[
+		{"seq":1,"op":"update","flags":["pk_not_unique","after_unavailable"]},
+		{"seq":2,"op":"update","flags":["redacted"]},
+		{"seq":3,"op":"update","some_later_field":true}]}`), &h); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Mutations) != 3 || !h.Mutations[0].Uncertain() || h.Mutations[1].Uncertain() || h.Mutations[2].Uncertain() ||
+		len(h.Mutations[0].Flags) != 2 || len(h.Mutations[1].Flags) != 1 {
+		t.Fatalf("history: %+v", h)
+	}
+	var ents []client.Entity
+	if err := json.Unmarshal([]byte(`[{"store":"postgres","entity":"stock","pk":"{}","mutation_count":3,"uncertain":2},
+		{"store":"postgres","entity":"orders","pk":"{\"id\":1}","mutation_count":1}]`), &ents); err != nil {
+		t.Fatal(err)
+	}
+	if ents[0].Uncertain != 2 || ents[1].Uncertain != 0 {
+		t.Fatalf("entities: %+v", ents)
 	}
 }

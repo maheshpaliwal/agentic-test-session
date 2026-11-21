@@ -20,6 +20,12 @@ type Config struct {
 	// BindPriority is the ordered binding fallback chain (TSESSION_BIND_PRIORITY).
 	// Process-wide; every service in one environment must use the same list.
 	BindPriority []BindingKey
+	// OverwriteTraceparent makes Inject replace a traceparent the application
+	// set with tsession's, as SDKs did before x-tsession-traceparent existed
+	// (TSESSION_OVERWRITE_TRACEPARENT). It breaks the application's own
+	// distributed traces; it is meant only for a rollout in which services
+	// downstream still run such an SDK. See docs/PROTOCOL.md.
+	OverwriteTraceparent bool
 }
 
 var cfg atomic.Pointer[Config]
@@ -88,6 +94,13 @@ type noSessions struct{}
 
 func (noSessions) IsActive(string) bool      { return false }
 func (noSessions) Exclusive() (string, bool) { return "", false }
+func (noSessions) AnyActive() bool           { return false }
+
+// AnyActiver is an optional interface a SessionSet implements when it can say
+// cheaply whether any request at all could be attributed to a session right
+// now: at least one session is active, or an exclusive session is set (it
+// attributes every request). The check must not block.
+type AnyActiver interface{ AnyActive() bool }
 
 type setBox struct{ s SessionSet }
 
@@ -105,6 +118,22 @@ func SetSessions(s SessionSet) {
 }
 
 func activeSessions() SessionSet { return sessions.Load().s }
+
+// AnyActive reports whether any request could belong to a session right now:
+// the SDK is enabled and the session set has an active or exclusive session.
+// Wrappers call it before work that is needed only to find out which session
+// a request belongs to (a lookup in another store, say), so that a process
+// with no session running does none of it. A session set that does not
+// implement AnyActiver cannot tell, and the answer is then true.
+func AnyActive() bool {
+	if !Enabled() {
+		return false
+	}
+	if a, ok := activeSessions().(AnyActiver); ok {
+		return a.AnyActive()
+	}
+	return true
+}
 
 // ---- ids & clocks ----
 

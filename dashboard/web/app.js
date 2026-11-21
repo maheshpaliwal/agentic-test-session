@@ -62,8 +62,20 @@
   }
   const FLAG_CLS = { tx_unresolved: 't-warn', orphaned: 't-err', oversize_dropped: 't-err', image_skipped: '', propagation_skipped: '' };
   const FLAG_HELP = { tx_unresolved: 'no commit/rollback seen for this transaction', orphaned: 'async work with no matching counterpart',
-    image_skipped: 'before/after image not captured', oversize_dropped: 'payload dropped for exceeding size limits',
+    image_skipped: 'before/after image not captured', after_unavailable: 'the updated row could not be read back; its new values are not known',
+    pk_unknown: 'no primary key value found for the row; declare the key with tsql.WithPKColumns', pk_lookup_failed: 'the primary key could not be read from the database catalog',
+    pk_not_unique: 'the key columns matched more than one row, so the new values were not recorded; declare the key with tsql.WithPKColumns',
+    after_from_args: 'the new values were taken from the statement, not read back from the database',
+    returning_partial: 'the statement returned only some of the row\'s columns',
+    oversize_dropped: 'payload dropped for exceeding size limits',
+    after_failed: 'reading the row back after the write failed; its new values are not known',
+    image_timeout: 'reading the row images took too long and was abandoned', image_failed: 'reading the row images failed',
+    image_truncated: 'the statement changed more rows than are captured; only some have images', diff_truncated: 'the list of changed fields was cut short',
     propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };
+  // A flag with a reason ("image_skipped:deadline") is styled and explained as its base flag.
+  const flagHelp = (x) => FLAG_HELP[x] || FLAG_HELP[U.flagBase(x)] || '';
+  const flagTag = (x) => tag(x, FLAG_CLS[x] || FLAG_CLS[U.flagBase(x)] || 't-warn', flagHelp(x));
+  const UNCERTAIN_HELP = 'the key or row image recorded for these changes is incomplete or uncertain; the flags on each change say how';
   function tag(text, tone, title, ic) { return h('span', { class: 'tag' + (tone ? ' ' + tone : ''), title: title }, ic ? icon(ic) : null, text); }
   function redChip() { return h('span', { class: 'redchip', title: 'value masked by the SDK' }, icon('lock'), '[REDACTED]'); }
   const ST_CLS = { ACTIVE: 'st-active', DRAINING: 'st-draining', SEALED: 'st-sealed', ABORTED: 'st-dead', EXPIRED: 'st-dead', CREATED: 'st-created' };
@@ -130,7 +142,8 @@
   }
 
   // ---------- api ----------
-  async function api(path, opts) {
+  /* request resolves to the decoded body and the response headers; api to the body alone. */
+  async function request(path, opts) {
     let r;
     try {
       r = await fetch(path, Object.assign({ cache: 'no-store', credentials: 'omit' }, opts || {}));
@@ -148,12 +161,22 @@
       err.status = r.status;
       throw err;
     }
-    return body;
+    return { body: body, headers: r.headers };
   }
+  async function api(path, opts) { return (await request(path, opts)).body; }
   const cp = (p, o) => api('/api/cp' + p, o);
   const col = (p, o) => api('/api/col' + p, o);
   const postJSON = (p, body) => cp(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   const asList = (b, key) => (Array.isArray(b) ? b : b && Array.isArray(b[key]) ? b[key] : []);
+  /* One page of the control plane's session list, newest first (docs/PROTOCOL.md): the sessions, the cursor of the
+     page after it ('' when there is none), how many sessions match in all (null when the server does not say) and
+     how many it could not read. A control plane without paging ignores the limit and answers with every session
+     and no headers, which reads here as one page with nothing after it. */
+  async function cpSessions(q) {
+    const r = await request('/api/cp/v1/sessions' + U.listQuery(q));
+    const hd = (k) => r.headers.get(k);
+    return { list: asList(r.body, 'sessions'), next: hd('X-Tsession-Next') || '', total: U.headerCount(hd('X-Tsession-Total')), unreadable: U.headerCount(hd('X-Tsession-Unreadable')) || 0 };
+  }
 
   // ---------- JSON viewer (DOM nodes only) ----------
   const TOK = /("(?:\\.|[^"\\])*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
@@ -280,6 +303,14 @@
     return t;
   }
   function diffView(mu) {
+    if (U.afterUnavailable(mu)) {
+      // The row was not read back: its fields are what they were before the update, not removed.
+      const rows = flatten(mu.before.inline === undefined ? {} : mu.before.inline, '', {});
+      const box = h('div', { class: 'sec' }, h('div', { class: 'note', text: 'After image unavailable: the new values were not captured, so no changes can be shown.' }));
+      const fields = Object.keys(rows).map((k) => ({ field: k, old: rows[k], nw: undefined, kind: 'same' }));
+      if (fields.length) box.appendChild(h('details', { class: 'more' }, h('summary', { text: 'Values before the update (' + fields.length + ' field' + (fields.length === 1 ? '' : 's') + ')' }), diffTable(fields)));
+      return box;
+    }
     const rows = diffRows(mu);
     const changed = rows.filter((r) => r.kind !== 'same'), same = rows.filter((r) => r.kind === 'same');
     const box = h('div', { class: 'sec' });
@@ -306,6 +337,8 @@
       mu.source ? tag('src: ' + mu.source) : null, mu.attrs && mu.attrs.commit_failed ? tag('commit failed', 't-err') : null));
     const body = h('div', { class: 'mut-body' });
     if (rolled) body.appendChild(h('div', { class: 'note', text: 'Rolled back: the values below were never applied.' }));
+    // Entity history: the flags of the event that made the change (they qualify how far the images below can be trusted).
+    (mu.flags || []).forEach((x) => body.appendChild(h('div', { class: 'flag-row' }, flagTag(x), flagHelp(x))));
     body.appendChild(diffView(mu));
     const b = payloadBlock('before', mu.before), a = payloadBlock('after', mu.after);
     const raw = h('details', { class: 'more' }, h('summary', { text: 'Raw before / after' }));
@@ -358,6 +391,27 @@
   }
   function emptyState(ill, title, text, extra) {
     return h('div', { class: 'empty' + (ill === 'error' ? ' err' : '') }, illustration(ill), h('h2', { text: title }), text ? h('p', null, text) : null, extra || null);
+  }
+
+  // connectedNote is a paragraph naming the services connected to the control
+  // plane; it stays empty when the control plane cannot tell (older version,
+  // offline or demo-less modes). The answer is reused for a few seconds, since
+  // the empty state is repainted on every poll.
+  // Only the newest paragraph is updated, and the request is given up after a few seconds, so repaints while
+  // a request hangs neither pile up callbacks on discarded nodes nor leave the note stuck.
+  const connected = { at: 0, text: '', pending: false, node: null };
+  function connectedNote() {
+    const p = h('p', { class: 'muted', 'aria-live': 'polite' }, connected.text);
+    connected.node = p;
+    if (Date.now() - connected.at > 5000 && !connected.pending) {
+      connected.pending = true;
+      const opts = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(5000) } : undefined;
+      cp('/v1/subscribers', opts).then((subs) => U.connectedText(subs), () => '').then((text) => {
+        connected.text = text; connected.at = Date.now(); connected.pending = false;
+        if (connected.node) connected.node.textContent = text;
+      });
+    }
+    return p;
   }
 
   // ---------- dialogs ----------
@@ -479,7 +533,7 @@
     setTimeout(() => { inp.focus(); inp.select(); }, 0);
     return inp;
   }
-  const renameBtn = (onclick) => h('button', { type: 'button', class: 'icon-btn sm', title: 'Rename session', 'aria-label': 'Rename session', onclick: (e) => { e.stopPropagation(); onclick(); } }, icon('edit'));
+  const renameBtn = (onclick) => h('button', { type: 'button', class: 'icon-btn sm', 'data-rw': '', title: 'Rename session', 'aria-label': 'Rename session', onclick: (e) => { e.stopPropagation(); onclick(); } }, icon('edit'));
   /* Entry point of a session (first trigger), cached per session and event count. */
   const ENTRY = new Map();
 
@@ -488,7 +542,20 @@
   function viewSessions(main, token, query) {
     document.title = 'Sessions - tsession';
     const f = { state: STATES.indexOf(query.get('state')) >= 0 ? query.get('state') : '', q: (query.get('q') || '').toLowerCase(), auto: true };
-    let rows = null, loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
+    /* The list is loaded a page at a time. #/?page=N sets the page size (default 200).
+       rows: the sessions loaded so far, newest first. next: the cursor of the sessions older than the oldest
+       loaded one, '' when there are none. total: how many sessions match the state filter on the server, null
+       when it did not say. unreadNew/unreadOld: sessions the server could not read, on the newest page and on
+       the pages loaded below it. filterGen changes with the state filter: a reply to an earlier one is dropped. */
+    const PAGE = U.pageSize(query.get('page'));
+    let rows = null, next = '', total = null, unreadNew = 0, unreadOld = 0, loadingMore = false, filterGen = 0, liveBusy = false;
+    let liveAt = 0;  // where the by-id refresh of running rows below the first page goes on
+    let below = 0;   // loaded rows below the first page: the periodic refresh does not reach them
+    /* counts: the collector's numbers for the loaded sessions, id -> {event_count, service_count}. They are asked
+       for by id, a page at a time. missing: loaded sessions whose counts the collector could not give when asked;
+       they are asked again by the refresh. */
+    let counts = new Map(), missing = new Set();
+    let loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
     const pendingNames = new Map();
     const q = h('input', { class: 'field', type: 'search', placeholder: 'Search id, name, binding, entry point', 'aria-label': 'Search sessions', value: query.get('q') || '', oninput: (e) => { f.q = e.target.value.toLowerCase(); paint(true); } });
     const chipsEl = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by state' });
@@ -497,7 +564,7 @@
     const sub = h('div', { class: 'sub' });
     S.search = q;
     main.appendChild(h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Test sessions' }), sub), h('span', { class: 'grow' }),
-      h('button', { type: 'button', class: 'btn primary', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start session')));
+      h('button', { type: 'button', class: 'btn primary', 'data-rw': '', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start session')));
     main.appendChild(h('div', { class: 'toolbar' },
       h('div', { class: 'search' }, icon('search', 'sm'), q, span('kbd', '/')), chipsEl, h('span', { class: 'grow' }),
       h('label', { class: 'switch' }, auto, h('span', { class: 'track', 'aria-hidden': 'true' }), 'Auto-refresh'),
@@ -507,11 +574,63 @@
 
     function paintChips() {
       clear(chipsEl);
-      const counts = {};
-      (rows || []).forEach((s) => { counts[s.state] = (counts[s.state] || 0) + 1; });
-      const mk = (val, label, n) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(f.state === val), onclick: () => { f.state = val; paintChips(); paint(true); } }, label, h('span', { class: 'n', text: n }));
-      chipsEl.appendChild(mk('', 'All', rows ? rows.length : 0));
-      STATES.forEach((st) => { if (counts[st] || f.state === st) chipsEl.appendChild(mk(st, st.charAt(0) + st.slice(1).toLowerCase(), counts[st] || 0)); });
+      const mk = (val, label, n) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(f.state === val), onclick: () => setState(val) }, label, n === null ? null : h('span', { class: 'n', text: n }));
+      const label = (st) => st.charAt(0) + st.slice(1).toLowerCase();
+      const loaded = rows ? rows.length : 0;
+      if (!next && !f.state) {
+        // Every session is loaded: the count of each state is known, and states nobody is in are left out.
+        const n = {};
+        (rows || []).forEach((s) => { n[s.state] = (n[s.state] || 0) + 1; });
+        chipsEl.appendChild(mk('', 'All', loaded));
+        STATES.forEach((st) => { if (n[st]) chipsEl.appendChild(mk(st, label(st), n[st])); });
+        return;
+      }
+      // Only part of the list is loaded, or one state of it: the server gives the size of the current selection, no more.
+      const sel = !rows ? null : total !== null ? total : loaded;
+      chipsEl.appendChild(mk('', 'All', f.state ? null : sel));
+      STATES.forEach((st) => chipsEl.appendChild(mk(st, label(st), f.state === st ? sel : null)));
+    }
+    /* The state filter is applied by the server, so that it covers the sessions that are not loaded too. */
+    function setState(val) {
+      if (f.state === val) return;
+      f.state = val; filterGen++;
+      rows = null; next = ''; total = null; unreadNew = unreadOld = 0; loadingMore = false; loadErr = null; lastSig = '';
+      missing = new Set();
+      paintChips();
+      sub.textContent = '';
+      clear(body).appendChild(skeletonRows(4));
+      load();
+    }
+    const decorate = (s) => { const pn = pendingNames.get(s.id), c = counts.get(s.id) || {}; return Object.assign({}, s, { event_count: c.event_count, service_count: c.service_count }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); };
+    /* The collector's counts for the given sessions: one request for up to a page of ids (U.idChunks), never one
+       per session. It resolves to what applyCounts takes and does not fail: without the collector the list is
+       shown with the counts it has. */
+    async function fetchCounts(ids) {
+      const out = [];
+      for (const chunk of U.idChunks(ids)) {
+        let list = null, un = null;
+        try {
+          const r = await request('/api/col/v1/sessions' + U.idsQuery(chunk));
+          list = asList(r.body, 'sessions'); un = U.headerCount(r.headers.get('X-Tsession-Unanswered'));
+        } catch (e) { /* the ids are asked again by the next refresh */ }
+        out.push({ ids: chunk, list: list, un: un });
+      }
+      return out;
+    }
+    function applyCounts(res) {
+      res.forEach((r) => {
+        const m = U.mergeCounts(counts, r.ids, r.list, r.un);
+        counts = m.counts;
+        r.ids.forEach((id) => missing.delete(id));
+        m.missing.forEach((id) => missing.add(id));
+      });
+    }
+    function moreBar() {
+      const left = total !== null ? Math.max(0, total - rows.length) : null;
+      return h('div', { class: 'list-more' },
+        // aria-disabled, not disabled: the button keeps the keyboard focus while the page loads (loadMore ignores a second click).
+        h('button', { type: 'button', class: 'btn', 'data-act': 'more', 'aria-disabled': loadingMore ? 'true' : null, onclick: () => loadMore() }, loadingMore ? 'Loading\u2026' : left ? 'Load ' + Math.min(PAGE, left) + ' more' : 'Load more'),
+        span('muted', (left ? left + ' older session' + (left === 1 ? ' is' : 's are') : 'Older sessions are') + ' not loaded. Auto-refresh updates the newest ' + PAGE + '.'));
     }
     function nameBlock(s) {
       const en = ENTRY.get(s.id), et = en && en.entry ? U.entryText(en.entry) : '';
@@ -532,13 +651,14 @@
       const open = () => { location.hash = sessionHref(s.id); };
       const start = Date.parse(s.started_at || s.created_at), end = s.ended_at ? Date.parse(s.ended_at) : now;
       const dur = isNaN(start) ? '-' : fmtNs(Math.max(0, end - start) * 1e6);
-      const stop = s.state === 'ACTIVE' ? h('button', { type: 'button', class: 'btn danger sm', onclick: async (e) => {
+      const stop = s.state === 'ACTIVE' ? h('button', { type: 'button', class: 'btn danger sm', 'data-act': 'stop', 'data-rw': '', onclick: async (e) => {
         e.stopPropagation();
-        try { await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); load(); } catch (er) { showError('Stop failed: ' + er.message); }
+        // The refresh reloads the newest page only: a row below it is brought up to date from the reply.
+        try { const r = await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); if (r && r.id === s.id && rows) { rows = U.mergeRows(rows, [decorate(r)]); paint(!editing); } load(); } catch (er) { actionError('Stop failed: ' + er.message); }
       } }, icon('stop', 'sm'), 'Stop') : null;
       // Delete is two clicks: the first arms the button for a few seconds, the second deletes.
       const armed = confirming === s.id;
-      const del = TERMINAL[s.state] ? h('button', { type: 'button', class: 'btn sm ' + (armed ? 'danger' : 'ghost'),
+      const del = TERMINAL[s.state] ? h('button', { type: 'button', class: 'btn sm ' + (armed ? 'danger' : 'ghost'), 'data-act': 'delete', 'data-rw': '',
         title: 'Delete this session and everything recorded for it', onclick: async (e) => {
           e.stopPropagation();
           if (!armed) {
@@ -547,7 +667,12 @@
             return;
           }
           confirming = null;
-          try { await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' }); toast('Deleted ' + s.id, 'ok'); load(); } catch (er) { showError('Delete failed: ' + er.message); paint(true); }
+          try {
+            await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' });
+            toast('Deleted ' + s.id, 'ok');
+            if (rows) { rows = rows.filter((x) => x.id !== s.id); if (total) total--; paint(!editing); }
+            load();
+          } catch (er) { actionError('Delete failed: ' + er.message); paint(true); }
         } }, armed ? 'Confirm delete' : 'Delete') : null;
       const bound = null;
       return h('tr', { class: 'row', tabindex: 0, 'data-id': s.id, onclick: open, onkeydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(); } },
@@ -560,16 +685,19 @@
           s.service_count !== undefined ? h('span', { title: 'services seen' }, h('b', { text: s.service_count }), 'services') : null,
           h('span', { title: 'wall-clock duration' }, icon('clock', 'sm'), h('b', { text: dur })))),
         h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', 'some async work or events are missing', 'warn') : null,
-          s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag('seal error', 't-err', s.seal_error) : null)),
+          s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag(s.seal_pending ? 'seal retrying' : 'seal error', 't-err', s.seal_error) : null)),
         h('td', { class: 'num' }, stop, del));
     }
     function paint(force) {
       const liveBucket = (rows || []).some(isLive) ? Math.floor(Date.now() / 5000) : 0;
       if (editing && !force) return;
-      const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing, confirming]);
+      const sig = JSON.stringify([rows, loadErr, f.state, f.q, liveBucket, entryVer, editing, confirming, next, total, unreadNew + unreadOld, loadingMore]);
       if (!force && sig === lastSig) return;
       lastSig = sig;
-      const focusId = document.activeElement && document.activeElement.getAttribute && document.activeElement.closest && document.activeElement.closest('tr.row') ? document.activeElement.closest('tr.row').getAttribute('data-id') : null;
+      const ae = document.activeElement;
+      const focusMore = !!(ae && ae.getAttribute && ae.getAttribute('data-act') === 'more');
+      const focusId = ae && ae.getAttribute && ae.closest && ae.closest('tr.row') ? ae.closest('tr.row').getAttribute('data-id') : null;
+      const focusAct = focusId ? ae.getAttribute('data-act') : null; // a button inside the row keeps the focus, not just the row
       clear(body);
       if (loadErr) {
         body.appendChild(emptyState('error', 'Cannot load sessions', 'The control plane or collector did not answer: ' + loadErr + '. Check that both are running and that the dashboard can reach them.',
@@ -579,38 +707,145 @@
       }
       if (!rows) return;
       paintChips();
+      // The search looks at the loaded sessions; the state filter was applied by the server (and is checked again here,
+      // for a control plane that does not page and for a session that changed state since).
       const vis = rows.filter((s) => (!f.state || s.state === f.state) && (!f.q || U.sessionHay(s, (ENTRY.get(s.id) || {}).entry).indexOf(f.q) >= 0));
-      sub.textContent = vis.length === rows.length ? rows.length + ' session' + (rows.length === 1 ? '' : 's') : vis.length + ' of ' + rows.length + ' sessions';
+      sub.textContent = U.listSummary({ loaded: rows.length, shown: vis.length, total: total, more: !!next, state: f.state, below: below });
+      const refocus = () => { if (focusMore) { const b = body.querySelector('[data-act="more"]'); if (b) b.focus(); } };
+      if (unreadNew + unreadOld) body.appendChild(h('div', { class: 'callout warn list-note', role: 'status' }, icon('warn'), h('div', { class: 'ct', text: U.unreadableText(unreadNew + unreadOld) })));
+      const clearFilters = () => { f.q = ''; q.value = ''; if (f.state) setState(''); else paint(true); };
       if (!rows.length) {
-        body.appendChild(emptyState('sessions', 'No sessions yet', 'A session captures every event produced by your test traffic. Start one, then send requests with the x-tsession-id header.',
-          h('button', { type: 'button', class: 'btn primary', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start your first session')));
+        if (f.state) body.appendChild(emptyState('sessions', 'No ' + f.state + ' sessions', 'No session is in this state.', h('button', { type: 'button', class: 'btn', onclick: clearFilters }, 'Show all sessions')));
+        else body.appendChild(emptyState('sessions', 'No sessions yet', 'A session captures every event produced by your test traffic. Start one, then send requests with the x-tsession-id header.',
+          h('button', { type: 'button', class: 'btn primary', 'data-rw': '', onclick: () => openStartDialog() }, icon('plus', 'sm'), 'Start your first session')));
+        if (next) body.appendChild(moreBar());
+        refocus();
         return;
       }
       if (!vis.length) {
-        body.appendChild(emptyState('sessions', 'No sessions match', 'Try a different search term or clear the state filter.',
-          h('button', { type: 'button', class: 'btn', onclick: () => { f.state = ''; f.q = ''; q.value = ''; paint(true); } }, 'Clear filters')));
+        body.appendChild(emptyState('sessions', next ? 'No loaded session matches' : 'No sessions match',
+          next ? 'Search looks only at the ' + rows.length + ' sessions that are loaded. Load more to search older ones, or try a different search term.' : 'Try a different search term or clear the state filter.',
+          h('button', { type: 'button', class: 'btn', onclick: clearFilters }, 'Clear filters')));
+        if (next) body.appendChild(moreBar());
+        refocus();
         return;
       }
       const now = Date.now();
       body.appendChild(h('div', { class: 'tablewrap' }, h('table', { class: 'stable' },
         h('thead', null, h('tr', null, [['State', ''], ['Session', ''], ['Mode', 'hide-sm'], ['Initiated by', 'hide-sm'], ['Started', ''], ['Activity', ''], ['Flags', ''], ['', '']].map((x) => h('th', { class: x[1], text: x[0] })))),
         h('tbody', null, vis.map((s) => sessionRow(s, now))))));
-      if (focusId) { const el = body.querySelector('tr.row[data-id="' + focusId.replace(/["\\]/g, '') + '"]'); if (el) el.focus(); }
+      if (next) body.appendChild(moreBar());
+      refocus();
+      if (focusId) {
+        const el = body.querySelector('tr.row[data-id="' + focusId.replace(/["\\]/g, '') + '"]');
+        const ctl = el && focusAct ? el.querySelector('[data-act="' + focusAct + '"]') : null;
+        if (ctl || el) (ctl || el).focus();
+      }
+      // An armed Delete is disarmed by Escape or by a click anywhere else in the list.
+      const wrap = body.querySelector('.tablewrap');
+      if (wrap && confirming) {
+        wrap.addEventListener('keydown', (e) => { if (e.key === 'Escape' && confirming) { e.stopPropagation(); confirming = null; paint(true); } });
+        wrap.addEventListener('click', (e) => { if (confirming && !(e.target.closest && e.target.closest('[data-act="delete"]'))) { confirming = null; paint(true); } }, true);
+      }
     }
+    // An error from a row action stays visible for a while; the periodic refresh must not wipe it at once.
+    let actionErrUntil = 0;
+    function actionError(msg) { actionErrUntil = Date.now() + 10000; showError(msg); }
+    /* load fetches the newest page, and the collector's counts for the sessions on it, and merges both into the
+       loaded rows: what the refresh costs does not grow with the number of sessions recorded, nor with the
+       number loaded here. */
     async function load() {
+      const gen = filterGen;
+      let fresh = null; // stays null when the load fails
       try {
-        const [a, b] = await Promise.all([cp('/v1/sessions'), col('/v1/sessions').catch(() => [])]);
-        if (token !== S.token) return;
-        const counts = {}, svcs = {};
-        asList(b, 'sessions').forEach((x) => { counts[x.id] = x.event_count; if (x.service_count !== undefined) svcs[x.id] = x.service_count; });
-        rows = asList(a, 'sessions').map((s) => { const pn = pendingNames.get(s.id); return Object.assign({}, s, { event_count: counts[s.id], service_count: svcs[s.id] }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); });
+        const p = await cpSessions({ limit: PAGE, state: f.state });
+        if (token !== S.token || gen !== filterGen) return;
+        const c = await fetchCounts(p.list.map((s) => s.id));
+        if (token !== S.token || gen !== filterGen) return;
+        applyCounts(c);
+        fresh = p.list;
+        const m = U.mergeFirstPage(rows, fresh, !!p.next);
+        // With nothing loaded below this page, its cursor is where "Load more" goes on; otherwise that is still
+        // the cursor of the oldest page loaded.
+        if (!m.older) { next = p.next; unreadOld = 0; }
+        unreadNew = p.unreadable;
+        rows = m.rows.map(decorate);
+        below = m.older;
+        // Everything is loaded and the server counts a different number: rows below the page were deleted (or
+        // changed state) elsewhere. They are never refreshed, so start over from the page rather than show them.
+        if (m.older && !next && p.total !== null && p.total !== rows.length) { rows = fresh.map(decorate); next = p.next; unreadOld = 0; below = 0; }
+        total = p.total !== null ? p.total : next ? null : rows.length;
+        // Counts are kept for the loaded sessions only.
+        const loaded = new Set(rows.map((s) => s.id));
+        counts.forEach((v, id) => { if (!loaded.has(id)) counts.delete(id); });
+        missing.forEach((id) => { if (!loaded.has(id)) missing.delete(id); });
         pendingNames.forEach((v, k) => { const r = rows.find((x) => x.id === k); if (!r || r.name === v.n) pendingNames.delete(k); });
-        rows.sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)));
-        loadErr = null; showError('');
+        loadErr = null; if (Date.now() > actionErrUntil) showError('');
         setLive(rows.some((s) => s.state === 'ACTIVE'));
-      } catch (e) { if (token !== S.token) return; loadErr = e.message; }
+      } catch (e) { if (token !== S.token || gen !== filterGen) return; loadErr = e.message; }
       paint();
       loadEntries();
+      refreshOlderLive(fresh);
+    }
+    /* The page after the oldest loaded one, appended. */
+    async function loadMore() {
+      if (loadingMore || !next || !rows) return;
+      const gen = filterGen, sent = next;
+      loadingMore = true; paint(true);
+      try {
+        const p = await cpSessions({ limit: PAGE, state: f.state, before: sent });
+        if (token !== S.token || gen !== filterGen) return;
+        const c = await fetchCounts(p.list.map((s) => s.id));
+        if (token !== S.token || gen !== filterGen) return;
+        // A refresh may have started the list over while this was in flight; the reply then continues a list
+        // that is gone, and appending it would leave a hole between the new rows and these.
+        if (next === sent) {
+          applyCounts(c);
+          rows = U.mergeRows(rows, p.list.map(decorate));
+          below += p.list.length;
+          next = p.next; unreadOld += p.unreadable;
+          if (p.total !== null) total = p.total; else if (!next) total = rows.length;
+        }
+      } catch (e) { if (token === S.token && gen === filterGen) actionError('Could not load more sessions: ' + e.message); }
+      if (token !== S.token || gen !== filterGen) return;
+      loadingMore = false;
+      paint(!editing); // a rename in progress is not interrupted; it repaints when it ends
+      loadEntries();
+    }
+    /* A session that is still running and sits below the newest page is not covered by the refresh: it is
+       asked for by id, a few at a time, so that its state does not go stale. Their counts, and those the
+       collector could not give earlier for rows below the page, are asked for in one request (at most a page
+       of ids), and only when there are such rows. */
+    async function refreshOlderLive(fresh) {
+      if (liveBusy || !rows || !fresh) return;
+      const gen = filterGen, onPage = new Set(fresh.map((s) => s.id));
+      liveBusy = true;
+      try {
+        // Ten per cycle, going round all of them: always taking the first ten would leave the rest stale for good.
+        const live = rows.filter((x) => isLive(x) && !onPage.has(x.id));
+        if (liveAt >= live.length) liveAt = 0;
+        const batch = live.slice(liveAt, liveAt + 10);
+        liveAt += batch.length;
+        // The ones that went unanswered come first: they leave the set once answered, so the others get their turn.
+        const ask = U.idChunks(Array.from(missing).filter((id) => !onPage.has(id)).concat(batch.map((s) => s.id)), PAGE)[0];
+        if (ask) {
+          const c = await fetchCounts(ask);
+          if (token !== S.token || gen !== filterGen || !rows) return;
+          applyCounts(c);
+          rows = rows.map(decorate);
+          paint();
+        }
+        for (const s of batch) {
+          let cur = null;
+          try { cur = await cp('/v1/sessions/' + encodeURIComponent(s.id)); } catch (e) { if (e.status !== 404) continue; }
+          if (token !== S.token || gen !== filterGen || !rows) return;
+          // The count was asked before the state: a session that finished in between is not live any more and
+          // would never be asked again, so its count goes on the list of ids still to ask.
+          if (cur && !isLive(cur)) missing.add(s.id);
+          rows = cur && (!f.state || cur.state === f.state) ? U.mergeRows(rows, [decorate(cur)]) : rows.filter((x) => x.id !== s.id);
+          paint();
+        }
+      } finally { liveBusy = false; }
     }
     /* Entry points are derived from each session's first events; only the first ~10 visible sessions, one at a time, never blocking the list. */
     async function loadEntries() {
@@ -828,7 +1063,7 @@
           h('span', { text: 'The JWT signature is not verified, so traffic can be spoofed. Test environments only.' }))));
       }
     }
-    if (s.seal_error) head.appendChild(h('div', { class: 'callout err', role: 'alert' }, icon('err'), h('div', { class: 'ct' }, h('strong', { text: 'Seal failed' }), h('span', { text: s.seal_error }))));
+    if (s.seal_error) head.appendChild(h('div', { class: 'callout err', role: 'alert' }, icon('err'), h('div', { class: 'ct' }, h('strong', { text: s.seal_pending ? 'Seal failed, retrying in the background' : 'Seal failed' }), h('span', { text: s.seal_error }))));
     if (s.incomplete || s.dropped_events) {
       const w = U.sessionWarnings(Object.assign({}, s, { seal_error: '' }));
       head.appendChild(h('div', { class: 'callout warn', role: 'alert' }, icon('warn'), h('div', { class: 'ct' },
@@ -922,20 +1157,42 @@
     if (e.attrs) Object.keys(e.attrs).sort().forEach((k) => row('attr ' + k, span('mono', typeof e.attrs[k] === 'object' ? JSON.stringify(e.attrs[k]) : String(e.attrs[k]))));
     pane.appendChild(kv);
     if (e.flags && e.flags.length) {
-      pane.appendChild(h('div', { class: 'sec' }, h('h3', { text: 'Flags' }), e.flags.map((x) => h('div', { class: 'flag-row' }, tag(x, FLAG_CLS[x] || 't-warn'), FLAG_HELP[x] || ''))));
+      pane.appendChild(h('div', { class: 'sec' }, h('h3', { text: 'Flags' }), e.flags.map((x) => h('div', { class: 'flag-row' }, flagTag(x), flagHelp(x)))));
     }
   }
   function drPayload(label, p, pane) {
     const b = payloadBlock(label, p);
     pane.appendChild(b || emptyState('events', 'No ' + label.toLowerCase() + ' captured', 'The SDK did not record a payload for this event.'));
   }
-  const drReq = (D, e, pane) => drPayload('Request', e.req, pane);
+  /* "Copy as curl" for HTTP events. The notes (placeholders, left-out headers, redaction, truncation)
+     appear under the button once the command is on the clipboard. */
+  function curlBar(e) {
+    const c = U.curlFor(e);
+    if (!c) return null;
+    const notes = h('ul', { class: 'curl-notes' });
+    const b = h('button', { type: 'button', class: 'btn sm', title: 'Copy this request as a curl command', onclick: async () => {
+      if (!(await copyText(c.command, 'curl command'))) return;
+      b.replaceChild(icon('check', 'sm'), b.firstChild);
+      setTimeout(() => { if (b.firstChild) b.replaceChild(icon('copy', 'sm'), b.firstChild); }, 1200);
+      clear(notes);
+      c.notes.forEach((n) => notes.appendChild(h('li', { text: n })));
+    } }, icon('copy', 'sm'), 'Copy as curl');
+    return h('div', { class: 'curl-bar' }, b, h('div', { role: 'status', 'aria-live': 'polite' }, notes));
+  }
+  function drReq(D, e, pane) {
+    const bar = curlBar(e);
+    if (bar) pane.appendChild(bar);
+    drPayload('Request', e.req, pane);
+  }
   const drResp = (D, e, pane) => drPayload('Response', e.resp, pane);
   function drMut(D, e, pane) {
     const ms = e.mutations || [];
     if (ms.length) {
       pane.appendChild(h('h3', { text: 'Mutations (' + ms.length + ')' }));
-      ms.forEach((m) => pane.appendChild(mutCard(Object.assign({ tx: e.tx_id }, m))));
+      // Each mutation links to the history of its row, key or document in the Entities tab.
+      ms.forEach((m) => pane.appendChild(mutCard(Object.assign({ tx: e.tx_id }, m),
+        h('button', { type: 'button', class: 'linkbtn', text: 'entity history', title: 'Every change this session made to this ' + (m.entity || 'entity'),
+          onclick: () => { D.entSel = [m.store, m.entity, U.pkRaw(m.pk)].join('\u0000'); D.entQ = ''; location.hash = sessionHref(D.id, 'entities'); } }))));
     }
     if (e.reads && e.reads.length) {
       pane.appendChild(h('h3', { text: 'Reads (' + e.reads.length + ')' }));
@@ -1088,10 +1345,10 @@
       if (e.attempt > 1) tags.push(tag('attempt ' + e.attempt, 't-retry'));
       if (e.attrs && e.attrs.retry_pending) tags.push(tag('retry pending', 't-retry'));
       if (e.attrs && e.attrs.commit_failed) tags.push(tag('commit failed', 't-err'));
-      (e.flags || []).forEach((x) => tags.push(tag(x, FLAG_CLS[x] || 't-warn', FLAG_HELP[x])));
+      (e.flags || []).forEach((x) => tags.push(flagTag(x)));
       if (g && G2 && e.kind === 'queue.publish') {
         const ws = G2.pubWorkers.get(e.span_id);
-        if (ws && ws.length) tags.push(h('button', { type: 'button', class: 'linkbtn jump', tabindex: -1, 'data-jump': 'g:' + ws[0], title: 'Scroll to the worker group that processed this message' + (ws.length > 1 ? ' (first of ' + ws.length + ' attempts)' : '') }, icon('async', 'sm'), 'jump to worker group' + (ws.length > 1 ? ' (' + ws.length + ')' : '')));
+        if (ws && ws.length) tags.push(h('button', { type: 'button', class: 'linkbtn jump', 'data-jump': 'g:' + ws[0], title: 'Scroll to the worker group that processed this message' + (ws.length > 1 ? ' (first of ' + ws.length + ' attempts)' : '') }, icon('async', 'sm'), 'jump to worker group' + (ws.length > 1 ? ' (' + ws.length + ')' : '')));
       }
       const pct = Math.max(3, Math.round(Math.sqrt(Math.max(0, evDur(e)) / maxDur) * 100));
       const bar = h('i'); bar.style.width = pct + '%';
@@ -1125,7 +1382,7 @@
         h('span', { class: 'grow' }), meta);
       const line2 = h('div', { class: 'gl2' },
         g.asyncLabel ? h('span', { class: 'gasync', title: g.asyncLabel }, icon('async', 'sm'), g.asyncLabel) : null,
-        g.triggeredBy ? h('button', { type: 'button', class: 'linkbtn jump', tabindex: -1, 'data-jump': 'e:' + g.triggeredBy.seq, title: 'Scroll to the queue.publish that started this job' }, 'go to publisher') : null,
+        g.triggeredBy ? h('button', { type: 'button', class: 'linkbtn jump', 'data-jump': 'e:' + g.triggeredBy.seq, title: 'Scroll to the queue.publish that started this job' }, 'go to publisher') : null,
         g.chips.map((c) => h('span', { class: 'gchip kg-' + (c.k === 'cache' ? 'cache' : c.k === 'err' ? 'dlq' : U.kindGroup(c.k)) }, h('b', { text: c.n }), ' ' + c.label)),
         g.mutText ? h('span', { class: 'gmut', title: g.mutText, text: g.mutText }) : null,
         h('span', { class: 'grow' }),
@@ -1136,7 +1393,9 @@
       return el;
     }
     function moreEl(it) {
-      const b = h('div', { class: 'vmore', 'data-more': it.g.key, role: 'presentation' }, it.revealed ? '− hide ' + it.n + ' non-matching events' : '+' + it.n + ' hidden by filters · show');
+      // Reachable and operable from the keyboard: it is the only way to see rows the filters hid.
+      const b = h('div', { class: 'vmore', 'data-more': it.g.key, role: 'button', tabindex: 0,
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); e.currentTarget.click(); } } }, it.revealed ? '− hide ' + it.n + ' non-matching events' : '+' + it.n + ' hidden by filters · show');
       b.style.top = it.top + 'px'; b.style.height = it.h + 'px';
       return b;
     }
@@ -1191,14 +1450,16 @@
       if (grouped()) {
         const total = G.groups.length;
         count.textContent = (b.active || f.err) && b.nGroups !== total ? b.nGroups + ' of ' + total + ' triggers · ' + b.nRows + ' events' : total + (total === 1 ? ' trigger' : ' triggers') + ' · ' + D.events.length + ' events';
-      } else count.textContent = b.nRows + ' of ' + D.events.length + ' events';
+      } else count.textContent = b.nRows + ' of ' + D.events.length + (D.events.length === 1 ? ' event' : ' events');
       sizer.style.height = b.total + 'px';
       sizer.hidden = !items.length;
       emptyEl.hidden = !!items.length;
       if (!items.length) {
         clear(emptyEl).appendChild(D.events.length
           ? emptyState('events', 'No events match the filters', 'Loosen the search or clear the filters to see all ' + D.events.length + ' events.')
-          : emptyState('events', 'No events recorded yet', 'Send traffic through the instrumented services with this session\'s x-tsession-id header and events will appear here.'));
+          : D.sess && TERMINAL[D.sess.state]
+            ? emptyState('events', 'No events were recorded', 'This session ended without recording anything: no instrumented service was connected, none could reach the collector, or no request carried the session.')
+            : emptyState('events', 'No events recorded yet', 'Send traffic through the instrumented services with this session\'s x-tsession-id header and events will appear here.', connectedNote()));
       }
       D.paintGen = (D.paintGen || 0) + 1;
       if (reset) list.scrollTop = 0; else restoreAnchor(anchor);
@@ -1372,7 +1633,7 @@
       if (e.err) tags.push(tag('error', 't-err', e.err, 'err'));
       if (rolledBack(e)) tags.push(tag('rolled back', 't-warn', null, 'retry'));
       if (e.attrs && e.attrs.commit_failed) tags.push(tag('commit failed', 't-err'));
-      (e.flags || []).forEach((x) => tags.push(tag(x, FLAG_CLS[x] || 't-warn', FLAG_HELP[x])));
+      (e.flags || []).forEach((x) => tags.push(flagTag(x)));
       if (e.kind === 'queue.publish') {
         const workers = n.linked.filter((x) => x.event.kind === 'worker.start');
         if (!n.linked.length) tags.push(isLive(D.sess) ? tag('pending async', 't-warn', 'no worker has consumed this message yet', 'clock') : tag('orphaned async', 't-err', 'no worker ever processed this message', 'warn'));
@@ -1382,7 +1643,9 @@
         }
       }
       const gg = D.events.length ? getGroups(D).byKey.get(id) : null;
-      if (gg && gg.trigger === e) {
+      // The tree's events and the timeline's come from different requests, so compare by identity of the span,
+      // not of the object: the object comparison was never true and the group tags never showed.
+      if (gg && gg.trigger && gg.trigger.span_id === e.span_id) {
         tags.push(gg.status === 'error' ? tag('group error', 't-err', 'a span in this trigger failed', 'err') : tag('group ok', 't-ok'));
         if (gg.chips.length) tags.push(h('span', { class: 'gsum', title: gg.mutText || '', text: U.chipsText(gg) }));
       }
@@ -1490,7 +1753,8 @@
       vis.forEach((x) => {
         const b = h('button', { type: 'button', class: 'elist-item', role: 'option', 'aria-current': D.entSel === keyOf(x) ? 'true' : null, onclick: () => selectEnt(x) },
           h('div', { class: 'l1' }, tag(x.store), h('strong', { text: x.entity })),
-          h('div', { class: 'l2' }, span('mono', U.pkLabel(x.pk)), span('note', x.mutation_count + (x.mutation_count === 1 ? ' mutation' : ' mutations'))));
+          h('div', { class: 'l2' }, span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }), x.uncertain > 0 ? tag(x.uncertain + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null,
+            span('note', x.mutation_count + (x.mutation_count === 1 ? ' mutation' : ' mutations'))));
         b._x = x; items.push(b); list.appendChild(b);
       });
     }
@@ -1508,8 +1772,9 @@
         clear(detail);
         const ms = asList(r, 'mutations');
         const rbN = ms.filter((it) => (it.effective !== undefined ? it.effective : (it.mutation || {}).effective) === false).length;
+        const unN = U.uncertainCount(ms);
         detail.appendChild(h('div', { class: 'edetail-head' }, tag(x.store), h('h2', { text: x.entity }), span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }),
-          tag(ms.length + (ms.length === 1 ? ' mutation' : ' mutations')), rbN ? tag(rbN + ' rolled back', 't-warn', null, 'retry') : null));
+          tag(ms.length + (ms.length === 1 ? ' mutation' : ' mutations')), rbN ? tag(rbN + ' rolled back', 't-warn', null, 'retry') : null, unN ? tag(unN + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null));
         if (!ms.length) detail.appendChild(emptyState('events', 'No mutations', 'Nothing recorded for this entity.'));
         const rail = h('ol', { class: 'rail', 'aria-label': 'Mutation history, oldest first' });
         ms.forEach((it) => {
@@ -1666,7 +1931,7 @@
       const rbCount = Object.keys(muts).reduce((a, k) => a + muts[k].rb, 0);
       const mutTotal = Object.keys(muts).reduce((a, k) => a + muts[k].n, 0);
       const dur = has('duration_ns') ? srv.duration_ns : (evs.length ? maxE - minS : 0);
-      const pendN = has('pending_async') ? srv.pending_async : pending.length;
+      const pendN = has('pending_async') ? (Array.isArray(srv.pending_async) ? srv.pending_async.length : srv.pending_async) : pending.length;
       const nEv = has('event_count') ? srv.event_count : evs.length;
       box.appendChild(h('div', { class: 'stat-cards' },
         stat('timeline', 'Events', String(nEv), Object.keys(kindC).length + ' kinds'), stat('clock', 'Duration', fmtNs(dur), 'first to last event'),
@@ -1757,7 +2022,9 @@
   paintThemeBtn();
   paintConn();
   fetch('/healthz', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
-    document.getElementById('mode-note').textContent = j.demo ? 'demo mode · synthetic data' : '';
+    document.getElementById('mode-note').textContent = j.demo ? 'demo mode · synthetic data' : j.offline ? 'offline · opened from export files (read-only)' : '';
+    // Sessions opened from files cannot be changed: hide what could only fail (see [data-rw] in style.css).
+    document.body.classList.toggle('offline', !!j.offline);
   }).catch(() => {});
   route();
 })();

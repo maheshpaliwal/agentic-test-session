@@ -31,6 +31,9 @@ func (t *stmtTrace) pkFromValues(m map[string]mutation.Value, pkCols []string) p
 	ref := pkRef{disp: make(map[string]any, len(pkCols)), raw: make(map[string]driver.Value, len(pkCols))}
 	for _, c := range pkCols {
 		v, ok := m[c]
+		if !ok { // the parser folds column names; a catalog name keeps its case
+			v, ok = m[strings.ToLower(c)]
+		}
 		if !ok {
 			return pkRef{}
 		}
@@ -89,7 +92,7 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		t.span.AddMutation(t.newMutation(op))
 		return
 	}
-	pkCols := t.cfg.pk(in.Schema, in.Table)
+	pkCols := t.pk
 	var muts []core.Mutation
 	emit := func(before, after *img, fallback map[string]any) {
 		m := t.newMutation(op)
@@ -118,7 +121,9 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		if ad != nil {
 			m.After = core.Payload(core.RedactAny(ad))
 		}
-		if bd != nil || ad != nil {
+		// An UPDATE whose row could not be read back has no known new values:
+		// a diff against nothing would show every column as removed.
+		if (bd != nil || ad != nil) && !(in.Kind == mutation.Update && ad == nil) {
 			var hidden bool
 			if m.Diff, hidden = diffMaps(bd, ad); hidden {
 				t.flag("diff_truncated")
@@ -277,6 +282,18 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 			}
 		}
 	}
+	// Two of the statement's rows with the same values in these columns: the
+	// columns do not identify a row, and the re-read could not tell them apart.
+	seen := make(map[string]struct{}, len(refs))
+	for _, r := range refs {
+		k := rawKey(r.raw, pkCols)
+		if _, dup := seen[k]; dup {
+			t.flag("pk_not_unique")
+			t.c.pks.drop(t.info.TableSQL)
+			return nil
+		}
+		seen[k] = struct{}{}
+	}
 	dollar := t.pg()
 	var vals []driver.Value
 	ph := func(v driver.Value) string {
@@ -286,7 +303,7 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 		}
 		return "?"
 	}
-	q := quoter(t.store)
+	q := quoter(t.store, t.pkCatalog)
 	var b strings.Builder
 	b.WriteString("SELECT * FROM " + t.info.TableSQL + " WHERE ")
 	if len(pkCols) == 1 {
@@ -313,19 +330,30 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 			b.WriteString(")")
 		}
 	}
-	rs, ok := t.capture(b.String(), vals, t.cfg.maxRows, "after_failed")
+	rs, ok := t.capture(b.String(), vals, len(refs)+1, "after_failed")
 	if !ok {
+		return nil
+	}
+	if len(rs) > len(refs) {
+		// More rows than keys: these columns do not identify a row, so they
+		// are not the table's key (the default "id" on a table without one,
+		// or a key that has changed since it was looked up). Which row is the
+		// changed one cannot be told, and a guess would be recorded as fact.
+		t.flag("pk_not_unique")
+		t.c.pks.drop(t.info.TableSQL)
 		return nil
 	}
 	return rs
 }
 
-func quoter(store string) func(string) string {
+// quoter quotes a column name for store. exact says the name is the
+// catalog's spelling, which is always quoted: it may be a reserved word.
+func quoter(store string, exact bool) func(string) string {
 	if store == "mysql" {
 		return func(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
 	}
 	return func(s string) string {
-		if simpleIdent(s) {
+		if !exact && simpleIdent(s) {
 			return s // unquoted folds to lower case, matching how it was written
 		}
 		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`

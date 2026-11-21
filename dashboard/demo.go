@@ -2,10 +2,13 @@ package dashboard
 
 import (
 	"cmp"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +37,7 @@ type Session struct {
 	BundleURI       string `json:"bundle_uri"`
 	Reason          string `json:"reason,omitempty"`
 	SealError       string `json:"seal_error,omitempty"`
+	SealPending     bool   `json:"seal_pending,omitempty"`
 	// Bindings attribute requests carrying matching attributes (docs/BINDING.md).
 	Bindings []Binding `json:"bindings,omitempty"`
 }
@@ -78,6 +82,9 @@ type demoSess struct {
 	started time.Time
 	stopAt  time.Time
 	sealed  bool // static terminal session
+	// resolved marks events that already carry transaction outcomes (read
+	// from an export); they are served as they are.
+	resolved bool
 }
 
 // Demo serves fake control-plane and collector APIs backed by synthetic data.
@@ -86,6 +93,8 @@ type Demo struct {
 	sess []*demoSess
 	seq  int
 	now  func() time.Time
+	// readOnly refuses every change (sessions opened from files).
+	readOnly bool
 }
 
 const liveStep = 1500 * time.Millisecond
@@ -168,6 +177,9 @@ func (d *Demo) view(s *demoSess) (Session, []core.Event) {
 			}
 		}
 	}
+	if s.resolved {
+		return sess, evs
+	}
 	return sess, resolveTx(evs)
 }
 
@@ -180,6 +192,46 @@ func (d *Demo) find(id string) *demoSess {
 	return nil
 }
 
+// The paging contract of GET /v1/sessions, as the control plane has it.
+const (
+	maxListLimit = 1000
+	headerNext   = "X-Tsession-Next"
+	headerTotal  = "X-Tsession-Total"
+)
+
+// listKey is the place of a session in the list order: creation time, then id.
+type listKey struct {
+	created int64 // unix nanoseconds; 0 when created_at does not parse
+	id      string
+}
+
+func listKeyOf(s Session) listKey {
+	k := listKey{id: s.ID}
+	if t, err := time.Parse(time.RFC3339Nano, s.CreatedAt); err == nil {
+		k.created = t.UnixNano()
+	}
+	return k
+}
+
+func (k listKey) compare(o listKey) int {
+	return cmp.Or(cmp.Compare(k.created, o.created), cmp.Compare(k.id, o.id))
+}
+
+// cursor is the opaque form of k: "return the sessions older than this one".
+func (k listKey) cursor() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(k.created, 10) + "." + k.id))
+}
+
+func decodeListCursor(c string) (listKey, bool) {
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err != nil {
+		return listKey{}, false
+	}
+	num, id, ok := strings.Cut(string(b), ".")
+	created, err := strconv.ParseInt(num, 10, 64)
+	return listKey{created, id}, ok && err == nil
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -190,17 +242,59 @@ func notFound(w http.ResponseWriter) { writeJSON(w, 404, m{"error": "not found"}
 
 // ControlPlane returns the fake control-plane API (paths without /api/cp).
 func (d *Demo) ControlPlane() http.Handler {
+	if d.readOnly {
+		return readOnlyAPI(d.controlPlane())
+	}
+	return d.controlPlane()
+}
+
+func (d *Demo) controlPlane() http.Handler {
 	mux := http.NewServeMux()
+	// The list takes the parameters of the control plane's (docs/PROTOCOL.md):
+	// state, name, limit and before, and answers a request with a limit with
+	// the newest sessions first and the X-Tsession-Next and X-Tsession-Total
+	// headers.
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, before := 0, q.Get("before")
+		if q.Has("limit") {
+			n, err := strconv.Atoi(q.Get("limit"))
+			if err != nil || n < 1 || n > maxListLimit {
+				writeJSON(w, 400, m{"error": fmt.Sprintf("invalid request: limit must be 1..%d", maxListLimit)})
+				return
+			}
+			limit = n
+		}
+		var cur listKey
+		if before != "" {
+			var ok bool
+			if cur, ok = decodeListCursor(before); !ok || limit == 0 {
+				writeJSON(w, 400, m{"error": "invalid request: before must be a cursor returned by this API, sent with a limit"})
+				return
+			}
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		want := r.URL.Query().Get("state")
+		wantState, wantName := q.Get("state"), q.Get("name")
 		out := []Session{}
 		for i := len(d.sess) - 1; i >= 0; i-- {
 			s, _ := d.view(d.sess[i])
-			if want == "" || s.State == want {
+			if (wantState == "" || s.State == wantState) && (wantName == "" || s.Name == wantName) {
 				out = append(out, s)
 			}
+		}
+		if limit == 0 {
+			writeJSON(w, 200, out)
+			return
+		}
+		w.Header().Set(headerTotal, strconv.Itoa(len(out)))
+		slices.SortFunc(out, func(a, b Session) int { return listKeyOf(b).compare(listKeyOf(a)) }) // newest first
+		if before != "" {
+			out = slices.DeleteFunc(out, func(s Session) bool { return listKeyOf(s).compare(cur) >= 0 })
+		}
+		if len(out) > limit {
+			out = out[:limit]
+			w.Header().Set(headerNext, listKeyOf(out[limit-1]).cursor())
 		}
 		writeJSON(w, 200, out)
 	})
@@ -335,6 +429,16 @@ func (d *Demo) ControlPlane() http.Handler {
 	}
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", stop)
 	mux.HandleFunc("POST /v1/sessions/{id}/abort", stop)
+	if !d.readOnly { // sessions opened from files have no services behind them
+		mux.HandleFunc("GET /v1/subscribers", func(w http.ResponseWriter, r *http.Request) {
+			since := ts(d.now().Add(-10 * time.Minute))
+			writeJSON(w, 200, []m{
+				{"service": "orders-api", "instance": "orders-api-1", "connected_at": since},
+				{"service": "orders-worker", "instance": "orders-worker-1", "connected_at": since},
+				{"service": "shipping-api", "instance": "shipping-api-1", "connected_at": since},
+			})
+		})
+	}
 	mux.HandleFunc("GET /v1/active", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -357,6 +461,36 @@ func (d *Demo) ControlPlane() http.Handler {
 	return mux
 }
 
+// The by-id contract of the collector's GET /v1/sessions.
+const (
+	headerUnanswered = "X-Tsession-Unanswered"
+	maxListIDs       = 1000
+)
+
+var demoSessionID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$`)
+
+// demoListIDs reads the ids parameter the way the collector does: comma
+// separated, empty elements skipped, repeats counted once, at most
+// maxListIDs valid session ids.
+func demoListIDs(vals []string) ([]string, error) {
+	var ids []string
+	for _, v := range vals {
+		for id := range strings.SplitSeq(v, ",") {
+			if id == "" || slices.Contains(ids, id) {
+				continue
+			}
+			if !demoSessionID.MatchString(id) {
+				return nil, errors.New("ids: invalid session id")
+			}
+			if len(ids) == maxListIDs {
+				return nil, fmt.Errorf("ids: more than %d session ids", maxListIDs)
+			}
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // Collector returns the fake collector read API (paths without /api/col).
 func (d *Demo) Collector() http.Handler {
 	mux := http.NewServeMux()
@@ -375,6 +509,26 @@ func (d *Demo) Collector() http.Handler {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		out := []m{}
+		if raw, ok := r.URL.Query()["ids"]; ok {
+			// By id, as the collector answers it (docs/PROTOCOL.md): the asked
+			// sessions that have events, in the order asked, without first_ns
+			// and last_ns.
+			ids, err := demoListIDs(raw)
+			if err != nil {
+				writeJSON(w, 400, m{"error": err.Error()})
+				return
+			}
+			for _, id := range ids {
+				if s := d.find(id); s != nil {
+					if v, evs := d.view(s); len(evs) > 0 {
+						out = append(out, m{"id": v.ID, "event_count": len(evs), "sealed": v.State == "SEALED" || v.State == "ABORTED"})
+					}
+				}
+			}
+			w.Header().Set(headerUnanswered, "0")
+			writeJSON(w, 200, out)
+			return
+		}
 		for _, s := range d.sess {
 			v, evs := d.view(s)
 			e := m{"id": v.ID, "event_count": len(evs), "sealed": v.State == "SEALED" || v.State == "ABORTED"}
@@ -390,15 +544,15 @@ func (d *Demo) Collector() http.Handler {
 		if !ok {
 			return
 		}
-		from, _ := strconv.Atoi(r.URL.Query().Get("from_seq"))
+		from, _ := strconv.ParseUint(r.URL.Query().Get("from_seq"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if limit <= 0 || limit > 5000 {
 			limit = 1000
 		}
 		out := []core.Event{}
-		next := uint64(from)
+		next := from
 		for _, e := range evs { // events with Seq > from_seq
-			if int(e.Seq) > from && len(out) < limit {
+			if e.Seq > from && len(out) < limit {
 				out = append(out, e)
 				next = e.Seq
 			}

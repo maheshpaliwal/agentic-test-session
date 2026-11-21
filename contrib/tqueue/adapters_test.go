@@ -161,13 +161,22 @@ func sqsRound(t *testing.T, existing int, opts SQSOptions) (*core.MemRecorder, *
 }
 
 func TestSQSAttrLimit(t *testing.T) {
-	rec, _, n := sqsRound(t, 7, SQSOptions{})
-	if n != 10 {
-		t.Fatalf("7+3 attrs = %d", n)
+	// The full form is four attributes: x-tsession-traceparent, traceparent,
+	// x-tsession-id and x-tsession-hlc.
+	rec, sent, n := sqsRound(t, 6, SQSOptions{})
+	if n != 10 || has(sent.MessageAttributes, ctxAttr) {
+		t.Fatalf("6+4 attrs = %d", n)
 	}
 	assertLinked(t, rec)
 
-	rec, sent, n := sqsRound(t, 9, SQSOptions{})
+	// One slot short of the full form: the compact form, not a partial one.
+	rec, sent, n = sqsRound(t, 7, SQSOptions{})
+	if n != 8 || sent.MessageAttributes[ctxAttr].StringValue == nil {
+		t.Fatalf("expected compact %s attr, n=%d", ctxAttr, n)
+	}
+	assertLinked(t, rec)
+
+	rec, sent, n = sqsRound(t, 9, SQSOptions{})
 	if n != 10 || sent.MessageAttributes[ctxAttr].StringValue == nil {
 		t.Fatalf("expected compact %s attr, n=%d", ctxAttr, n)
 	}

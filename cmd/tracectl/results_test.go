@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/maheshpaliwal/agentic-test-session/controlplane"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -20,6 +22,14 @@ type resultsEnv struct {
 	cp, col string
 	sum     client.Summary
 	deleted []string
+	// events overrides, per session name, the events the collector serves;
+	// a session without an entry gets the default ones.
+	events map[string][]core.Event
+	// ents and hist, when set, replace the canned entities list and the
+	// mutations of a history; histPKs are the keys history was asked for.
+	ents    []client.Entity
+	hist    []client.EntityMutation
+	histPKs []string
 }
 
 func newResultsEnv(t *testing.T) *resultsEnv {
@@ -28,8 +38,10 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 	yes, no := true, false
 	evs := []core.Event{
 		{Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "POST /orders", StartNs: 1_000_000_000, EndNs: 1_050_000_000},
-		{Seq: 2, Service: "api", Kind: core.KindDBWrite, Name: "INSERT INTO orders", StartNs: 1_010_000_000,
-			Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &yes}}},
+		{Seq: 2, Service: "api", Kind: core.KindDBWrite, Name: "INSERT INTO orders", StartNs: 1_010_000_000, EndNs: 1_012_000_000,
+			TxID: "tx1", Attrs: map[string]string{"rows": "1"}, Req: core.PayloadRef{Inline: json.RawMessage(`{"args":[42,"[REDACTED]"]}`), Redacted: true},
+			Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &yes, PK: map[string]any{"id": 42},
+				Diff: []core.FieldChange{{Field: "status", New: "new"}}}}},
 		{Seq: 3, Service: "worker", Kind: core.KindDBRead, Name: "SELECT 1", StartNs: 1_020_000_000},
 		{Seq: 4, Service: "worker", Kind: core.KindWorkerEnd, Name: "ship", StartNs: 1_030_000_000, Err: "carrier\n  timeout"},
 	}
@@ -38,20 +50,56 @@ func newResultsEnv(t *testing.T) *resultsEnv {
 		json.NewEncoder(w).Encode(env.sum)
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(client.EventPage{Events: evs, NextSeq: 5, Sealed: true})
+		from, _ := strconv.ParseUint(r.URL.Query().Get("from_seq"), 10, 64)
+		all := evs
+		if len(env.events) > 0 {
+			s, err := client.Attach(r.Context(), client.Options{BaseURL: env.cp}, r.PathValue("id"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			if over, ok := env.events[s.Info().Name]; ok {
+				all = over
+			}
+		}
+		page := slicex.Filter(all, func(e core.Event) bool { return e.Seq >= from })
+		if n, _ := strconv.Atoi(r.URL.Query().Get("limit")); n > 0 && len(page) > n {
+			page = page[:n]
+		}
+		json.NewEncoder(w).Encode(client.EventPage{Events: page, NextSeq: 5, Sealed: true})
+	})
+	mux.HandleFunc("GET /v1/sessions/{id}/trace", func(w http.ResponseWriter, r *http.Request) {
+		node := func(i int, children, linked []*client.TraceNode) *client.TraceNode {
+			return &client.TraceNode{Event: evs[i], Children: children, Linked: linked}
+		}
+		ship := node(3, nil, nil)
+		json.NewEncoder(w).Encode(client.Trace{SessionID: r.PathValue("id"), Roots: []*client.TraceNode{
+			node(0, []*client.TraceNode{node(1, nil, []*client.TraceNode{ship})}, nil),
+			node(2, nil, nil),
+		}})
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/entities", func(w http.ResponseWriter, r *http.Request) {
+		if env.ents != nil {
+			json.NewEncoder(w).Encode(env.ents)
+			return
+		}
 		json.NewEncoder(w).Encode([]client.Entity{{Store: "postgres", Entity: "orders", PK: `{"id":42}`, MutationCount: 2}})
 	})
 	mux.HandleFunc("GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(client.EntityHistory{Store: r.PathValue("store"), Entity: r.PathValue("entity"), PK: `{"id":42}`,
+		env.histPKs = append(env.histPKs, r.PathValue("pk"))
+		h := client.EntityHistory{Store: r.PathValue("store"), Entity: r.PathValue("entity"), PK: r.PathValue("pk"),
 			Mutations: []client.EntityMutation{
 				{Seq: 2, Op: "insert", Service: "api", Kind: core.KindDBWrite, Effective: &yes,
 					Diff: []core.FieldChange{{Field: "status", New: "new"}}},
 				{Seq: 9, Op: "update", Service: "worker", Kind: core.KindDBWrite, Effective: &no,
 					Diff: []core.FieldChange{{Field: "status", Old: "new", New: "shipped"}}},
-			}})
+			}}
+		if env.hist != nil {
+			h.Mutations = env.hist
+		}
+		json.NewEncoder(w).Encode(h)
 	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	// internal API used by the control plane
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(controlplane.DrainStatus{})
@@ -112,6 +160,22 @@ func TestCLIResults(t *testing.T) {
 	if code, _, e := env.tc("summary", "run-1", "--fail-on-incomplete"); code != exitCheckFailed || !strings.Contains(e, "incomplete") {
 		t.Fatalf("--fail-on-incomplete: %d %s", code, e)
 	}
+	// A session that recorded nothing passes the other gates; --fail-on-empty catches it.
+	if code, _, e := env.tc("summary", "run-1", "--fail-on-empty"); code != 0 {
+		t.Fatalf("--fail-on-empty with events: %d %s", code, e)
+	}
+	full := env.sum
+	env.sum = client.Summary{Sealed: true}
+	if code, _, e := env.tc("summary", "run-1", "--fail-on-error", "--fail-on-incomplete"); code != 0 {
+		t.Fatalf("an empty session passes the other gates: %d %s", code, e)
+	}
+	if code, _, e := env.tc("summary", "run-1", "--fail-on-empty"); code != exitCheckFailed || !strings.Contains(e, "recorded no events") {
+		t.Fatalf("--fail-on-empty: %d %s", code, e)
+	}
+	if code, _, e := env.tc("report", "run-1", "--fail-on-empty"); code != exitCheckFailed || !strings.Contains(e, "recorded no events") {
+		t.Fatalf("report --fail-on-empty: %d %s", code, e)
+	}
+	env.sum = full
 
 	code, out, _ = env.tc("events", "run-1")
 	if code != 0 || !strings.Contains(out, "4 of 4 events") || !strings.Contains(out, "+10ms") ||

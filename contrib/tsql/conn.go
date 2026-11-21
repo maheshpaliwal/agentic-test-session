@@ -16,14 +16,25 @@ import (
 type conn struct {
 	inner driver.Conn
 	cfg   *config
+	pks   *pkCache // primary keys found in the catalog, shared by the handle's connections
 
 	mu     sync.Mutex
 	txID   string
 	serial bool // open tx runs at SERIALIZABLE
 	rawTx  bool // the app opened a transaction with a plain BEGIN statement
+	// Primary-key cache bookkeeping for the open transaction (see endPKTx).
+	pkSchemaDirty bool
+	pkTxTables    []string
+
+	// multi is whether this connection takes two statements in one text (see
+	// capture). Only the statement path touches it, which database/sql
+	// serializes per connection.
+	multi multiStmt
 }
 
-func newConn(inner driver.Conn, cfg *config) *conn { return &conn{inner: inner, cfg: cfg} }
+func newConn(inner driver.Conn, cfg *config, pks *pkCache) *conn {
+	return &conn{inner: inner, cfg: cfg, pks: pks}
+}
 
 func (c *conn) currentTx() string {
 	c.mu.Lock()
@@ -55,6 +66,23 @@ func (c *conn) trackTx(tc mutation.TxControl) {
 	c.mu.Lock()
 	c.rawTx = tc.Opens()
 	c.mu.Unlock()
+	if tc != mutation.TxBegin {
+		c.endPKTx(tc == mutation.TxCommit)
+	}
+}
+
+// trackTxUntraced is trackTx for a statement that is not traced and so was
+// not parsed. The transaction state must stay exact for it too: a later
+// statement on this conn may belong to a session. Only a text that can
+// contain transaction control (a cheap scan of the first keyword of each
+// statement) is parsed, and then trackTx sees exactly what it sees for a
+// traced statement.
+func (c *conn) trackTxUntraced(query string) {
+	if !mutation.MayControlTx(query, c.dialect()) {
+		return
+	}
+	info, _ := c.parse(query)
+	c.trackTx(info.Tx)
 }
 
 func (c *conn) dialect() mutation.Dialect {
@@ -155,17 +183,21 @@ func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	}
 	id := "tx_" + core.NewSpanID()
 	c.setTx(id, driver.IsolationLevel(opts.Isolation) == driver.IsolationLevel(sql.LevelSerializable))
-	safe(func() {
-		_, sp := core.Begin(ctx, core.KindDBTxBegin, "BEGIN")
-		sp.SetTx(id)
-		if opts.ReadOnly {
-			sp.SetAttr("read_only", "true")
-		}
-		if opts.Isolation != 0 {
-			sp.SetAttr("isolation", sql.IsolationLevel(opts.Isolation).String())
-		}
-		sp.End()
-	})
+	// The id is kept even outside a session: statements of this transaction
+	// may run with a context that is in one.
+	if core.Active(ctx) {
+		safe(func() {
+			_, sp := core.Begin(ctx, core.KindDBTxBegin, "BEGIN")
+			sp.SetTx(id)
+			if opts.ReadOnly {
+				sp.SetAttr("read_only", "true")
+			}
+			if opts.Isolation != 0 {
+				sp.SetAttr("isolation", sql.IsolationLevel(opts.Isolation).String())
+			}
+			sp.End()
+		})
+	}
 	return &txWrap{inner: tx, c: c, ctx: ctx, id: id}, nil
 }
 
@@ -316,6 +348,10 @@ func (t *txWrap) Rollback() error {
 
 func (t *txWrap) end(kind core.Kind, name string, err error, commitFailed bool) {
 	t.c.clearTx(t.id)
+	t.c.endPKTx(kind == core.KindDBTxCommit)
+	if !core.Active(t.ctx) {
+		return // no span: nothing to render or redact
+	}
 	safe(func() {
 		_, sp := core.Begin(t.ctx, kind, name)
 		sp.SetTx(t.id)
