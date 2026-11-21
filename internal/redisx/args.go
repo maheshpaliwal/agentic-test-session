@@ -49,7 +49,9 @@ func SpanName(args []any, key string) string {
 }
 
 // KeyPattern collapses id-like and masked segments so mutations of user:1,
-// user:2 group under one entity "user:*". The key is kept in Mutation.PK.
+// user:2 group under one entity "user:*". The key is kept in Mutation.PK. A
+// segment is id-like when it is all digits, or 8 or more characters of hex
+// digits and '-'. The rule is documented in contrib/tredis: keep them in step.
 func KeyPattern(key string) string {
 	parts := strings.Split(key, ":")
 	for i, p := range parts {

@@ -63,3 +63,21 @@ func TestShowKeyHash(t *testing.T) {
 		t.Errorf("masking is off: %q", got)
 	}
 }
+
+// The examples of the "Entities and keys" section of contrib/tredis.
+func TestKeyPattern(t *testing.T) {
+	for key, want := range map[string]string{
+		"user:1":                  "user:*",
+		"order:42:items":          "order:*:items",
+		"user:550e8400-e29b-41d4": "user:*",
+		"user:alice":              "user:alice",
+		"config":                  "config",
+		"session:#a1b2c3d4":       "session:*",
+		"orders:2024-05-01":       "orders:*",
+		"user:abc1234":            "user:abc1234", // hex, but shorter than 8
+	} {
+		if got := KeyPattern(key); got != want {
+			t.Errorf("entity of %q is %q, want %q", key, got, want)
+		}
+	}
+}

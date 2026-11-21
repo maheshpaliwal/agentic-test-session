@@ -18,6 +18,28 @@
 // failed condition; DEL, UNLINK, HDEL, SREM, ZREM, EXPIRE*, PERSIST returning
 // 0) still gets its span but no mutation.
 //
+// Entities and keys. A mutation is filed under an entity and a key, the way a
+// SQL row is filed under its table and primary key. The key is the Redis key
+// (Mutation.PK["key"]). The entity is the key with every id-like ':'
+// separated segment replaced by "*", so the keys of one kind share an entity.
+// A segment is id-like when it is all digits, or 8 or more characters of hex
+// digits and '-' (a UUID, an object id, a date), or masked as a secret:
+//
+//	key user:1                   entity user:*
+//	key order:42:items           entity order:*:items
+//	key user:550e8400-e29b-41d4  entity user:*
+//	key user:alice               entity user:alice     (a name is not id-like)
+//	key config                   entity config
+//	key session:#a1b2c3d4        entity session:*      (see Secret key names)
+//
+// tracectl entities lists both. history takes the entity, then the key; quote
+// the "*" for the shell:
+//
+//	tracectl history <session> redis 'user:*' user:1
+//
+// "history <session> redis user:1 user:1" finds nothing: user:1 is the key of
+// the entity user:*, not an entity.
+//
 // Image reads (GET/HSCAN/LRANGE/SSCAN/ZRANGE by TYPE, collections capped at
 // about 1000 elements) are bounded per command and per pipeline by
 // WithPipelineImageCap, WithImageTimeout and WithImageDeadline; a skipped read
