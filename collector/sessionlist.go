@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
-	"net/url"
-	"time"
 )
 
 const (
@@ -105,12 +105,6 @@ func (c *Collector) sessionCounts(ctx context.Context, ids []string) (out []sess
 		failed bool
 	}
 	res := make([]answer, len(ids))
-	var (
-		next     atomic.Int64
-		wg       sync.WaitGroup
-		errOnce  sync.Once
-		firstErr error
-	)
 	lookup := func(id string) (sc sessionCount, held bool, err error) {
 		// These run on goroutines of their own: a panic in the store would
 		// end the process instead of the one request, as it does elsewhere.
@@ -134,28 +128,27 @@ func (c *Collector) sessionCounts(ctx context.Context, ids []string) (out []sess
 		// Seq runs gapless from 1 (store.Store), so the head is the count.
 		return sessionCount{ID: id, EventCount: int(head), Sealed: si != nil}, true, nil
 	}
-	for range min(listLookups, len(ids)) {
-		wg.Go(func() {
-			for {
-				i := int(next.Add(1)) - 1
-				if i >= len(ids) {
-					return
-				}
-				if ctx.Err() != nil {
-					res[i].failed = true
-					continue
-				}
-				sc, held, err := lookup(ids[i])
-				if err != nil {
-					res[i].failed = true
-					errOnce.Do(func() { firstErr = fmt.Errorf("session %s: %w", ids[i], err) })
-					continue
-				}
-				res[i].sc, res[i].held = sc, held
+	// The group bounds the lookups and keeps the first error for the log. It
+	// is given no context of its own on purpose: a lookup that fails leaves
+	// its one id unanswered and must not end the others.
+	var g errgroup.Group
+	g.SetLimit(listLookups)
+	for i, id := range ids {
+		g.Go(func() error {
+			if ctx.Err() != nil {
+				res[i].failed = true
+				return nil
 			}
+			sc, held, err := lookup(id)
+			if err != nil {
+				res[i].failed = true
+				return fmt.Errorf("session %s: %w", id, err)
+			}
+			res[i].sc, res[i].held = sc, held
+			return nil
 		})
 	}
-	wg.Wait()
+	firstErr := g.Wait()
 	out = make([]sessionCount, 0, len(ids))
 	for i := range res {
 		switch {
