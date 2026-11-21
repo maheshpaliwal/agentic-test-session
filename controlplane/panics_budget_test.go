@@ -67,8 +67,12 @@ func TestADrainThatKeepsPanickingEndsTheSessionIncomplete(t *testing.T) {
 	if a := m.Active(); slices.Contains(a.Active, s.ID) {
 		panic(fmt.Sprintf("the SDKs are still told to record for it: %+v", a))
 	}
-	if !panicMetric(t, m, "drain", maxDrainPanics) {
-		t.Errorf("metrics:\n%s", scrapeMetrics(t, m))
+	// The session is ended before its last panic is counted and logged.
+	for deadline := time.Now().Add(10 * time.Second); !panicMetric(t, m, "drain", maxDrainPanics) ||
+		strings.Count(logs.String(), "goroutine=drain") != maxDrainPanics; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			panic(fmt.Sprintf("the %d panics of the drain are not all counted and logged:\n%s\n%s", maxDrainPanics, scrapeMetrics(t, m), logs.String()))
+		}
 	}
 	// The seal the drain never made is made in the background; the session
 	// stays incomplete.
@@ -78,9 +82,6 @@ func TestADrainThatKeepsPanickingEndsTheSessionIncomplete(t *testing.T) {
 	}
 	if code, body := healthz(t, m); code != 200 || body != "ok\n" {
 		t.Errorf("/healthz after the drain was given up: %d %q", code, body)
-	}
-	if n := strings.Count(logs.String(), "goroutine=drain"); n != maxDrainPanics {
-		t.Errorf("%d drain panics logged, want %d:\n%s", n, maxDrainPanics, logs.String())
 	}
 }
 
