@@ -272,7 +272,8 @@ Rolling back:
   `PUBLISH` no longer records a changed key; `GETSET` on a new key is a mutation; a command queued by a raw
   `MULTI` is not. Members of a sorted set that redact alike are kept apart, and infinite scores are recorded.
 - Every wrapper that records nothing when created before the SDK starts now says so (`tredis.Wrap`,
-  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`); only `thttp.Handler` did.
+  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`, `tsql.Open`, `tsql.OpenDB`, `tsql.WrapDriver`,
+  `tmongo.Apply`, `tdynamo.Apply`); only `thttp.Handler` did.
 - `tsql`: `DO`, `CALL` and `EXECUTE` were recorded as reads. They are writes whose row changes tsql cannot
   see, recorded as `db.write` with the new flag `effects_unknown` and no mutations.
 - An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record
