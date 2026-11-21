@@ -60,6 +60,11 @@ Rolling back:
 
 ### Added
 
+- **`tracectl run [flags] -- <command>`** starts a session, runs the command with `TSESSION_ID` in its
+  environment, stops and seals the session, prints the summary to stderr and can write a report (`--report FILE`).
+  It exits with the command's status if that failed, else 1 if the session could not be sealed or read, else 3 if
+  a `--fail-on-*` gate failed. The command must send the id itself as `x-tsession-id`; nothing reads the variable
+  automatically. Signal forwarding is untested on Windows.
 - **Delete and retention.** `DELETE /v1/sessions/{id}` on the control plane, `tracectl delete` and a two-click
   Delete in the dashboard remove a finished session with its events, seal and bundle. The collector's
   `--retention` (`TSESSION_COLLECTOR_RETENTION`, off by default) deletes a session that long after its seal, or
@@ -160,6 +165,9 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl diff` treated `HTTP 500` and `HTTP 503` (and differing SQLSTATE, MySQL error numbers and unnamed
+  gRPC codes) as the same failure and reported no differences. `tracectl report --fail-on-incomplete` now also
+  fails on a seal error alone, as `summary` already did.
 - `tsql`: a table whose primary key is not `id` was recorded as if an `UPDATE` wiped the row (every column
   `-> ∅`, no key). Primary keys are now read from the database catalog (Postgres, MySQL; the MySQL query has not
   been run against a live server), once per table per handle and again after 30 seconds. `WithPKColumns` still
