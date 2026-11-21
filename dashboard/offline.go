@@ -104,7 +104,9 @@ func loadExport(path string) (*demoSess, error) {
 		first = last
 	}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	start, end := ts(time.Unix(0, first)), ts(time.Unix(0, last))
+	// To the nanosecond: a recording is often shorter than a second, and whole
+	// seconds would show its duration as zero.
+	start, end := time.Unix(0, first).UTC().Format(time.RFC3339Nano), time.Unix(0, last).UTC().Format(time.RFC3339Nano)
 	return &demoSess{
 		Session: Session{ID: evs[0].SessionID, Name: name, Mode: "header", State: "SEALED", InitiatedBy: "file",
 			CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped,

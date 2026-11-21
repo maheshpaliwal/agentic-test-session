@@ -131,3 +131,20 @@ func TestPGPKTableCreatedAfterAFailedStatement(t *testing.T) {
 	rtAdmin(t, "CREATE TABLE tsql_st.late (sku text PRIMARY KEY, qty int)", "INSERT INTO tsql_st.late VALUES ('w', 1)")
 	rtWantChange(t, rtWrite(t, rec, db, ctx, "UPDATE tsql_st.late SET qty = qty + 1 WHERE qty = $1", 1), map[string]any{"sku": "w"}, "qty")
 }
+
+// The statement itself changes two rows that share the default key's value:
+// neither may be recorded with the other's values.
+func TestPGPKDefaultKeySharedByTheRowsWritten(t *testing.T) {
+	rtStaleTables(t, "CREATE TABLE tsql_st.dup (id int, tag text, v int)", "INSERT INTO tsql_st.dup VALUES (1, 'a', 101), (1, 'b', 201)")
+	rec, ctx := setup(t)
+	db := rtOpen(t, &rtDriver{})
+	e := rtWrite(t, rec, db, ctx, "UPDATE tsql_st.dup SET v = v + 1 WHERE id = $1", 1)
+	if !hasFlag(e, "pk_not_unique") || len(e.Mutations) == 0 {
+		t.Fatalf("flags %v mutations %+v", e.Flags, e.Mutations)
+	}
+	for _, m := range e.Mutations {
+		if len(m.Diff) != 0 || !m.After.IsZero() {
+			t.Fatalf("a row was recorded with new values although the key does not identify it: %+v", m)
+		}
+	}
+}

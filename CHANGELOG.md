@@ -165,6 +165,7 @@ Rolling back:
 
 ### Fixed
 
+- Dashboard opened on an exported file showed a duration of 0 for a recording shorter than a second.
 - `tracectl diff` treated `HTTP 500` and `HTTP 503` (and differing SQLSTATE, MySQL error numbers and unnamed
   gRPC codes) as the same failure and reported no differences. `tracectl report --fail-on-incomplete` now also
   fails on a seal error alone, as `summary` already did.

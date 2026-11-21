@@ -64,6 +64,9 @@
   const FLAG_HELP = { tx_unresolved: 'no commit/rollback seen for this transaction', orphaned: 'async work with no matching counterpart',
     image_skipped: 'before/after image not captured', after_unavailable: 'the updated row could not be read back; its new values are not known',
     pk_unknown: 'no primary key value found for the row; declare the key with tsql.WithPKColumns', pk_lookup_failed: 'the primary key could not be read from the database catalog',
+    pk_not_unique: 'the key columns matched more than one row, so the new values were not recorded; declare the key with tsql.WithPKColumns',
+    after_from_args: 'the new values were taken from the statement, not read back from the database',
+    returning_partial: 'the statement returned only some of the row\'s columns',
     oversize_dropped: 'payload dropped for exceeding size limits',
     propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };
   function tag(text, tone, title, ic) { return h('span', { class: 'tag' + (tone ? ' ' + tone : ''), title: title }, ic ? icon(ic) : null, text); }

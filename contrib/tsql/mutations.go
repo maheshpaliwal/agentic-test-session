@@ -282,6 +282,18 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 			}
 		}
 	}
+	// Two of the statement's rows with the same values in these columns: the
+	// columns do not identify a row, and the re-read could not tell them apart.
+	seen := make(map[string]struct{}, len(refs))
+	for _, r := range refs {
+		k := rawKey(r.raw, pkCols)
+		if _, dup := seen[k]; dup {
+			t.flag("pk_not_unique")
+			t.c.pks.drop(t.info.TableSQL)
+			return nil
+		}
+		seen[k] = struct{}{}
+	}
 	dollar := t.pg()
 	var vals []driver.Value
 	ph := func(v driver.Value) string {

@@ -174,3 +174,19 @@ func TestOfflineRejectsDuplicateAndOutOfRangeSeq(t *testing.T) {
 		t.Fatalf("seq beyond int64: %v", err)
 	}
 }
+
+// A recording shorter than a second keeps its length: whole-second
+// timestamps showed its duration as zero.
+func TestOfflineKeepsSubSecondTimes(t *testing.T) {
+	a := core.Event{SessionID: "ts_ms", Seq: 1, Kind: core.KindAPIIn, StartNs: 5e9 + 10e6, EndNs: 5e9 + 132e6}
+	d, err := NewOffline([]string{writeExport(t, "short.ndjson", a)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := d.sess[0]
+	start, err1 := time.Parse(time.RFC3339Nano, s.StartedAt)
+	end, err2 := time.Parse(time.RFC3339Nano, s.EndedAt)
+	if err1 != nil || err2 != nil || end.Sub(start) != 122*time.Millisecond {
+		t.Fatalf("started %s ended %s (%v %v), want 122ms apart", s.StartedAt, s.EndedAt, err1, err2)
+	}
+}
