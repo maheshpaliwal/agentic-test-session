@@ -32,6 +32,11 @@ func deliveryRuns() int {
 	return 4
 }
 
+// deliveryHTTP is the HTTP client of the scenarios' own requests. It keeps
+// its connections: hundreds of sessions that poll at once would otherwise
+// open one per request and run the machine out of local ports.
+var deliveryHTTP = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{MaxIdleConns: 4096, MaxIdleConnsPerHost: 1024}}
+
 // deliveryRun is how one session of a scenario ended.
 type deliveryRun struct {
 	name   string
@@ -159,7 +164,7 @@ func (e *deliveryEnv) connected(service string) {
 func (e *deliveryEnv) begin(maxDrain int) (*client.Session, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	s, err := client.Start(ctx, client.Options{BaseURL: e.cpURL, CollectorURL: e.colURL, Name: "s",
+	s, err := client.Start(ctx, client.Options{BaseURL: e.cpURL, CollectorURL: e.colURL, Name: "s", HTTPClient: deliveryHTTP,
 		QuiesceSeconds: 1, MaxDrainSeconds: maxDrain, PollInterval: 50 * time.Millisecond})
 	if err != nil {
 		return nil, err
@@ -179,7 +184,7 @@ func (a *svcApp) burst(s *client.Session, n int) error {
 		return err
 	}
 	s.Inject(req.Header)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := deliveryHTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -358,13 +363,21 @@ func TestDelivery_BacklogOfManySessionsIsNotFlagged(t *testing.T) {
 	wantAllComplete(t, runs)
 }
 
-// F4: a service whose collector URL is wrong, behind something that answers
-// 403 to its delivery reports (a proxy that lets GET through). No report
-// arrives, so nothing tells the control plane of the lost events; but the
-// service follows the active set and said that it reports, so its silence is
-// not taken for "nothing to report". The session is incomplete, the reason
-// names the service, and the service's log says what is wrong, once.
-func TestDelivery_RefusedReportsAreNotAMiss(t *testing.T) {
+// The cost of not taking silence for evidence, pinned so that a change to it
+// changes the docs: a service whose collector URL is wrong AND whose
+// delivery reports are refused on the way (a proxy that lets GET through and
+// answers 403 to POST). Nothing of it reaches anybody: no event at the
+// collector, no report at the control plane. The control plane knows that
+// the service follows it and that none of its reports ever arrived, and
+// cannot know whether it took part in this session; an idle service behind
+// the same proxy looks the same. So the session is not incomplete. It says
+// so under delivery_unconfirmed, the drain is not held, the service's log
+// says what is wrong, once, and a gate that asks for it fails:
+// --fail-on-unconfirmed, tsessiontest.RequireDeliveryConfirmed.
+//
+// With a collector that the service reaches, the session is incomplete: see
+// TestDelivery_RefusedReportsOfAServiceThatTookPart.
+func TestDelivery_RefusedReportsAndAWrongCollectorAreUnconfirmed(t *testing.T) {
 	e := newDeliveryBase(t)
 	blocked := e.cpProxy(func(r *http.Request) int {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/delivery") {
@@ -376,7 +389,7 @@ func TestDelivery_RefusedReportsAreNotAMiss(t *testing.T) {
 	orders := e.startSvc("orders-api", svcOpts{collector: "http://" + freeAddr(t), cp: blocked})
 	e.connected("inventory")
 	e.connected("orders-api")
-	runs := repeat(t, "report-403", deliveryRuns(), 8, func(int) deliveryRun {
+	runs := repeat(t, "report-403-wrong-url", deliveryRuns(), 8, func(int) deliveryRun {
 		s, err := e.begin(0)
 		if err != nil {
 			return failed(err)
@@ -388,12 +401,27 @@ func TestDelivery_RefusedReportsAreNotAMiss(t *testing.T) {
 		}
 		return e.finish(s, 12)
 	})
-	wantNoFalseVerdict(t, runs)
 	for _, r := range runs {
-		if !r.info.Incomplete || len(r.info.IncompleteReasons) != 1 || !strings.Contains(r.info.IncompleteReasons[0], "service orders-api (instance ") ||
-			!strings.Contains(r.info.IncompleteReasons[0], "none of its delivery reports arrived") || strings.Contains(r.info.IncompleteReasons[0], "inventory") {
-			t.Errorf("want the session incomplete for orders-api: %s", r)
+		if r.info.Incomplete || len(r.info.IncompleteReasons) != 0 || r.got != 6 || len(r.info.DeliveryUnconfirmed) != 1 ||
+			!strings.Contains(r.info.DeliveryUnconfirmed[0], "service orders-api (instance ") ||
+			!strings.Contains(r.info.DeliveryUnconfirmed[0], "no delivery report of it has arrived since it connected (its log says why); the collector has no events from it for this session") ||
+			strings.Contains(r.info.DeliveryUnconfirmed[0], "inventory") {
+			t.Errorf("the documented limit no longer holds as documented: %s", r)
 		}
+		if r.drain > 5*time.Second {
+			t.Errorf("the drain was held for an instance nothing is known of: %s", r)
+		}
+	}
+	// The strict gate fails on it, the default one does not.
+	id := runs[0].info.ID
+	if code, out := e.runTracectl("summary", id, "--fail-on-incomplete", "--fail-on-empty"); code != 0 {
+		t.Errorf("summary --fail-on-incomplete: exit %d\n%s", code, out)
+	}
+	if code, out := e.runTracectl("summary", id, "--fail-on-unconfirmed"); code != 3 || !strings.Contains(out, "check failed: delivery is unconfirmed (service orders-api") {
+		t.Errorf("summary --fail-on-unconfirmed: exit %d\n%s", code, out)
+	}
+	if code, out := e.runTracectl("doctor"); code != 0 || !strings.Contains(out, "NO DELIVERY REPORTS") {
+		t.Errorf("doctor does not name the service whose reports do not arrive: exit %d\n%s", code, out)
 	}
 	orders.kill()
 	log := orders.out.String()
@@ -543,7 +571,7 @@ func TestDelivery_HealthyRunsRepeated(t *testing.T) {
 	})
 	wantAllComplete(t, runs)
 	for _, r := range runs {
-		// The service that recorded nothing said so, and is not listed.
+		// The service that recorded nothing sent no report, and is not listed.
 		if len(r.info.Delivery) != 2 || r.drain > 5*time.Second {
 			t.Errorf("healthy run: %s", r)
 		}
