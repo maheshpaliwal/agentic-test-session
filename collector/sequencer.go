@@ -11,6 +11,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
@@ -241,6 +242,9 @@ type Status struct {
 	// more than MaxStatusInstances and the rest is left out.
 	Instances          []InstanceCount
 	InstancesTruncated bool
+	// all holds every instance's count when Instances was cut short; never
+	// changed once the status is built.
+	all map[instKey]int
 }
 
 // InstanceCount is how many events of a session the collector has from one
@@ -272,13 +276,16 @@ func (a *sessionActor) status() Status {
 		Quarantined: a.seqr.quarantined(a.id)}
 	st.Open = mapx.SortedKeys(a.open)
 	st.Pending = len(a.open) + len(a.buf)
-	st.Instances, st.InstancesTruncated = a.instances()
+	st.Instances, st.all = a.instances()
+	st.InstancesTruncated = st.all != nil
 	return st
 }
 
 // instances lists what the collector has of the session per instance: the
-// stored events and the ones accepted into the reorder window.
-func (a *sessionActor) instances() ([]InstanceCount, bool) {
+// stored events and the ones accepted into the reorder window. When there
+// are more than MaxStatusInstances the list holds the first of them and all
+// is a copy of every count.
+func (a *sessionActor) instances() (list []InstanceCount, all map[instKey]int) {
 	counts := a.inst
 	if len(a.buf) > 0 {
 		if counts = maps.Clone(a.inst); counts == nil {
@@ -298,9 +305,35 @@ func (a *sessionActor) instances() ([]InstanceCount, bool) {
 		return cmp.Or(cmp.Compare(x.Service, y.Service), cmp.Compare(x.Instance, y.Instance))
 	})
 	if len(out) > MaxStatusInstances {
-		return out[:MaxStatusInstances:MaxStatusInstances], true
+		if len(a.buf) == 0 {
+			counts = maps.Clone(counts) // a.inst itself: the actor goes on changing it
+		}
+		return out[:MaxStatusInstances:MaxStatusInstances], counts
 	}
-	return out, false
+	return out, nil
+}
+
+// countsOf answers how many events the status holds from each instance asked
+// about, in order. Names are compared the way the control plane compares
+// them (ident.Clean): it knows an instance by its cleaned name, and two
+// instances whose names clean to the same are one to it.
+func (st Status) countsOf(ask []InstanceCount) []InstanceCount {
+	clean := func(service, instance string) instKey { return instKey{ident.Clean(service), ident.Clean(instance)} }
+	sum := make(map[instKey]int, len(st.Instances))
+	if st.all != nil {
+		for k, n := range st.all {
+			sum[clean(k.service, k.instance)] += n
+		}
+	} else {
+		for _, i := range st.Instances {
+			sum[clean(i.Service, i.Instance)] += i.Events
+		}
+	}
+	out := make([]InstanceCount, len(ask))
+	for i, q := range ask {
+		out[i] = InstanceCount{Service: q.Service, Instance: q.Instance, Events: sum[clean(q.Service, q.Instance)]}
+	}
+	return out
 }
 
 // Status reports a session's live state without creating an actor: unknown

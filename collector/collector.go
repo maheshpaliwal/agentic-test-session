@@ -287,7 +287,8 @@ type DrainStatus struct {
 	// instance (see InstanceCount); always present, empty for a session without
 	// events. InstancesTruncated is set when more than MaxStatusInstances
 	// instances sent events: the list then holds the first ones in order, and
-	// an instance that is not in it may have sent events all the same.
+	// an instance that is not in it may have sent events all the same (ask
+	// about it by name: InstanceCounts).
 	Instances          []InstanceCount `json:"instances"`
 	InstancesTruncated bool            `json:"instances_truncated,omitempty"`
 }
@@ -307,6 +308,29 @@ func (c *Collector) DrainStatus(ctx context.Context, id string) (DrainStatus, er
 		EventCount: st.EventCount, DroppedEvents: st.Dropped, Quarantined: st.Quarantined,
 		Instances: inst, InstancesTruncated: st.InstancesTruncated}, nil
 }
+
+// MaxInstanceCountsAsk bounds the instances one InstanceCounts call asks
+// about.
+const MaxInstanceCountsAsk = 512
+
+// InstanceCounts reports how many events of a session the collector has from
+// each of the instances asked about (see InstanceCount), in the order asked,
+// zero for one without events. Unlike DrainStatus.Instances the answer cannot
+// be crowded out by other instances: the control plane asks this about the
+// instances whose delivery reports it holds when that list was cut short.
+// Like DrainStatus it creates no in-memory state.
+func (c *Collector) InstanceCounts(ctx context.Context, id string, ask []InstanceCount) ([]InstanceCount, error) {
+	if len(ask) > MaxInstanceCountsAsk {
+		return nil, fmt.Errorf("%w: at most %d instances per request", errBadAsk, MaxInstanceCountsAsk)
+	}
+	st, err := c.seq.Status(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return st.countsOf(ask), nil
+}
+
+var errBadAsk = errors.New("invalid request")
 
 // SealResult is the seal response body.
 type SealResult struct {
