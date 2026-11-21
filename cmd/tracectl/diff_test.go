@@ -50,6 +50,25 @@ func TestNormalizeName(t *testing.T) {
 		{"can't reach db-1: don't retry", "can't reach db-?: don't retry"},
 		{"dial tcp 10.0.0.5:5432: timeout", "dial tcp ?.?:?: timeout"},
 		{"tx tx_9f86d081884c7d65 aborted", "tx ? aborted"},
+		// codes that name an outcome are kept; the values around them are not
+		{"HTTP 500", "HTTP 500"},
+		{"GET /orders/42: HTTP 503", "GET /orders/?: HTTP 503"},
+		{"HTTP/1.1 502 Bad Gateway after 3 tries", "HTTP/1.1 502 Bad Gateway after ? tries"},
+		{"unexpected status code: 429 (attempt 2)", "unexpected status code: 429 (attempt ?)"},
+		{"upstream 17 returned status 404", "upstream ? returned status 404"},
+		{"HTTP 500 then HTTP 503", "HTTP 500 then HTTP 503"},
+		{`ERROR: duplicate key value violates unique constraint "orders_pkey" (SQLSTATE 23505) at row 7`,
+			`ERROR: duplicate key value violates unique constraint "orders_pkey" (SQLSTATE 23505) at row ?`},
+		{"Error 1062 (23000): Duplicate entry '42' for key 'PRIMARY'", "Error 1062 (23000): Duplicate entry ? for key ?"},
+		{"rpc error: code = Code(17) desc = shard 4", "rpc error: code = Code(17) desc = shard ?"},
+		{"rpc error: code = Unavailable desc = conn 12 closed", "rpc error: code = Unavailable desc = conn ? closed"},
+		// not such codes: an HTTP status is three digits from 1xx to 5xx, and a SQL literal stays a literal
+		{"HTTP 7", "HTTP ?"},
+		{"HTTP 5000", "HTTP ?"},
+		{"HTTP 999", "HTTP ?"},
+		{"UPDATE jobs SET status = 500 WHERE id = 3", "UPDATE jobs SET status = ? WHERE id = ?"},
+		{"INSERT INTO log (msg) VALUES ('HTTP 500')", "INSERT INTO log (msg) VALUES (?)"},
+		{"HTTP 500 \uE000 9", "HTTP ? \uE000 ?"},
 		// not ids: a hex-looking word, a short hex string
 		{"GET /tags/deadbeefcafe", "GET /tags/deadbeefcafe"},
 		{"GET /tags/deadbeefcafefeed", "GET /tags/?"},
@@ -78,6 +97,8 @@ func TestNormalizeNameMergesAndKeepsApart(t *testing.T) {
 		{"DELETE FROM t WHERE id IN ($1, $2)", "DELETE FROM t WHERE id IN (?)"},
 		{"SET cart:17", "SET cart:18"},
 		{"job ts_0193a5b7c2d4f6a8b0c1d2e", "job ts_0193a5b7c2d4f6a8b0c1d2f"},
+		{"GET /orders/1: HTTP 500", "GET /orders/22: HTTP 500"},
+		{"HTTP 503 after 120 ms", "HTTP 503 after 95 ms"},
 	}
 	for _, p := range same {
 		if a, b := normalizeName(p[0]), normalizeName(p[1]); a != b {
@@ -102,6 +123,13 @@ func TestNormalizeNameMergesAndKeepsApart(t *testing.T) {
 		{"GET user:1", "SET user:1"},
 		{"ship-order", "bill-order"},
 		{"it's broken", "it's fixed"},
+		{"HTTP 500", "HTTP 503"},
+		{"HTTP 404", "HTTP 500"},
+		{"unexpected status 502", "unexpected status 504"},
+		{"insert failed (SQLSTATE 23505)", "insert failed (SQLSTATE 40001)"},
+		{"Error 1062 (23000): Duplicate entry", "Error 1213 (40001): Duplicate entry"},
+		{"rpc error: code = Code(17)", "rpc error: code = Code(18)"},
+		{"rpc error: code = Unavailable", "rpc error: code = Internal"},
 	}
 	for _, p := range apart {
 		if a, b := normalizeName(p[0]), normalizeName(p[1]); a == b {
@@ -379,6 +407,46 @@ func TestCLIDiff(t *testing.T) {
 
 	if code, _, e := env.tc("diff", "pass", "nope"); code != 1 || !strings.Contains(e, `no session named "nope"`) {
 		t.Fatalf("unknown session: %d %s", code, e)
+	}
+}
+
+// Two runs that differ only in the status a request failed with are
+// different: 500 is a bug in the service, 503 an unavailable dependency.
+func TestCLIDiffHTTPStatus(t *testing.T) {
+	env := newResultsEnv(t)
+	run := func(order, status string) []core.Event {
+		return reseq([]core.Event{
+			{Service: "api", Kind: core.KindAPIIn, Name: "POST /orders/" + order + "/pay", Err: "HTTP " + status},
+			{Service: "api", Kind: core.KindAPIOut, Name: "POST http://psp/charges/" + order, Err: "HTTP " + status},
+		})
+	}
+	env.events = map[string][]core.Event{"r500": run("42", "500"), "r503": run("43", "503"), "r500b": run("44", "500")}
+	ids := map[string]string{}
+	for _, name := range []string{"r500", "r503", "r500b"} {
+		code, out, e := env.tc("start", "--name", name)
+		var info struct{ ID string }
+		if err := json.Unmarshal([]byte(out), &info); code != 0 || err != nil {
+			t.Fatalf("start %s: %d %s %v", name, code, e, err)
+		}
+		ids[name] = info.ID
+	}
+	code, out, e := env.tc("diff", "r500", "r503", "--fail-on-diff")
+	t.Logf("500 vs 503: exit %d\n%s%s", code, out, e)
+	want := "a  " + ids["r500"] + "  r500\nb  " + ids["r503"] + "  r503\n" + `
+failures only in a:
+  1x api api.in POST /orders/?/pay: HTTP 500  (#1)
+  1x api api.out POST http://psp/charges/?: HTTP 500  (#2)
+
+failures only in b:
+  1x api api.in POST /orders/?/pay: HTTP 503  (#1)
+  1x api api.out POST http://psp/charges/?: HTTP 503  (#2)
+`
+	if code != exitCheckFailed || out != want {
+		t.Fatalf("500 vs 503: %d\n got %q\nwant %q", code, out, want)
+	}
+	// The same status for another order is still the same failure.
+	if code, out, _ := env.tc("diff", "r500", "r500b", "--fail-on-diff"); code != 0 || !strings.Contains(out, "no differences") {
+		t.Fatalf("500 vs 500: %d\n%s", code, out)
 	}
 }
 

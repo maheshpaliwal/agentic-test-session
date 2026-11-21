@@ -58,6 +58,10 @@ func (c *cli) diff(ctx context.Context, args []string) error {
 // value with the same placeholder, so the same operation gets the same name
 // in every run whatever kind of value it carried. It works on text alone and
 // does not parse SQL.
+//
+// A number that names an outcome is not such a value: "HTTP 500" and
+// "HTTP 503" are different failures, although the number rule alone would
+// make both "HTTP ?". reOutcome lists those codes; they are compared exactly.
 const (
 	placeholder    = "?"
 	maxNormalized  = 200 // runes kept of a normalised name
@@ -80,9 +84,41 @@ var (
 	// digits of orders_2024, t2 or v1.
 	reNumber = regexp.MustCompile(`\b\d+(?:\.\d+)?\b`)
 	reInList = regexp.MustCompile(`(?i)\bIN\s*\(\s*\?(?:\s*,\s*\?)*\s*\)`)
+	// Codes from a small fixed set, kept as they are: an HTTP status after
+	// "HTTP" or "status" ("HTTP 503", "HTTP/1.1 503", "status code: 503"), a
+	// SQLSTATE, a MySQL error number ("Error 1062 (23000)") and a gRPC code
+	// that has no name ("Code(17)"; named ones are words already). "status"
+	// must be followed by a space or a colon, so the SQL "status = 200" is
+	// still a literal.
+	reOutcome = regexp.MustCompile(`(?i)\b(?:HTTP(?:/\d(?:\.\d)?)?(?: status(?: code)?)?:? [1-5]\d\d\b` +
+		`|status(?: code)?:? [1-5]\d\d\b` +
+		`|SQLSTATE:? ?\(?[0-9A-Z]{5}\b` +
+		`|Error \d{4} \([0-9A-Z]{5}\)` +
+		`|Code\(\d+\))`)
 )
 
+// Private-use runes stand in for the reOutcome matches while the other rules
+// run; no rule touches them.
+const (
+	outcomeFirst = '\uE000'
+	outcomeLast  = '\uF8FF'
+)
+
+func isOutcomeMark(r rune) bool { return r >= outcomeFirst && r <= outcomeLast }
+
 func normalizeName(s string) string {
+	// Text that already holds a private-use rune is normalised without this
+	// step rather than risk restoring the wrong thing.
+	var outcomes []string
+	if !strings.ContainsFunc(s, isOutcomeMark) {
+		s = reOutcome.ReplaceAllStringFunc(s, func(m string) string {
+			if len(outcomes) > outcomeLast-outcomeFirst {
+				return m
+			}
+			outcomes = append(outcomes, m)
+			return string(rune(outcomeFirst + len(outcomes) - 1))
+		})
+	}
 	s = reQuoted.ReplaceAllString(s, "${1}"+placeholder)
 	s = reUUID.ReplaceAllString(s, placeholder)
 	s = reTsessionID.ReplaceAllString(s, placeholder)
@@ -95,12 +131,34 @@ func normalizeName(s string) string {
 	})
 	s = reBindVar.ReplaceAllString(s, placeholder)
 	s = reNumber.ReplaceAllString(s, placeholder)
+	if len(outcomes) > 0 {
+		// One inside a quoted literal went with the literal.
+		s = strings.Map(func(r rune) rune {
+			if isOutcomeMark(r) {
+				return -1
+			}
+			return r
+		}, restoreOutcomes(s, outcomes))
+	}
 	s = strings.Join(strings.Fields(s), " ")
 	s = reInList.ReplaceAllString(s, "IN (?)")
 	if r := []rune(s); len(r) > maxNormalized {
 		s = string(r[:maxNormalized-1]) + "…"
 	}
 	return s
+}
+
+// restoreOutcomes puts each kept code back in place of its mark.
+func restoreOutcomes(s string, outcomes []string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if i := int(r - outcomeFirst); isOutcomeMark(r) && i < len(outcomes) {
+			b.WriteString(outcomes[i])
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 type sessionRef struct {
