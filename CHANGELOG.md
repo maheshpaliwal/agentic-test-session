@@ -82,6 +82,11 @@ Rolling back:
   cannot read from the terminal. SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on, and the session is stopped
   and sealed after them; a control plane that cannot be reached is asked again until `--timeout`. Signal
   handling is untested on Windows.
+- **Go tests under `tracectl run`.** `client.AttachEnv` returns the session named in `TSESSION_ID`, and
+  `tsessiontest.Ambient(t, o)` joins it from a test without stopping it. `tsessiontest.Run` still starts one
+  session per test and ignores the variable. There are no assertions on the shared session: its verdict exists
+  only once `tracectl run` has sealed it, so `tsessiontest.Stop` and `Require*` fail the test when given that
+  session and never stop it. An empty header-mode session makes `tracectl run` say why.
 - **Delete and retention.** `DELETE /v1/sessions/{id}` on the control plane, `tracectl delete` and a two-click
   Delete in the dashboard remove a finished session with its events, seal and bundle. The collector's
   `--retention` (`TSESSION_COLLECTOR_RETENTION`, off by default) deletes a session that long after its seal, or

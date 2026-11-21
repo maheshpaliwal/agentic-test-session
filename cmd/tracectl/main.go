@@ -44,6 +44,8 @@ record a command (control plane and collector):
                                 summary. The command is not run through a shell. Its stdin, stdout and stderr
                                 pass through; tracectl prints to stderr only and writes the report to FILE.
                                 The session is stopped and sealed also when the command fails.
+                                A Go test joins the session with tsessiontest.Ambient or client.AttachEnv;
+                                tsessiontest.Run still starts a session of its own per test.
                                 The command runs in a process group of its own (it cannot read from the
                                 terminal) and needs a --ttl longer than its runtime (default 1h).
                                 SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on to the command's group, a
