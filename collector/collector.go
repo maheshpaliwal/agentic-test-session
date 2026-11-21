@@ -180,7 +180,20 @@ type IngestResult struct {
 	Duplicates      int            `json:"duplicates"`
 	Rejected        int            `json:"rejected,omitempty"`
 	RejectedReasons map[string]int `json:"rejected_reasons,omitempty"`
+	// FailedSessions names the sessions whose events the request could not
+	// take, each with the cause (backpressure, shutdown or storage). It is set
+	// only on a failed request, and lets an exporter treat the events of every
+	// session it does not name as resolved and resend only the named ones. At
+	// most maxFailedSessions are listed; FailedSessionsTruncated says that
+	// more failed, in which case a session that is not named may have failed
+	// too and the whole request has to be resent.
+	FailedSessions          map[string]string `json:"failed_sessions,omitempty"`
+	FailedSessionsTruncated bool              `json:"failed_sessions_truncated,omitempty"`
 }
+
+// maxFailedSessions bounds IngestResult.FailedSessions, and with it the size
+// of an error response: session ids are at most 128 bytes long.
+const maxFailedSessions = 32
 
 func (r *IngestResult) reject(reason string, n int) {
 	if n <= 0 {
@@ -193,7 +206,10 @@ func (r *IngestResult) reject(reason string, n int) {
 	r.RejectedReasons[reason] += n
 }
 
-// Ingest groups events by session and hands them to the sequencer.
+// Ingest groups events by session and hands them to the sequencer. A session
+// that fails does not stop the others: the error returned is that of the
+// first failed session (in id order), the counts cover what the other
+// sessions took, and the result names the sessions that failed.
 func (c *Collector) Ingest(ctx context.Context, instance string, evs []core.Event) (IngestResult, error) {
 	var res IngestResult
 	by := map[string][]core.Event{}
@@ -206,13 +222,31 @@ func (c *Collector) Ingest(ctx context.Context, instance string, evs []core.Even
 		by[e.SessionID] = append(by[e.SessionID], e)
 	}
 	var firstErr error
+	failed := 0
 	for _, id := range mapx.SortedKeys(by) {
 		a, d, err := c.seq.Add(ctx, id, by[id])
 		res.Accepted += a
 		res.Duplicates += d
-		if err != nil && firstErr == nil {
+		if err == nil {
+			continue
+		}
+		if firstErr == nil {
 			firstErr = err
 		}
+		failed++
+		cause := ingestErrorCause(err)
+		c.tel.sessionFailures.With(cause).Inc()
+		if len(res.FailedSessions) >= maxFailedSessions {
+			res.FailedSessionsTruncated = true
+			continue
+		}
+		if res.FailedSessions == nil {
+			res.FailedSessions = map[string]string{}
+		}
+		res.FailedSessions[id] = cause
+	}
+	if failed > 0 && failed < len(by) {
+		c.tel.partialFailures.Inc()
 	}
 	c.tel.ingested.With("accepted").Add(res.Accepted)
 	c.tel.ingested.With("duplicate").Add(res.Duplicates)
