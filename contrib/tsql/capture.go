@@ -18,6 +18,7 @@ const (
 	capTimeout
 	capSerializable
 	capDeadline
+	capAborted // the transaction is already aborted: the fence could not open and nothing ran
 )
 
 // A capture may spend at most 1/captureShare of the time the caller's
@@ -140,10 +141,11 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			// that is the SAVEPOINT: there is no fence then, and nothing more
 			// is sent (a ROLLBACK TO could hit a savepoint of the same name
 			// that belongs to the application).
-			st = classify(err, cctx)
-			if !txAborted(err) {
-				closeFence()
+			if txAborted(err) {
+				return nil, capAborted
 			}
+			st = classify(err, cctx)
+			closeFence()
 			return nil, st
 		default:
 			st = classify(err, cctx)
@@ -152,7 +154,7 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 				// not see begin (the application sent "BEGIN; ..." as one
 				// text). It is the application's: a ROLLBACK here would end it
 				// and let the statement that follows commit on its own.
-				return nil, st
+				return nil, capAborted
 			}
 			// Autocommit: nothing ran, or the BEGIN did and the transaction it
 			// opened is tsql's own. Ending it is right in both cases.
@@ -165,6 +167,9 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 	}
 	if !opened {
 		if _, err := c.execInner(cctx, begin, nil); err != nil {
+			if txAborted(err) {
+				return nil, capAborted
+			}
 			return nil, classify(err, cctx)
 		}
 		if _, err := c.execInner(cctx, timeout, nil); err != nil {

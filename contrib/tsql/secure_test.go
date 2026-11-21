@@ -186,7 +186,7 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 		}
 		return result{affected: 1}
 	}}
-	db := open(t, f, "postgres")
+	db := open(t, f, "postgres", noPKLookup)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 		}
 		return result{affected: 1}
 	}}
-	db := open(t, f, "postgres")
+	db := open(t, f, "postgres", noPKLookup)
 	tx, _ := db.BeginTx(ctx, nil)
 	if _, err := tx.ExecContext(ctx, "DELETE FROM t WHERE id = $1", 2); err != nil {
 		t.Fatal(err)

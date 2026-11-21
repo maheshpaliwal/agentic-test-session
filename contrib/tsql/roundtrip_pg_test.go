@@ -204,6 +204,10 @@ var rtCases = []rtCase{
 // statement (legacy) cannot: there a capture is five statements in a
 // transaction and four in autocommit, plus the one refused attempt per
 // connection (followed in autocommit by a ROLLBACK).
+//
+// The first traced write of a table on a handle also reads the table's
+// primary key from the catalog, which is one more capture (and so makes the
+// probe even where the statement itself needs no image read).
 func (c rtCase) rtWant(inTx, legacy bool) (first, steady int) {
 	per, probe := 3, 0
 	switch {
@@ -215,10 +219,7 @@ func (c rtCase) rtWant(inTx, legacy bool) (first, steady int) {
 		probe = 1
 	}
 	steady = 1 + per*c.captures
-	if c.captures == 0 {
-		probe = 0
-	}
-	return steady + probe, steady
+	return steady + per + probe, steady
 }
 
 // rtReset (re)creates the tables the cases write to: ids 1..3 with note

@@ -16,6 +16,7 @@ import (
 type conn struct {
 	inner driver.Conn
 	cfg   *config
+	pks   *pkCache // primary keys found in the catalog, shared by the handle's connections
 
 	mu     sync.Mutex
 	txID   string
@@ -28,7 +29,9 @@ type conn struct {
 	multi multiStmt
 }
 
-func newConn(inner driver.Conn, cfg *config) *conn { return &conn{inner: inner, cfg: cfg} }
+func newConn(inner driver.Conn, cfg *config, pks *pkCache) *conn {
+	return &conn{inner: inner, cfg: cfg, pks: pks}
+}
 
 func (c *conn) currentTx() string {
 	c.mu.Lock()

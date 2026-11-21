@@ -53,6 +53,39 @@ type fakeDB struct {
 	noMulti bool
 	// slow makes matching queries block (honouring ctx) for the returned duration.
 	slow func(q string) time.Duration
+	// pk answers the catalog lookup of a table's primary key (the argument is
+	// the table as the lookup names it); nil answers "no primary key", so the
+	// default key "id" applies.
+	pk func(table string) result
+}
+
+// noPKLookup keeps the catalog lookup out of tests that assert the exact
+// statements of the image captures.
+var noPKLookup = tsql.WithPKLookup(false)
+
+// isPKLookup reports whether q is the catalog query for a table's primary key.
+func isPKLookup(q string) bool {
+	return strings.Contains(q, "pg_catalog.pg_index") || strings.Contains(q, "information_schema.KEY_COLUMN_USAGE")
+}
+
+// pkRows is the catalog's answer for a table with the given key columns.
+func pkRows(cols ...string) result {
+	r := result{cols: []string{"attname"}}
+	for _, c := range cols {
+		r.rows = append(r.rows, []driver.Value{c})
+	}
+	return r
+}
+
+// PKLookups returns the catalog lookups the fake database saw.
+func (f *fakeDB) PKLookups() []call {
+	var out []call
+	for _, c := range f.RawCalls() {
+		if isPKLookup(c.SQL) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (f *fakeDB) wait(ctx context.Context, q string) error {
@@ -83,11 +116,12 @@ func (f *fakeDB) RawCalls() []call {
 	return append([]call(nil), f.calls...)
 }
 
-// Calls returns the statements without the capture fence.
+// Calls returns the statements without the capture fence and the primary-key
+// lookups.
 func (f *fakeDB) Calls() []call {
 	var out []call
 	for _, c := range f.RawCalls() {
-		if !isFence(c.SQL) {
+		if !isFence(c.SQL) && !isPKLookup(c.SQL) {
 			out = append(out, c)
 		}
 	}
@@ -118,10 +152,16 @@ func (f *fakeDB) answer(q string, args []driver.Value) result {
 			return result{err: errors.New("current transaction is aborted, commands ignored until end of transaction block")}
 		}
 	}
-	if f.handler == nil {
-		return result{}
+	var r result
+	switch {
+	case isPKLookup(q):
+		r = pkRows()
+		if f.pk != nil && len(args) > 0 {
+			r = f.pk(fmt.Sprint(args[len(args)-1]))
+		}
+	case f.handler != nil:
+		r = f.handler(q, args)
 	}
-	r := f.handler(q, args)
 	if f.abortModel && r.err != nil {
 		f.aborted = true
 	}

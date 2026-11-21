@@ -145,7 +145,7 @@ func TestTrackTxUntracedMatchesTrackTx(t *testing.T) {
 	for _, store := range []string{"postgres", "mysql"} {
 		cfg := buildConfig(nil)
 		cfg.store = store
-		oldC, newC := newConn(nil, cfg), newConn(nil, cfg)
+		oldC, newC := newConn(nil, cfg, &pkCache{}), newConn(nil, cfg, &pkCache{})
 		for i, q := range txCorpus() {
 			info, _ := oldC.parse(q)
 			oldC.trackTx(info.Tx)
@@ -221,7 +221,7 @@ func TestUntracedStatementsDoNotAllocate(t *testing.T) {
 
 	cfg := buildConfig(nil)
 	cfg.store = "postgres"
-	c := newConn(nopConn{}, cfg)
+	c := newConn(nopConn{}, cfg, &pkCache{})
 	st, err := c.PrepareContext(context.Background(), insert)
 	if err != nil {
 		t.Fatal(err)

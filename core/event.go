@@ -81,6 +81,20 @@ type Mutation struct {
 	Effective *bool          `json:"effective,omitempty"`
 }
 
+// AfterUnavailable reports an update whose new values are not known: the row
+// was read before the write and could not be read back after it. Such a
+// mutation has no meaningful Diff (SDKs that predate this method listed every
+// field as removed there); show the before image and say so instead.
+func (m *Mutation) AfterUnavailable() bool {
+	return AfterUnavailable(m.Op, m.Before, m.After)
+}
+
+// AfterUnavailable is Mutation.AfterUnavailable for a mutation held in
+// another shape (an entity history entry).
+func AfterUnavailable(op string, before, after PayloadRef) bool {
+	return op == "update" && !before.IsZero() && after.IsZero()
+}
+
 // Event is one recorded step. The SDK leaves Seq zero; the collector assigns it.
 type Event struct {
 	SessionID string   `json:"session_id"`

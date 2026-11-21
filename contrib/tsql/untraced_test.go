@@ -123,7 +123,7 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 		}
 		return result{affected: 1}
 	}}
-	db := open(t, f, "postgres")
+	db := open(t, f, "postgres", noPKLookup)
 	db.SetMaxOpenConns(1)
 	bg := context.Background()
 

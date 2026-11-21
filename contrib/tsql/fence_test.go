@@ -55,7 +55,7 @@ func fenceWant(t *testing.T, f *fakeDB, want ...string) {
 func TestCaptureFenceAutocommitSequence(t *testing.T) {
 	_, ctx := setup(t)
 	f := fenceFake(&fakeDB{})
-	db := open(t, f, "postgres")
+	db := open(t, f, "postgres", noPKLookup) // the lookup has its own fence tests
 	if _, err := db.ExecContext(ctx, fenceUpdate); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 		rec, ctx := setup(t)
 		// the fake models an aborted transaction, not an aborted statement in autocommit
 		f := fenceFake(&fakeDB{noMulti: noMulti, abortModel: inTx})
-		db := open(t, f, "postgres")
+		db := open(t, f, "postgres", noPKLookup)
 		db.SetMaxOpenConns(1)
 		var ex interface {
 			ExecContext(context.Context, string, ...any) (sql.Result, error)
