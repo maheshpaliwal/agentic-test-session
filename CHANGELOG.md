@@ -160,6 +160,14 @@ Rolling back:
 
 ### Fixed
 
+- `tsql`: a table whose primary key is not `id` was recorded as if an `UPDATE` wiped the row (every column
+  `-> ∅`, no key). Primary keys are now read from the database catalog (Postgres, MySQL; the MySQL query has not
+  been run against a live server), once per table per handle and again after 30 seconds. `WithPKColumns` still
+  wins; `WithPKLookup(false)` turns the lookup off. Cost: three more round trips on the first traced write to a
+  table, and such tables now take 7 round trips per `UPDATE` instead of 4, because the row is read back.
+- `tsql`: an `UPDATE` whose row cannot be read back records no diff and reads "after image unavailable" in
+  `tracectl` and the dashboard; a key that matches more rows than were written is flagged `pk_not_unique`
+  instead of recording another row's values. New flag `pk_lookup_failed`.
 - Collector on Postgres: several collectors starting together on a database without the schema failed with a
   unique violation in `CREATE SCHEMA`; the schema is now created under the migration lock. `make it` also runs
   the Postgres store's own tests against the real server.
