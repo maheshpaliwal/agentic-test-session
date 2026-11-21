@@ -17,6 +17,10 @@ const (
 	Upsert
 	Truncate
 	DDL
+	// Routine is a statement that runs code on the server: DO, CALL, and
+	// EXECUTE of a prepared statement. What it reads or writes is not in
+	// its text.
+	Routine
 )
 
 // IsWrite reports whether the statement changes data or schema.

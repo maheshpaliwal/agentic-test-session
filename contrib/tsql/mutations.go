@@ -68,6 +68,12 @@ func imgsOf(data []map[string]any, raws []map[string]driver.Value) []img {
 
 func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 	in := t.info
+	if in.Kind == mutation.Routine {
+		// The rows it changed are not in its text and are not looked for:
+		// the event says a write happened and that its effects are not
+		// recorded, so "no mutation" is not read as "nothing changed".
+		t.flag("effects_unknown")
+	}
 	if !in.Kind.IsMutation() {
 		return
 	}

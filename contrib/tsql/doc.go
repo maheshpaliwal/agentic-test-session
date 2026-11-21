@@ -87,6 +87,10 @@
 //     (no key, or the re-read failed or was skipped). The mutation carries
 //     the before image only and no diff: the new values are not known, which
 //     is not the same as every column having been cleared.
+//   - "effects_unknown": the statement runs code on the server (DO, CALL,
+//     EXECUTE of a prepared statement). It is recorded as a write with no
+//     mutations: the rows it changed are not in its text and are not looked
+//     for. No mutation on such an event does not mean nothing changed.
 //   - "pk_not_unique": the key columns matched more rows than the statement
 //     wrote, so they are not the table's key. The after image is dropped
 //     ("after_unavailable" applies) and the key is looked up afresh.

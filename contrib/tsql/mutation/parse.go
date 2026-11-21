@@ -246,6 +246,8 @@ func (p *parser) verb(t []token) Info {
 				}
 			}
 		}
+	case "DO", "CALL", "EXECUTE":
+		in.Kind = Routine
 	case "CREATE", "ALTER", "DROP", "RENAME", "GRANT", "REVOKE", "COMMENT":
 		in.Kind = DDL
 		for i := 1; i < len(t) && i < 8; i++ {

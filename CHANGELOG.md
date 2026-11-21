@@ -222,6 +222,8 @@ Rolling back:
 
 ### Fixed
 
+- `tsql`: `DO`, `CALL` and `EXECUTE` were recorded as reads. They are writes whose row changes tsql cannot
+  see, recorded as `db.write` with the new flag `effects_unknown` and no mutations.
 - An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record
   in `tracectl digest`, `history`, `entities` and the dashboard, although its row image is read separately and
   is complete. The flag `returning_partial` describes the statement, not the image, and no longer counts as
