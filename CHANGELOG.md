@@ -152,7 +152,8 @@ Rolling back:
     (parallel sessions, 500 sessions stopping together, slow or briefly unreachable collector and report
     endpoint, idle services frozen or half-open); healthy drain time unchanged.
   - Not detected: a service killed before it ever reports, a service on an older SDK, and a session that ends
-    sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off).
+    sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off), or less
+    than about 10 s after the control plane's first session following a time without any began.
   - Reported as `incomplete` although nothing is missing: a service whose reports are blocked while its events
     all arrived, and one frozen for longer than the grace after delivering and before reporting. The control
     plane cannot know that without the report, and the reason says so.

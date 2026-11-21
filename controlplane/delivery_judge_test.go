@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -90,4 +91,47 @@ func BenchmarkJudgeDelivery(b *testing.B) {
 	for b.Loop() {
 		judge()
 	}
+}
+
+// Two lines of delivery_unconfirmed a caller who can reach the control plane
+// can take out. Neither is prevented: the endpoint is not authenticated, and
+// docs/PROTOCOL.md lists both among what such a caller can do. Pinned here so
+// that the list stays true.
+func TestDeliveryUnconfirmedLinesACallerCanRemove(t *testing.T) {
+	// An instance of which nothing has arrived since it connected is named in
+	// every session. One request in its name makes it one that was heard of,
+	// which a session it left nothing in does not name.
+	t.Run("a request in the name of an instance that was never heard of", func(t *testing.T) {
+		for _, forged := range []bool{false, true} {
+			e := newDeliveryEnv(t, testGrace, nil)
+			e.col.counting()
+			defer follow(e.m, "orders-api", "o-1")()
+			if forged {
+				hello(t, e.m, "orders-api", "o-1")
+			}
+			time.Sleep(testGrace + testGrace/4)
+			s, _ := e.stop()
+			if named := len(s.DeliveryUnconfirmed) == 1 && strings.Contains(s.DeliveryUnconfirmed[0], "no delivery report of it has arrived since it connected"); s.Incomplete || named == forged {
+				panic(fmt.Sprintf("forged=%v: incomplete=%v unconfirmed=%q", forged, s.Incomplete, s.DeliveryUnconfirmed))
+			}
+		}
+	})
+	// An instance recorded after its last report and stopped reporting: the
+	// collector has more events than the report names. A final report in its
+	// name with the same counters is not stale, makes the kept report final,
+	// and a final report the collector covers is complete.
+	t.Run("a final report that repeats the instance's last one", func(t *testing.T) {
+		for _, forged := range []bool{false, true} {
+			e := newDeliveryEnv(t, testGrace, nil)
+			e.col.counting().has("orders-api", "o-1", 5)
+			e.report(rep("orders-api", "o-1", 3, 3, 0))
+			if forged {
+				e.report(final(rep("orders-api", "o-1", 3, 3, 0)))
+			}
+			s, _ := e.stop()
+			if named := len(s.DeliveryUnconfirmed) == 1 && strings.Contains(s.DeliveryUnconfirmed[0], "the collector has 5 events, more than the 3 of the instance's last report"); s.Incomplete || named == forged {
+				panic(fmt.Sprintf("forged=%v: incomplete=%v unconfirmed=%q", forged, s.Incomplete, s.DeliveryUnconfirmed))
+			}
+		}
+	})
 }
