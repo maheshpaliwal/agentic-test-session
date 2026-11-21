@@ -251,6 +251,12 @@ func TestExtractIgnoresOwnKeyCopiedByOldHop(t *testing.T) {
 // with: observing it moves the local clock past it.
 func TestForwarderClockDiffersFromSenders(t *testing.T) {
 	ctx, _ := propSetup(t, Config{})
+	// The clock is process-wide and only moves forward: an earlier test (or an
+	// earlier run of this one under -count) leaves it ahead of the wall clock,
+	// and "ahead" below would then pass the skew limit and be ignored.
+	hlcMu.Lock()
+	hlcLast = 0
+	hlcMu.Unlock()
 	c := MapCarrier{}
 	Inject(ctx, c)
 	// A sender whose clock is ahead of this process by less than the skew
