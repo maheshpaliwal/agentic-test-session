@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/proto/tsessionproto"
 )
@@ -165,18 +164,6 @@ func (c *Collector) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
-}
-
-func (c *Collector) handleSessions(w http.ResponseWriter, r *http.Request) {
-	l, err := c.st.ListSessions(r.Context())
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	if l == nil {
-		l = []store.SessionInfo{}
-	}
-	writeJSON(w, http.StatusOK, l)
 }
 
 // resolvePage applies tx outcomes and orphan flags to one page of a session's

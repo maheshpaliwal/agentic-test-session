@@ -75,6 +75,12 @@ func Run(t *testing.T, s store.Store) {
 	if !found {
 		t.Fatalf("list %+v", l)
 	}
+	// The collector answers a list by id (GET /v1/sessions?ids=) from Head
+	// and GetSeal, so they must say what the list says: the head is the
+	// event count, and a listed session is sealed exactly when it has a seal.
+	if h, err := s.Head(ctx, sid); err != nil || h != 6 {
+		t.Fatalf("head %d %v, list counts 6 events", h, err)
+	}
 
 	// DeleteSession removes events and seal, leaves other sessions alone, and
 	// is idempotent. The id is then free for a fresh run starting at Seq 1.

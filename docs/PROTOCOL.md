@@ -161,7 +161,26 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
     in Seq order; `{pk}` is the canonical JSON key or, for a single-column key, the bare value
   - `GET /v1/sessions/{id}/summary` -> `{session_id,event_count,by_kind,by_service,mutations,failures,pending_async,
     pending_async_ids,dropped_events,flags,duration_ns,sealed,incomplete,quarantined}`
-  - `GET /v1/sessions` -> sessions the collector holds events for `[{id,event_count,first_ns,last_ns,sealed}]`
+  - `GET /v1/sessions` -> sessions the collector holds events for `[{id,event_count,first_ns,last_ns,sealed}]`,
+    ordered by id. It lists every session: its cost grows with everything stored (a table scan on DynamoDB), so
+    do not poll it.
+  - `GET /v1/sessions?ids=a,b,c` -> the same array for the named sessions only: `[{id,event_count,sealed}]`, one
+    element per requested id the collector holds events for, in the order asked. An id without stored events is
+    left out. `first_ns` and `last_ns` are **not** in an `ids` answer (they need the session's events). The answer
+    costs one head lookup per id plus one seal lookup per id that has events, at most 8 at a time; it never lists
+    sessions and never reads events. `event_count` counts stored events, as in the full list (events still in the
+    reorder window are not counted).
+    - `ids` is a comma-separated list of at most 1000 distinct session ids (empty elements are skipped, repeats
+      count once, several `ids=` parameters are one list). More than 1000, or an id that is not a valid session
+      id, is `400`. `ids=` with no id answers `[]`, not the full list.
+    - Every `ids` answer carries `X-Tsession-Unanswered: <n>`: the number of requested ids left out because the
+      store failed for them (or the request ended first). A store failure is not a `500` here. An id missing from
+      the body means "no events held" only when the header is `0`. The header's presence also tells a client that
+      the collector understood `ids`: a collector older than this parameter ignores it and answers with the full
+      list and no header.
+    - The ids travel in the URL: 200 ids of 30 characters are about 6 KB, 1000 are about 31 KB. The collector and
+      the dashboard proxy accept that (Go's 1 MB request-header limit); a reverse proxy in front of them may not
+      (nginx allows 8 KB by default), so raise its limit or ask for fewer ids per request.
 - Internal (control plane -> collector):
   - `GET /v1/internal/sessions/{id}/drain-status` -> `{"pending":n,"last_event_unix_ns":n,"event_count":n,"dropped_events":n}`
   - `POST /v1/internal/sessions/{id}/seal` -> flushes window, resolves tx `effective`, marks orphans, writes bundle -> `{"incomplete":bool,"orphaned":[spanIDs],"bundle_uri":""}`
