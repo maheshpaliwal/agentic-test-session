@@ -73,7 +73,11 @@ func (r *Recorder) Record(e core.Event) {
 }
 
 // evictScan bounds how far evictLocked looks, and with it the time Record
-// can take with the ring full.
+// can take with the ring full: an eviction moves the events behind the one
+// it drops, which was measured at about 30µs for 1000 of them, against tens
+// of nanoseconds for dropping the new event. That price is paid only while
+// the ring is full and a session is held. Held events further back than
+// this are out of reach, and then the new event is dropped as before.
 const evictScan = 1024
 
 // evictLocked makes room in a full ring for an event of session sid by

@@ -376,7 +376,10 @@ func propCase(seed int64) (out propResult) {
 				bad("%s: session %s: %d drops are not reported", when, sid, rec.drops[sid])
 			}
 			sum := len(m.delivered[sid]) + int(m.dropped[sid]+rec.drops[sid])
-			if sum < want[sid] || sum > want[sid]+m.unacked[sid] {
+			// Before the end the exporter's own loop may hold drop counts it
+			// has just taken from the recorder and not yet delivered: they are
+			// in neither place for a moment, so only the upper bound holds.
+			if (end && sum < want[sid]) || sum > want[sid]+m.unacked[sid] {
 				bad("%s: session %s (kind %d): delivered %d + reported dropped %d + drops to report %d != recorded %d (stored without an answer: %d)",
 					when, sid, m.sess[sid].kind, len(m.delivered[sid]), m.dropped[sid], rec.drops[sid], want[sid], m.unacked[sid])
 			}

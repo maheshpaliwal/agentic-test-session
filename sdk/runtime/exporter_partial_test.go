@@ -325,7 +325,10 @@ func TestHeldSessionsAreLoggedOnce(t *testing.T) {
 	for round := range 2 {
 		env.hold("bad-session", "ok")
 		env.col.setFail(nil)
-		env.eventually("the session is released", func() bool { return len(env.held()) == 0 })
+		// The recorder is told before the line is written: wait for the line too.
+		env.eventually("the session is released, and that is logged", func() bool {
+			return len(env.held()) == 0 && strings.Contains(out.String(), "accepts all sessions again")
+		})
 		if h, r := strings.Count(out.String(), "keeps failing some sessions"), strings.Count(out.String(), "accepts all sessions again"); h != 1 || r != 1 {
 			t.Fatalf("round %d: %d hold and %d release lines, want one each:\n%s", round, h, r, out.String())
 		}
