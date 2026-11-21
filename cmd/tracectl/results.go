@@ -116,7 +116,11 @@ func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 		state += ", delivery unconfirmed"
 	}
 	fmt.Fprintf(w, "session    %s  %s  (%s)\n", info.ID, displayName(info), state)
-	fmt.Fprintf(w, "events     %d over %s\n", sum.EventCount, time.Duration(sum.DurationNs).Round(time.Millisecond))
+	events := fmt.Sprintf("events     %d over %s", sum.EventCount, time.Duration(sum.DurationNs).Round(time.Millisecond))
+	if sum.EventCount == 0 {
+		events = "events     0: the session recorded nothing, so nothing was checked (see tracectl doctor)"
+	}
+	fmt.Fprintln(w, events)
 	fmt.Fprintf(w, "failures   %d\n", len(sum.Failures))
 	if sum.PendingAsync > 0 {
 		label := "pending"

@@ -251,3 +251,10 @@ func TestURLFlagWithoutASchemeIsRefused(t *testing.T) {
 		panic(fmt.Sprintf("exit %d, stderr %q", code, errb.String()))
 	}
 }
+
+func TestListRefusesAReplyThatIsNotAControlPlanes(t *testing.T) {
+	env := newPagingEnv(t, false, pagingSession(0, "s0", ""))
+	if code, out, e := env.tc("list"); code != 1 || out != "" || !strings.Contains(e, "did not answer like a control plane") {
+		panic(fmt.Sprintf("exit %d, out %q, stderr %q", code, out, e))
+	}
+}

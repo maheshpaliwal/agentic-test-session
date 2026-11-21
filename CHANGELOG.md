@@ -257,6 +257,8 @@ Rolling back:
 
 ### Changed
 
+- `tracectl list` refuses a reply whose sessions have no state (`--cp` pointing at the collector) with exit 1; it
+  printed a row of blanks. `tracectl summary` of a session without events says that nothing was recorded.
 - `tracectl start --name X` notes on standard error when an earlier session is also named X, with its id and
   state: the name stands for the new session from then on. An id that neither the control plane nor the
   collector knows is reported as "no session with id ..." before the HTTP status.
