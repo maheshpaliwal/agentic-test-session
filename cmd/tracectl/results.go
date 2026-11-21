@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -19,9 +20,8 @@ import (
 func (c *cli) summary(ctx context.Context, args []string) error {
 	fs := c.flags("summary")
 	asJSON := fs.Bool("json", false, "print the raw summary as JSON")
-	failErr := fs.Bool("fail-on-error", false, "exit 3 when the session recorded failed events")
-	failInc := fs.Bool("fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work)")
-	failEmpty := fs.Bool("fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
+	var g gates
+	g.register(fs)
 	s, err := c.session(ctx, fs, args)
 	if err != nil {
 		return err
@@ -35,14 +35,29 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	} else {
 		printSummary(c.stdout, s.Info(), sum)
 	}
+	return g.check(s.Info(), sum, len(sum.Failures))
+}
+
+// gates are the --fail-on-* checks of summary, report and run.
+type gates struct{ onError, onIncomplete, onEmpty bool }
+
+func (g *gates) register(fs *flag.FlagSet) {
+	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
+	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work, a failed seal)")
+	fs.BoolVar(&g.onEmpty, "fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
+}
+
+// check returns a checkError naming every gate the session fails; failures
+// is the number of failed events the caller found.
+func (g *gates) check(info client.Info, sum client.Summary, failures int) error {
 	var failed []string
-	if *failErr && len(sum.Failures) > 0 {
-		failed = append(failed, fmt.Sprintf("%d failed event(s)", len(sum.Failures)))
+	if g.onError && failures > 0 {
+		failed = append(failed, fmt.Sprintf("%d failed event(s)", failures))
 	}
 	// The control plane knows about a failed seal and a drain that timed out;
 	// the collector's summary does not.
-	switch info := s.Info(); {
-	case !*failInc:
+	switch {
+	case !g.onIncomplete:
 	case sum.Incomplete || info.Incomplete || info.SealError != "":
 		failed = append(failed, "session is incomplete")
 	case info.State == "":
@@ -50,7 +65,7 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 		// drain timed out is not known, so the gate cannot pass.
 		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
 	}
-	if *failEmpty && sum.EventCount == 0 {
+	if g.onEmpty && sum.EventCount == 0 {
 		failed = append(failed, emptySession)
 	}
 	if len(failed) > 0 {

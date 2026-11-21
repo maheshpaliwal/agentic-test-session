@@ -34,71 +34,75 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	fs := c.flags("report")
 	format := fs.String("format", "markdown", "markdown or junit")
 	path := fs.String("o", "", "write to this file instead of stdout")
-	failErr := fs.Bool("fail-on-error", false, "exit 3 when the session recorded failed events")
-	failInc := fs.Bool("fail-on-incomplete", false, "exit 3 when the session is incomplete")
-	failEmpty := fs.Bool("fail-on-empty", false, "exit 3 when the session recorded no events")
+	var g gates
+	g.register(fs)
 	pos, err := parseArgs(fs, args, 1, reportArgs)
 	if err != nil {
 		return err
 	}
-	var render func(*sessionReport) ([]byte, error)
-	switch *format {
-	case "markdown":
-		render = renderMarkdown
-	case "junit":
-		render = renderJUnit
-	default:
-		return fmt.Errorf("usage: tracectl report %s: unknown --format %q", reportArgs, *format)
+	render, err := reportRenderer(*format)
+	if err != nil {
+		return fmt.Errorf("usage: tracectl report %s: %w", reportArgs, err)
 	}
 	s, err := resolve(ctx, c.opts, pos[0])
 	if err != nil {
 		return err
 	}
-	sum, err := s.Summary(ctx)
+	rep, err := loadReport(ctx, s)
 	if err != nil {
 		return err
 	}
-	tr, err := s.Trace(ctx)
-	if err != nil {
-		return err
-	}
-	muts, err := s.Mutations(ctx, client.MutationFilter{})
-	if err != nil {
-		return err
-	}
-	rep := buildReport(s.Info(), sum, tr, muts)
 	out, err := render(rep)
 	if err != nil {
 		return err
 	}
 	if *path != "" {
-		// 0644, unlike export's 0600: the report holds names and error text,
-		// not request or row payloads, and CI steps that publish it often run
-		// as another user.
-		if err := os.WriteFile(*path, out, 0o644); err != nil {
+		if err := c.writeReportFile(*path, *format, out); err != nil {
 			return err
 		}
-		fmt.Fprintf(c.stderr, "wrote %s report to %s\n", *format, *path)
 	} else if _, err := c.stdout.Write(out); err != nil {
 		return err
 	}
-	var failed []string
-	if *failErr && len(rep.failures) > 0 {
-		failed = append(failed, fmt.Sprintf("%d failed event(s)", len(rep.failures)))
+	return g.check(rep.info, rep.sum, len(rep.failures))
+}
+
+// reportRenderer returns the renderer of a --format value.
+func reportRenderer(format string) (func(*sessionReport) ([]byte, error), error) {
+	switch format {
+	case "markdown":
+		return renderMarkdown, nil
+	case "junit":
+		return renderJUnit, nil
 	}
-	switch {
-	case !*failInc:
-	case rep.incomplete:
-		failed = append(failed, "session is incomplete")
-	case rep.info.State == "":
-		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+	return nil, fmt.Errorf("unknown --format %q", format)
+}
+
+// loadReport reads what a report is made of.
+func loadReport(ctx context.Context, s *client.Session) (*sessionReport, error) {
+	sum, err := s.Summary(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if *failEmpty && rep.sum.EventCount == 0 {
-		failed = append(failed, emptySession)
+	tr, err := s.Trace(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if len(failed) > 0 {
-		return checkError{msg: "check failed: " + strings.Join(failed, "; ")}
+	muts, err := s.Mutations(ctx, client.MutationFilter{})
+	if err != nil {
+		return nil, err
 	}
+	return buildReport(s.Info(), sum, tr, muts), nil
+}
+
+// writeReportFile writes a rendered report to path, replacing the file.
+func (c *cli) writeReportFile(path, format string, out []byte) error {
+	// 0644, unlike export's 0600: the report holds names and error text,
+	// not request or row payloads, and CI steps that publish it often run
+	// as another user.
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.stderr, "wrote %s report to %s\n", format, path)
 	return nil
 }
 

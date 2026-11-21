@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"slices"
@@ -15,13 +16,7 @@ import (
 func (c *cli) start(ctx context.Context, args []string) error {
 	fs := c.flags("start")
 	opts := c.opts
-	fs.StringVar(&opts.Name, "name", "", "session name")
-	fs.StringVar(&opts.Mode, "mode", "header", "header|exclusive")
-	fs.IntVar(&opts.TTLSeconds, "ttl", 0, "ttl seconds")
-	fs.IntVar(&opts.QuiesceSeconds, "quiesce", 0, "quiesce seconds")
-	fs.IntVar(&opts.MaxDrainSeconds, "max-drain", 0, "max drain seconds")
-	var binds bindFlags
-	fs.Var(&binds, "bind", "source:name=value (repeatable; header|jwt|jwt_claim|cookie|query)")
+	binds := sessionFlags(fs, &opts)
 	idOnly := fs.Bool("id-only", false, "print only the session id, for scripts: ID=$(tracectl start --id-only)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -38,6 +33,19 @@ func (c *cli) start(ctx context.Context, args []string) error {
 	}
 	printJSON(c.stdout, s.Info())
 	return nil
+}
+
+// sessionFlags registers the flags that describe a new session, shared by
+// start and run. The bindings are complete once fs is parsed.
+func sessionFlags(fs *flag.FlagSet, opts *client.Options) *bindFlags {
+	fs.StringVar(&opts.Name, "name", "", "session name")
+	fs.StringVar(&opts.Mode, "mode", "header", "header|exclusive")
+	fs.IntVar(&opts.TTLSeconds, "ttl", 0, "ttl seconds")
+	fs.IntVar(&opts.QuiesceSeconds, "quiesce", 0, "quiesce seconds")
+	fs.IntVar(&opts.MaxDrainSeconds, "max-drain", 0, "max drain seconds")
+	binds := &bindFlags{}
+	fs.Var(binds, "bind", "source:name=value (repeatable; header|jwt|jwt_claim|cookie|query)")
+	return binds
 }
 
 func (c *cli) rename(ctx context.Context, args []string) error {
