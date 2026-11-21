@@ -100,6 +100,8 @@ Rolling back:
 
 ### Added
 
+- `client.StatusError` and `client.StatusCode(err)`: the error of a request the service answered with a non-2xx
+  status now carries the code, so callers no longer match its text (it reads the same as before).
 - **Redis writes carry a diff** when before-images are on (`tredis.WithBeforeImage`): the value of a string,
   per field of a hash, per member of a sorted set, `added`/`removed` for a set, by index for a list. It adds no
   round trips. Collections beyond the image cap get a partial diff or none, flagged `diff_truncated`; a diff

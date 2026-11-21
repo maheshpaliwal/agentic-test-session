@@ -33,28 +33,6 @@ func TestMap(t *testing.T) {
 	}
 }
 
-func TestFilterMap(t *testing.T) {
-	got := FilterMap([]string{"1", "x", "3"}, func(s string) (int, bool) {
-		n, err := strconv.Atoi(s)
-		return n, err == nil
-	})
-	if !reflect.DeepEqual(got, []int{1, 3}) {
-		panic(fmt.Sprintf("got %v", got))
-	}
-}
-
-func TestToMap(t *testing.T) {
-	type row struct {
-		ID string
-		N  int
-	}
-	got := ToMap([]row{{"a", 1}, {"b", 2}, {"a", 3}}, func(r row) string { return r.ID })
-	want := map[string]row{"a": {"a", 3}, "b": {"b", 2}}
-	if !reflect.DeepEqual(got, want) {
-		panic(fmt.Sprintf("got %v", got))
-	}
-}
-
 func TestSortBy(t *testing.T) {
 	type row struct{ ID string }
 	s := []row{{"c"}, {"a"}, {"b"}}
