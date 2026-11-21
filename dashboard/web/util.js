@@ -50,8 +50,12 @@
     const o = parsePK(pk);
     if (o === null || typeof o !== 'object') return String(o);
     const k = Object.keys(o).sort();
-    return k.length ? k.map((x) => x + '=' + (typeof o[x] === 'object' ? JSON.stringify(o[x]) : o[x])).join(', ') : '{}';
+    return k.length ? k.map((x) => x + '=' + (typeof o[x] === 'object' ? JSON.stringify(o[x]) : o[x])).join(', ') : '(key unknown)';
   }
+  const hasPayload = (p) => !!p && (p.inline !== undefined || !!p.blob_hash);
+  /* An update whose row could not be read back: the before image is known, the new values are not. Its diff, if an
+     older SDK sent one, lists every field as removed and must not be shown. Mirrors core.Mutation.AfterUnavailable. */
+  const afterUnavailable = (mu) => !!mu && mu.op === 'update' && hasPayload(mu.before) && !hasPayload(mu.after);
   // Canonical form used in URL paths (the collector accepts the canonical JSON string).
   function pkRaw(pk) {
     if (pk === undefined || pk === null) return '';
@@ -543,7 +547,7 @@
       ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
   }
 
-  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, unresolvedMut, hasUnresolved,
     mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;

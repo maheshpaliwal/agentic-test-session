@@ -62,7 +62,9 @@
   }
   const FLAG_CLS = { tx_unresolved: 't-warn', orphaned: 't-err', oversize_dropped: 't-err', image_skipped: '', propagation_skipped: '' };
   const FLAG_HELP = { tx_unresolved: 'no commit/rollback seen for this transaction', orphaned: 'async work with no matching counterpart',
-    image_skipped: 'before/after image not captured', oversize_dropped: 'payload dropped for exceeding size limits',
+    image_skipped: 'before/after image not captured', after_unavailable: 'the updated row could not be read back; its new values are not known',
+    pk_unknown: 'no primary key value found for the row; declare the key with tsql.WithPKColumns', pk_lookup_failed: 'the primary key could not be read from the database catalog',
+    oversize_dropped: 'payload dropped for exceeding size limits',
     propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };
   function tag(text, tone, title, ic) { return h('span', { class: 'tag' + (tone ? ' ' + tone : ''), title: title }, ic ? icon(ic) : null, text); }
   function redChip() { return h('span', { class: 'redchip', title: 'value masked by the SDK' }, icon('lock'), '[REDACTED]'); }
@@ -291,6 +293,14 @@
     return t;
   }
   function diffView(mu) {
+    if (U.afterUnavailable(mu)) {
+      // The row was not read back: its fields are what they were before the update, not removed.
+      const rows = flatten(mu.before.inline === undefined ? {} : mu.before.inline, '', {});
+      const box = h('div', { class: 'sec' }, h('div', { class: 'note', text: 'After image unavailable: the new values were not captured, so no changes can be shown.' }));
+      const fields = Object.keys(rows).map((k) => ({ field: k, old: rows[k], nw: undefined, kind: 'same' }));
+      if (fields.length) box.appendChild(h('details', { class: 'more' }, h('summary', { text: 'Values before the update (' + fields.length + ' field' + (fields.length === 1 ? '' : 's') + ')' }), diffTable(fields)));
+      return box;
+    }
     const rows = diffRows(mu);
     const changed = rows.filter((r) => r.kind !== 'same'), same = rows.filter((r) => r.kind === 'same');
     const box = h('div', { class: 'sec' });

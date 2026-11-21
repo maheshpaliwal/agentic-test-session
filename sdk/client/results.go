@@ -87,6 +87,12 @@ type EntityMutation struct {
 	Effective *bool `json:"effective,omitempty"`
 }
 
+// AfterUnavailable reports an update whose new values were not captured; see
+// core.Mutation.AfterUnavailable. Its Diff is not to be read.
+func (m EntityMutation) AfterUnavailable() bool {
+	return core.AfterUnavailable(m.Op, m.Before, m.After)
+}
+
 // EntityHistory is every recorded change to one entity, in Seq order.
 type EntityHistory struct {
 	Store     string           `json:"store"`
@@ -167,6 +173,8 @@ func (f MutationFilter) match(m *core.Mutation) bool {
 }
 
 // Mutation is one recorded mutation together with the event that made it.
+// Before reading Diff or After of an update, check AfterUnavailable: an update
+// whose row could not be read back has neither.
 type Mutation struct {
 	Seq     uint64 // of the event
 	Service string

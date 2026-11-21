@@ -221,11 +221,19 @@ func (c *cli) entities(ctx context.Context, args []string) error {
 		printJSON(c.stdout, ents)
 		return nil
 	}
-	for _, e := range ents {
-		fmt.Fprintf(c.stdout, "%-10s %-28s %-30s %d mutation(s)\n", e.Store, clip(e.Entity, 28), clip(e.PK, 30), e.MutationCount)
-	}
-	fmt.Fprintf(c.stdout, "%d entities\n", len(ents))
+	printEntities(c.stdout, ents)
 	return nil
+}
+
+func printEntities(w io.Writer, ents []client.Entity) {
+	for _, e := range ents {
+		pk := e.PK
+		if pk == "{}" || pk == "" { // "{}" is still the value to pass to "history"
+			pk = "{} " + unknownKey
+		}
+		fmt.Fprintf(w, "%-10s %-28s %-30s %d mutation(s)\n", e.Store, clip(e.Entity, 28), clip(pk, 30), e.MutationCount)
+	}
+	fmt.Fprintf(w, "%d entities\n", len(ents))
 }
 
 func (c *cli) history(ctx context.Context, args []string) error {
@@ -247,7 +255,12 @@ func (c *cli) history(ctx context.Context, args []string) error {
 		printJSON(c.stdout, h)
 		return nil
 	}
-	fmt.Fprintf(c.stdout, "%s/%s %s: %d mutation(s)\n", h.Store, h.Entity, h.PK, len(h.Mutations))
+	printHistory(c.stdout, h)
+	return nil
+}
+
+func printHistory(w io.Writer, h client.EntityHistory) {
+	fmt.Fprintf(w, "%s/%s %s: %d mutation(s)\n", h.Store, h.Entity, h.PK, len(h.Mutations))
 	for _, m := range h.Mutations {
 		outcome := "tx open"
 		switch {
@@ -257,12 +270,16 @@ func (c *cli) history(ctx context.Context, args []string) error {
 		default:
 			outcome = "ROLLED BACK"
 		}
-		fmt.Fprintf(c.stdout, "#%-5d %-8s %-12s %-12s %s\n", m.Seq, m.Op, outcome, clip(m.Service, 12), m.Kind)
+		fmt.Fprintf(w, "#%-5d %-8s %-12s %-12s %s\n", m.Seq, m.Op, outcome, clip(m.Service, 12), m.Kind)
+		if m.AfterUnavailable() {
+			// No diff, even one an older SDK sent: it lists every field as removed.
+			fmt.Fprintf(w, "       %s\n", afterUnavailable)
+			continue
+		}
 		for _, d := range m.Diff {
-			fmt.Fprintf(c.stdout, "       %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
+			fmt.Fprintf(w, "       %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
 		}
 	}
-	return nil
 }
 
 // compact renders a diff value on one line.

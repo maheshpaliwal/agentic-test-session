@@ -8,6 +8,19 @@ assert.strictEqual(U.pkLabel('{"b":2,"a":"x"}'), 'a=x, b=2');
 assert.strictEqual(U.pkLabel({ id: 7 }), 'id=7');
 assert.strictEqual(U.pkLabel('42'), '42');
 assert.strictEqual(U.pkLabel('{bad'), '{bad');
+assert.strictEqual(U.pkLabel('{}'), '(key unknown)');
+assert.strictEqual(U.pkLabel(undefined), '');
+
+// An update with a before image and no after image has unknown new values; anything else is diffed as usual.
+const img = { inline: { sku: 'widget', qty: 10 } };
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: img }), true);
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: img, diff: [{ field: 'qty', old: 10 }] }), true); // as sent by an older SDK
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: { blob_hash: 'abc' }, after: {} }), true);
+assert.strictEqual(U.afterUnavailable({ op: 'update', before: img, after: img }), false);
+assert.strictEqual(U.afterUnavailable({ op: 'update', after: img }), false);
+assert.strictEqual(U.afterUnavailable({ op: 'update' }), false);
+assert.strictEqual(U.afterUnavailable({ op: 'delete', before: img }), false);
+assert.strictEqual(U.afterUnavailable(undefined), false);
 assert.strictEqual(U.pkRaw({ b: 1, a: 2 }), '{"a":2,"b":1}');
 assert.strictEqual(U.pkRaw('{"id":1}'), '{"id":1}');
 

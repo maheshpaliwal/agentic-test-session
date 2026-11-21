@@ -183,7 +183,13 @@ func printEvent(w io.Writer, e *core.Event) {
 				outcome = "  ROLLED BACK"
 			}
 		}
-		fmt.Fprintf(w, "mutation  %s %s/%s %s%s\n", m.Op, m.Store, m.Entity, compact(m.PK), outcome)
+		fmt.Fprintf(w, "mutation  %s %s/%s %s%s\n", m.Op, m.Store, m.Entity, pkText(m.PK), outcome)
+		if m.AfterUnavailable() {
+			// No diff, even one an older SDK sent: it lists every field as removed.
+			fmt.Fprintf(w, "            %s\n", afterUnavailable)
+			printPayload(w, "  before", m.Before)
+			continue
+		}
 		for _, d := range m.Diff {
 			fmt.Fprintf(w, "            %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
 		}
@@ -192,6 +198,21 @@ func printEvent(w io.Writer, e *core.Event) {
 			printPayload(w, "  after", m.After)
 		}
 	}
+}
+
+// afterUnavailable is printed in place of the diff of an update whose row
+// could not be read back (core.Mutation.AfterUnavailable).
+const afterUnavailable = "after image unavailable: the new values were not captured"
+
+// unknownKey stands for the key of a mutation recorded without one.
+const unknownKey = "(key unknown)"
+
+// pkText renders a mutation's primary key on one line.
+func pkText(pk map[string]any) string {
+	if len(pk) == 0 {
+		return unknownKey
+	}
+	return compact(pk)
 }
 
 // printPayload prints a payload indented under label; an absent one prints nothing.
