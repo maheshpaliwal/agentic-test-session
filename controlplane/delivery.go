@@ -51,6 +51,67 @@ type Delivery struct {
 	At time.Time `json:"at"`
 }
 
+// PendingDelivery sums what one instance last reported of the sessions that
+// are ACTIVE or DRAINING now: the events it had not got to the collector.
+// It is the instance's own word and as old as its newest report (At).
+type PendingDelivery struct {
+	Sessions    int   `json:"sessions"`    // running sessions it reported events held or given up of
+	Undelivered int64 `json:"undelivered"` // events it still held
+	Dropped     int64 `json:"dropped"`     // events it gave up
+	// LastError is why its last request to the collector failed, by its
+	// newest report; empty when that request succeeded.
+	LastError string    `json:"last_error,omitempty"`
+	At        time.Time `json:"at"`
+}
+
+// pendingLocked is the PendingDelivery of every instance that has one, by
+// deliveryKey. It walks the live sessions, never the store.
+func (m *Manager) pendingLocked() map[string]*PendingDelivery {
+	out := map[string]*PendingDelivery{}
+	// newest is the newest report of each instance: its error is the current
+	// one, since an instance has one exporter for all its sessions.
+	newest := map[string]Delivery{}
+	add := func(d Delivery) {
+		key := deliveryKey(d.Service, d.Instance)
+		if n, ok := newest[key]; !ok || d.At.After(n.At) {
+			newest[key] = d
+		}
+		if d.Buffered == 0 && d.Dropped == 0 {
+			return
+		}
+		p := out[key]
+		if p == nil {
+			p = &PendingDelivery{}
+			out[key] = p
+		}
+		p.Sessions++
+		p.Undelivered += d.Buffered
+		p.Dropped += d.Dropped
+	}
+	for id, s := range m.live {
+		for _, d := range s.Delivery {
+			add(d)
+		}
+		if st := m.delivery[id]; st != nil {
+			for _, d := range st.refused {
+				add(d)
+			}
+		}
+	}
+	for key, n := range newest {
+		p := out[key]
+		if p == nil {
+			if n.LastError == "" {
+				continue
+			}
+			p = &PendingDelivery{}
+			out[key] = p
+		}
+		p.LastError, p.At = n.LastError, n.At
+	}
+	return out
+}
+
 // DeliveryBatch is the body of POST /v1/delivery: the reports of one SDK
 // instance for any number of sessions. One without reports says only that
 // the instance's reports arrive (it is sent when the instance connects).

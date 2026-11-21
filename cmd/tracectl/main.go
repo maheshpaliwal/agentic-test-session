@@ -109,9 +109,12 @@ session results (collector):
 
   kill on|off|status            the global kill switch: while on, no service records anything, for
                                 any session (kept in memory: a control plane restart turns it off)
-  doctor [--json] [--require-services N]
+  doctor [--json] [--require-services N] [--require-delivery]
                                 check that the control plane and collector answer and list the
-                                services connected to the control plane
+                                services connected to the control plane; one that reports events
+                                it cannot deliver is marked. --require-delivery exits 3 on such a
+                                service, or one whose reports do not arrive: a check for DURING a
+                                run (it sees only services that report, and only running sessions)
   version                       print the tracectl version
 
 exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,

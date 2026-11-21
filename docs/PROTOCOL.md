@@ -121,6 +121,20 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   since it connected. `delivery_unheard` is `true` (omitted otherwise) for a follower with a `delivery_instance`
   of which nothing has arrived for too long, by the rule the verdict of a session goes by (see "Delivery
   accounting"): it cannot get its reports through. `tracectl doctor` marks it.
+  `delivery_pending` (optional; omitted when there is nothing to say, and by a control plane before this field)
+  is `{"sessions","undelivered","dropped","last_error","at"}`: what the follower's own delivery reports say of
+  the sessions that are ACTIVE or DRAINING now. `undelivered` and `dropped` are the sums of `buffered` and
+  `dropped` over those sessions, `sessions` how many of them have either, `last_error` and `at` the
+  `last_error` (omitted when empty) and arrival time of its newest report among them. It is present when
+  `undelivered` or `dropped` is above zero or `last_error` is set. Events held without a `last_error` are on
+  their way; held or dropped WITH one means that the follower cannot deliver (a wrong
+  `TSESSION_COLLECTOR_URL`, typically), which `tracectl doctor` shows and `doctor --require-delivery` fails on
+  (exit 3, as for `delivery_unheard`). What it cannot say: anything about a follower that sends no reports (no
+  `delivery_instance`) or whose reports are refused (`delivery_unheard` covers the latter), anything while no
+  session runs (an SDK reports only sessions it recorded events for, so a wrong URL shows once the first
+  event of a running session was recorded and the next periodic report arrived), and nothing of sessions
+  that have ended (their verdict is `incomplete_reasons`). It is the follower's word, as unauthenticated as
+  every delivery report (see "Limits"). A reader that does not know the field ignores it.
   `generation` is the newest active-set `generation` (also on `GET /v1/active` and in every stream message)
   written to that follower: a follower at or past the generation in which a session became active has been sent
   it (sent, not necessarily applied yet).

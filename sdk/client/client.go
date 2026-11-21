@@ -570,8 +570,32 @@ type Subscriber struct {
 	// DeliveryInstance: its reports do not get through. A session that ended
 	// now would name it under delivery_unconfirmed, or be incomplete for it.
 	DeliveryUnheard bool `json:"delivery_unheard,omitempty"`
+	// Pending is what the process last told the control plane of its events
+	// of the sessions that run now, when some had not reached the collector
+	// or its last request to it failed. Nil otherwise: all delivered, no
+	// running session, or a control plane that does not send it.
+	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
 	// Generation is the newest version of the active set sent to it.
 	Generation uint64 `json:"generation"`
+}
+
+// PendingDelivery is the events of running sessions that a connected process
+// reported as not delivered: its own word, as old as its newest report (At).
+type PendingDelivery struct {
+	Sessions    int   `json:"sessions"`    // running sessions it holds or gave up events of
+	Undelivered int64 `json:"undelivered"` // events it still holds
+	Dropped     int64 `json:"dropped"`     // events it gave up
+	// LastError is why its last request to the collector failed; empty when
+	// that request succeeded.
+	LastError string    `json:"last_error,omitempty"`
+	At        time.Time `json:"at"`
+}
+
+// Stuck reports whether the process holds or lost events and its last
+// request to the collector failed: it cannot deliver, by its own word.
+// Events held without an error are on their way.
+func (p *PendingDelivery) Stuck() bool {
+	return p != nil && p.LastError != "" && (p.Undelivered > 0 || p.Dropped > 0)
 }
 
 // Subscribers lists the processes currently connected to the control plane.

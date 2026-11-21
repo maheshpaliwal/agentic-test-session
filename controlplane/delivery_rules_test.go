@@ -811,3 +811,69 @@ func TestDeliveryUnheardIsJudgedByTheTimeSinceTheLastWord(t *testing.T) {
 		panic(fmt.Sprintf("the active set asks for a heartbeat with the check off: %+v", a))
 	}
 }
+
+// The list of followers says, during a run, what each one holds of the
+// running sessions and why: a service that follows and reports and cannot
+// reach the collector was indistinguishable from a healthy one until its
+// session ended incomplete.
+func TestSubscribersCarryPendingDelivery(t *testing.T) {
+	e := newDeliveryEnv(t, testGrace, nil)
+	defer follow(e.m, "orders-api", "o-1")()
+	defer follow(e.m, "inventory", "i-1")()
+	_, leave := e.m.SubscribeAs("legacy", "l-1")
+	defer leave()
+	pending := func() map[string]*PendingDelivery {
+		out := map[string]*PendingDelivery{}
+		for _, s := range e.m.Subscribers() {
+			out[s.Service] = s.Pending
+		}
+		return out
+	}
+	if p := pending(); len(p) != 3 || p["orders-api"] != nil || p["inventory"] != nil {
+		panic(fmt.Sprintf("before any report: %+v", p))
+	}
+	second, err := e.m.Start(StartRequest{Name: "d2", QuiesceSeconds: 2, MaxDrainSeconds: 1000})
+	if err != nil {
+		panic(err)
+	}
+	e.report(Delivery{Service: "inventory", Instance: "i-1", Recorded: 4, Delivered: 4})
+	e.report(Delivery{Service: "orders-api", Instance: "o-1", Recorded: 3, Delivered: 1, Buffered: 2, LastError: "old"})
+	time.Sleep(2 * time.Millisecond) // the second report is the newer one by the clock
+	if ok, err := e.m.ReportDelivery(second.ID, Delivery{Service: "orders-api", Instance: "o-1", Recorded: 6, Dropped: 1, Buffered: 5,
+		LastError: `Post "http://u:secret@10.0.0.9:9/v1/ingest": connection refused`}); err != nil || !ok {
+		panic(fmt.Sprintf("report: %v %v", ok, err))
+	}
+	p := pending()
+	if p["inventory"] != nil || p["legacy"] != nil {
+		panic(fmt.Sprintf("a follower that delivered, or sends no reports, has pending delivery: %+v %+v", p["inventory"], p["legacy"]))
+	}
+	o := p["orders-api"]
+	if o == nil || o.Sessions != 2 || o.Undelivered != 7 || o.Dropped != 1 || !strings.Contains(o.LastError, "connection refused") ||
+		strings.Contains(o.LastError, "secret") || o.At.IsZero() {
+		panic(fmt.Sprintf("orders-api: %+v", o))
+	}
+
+	// A session that is draining still counts; one that ended does not.
+	if _, err := e.m.Stop(second.ID); err != nil {
+		panic(err)
+	}
+	if o := pending()["orders-api"]; o == nil || o.Sessions < 1 {
+		panic(fmt.Sprintf("while the second session drains: %+v", o))
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		if s, _ := e.m.Get(second.ID); s.State.Terminal() {
+			break
+		}
+		if time.Now().After(deadline) {
+			panic("the second session never sealed")
+		}
+	}
+	if o := pending()["orders-api"]; o == nil || o.Sessions != 1 || o.Undelivered != 2 || o.Dropped != 0 || o.LastError != "old" {
+		panic(fmt.Sprintf("with the second session gone: %+v", o))
+	}
+	// Its requests succeed again: nothing is pending.
+	e.report(Delivery{Service: "orders-api", Instance: "o-1", Recorded: 3, Delivered: 3})
+	if o := pending()["orders-api"]; o != nil {
+		panic(fmt.Sprintf("after it delivered: %+v", o))
+	}
+}

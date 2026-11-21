@@ -583,6 +583,11 @@ type Subscriber struct {
 	// Manager.unheard): its reports do not get through. It is what the verdict
 	// of a session that ended now would go by.
 	DeliveryUnheard bool `json:"delivery_unheard,omitempty"`
+	// Pending is what the follower last said of its events of the sessions
+	// that run now, when some had not reached the collector or its last
+	// request to it failed; nil otherwise. It is how an operator sees, during
+	// a run, a service that follows and reports and cannot deliver.
+	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
 	// since and heard are ConnectedAt and LastDeliveryReport as the drain
 	// counts from them: with the monotonic clock reading, which a step of the
 	// wall clock does not move. reported is when a request that carried a
@@ -596,11 +601,15 @@ func (m *Manager) Subscribers() []Subscriber {
 	m.mu.Lock()
 	out := make([]Subscriber, 0, len(m.subs))
 	now := time.Now()
+	pending := m.pendingLocked()
 	for _, s := range m.subs {
 		if !s.stream {
 			s.Generation = m.gen
 		}
 		s.DeliveryUnheard = m.unheard(s, now)
+		if s.DeliveryInstance != "" {
+			s.Pending = pending[deliveryKey(s.Service, s.DeliveryInstance)]
+		}
 		out = append(out, s)
 	}
 	m.mu.Unlock()
