@@ -108,6 +108,10 @@ Rolling back:
 
 ### Added
 
+- `tracectl doctor` marks a connected service that reports events it cannot deliver, with the count, the last
+  error and what to check; `doctor --require-delivery` exits 3 for it and for a service whose delivery reports
+  do not arrive (a preflight to run while a session is active: it only sees services that report). `GET
+  /v1/subscribers` carries an optional `delivery_pending` per follower.
 - The dashboard's entity view follows the diff the SDK recorded, so a field that changed under redaction reads
   "changed · value hidden" (it read "no field changes"); `tracectl show`, `history` and `digest` say
   `changed (value hidden)`. The session page lists the delivery reports per service instance, and every event
