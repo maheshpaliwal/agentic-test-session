@@ -371,3 +371,30 @@ func TestRetentionSweepFailingStore(t *testing.T) {
 		t.Fatalf("wrong sessions survived: %v", slices.Collect(maps.Keys(left)))
 	}
 }
+
+// A sweep that was cut short resumes behind the session it stopped at. The
+// next sweep must still delete the due sessions that sort before that point,
+// in the same call, not a tick later.
+func TestRetentionSweepWrapsAfterResuming(t *testing.T) {
+	now := time.Now()
+	spy := &sweepSpy{Store: store.NewMem(), maxDel: 10}
+	c := sweepCollector(t, spy)
+	for i := range 40 {
+		seedSession(t, spy.Store, fmt.Sprintf("m_%04d", i), now.UnixNano(), now.Add(-2*time.Hour))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	spy.cancel = cancel
+	if n, _ := c.PurgeExpired(ctx, now); n != 10 {
+		t.Fatalf("test setup: the first sweep should stop after 10 deletes, deleted %d", n)
+	}
+	spy.mu.Lock()
+	spy.maxDel = 0
+	spy.mu.Unlock()
+	for i := range 20 {
+		seedSession(t, spy.Store, fmt.Sprintf("a_%04d", i), now.UnixNano(), now.Add(-2*time.Hour))
+	}
+	n, err := c.PurgeExpired(context.Background(), now)
+	if left := sessionIDs(t, spy.Store); err != nil || n != 50 || len(left) != 0 {
+		t.Fatalf("a full sweep after a cut-short one deleted %d and left %v (%v), want 50 and none", n, left, err)
+	}
+}

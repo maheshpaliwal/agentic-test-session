@@ -191,9 +191,11 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - Retention: `--retention D` / `TSESSION_COLLECTOR_RETENTION` (default `0` = keep forever) deletes a session `D`
   after its seal. A never-sealed session is deleted once its newest event is older than `D` and its in-memory actor
   has been evicted (see `--idle-evict`). Every sweep deletes all the sessions that are due. On the in-memory and
-  Postgres stores a sweep reads only the sessions that may be due, plus the events of the never-sealed ones; on the
-  MongoDB and DynamoDB stores it still lists every session (an aggregation over all events; a `Scan` of the whole
-  table) and reads every seal. A sweep that runs out of time is carried on by the next one from where it stopped.
+  Postgres stores a sweep reads only the sealed sessions that may be due, plus the events of every never-sealed
+  session: its cost grows with the number of never-sealed sessions, not with the sealed ones. On the MongoDB and
+  DynamoDB stores it still lists every session (an aggregation over all events; a `Scan` of the whole table) and
+  reads every seal. A sweep that runs out of time is carried on by the next one from where it stopped. On
+  Postgres, events whose session has no row in `sessions` (the collector never writes that state) are not swept.
 - Pending-async ledger: a `queue.publish` event opens an entry keyed by its `SpanID`;
   a `worker.end` event whose `LinkIDs` contains that id closes it. Seal marks unclosed entries orphaned.
 - Tx resolution: `db.write` events carry `TxID`; `db.tx.commit`/`db.tx.rollback` with the same TxID set

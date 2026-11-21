@@ -358,8 +358,9 @@ const retentionPage = 256
 // due session. A call that ends early (ctx, or the store failing to list)
 // leaves the rest to the next call, which carries on after the last session
 // this one looked at instead of starting over: sessions that cannot be
-// deleted do not keep the ones behind them waiting. Any other store is
-// listed whole.
+// deleted do not keep the ones behind them waiting. Having reached the end,
+// such a call goes round once more from the start for the sessions before
+// the point it began at. Any other store is listed whole.
 func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
 	if c.cfg.Retention <= 0 {
 		return 0, nil
@@ -378,6 +379,7 @@ func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error
 	defer c.sweepMu.Unlock()
 	n := 0
 	var firstErr error
+	wrap := c.sweepAfter != "" // began mid-way: the sessions before that point are still owed
 	for ctx.Err() == nil {
 		page, err := el.ListExpired(ctx, cutoff, c.sweepAfter, retentionPage)
 		if err == nil && len(page) > 0 && page[len(page)-1].ID <= c.sweepAfter {
@@ -399,6 +401,10 @@ func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error
 		}
 		if len(page) < retentionPage {
 			c.sweepAfter = ""
+			if wrap {
+				wrap = false
+				continue
+			}
 			break
 		}
 		c.sweepAfter = page[len(page)-1].ID
