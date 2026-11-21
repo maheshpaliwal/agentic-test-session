@@ -18,6 +18,16 @@ func SortedKeys[M ~map[K]V, K cmp.Ordered, V any](m M) []K {
 	return out
 }
 
+// MapKeys returns a map holding the values of m under fn(key). When two keys map to the same new key, which
+// value is kept is unspecified. The result is non-nil.
+func MapKeys[M ~map[K]V, K, K2 comparable, V any](m M, fn func(K) K2) map[K2]V {
+	out := make(map[K2]V, len(m))
+	for k, v := range m {
+		out[fn(k)] = v
+	}
+	return out
+}
+
 // Values returns the values of m in unspecified order. The result is non-nil.
 func Values[M ~map[K]V, K comparable, V any](m M) []V {
 	out := make([]V, 0, len(m))

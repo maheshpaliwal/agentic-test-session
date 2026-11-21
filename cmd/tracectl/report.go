@@ -15,6 +15,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -533,12 +534,7 @@ func renderJUnit(rep *sessionReport) ([]byte, error) {
 		suite.Cases = append(suite.Cases, tc)
 	}
 	// Failed events the trace does not hold must not vanish from the report.
-	var loose []reportFailure
-	for _, f := range rep.failures {
-		if f.root < 0 {
-			loose = append(loose, f)
-		}
-	}
+	loose := slicex.Filter(rep.failures, func(f reportFailure) bool { return f.root < 0 })
 	if len(loose) > 0 {
 		suite.Cases = append(suite.Cases, junitCase{Name: "failed events outside the trace", Classname: junitClass,
 			Time: junitSeconds(0), Failure: junitEventFailure(loose)})
@@ -549,11 +545,7 @@ func renderJUnit(rep *sessionReport) ([]byte, error) {
 				Body: strings.Join(rep.reasons, "\n") + "\n"}})
 	}
 	suite.Tests = len(suite.Cases)
-	for _, tc := range suite.Cases {
-		if tc.Failure != nil {
-			suite.Failures++
-		}
-	}
+	suite.Failures = slicex.Count(suite.Cases, func(tc junitCase) bool { return tc.Failure != nil })
 	doc := junitSuites{Name: "tsession", Tests: suite.Tests, Failures: suite.Failures, Time: suite.Time, Suites: []junitSuite{suite}}
 	out, err := xml.MarshalIndent(doc, "", "  ")
 	if err != nil {

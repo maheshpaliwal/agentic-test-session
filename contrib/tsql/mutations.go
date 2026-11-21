@@ -152,12 +152,7 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 			case t.retAll && ret != nil:
 				after = ret
 			case t.beforeOK:
-				var refs []pkRef
-				for _, b := range t.before {
-					if r := b.ref(pkCols); r.disp != nil {
-						refs = append(refs, r)
-					}
-				}
+				refs := refsOf(t.before, pkCols)
 				if len(refs) == len(t.before) {
 					after = t.reread(refs, pkCols)
 				}
@@ -207,12 +202,7 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 			ref := t.pkFromValues(in.Values, pkCols)
 			// App-written partial RETURNING (e.g. "RETURNING id"): take the PK from the returned rows.
 			if ref.disp == nil {
-				var retRefs []pkRef
-				for _, rr := range ret {
-					if r := rr.ref(pkCols); r.disp != nil {
-						retRefs = append(retRefs, r)
-					}
-				}
+				retRefs := refsOf(ret, pkCols)
 				if len(retRefs) == 1 {
 					ref = retRefs[0]
 				} else if len(retRefs) > 1 {

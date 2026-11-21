@@ -83,12 +83,7 @@ func projection(it []token) (Projection, bool) {
 	if len(it) == 0 || plainColumn(it) {
 		return Projection{}, false
 	}
-	var p Projection
-	for _, tk := range it {
-		if tk.isIdent() {
-			p.Idents = append(p.Idents, strings.ToLower(tk.name(Postgres)))
-		}
-	}
+	p := Projection{Idents: identsOf(it)}
 	if len(p.Idents) == 0 {
 		return Projection{}, false
 	}

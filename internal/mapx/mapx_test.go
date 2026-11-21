@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -32,5 +33,16 @@ func TestPick(t *testing.T) {
 	got := Pick(attrs{"a": 1, "b": 2, "c": 3}, "a", "c", "missing")
 	if !reflect.DeepEqual(got, attrs{"a": 1, "c": 3}) {
 		panic(fmt.Sprintf("got %v", got))
+	}
+}
+
+func TestMapKeys(t *testing.T) {
+	type headers map[string]int
+	got := MapKeys(headers{"X-A": 1, "x-b": 2}, strings.ToLower)
+	if want := map[string]int{"x-a": 1, "x-b": 2}; !reflect.DeepEqual(got, want) {
+		panic(fmt.Sprintf("got %v, want %v", got, want))
+	}
+	if got := MapKeys(headers(nil), strings.ToLower); got == nil || len(got) != 0 {
+		panic(fmt.Sprintf("nil map: got %#v, want an empty non-nil map", got))
 	}
 }

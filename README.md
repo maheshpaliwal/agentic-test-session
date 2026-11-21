@@ -171,7 +171,7 @@ tracectl history my-run postgres orders --unknown-key     # changes recorded wit
 tracectl trace my-run --errors               # call tree, only branches that failed
 tracectl show my-run 17                      # one event in full: request, response, mutations
 tracectl diff nightly-ok nightly-failed      # what differs between two runs
-tracectl list --limit 20                     # the newest sessions
+tracectl list --limit 20                     # the newest sessions; INCOMPLETE marks a record with known gaps
 ```
 
 A failed event is one that returned an error or an HTTP status of 500 or above; a 4xx response is recorded

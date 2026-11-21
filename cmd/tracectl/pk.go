@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -28,12 +29,10 @@ const noKey = "{}"
 // rather than guessed. Nothing is looked up from what was typed alone: the
 // result is always a key the session recorded.
 func resolveKey(ents []client.Entity, store, entity, typed string) (string, error) {
-	var keys []string // of this store and entity, as listed
-	for _, e := range ents {
-		if e.Store == store && e.Entity == entity {
-			keys = append(keys, canonKey(e.PK))
-		}
-	}
+	// The keys of this store and entity, as listed.
+	keys := slicex.FilterMap(ents, func(e client.Entity) (string, bool) {
+		return canonKey(e.PK), e.Store == store && e.Entity == entity
+	})
 	if strings.TrimSpace(typed) == "" {
 		typed = noKey
 	}
@@ -58,12 +57,7 @@ func resolveKey(ents []client.Entity, store, entity, typed string) (string, erro
 		return false
 	})
 	for _, matches := range readings {
-		var hit []string
-		for _, key := range keys {
-			if matches(key) {
-				hit = append(hit, key)
-			}
-		}
+		hit := slicex.Filter(keys, matches)
 		switch len(hit) {
 		case 0:
 		case 1:
@@ -199,11 +193,5 @@ func printable(s string) string {
 // uncertainCount is the number of changes whose key or row image is
 // incomplete or uncertain.
 func uncertainCount(ms []client.EntityMutation) int {
-	n := 0
-	for _, m := range ms {
-		if m.Uncertain() {
-			n++
-		}
-	}
-	return n
+	return slicex.Count(ms, client.EntityMutation.Uncertain)
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"log"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -169,11 +170,4 @@ func (s BindingSet) MatchDetail(a Attributes) BindingMatch {
 	return res
 }
 
-func inPrio(prio []BindingKey, k BindingKey) bool {
-	for _, p := range prio {
-		if p == k {
-			return true
-		}
-	}
-	return false
-}
+func inPrio(prio []BindingKey, k BindingKey) bool { return slices.Contains(prio, k) }

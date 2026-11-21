@@ -46,6 +46,17 @@ func (t token) isWord(w string) bool  { return t.typ == tWord && t.val == w }
 func (t token) isPunct(p string) bool { return t.typ == tPunct && t.text == p }
 func (t token) isIdent() bool         { return t.typ == tWord || t.typ == tQuoted }
 
+// identsOf returns the lower-cased name of every identifier among toks, in order; nil when there is none.
+func identsOf(toks []token) []string {
+	var out []string
+	for _, tk := range toks {
+		if tk.isIdent() {
+			out = append(out, strings.ToLower(tk.name(Postgres)))
+		}
+	}
+	return out
+}
+
 // name is the identifier a word or quoted token denotes (bare words fold to
 // lower case, as Postgres does; MySQL keeps them as written).
 func (t token) name(d Dialect) string {
