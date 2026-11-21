@@ -68,6 +68,14 @@
 // that keeps the length does not show in the diff. A key column with a
 // sensitive name is masked like any other.
 //
+// An UPDATE is recorded with the row before and after it and the fields that
+// differ. When one of the two images is missing no diff is recorded, because
+// what changed is not known: without the after image the event is flagged
+// "after_unavailable" (below); without the before image it carries the flag
+// of whatever kept the row from being read before the write
+// ("image_skipped" with its reason, "image_timeout" or "image_failed"; see
+// the caveats below) and the mutation has the after image only.
+//
 // Three flags mark a write whose key or new values are not known:
 //
 //   - "pk_unknown": no value for the key columns was found in the row images,

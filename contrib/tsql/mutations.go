@@ -122,9 +122,11 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		if ad != nil {
 			m.After = core.Payload(core.RedactAny(ad))
 		}
-		// An UPDATE whose row could not be read back has no known new values:
-		// a diff against nothing would show every column as removed.
-		if (bd != nil || ad != nil) && !(in.Kind == mutation.Update && ad == nil) {
+		// An UPDATE is a change from one known row to another. With the row
+		// not read back the new values are not known, and with no image from
+		// before the write the old ones are not: a diff against nothing would
+		// show every column as removed, or as set from nothing.
+		if (bd != nil || ad != nil) && !(in.Kind == mutation.Update && (bd == nil || ad == nil)) {
 			var hidden bool
 			if m.Diff, hidden = diffMaps(bd, ad); hidden {
 				t.flag("diff_truncated")
@@ -170,6 +172,14 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		}
 		if in.Kind == mutation.Update && t.cfg.images && len(muts) > 0 && muts[0].After.IsZero() {
 			t.flag("after_unavailable")
+		}
+		// An after image without a before image: whatever kept the row from
+		// being read before the write has flagged the event (image_skipped,
+		// image_timeout, image_failed). If nothing did, the read did not
+		// finish (it panicked): the record must still say it is incomplete.
+		if in.Kind == mutation.Update && !t.beforeOK && len(after) > 0 &&
+			!t.flagged["image_skipped"] && !t.flagged["image_timeout"] && !t.flagged["image_failed"] {
+			t.flag("image_failed")
 		}
 	default: // insert, upsert
 		var after []img
