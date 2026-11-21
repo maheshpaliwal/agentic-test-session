@@ -16,6 +16,35 @@
 // Instrumented services learn about a new session over a stream. Run waits (up to PropagationTimeout) until
 // the control plane has sent the session to every connected service, so the first request of a test is
 // normally recorded; a service that connects later, or one still applying the update, can miss it.
+//
+// # Under tracectl run
+//
+// `tracectl run -- go test ./...` starts one session, the ambient session, and gives the tests its id in
+// TSESSION_ID. The rules:
+//
+//   - Run does not look at TSESSION_ID. A test that calls Run records in a session of its own, with or
+//     without tracectl run, and the ambient session sees nothing of it. If every test uses Run, the ambient
+//     session stays empty and tracectl run's --fail-on-empty fails; run such tests with plain `go test`.
+//   - Ambient is the opt-in: it returns the ambient session instead of starting one, so that everything the
+//     command does lands in one session, which tracectl run stops, seals, reports and gates
+//     (--fail-on-error, --fail-on-incomplete, --fail-on-empty, --report).
+//   - The ambient session is tracectl run's. Ambient never stops it, and Stop and the Require functions
+//     refuse a session whose id is the one in TSESSION_ID (they fail the test) rather than stop it under
+//     the other tests; this also holds for a handle from client.AttachEnv or client.Attach.
+//   - There are no per-test assertions on the ambient session, on purpose. They need two things a session
+//     that is still recording and shared does not give. Completeness: services send events in batches and
+//     workers run later, and until the seal nothing says that everything a test caused has arrived or
+//     whether its transactions committed, so "no failures" and RequireNoMutation could pass on events
+//     still in flight. Attribution: the session holds the events of every test of the command, numbered
+//     in the order they reached the collector, so neither "events after a mark" nor a count belongs to one
+//     test, least of all with t.Parallel. The verdict on the ambient session is tracectl run's, made once,
+//     after the seal, for the command as a whole. A test that needs its own verdict uses Run.
+//   - Both can be used in one command, also in one test: they are different sessions.
+//
+// Ambient is safe with t.Parallel: each call makes its own handle, and tagging requests keeps no state.
+// When a test that used Ambient fails, the log names the ambient session; it is not saved to
+// TSESSION_ARTIFACT_DIR, because it is still recording (use tracectl run --report, or tracectl export
+// once the command has ended).
 package tsessiontest
 
 import (
@@ -108,16 +137,7 @@ func Run(t testing.TB, o client.Options) *client.Session {
 		t.Fatalf("tsession: start session: %v", err)
 		return nil
 	}
-	// Give the connected services the session before the test's first request.
-	pctx, pcancel := context.WithTimeout(ctx, PropagationTimeout)
-	switch n, err := s.WaitPropagated(pctx); {
-	case err != nil:
-		t.Logf("tsession: not every connected service was sent session %s within %v (%v); its first requests may go unrecorded",
-			s.ID, PropagationTimeout, err)
-	case n == 0:
-		t.Logf("tsession: no service is connected to the control plane, so nothing will record session %s (see tracectl doctor)", s.ID)
-	}
-	pcancel()
+	waitPropagated(ctx, t, s)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 		defer cancel()
@@ -147,6 +167,70 @@ func Run(t testing.TB, o client.Options) *client.Session {
 	return s
 }
 
+// waitPropagated gives the connected services the session before the test's
+// first request.
+func waitPropagated(ctx context.Context, t testing.TB, s *client.Session) {
+	t.Helper()
+	pctx, pcancel := context.WithTimeout(ctx, PropagationTimeout)
+	defer pcancel()
+	switch n, err := s.WaitPropagated(pctx); {
+	case err != nil:
+		t.Logf("tsession: not every connected service was sent session %s within %v (%v); its first requests may go unrecorded",
+			s.ID, PropagationTimeout, err)
+	case n == 0:
+		t.Logf("tsession: no service is connected to the control plane, so nothing will record session %s (see tracectl doctor)", s.ID)
+	}
+}
+
+// Ambient returns the ambient session: the one a surrounding `tracectl run -- go test ...` started and
+// named in TSESSION_ID (see client.AttachEnv). Use it instead of Run when the whole command is to be
+// recorded as one session:
+//
+//	func TestCheckout(t *testing.T) {
+//		sess := tsessiontest.Ambient(t, client.Options{})
+//		httpClient := &http.Client{Transport: sess.Transport(nil)}
+//		// ... drive the system under test with httpClient ...
+//	}
+//
+// The test fails at once if TSESSION_ID is not set, or names a session that the control plane does not know
+// or that is not ACTIVE: a test that asks for the ambient session must not pass unrecorded. A test that
+// should also run without tracectl run can choose with os.Getenv(client.SessionEnv) between Ambient and Run.
+//
+// The session is not the test's: it is not stopped when the test ends, and Stop and the Require functions
+// refuse it (see the package documentation for why there are no assertions on it). Like Run, Ambient waits
+// (up to PropagationTimeout) until the connected services have been sent the session; tracectl run starts
+// its command without waiting for that. If the test fails, the session id is logged.
+func Ambient(t testing.TB, o client.Options) *client.Session {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
+	defer cancel()
+	s, err := client.AttachEnv(ctx, o)
+	if err != nil {
+		t.Fatalf("tsession: the ambient session of tracectl run: %v (Run starts a session for the test alone)", err)
+		return nil
+	}
+	waitPropagated(ctx, t, s)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		t.Logf("tsession: session %s (%s) recorded this test and everything else the command of tracectl run does; "+
+			"it is still recording. tracectl run prints its summary when the command ends; then: tracectl summary %s",
+			s.ID, s.Info().Name, s.ID)
+		if os.Getenv(ArtifactDirEnv) != "" {
+			t.Logf("tsession: session %s is not saved to $%s, since it is not sealed yet; "+
+				"give tracectl run --report FILE, or save it afterwards with: tracectl export %s -o FILE", s.ID, ArtifactDirEnv, s.ID)
+		}
+	})
+	return s
+}
+
+// ambient reports whether s is the session named in TSESSION_ID, which
+// belongs to tracectl run and is shared with the rest of its command.
+func ambient(s *client.Session) bool {
+	return s.ID != "" && s.ID == os.Getenv(client.SessionEnv)
+}
+
 // stop stops s and waits for its seal unless it already ended.
 func stop(ctx context.Context, s *client.Session) error {
 	if s.Info().Done() {
@@ -158,8 +242,18 @@ func stop(ctx context.Context, s *client.Session) error {
 
 // Stop stops the session, waits for its seal and returns the summary. The Require functions do this
 // themselves; call Stop to inspect the results directly.
+//
+// Stop, and with it every Require function, fails the test instead when s is the ambient session (the one
+// named in TSESSION_ID): that session is tracectl run's to stop.
 func Stop(t testing.TB, s *client.Session) client.Summary {
 	t.Helper()
+	if ambient(s) {
+		t.Fatalf("tsession: session %s is the one in $%s: it belongs to tracectl run and is shared with the rest of its command, "+
+			"so a test must not stop it, and the assertions of tsessiontest need a stopped session. "+
+			"Assert on a session of the test's own (tsessiontest.Run), or let tracectl run check this one (--fail-on-error)",
+			s.ID, client.SessionEnv)
+		return client.Summary{}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	if err := stop(ctx, s); err != nil {
