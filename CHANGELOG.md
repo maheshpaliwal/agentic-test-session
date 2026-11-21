@@ -157,6 +157,9 @@ Rolling back:
 
 ### Fixed
 
+- `tsql` on Postgres: a capture that ran longer than a second left its `statement_timeout` and savepoint in
+  the application's transaction, or in autocommit a read-only transaction that made the application's write
+  fail. The fence is now closed under its own deadline.
 - `tracectl report`: a session with no events is headed **Empty**, not **Passed**; with `--fail-on-empty` the
   job summary used to say "Passed" on a failed job. `tracectl start --id-only` prints just the id for scripts,
   and `tracectl doctor --require-services N` exits 3 with fewer connected services (a CI preflight).
@@ -187,6 +190,11 @@ Rolling back:
 
 ### Performance
 
+- `tsql` on Postgres: fewer round trips per traced write. The capture fence is closed by rolling back to its
+  savepoint, and its opening and closing statement pairs go out as one text each where the driver allows it
+  (detected per connection). Measured on Postgres 14 with pgx: a traced `UPDATE` takes 7 round trips instead of
+  9 (autocommit) or 11 (in a transaction); `DELETE` and keyed `INSERT` take 4 instead of 5 or 6. The recorded
+  mutations are unchanged. Not measured on other Postgres versions or behind pgbouncer.
 - Outside an active session the wrappers do no tracing work: `tsql` neither parses nor redacts (a 54 KB literal
   INSERT: about 3 ms and 8.6 MB down to about 1 µs), `tdynamo` renders nothing, the Redis wrappers do not
   classify the command, the queue wrappers do not decode message bodies or consult the side channel (which
