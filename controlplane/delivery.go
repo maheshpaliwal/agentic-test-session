@@ -128,6 +128,24 @@ type DeliveryBatch struct {
 	// such a session makes of it depends on whether anything ties the instance
 	// to the session (see stoppedLocked and stoppedReasons).
 	Stopped string `json:"stopped,omitempty"`
+	// Collector is set by an instance that looked whether it can reach its
+	// collector, and says what it found (see CollectorReach). It is kept with
+	// the instance's connection to the active set, for GET /v1/subscribers;
+	// no session is judged by it.
+	Collector *CollectorReach `json:"collector,omitempty"`
+}
+
+// CollectorReach is the word of an SDK instance on whether it can reach its
+// collector: it asks the collector's /healthz while it has nothing to send.
+// It is how a collector URL that leads nowhere shows before a session runs
+// and an event is lost to it (`tracectl doctor`).
+type CollectorReach struct {
+	Reachable bool `json:"reachable"`
+	// Error is why not, in the instance's words (cleaned and bounded); empty
+	// when it can.
+	Error string `json:"error,omitempty"`
+	// At is when the control plane was last told.
+	At time.Time `json:"at"`
 }
 
 // SessionDelivery is one entry of DeliveryBatch.Reports.
@@ -283,7 +301,7 @@ func (m *Manager) ReportDelivery(id string, d Delivery) (bool, error) {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.heardLocked(deliveryKey(d.Service, d.Instance), now, true)
+	m.heardLocked(deliveryKey(d.Service, d.Instance), now, true, nil)
 	return m.reportLocked(id, d, now)
 }
 
@@ -316,7 +334,7 @@ func (m *Manager) ReportDeliveries(b DeliveryBatch) ([]DeliveryResult, error) {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.heardLocked(deliveryKey(service, instance), now, len(reports) > 0)
+	m.heardLocked(deliveryKey(service, instance), now, len(reports) > 0, b.Collector)
 	// After the reports of the batch: they are what ties the instance to a session.
 	if why := cleanDeliveryError(b.Stopped); why != "" {
 		defer m.stoppedLocked(service, instance, why, now)
@@ -354,12 +372,27 @@ func (m *Manager) ReportDeliveries(b DeliveryBatch) ([]DeliveryResult, error) {
 // (reports) is also a sign that the instance is at work on its sessions. Both
 // are noted on the instance's connection to the active set, which is what the
 // drain of a session looks at (see unheard and silentLocked).
-func (m *Manager) heardLocked(key string, now time.Time, reports bool) {
+//
+// reach, when the request carried it, is what the instance says about
+// reaching its collector. It is kept on the connection too, and goes with it:
+// an instance that connects anew says it again, and one that is gone is not
+// listed at all.
+func (m *Manager) heardLocked(key string, now time.Time, reports bool, reach *CollectorReach) {
+	if reach != nil {
+		why := ""
+		if !reach.Reachable {
+			why = cmp.Or(cleanDeliveryError(reach.Error), "it did not say why")
+		}
+		reach = &CollectorReach{Reachable: reach.Reachable, Error: why, At: now.UTC()}
+	}
 	for ch, sub := range m.subs {
 		if sub.stream && sub.DeliveryInstance != "" && deliveryKey(sub.Service, sub.DeliveryInstance) == key {
 			sub.heard, sub.LastDeliveryReport = now, now.UTC()
 			if reports {
 				sub.reported = now
+			}
+			if reach != nil {
+				sub.Collector = reach // shared and never changed
 			}
 			m.subs[ch] = sub
 		}

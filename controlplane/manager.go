@@ -627,6 +627,12 @@ type Subscriber struct {
 	// request to it failed; nil otherwise. It is how an operator sees, during
 	// a run, a service that follows and reports and cannot deliver.
 	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
+	// Collector is what the follower last said, on this connection, about
+	// whether it can reach its collector; nil when it has not said (an SDK
+	// that does not look, or one that has not looked yet): not known, which
+	// is not the same as not reachable. It is how an operator sees a wrong
+	// collector URL before any session runs.
+	Collector *CollectorReach `json:"collector,omitempty"`
 	// since and heard are ConnectedAt and LastDeliveryReport as the drain
 	// counts from them: with the monotonic clock reading, which a step of the
 	// wall clock does not move. reported is when a request that carried a

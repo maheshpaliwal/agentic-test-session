@@ -22,8 +22,8 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 	fs := c.flags("doctor")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	need := fs.Int("require-services", 0, "exit 3 unless at least this many services are connected (a CI preflight)")
-	needDelivery := fs.Bool("require-delivery", false, "exit 3 when a connected service reports events it cannot deliver, or its reports do not arrive "+
-		"(a check DURING a run: it sees only services that report, and only the sessions running now)")
+	needDelivery := fs.Bool("require-delivery", false, "exit 3 when a connected service says that it cannot reach its collector (also before a run), "+
+		"reports events it cannot deliver, or its reports do not arrive (those two DURING a run: they show only for the sessions running now)")
 	if _, err := parseArgs(fs, args, 0, ""); err != nil {
 		return err
 	}
@@ -87,9 +87,12 @@ func who(s client.Subscriber) string {
 }
 
 // undeliverable names the connected services that cannot deliver as far as
-// the control plane knows: those whose reports do not arrive, and those that
-// reported events held or lost with a failed request to the collector. It is
-// what --require-delivery fails on.
+// the control plane knows: those whose reports do not arrive, those that
+// reported events held or lost with a failed request to the collector, and
+// those that said that they cannot reach their collector, which a service
+// finds out by itself, also while no session runs. It is what
+// --require-delivery fails on. A service that said nothing about reaching
+// its collector (an older SDK) is not named: not known is not unreachable.
 func (r doctorReport) undeliverable() []string {
 	var out []string
 	for _, s := range r.Subscribers {
@@ -98,6 +101,8 @@ func (r doctorReport) undeliverable() []string {
 			out = append(out, who(s)+" sends no delivery reports")
 		case s.Pending.Stuck():
 			out = append(out, who(s)+" cannot deliver: "+s.Pending.LastError)
+		case s.Collector.Unreachable():
+			out = append(out, who(s)+" cannot reach its collector: "+s.Collector.Error)
 		}
 	}
 	return out
@@ -109,6 +114,16 @@ func (r doctorReport) undeliverable() []string {
 func (r *doctorReport) noteDelivery() {
 	var named []string
 	for i, s := range r.Subscribers {
+		if s.Collector != nil {
+			c := *s.Collector
+			c.Error = clip(scrub.Text(ident.CleanN(c.Error, 1024)), 200)
+			r.Subscribers[i].Collector = &c
+			if name := cmp.Or(s.Service, "the unnamed service"); c.Unreachable() && !s.Pending.Stuck() && !slices.Contains(named, name) {
+				named = append(named, name)
+				r.Notes = append(r.Notes, name+" cannot reach its collector, so nothing it records would arrive: check TSESSION_COLLECTOR_URL of "+name+
+					" (it must be the collector's address as seen from that service)")
+			}
+		}
 		if s.Pending == nil {
 			continue
 		}
@@ -216,6 +231,11 @@ func (r doctorReport) print(w io.Writer) {
 					fmt.Fprintf(w, ", %d dropped", p.Dropped)
 				}
 				fmt.Fprintf(w, " in %d session(s); last error: %s", p.Sessions, p.LastError)
+			} else if c := s.Collector; c.Unreachable() {
+				// It holds nothing, and it looked, also without a session: its
+				// collector is not there. (With events held the line above says
+				// so, and why.)
+				fmt.Fprintf(w, "  CANNOT REACH COLLECTOR: %s", c.Error)
 			}
 		case s.LastDeliveryReport.IsZero():
 			fmt.Fprint(w, "  NO DELIVERY REPORTS: none has arrived from it; its log says why")
@@ -228,7 +248,24 @@ func (r doctorReport) print(w io.Writer) {
 		fmt.Fprintf(w, "  %d unnamed (an older SDK, or another client following the active set)\n", unnamed)
 	}
 	if len(r.Subscribers) > 0 {
-		fmt.Fprintln(w, "  connected means the service follows sessions; it does not show that it can reach the collector")
+		// A service says whether it reaches its collector when its SDK looks
+		// (CANNOT REACH COLLECTOR above); of one that does not say, nothing
+		// is known.
+		told := 0
+		for _, s := range r.Subscribers {
+			if s.Collector != nil {
+				told++
+			}
+		}
+		switch {
+		case told == len(r.Subscribers):
+			fmt.Fprintln(w, "  connected means the service follows sessions; each one also said whether it reaches its collector")
+		case told == 0:
+			fmt.Fprintln(w, "  connected means the service follows sessions; it does not show that it can reach the collector")
+		default:
+			fmt.Fprintf(w, "  connected means the service follows sessions; %d of %d said whether they reach their collector, of the others that is not known\n",
+				told, len(r.Subscribers))
+		}
 	}
 	for _, n := range r.Notes {
 		fmt.Fprintln(w, "note: "+n)

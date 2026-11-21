@@ -56,10 +56,22 @@ type deliveryBatch struct {
 	DeliveredTotal uint64        `json:"delivered_total"`
 	Reports        []batchReport `json:"reports"`
 	// Stopped is set when this process stopped recording after an internal
-	// error, and says how (see Subscriber.panicked). The control plane marks
-	// the sessions that run when it hears this incomplete; one that does not
-	// know the field ignores it.
+	// error, and says how (see Subscriber.panicked). The control plane notes
+	// it on the sessions that run when it hears this: those this process took
+	// part in end incomplete, the others say that it may have missed events.
+	// One that does not know the field ignores it.
 	Stopped string `json:"stopped,omitempty"`
+	// Collector says whether this process could reach its collector when it
+	// last looked (see Exporter.checkCollector); nil while it has not. It is
+	// how a wrong collector URL shows before any event was recorded. A control
+	// plane that does not know the field ignores it.
+	Collector *collectorNote `json:"collector,omitempty"`
+}
+
+// collectorNote is deliveryBatch.Collector.
+type collectorNote struct {
+	Reachable bool   `json:"reachable"`
+	Error     string `json:"error,omitempty"`
 }
 
 // batchReport is one report of a batch: a deliveryReport without what the
@@ -197,6 +209,9 @@ type reporter struct {
 	// recording stopped; wasBlind: the set was unknown at the last pass.
 	toldAt   time.Time
 	wasBlind bool
+	// reachTold is what the control plane was last told, on this stream,
+	// about whether this process reaches its collector; nil when nothing yet.
+	reachTold *collectorReach
 	// down, outageLogged and lastOutageLog make the reporter say once when
 	// its reports stop arriving and once when they arrive again, at most one
 	// such pair per outageLogGap.
@@ -357,6 +372,7 @@ func (r *reporter) pass() {
 	}
 	if c := r.sub.connects.Load(); c != r.connects {
 		r.connects, r.mode, r.hello, r.refused = c, modeBatch, true, false
+		r.reachTold = nil // what is behind a new stream knows nothing of it
 		if r.askNow {
 			// The stream this process opened anew itself (see failed): the
 			// control plane names a connection it has not heard of within a
@@ -394,7 +410,12 @@ func (r *reporter) pass() {
 	// arrive: the control plane is to be told that the reports of this
 	// process arrive. Not while it refuses them and has no session.
 	arrive := streaming && (r.hello || r.beat(sn, now)) && (!r.refused || r.busy || sn.blind)
-	hello := r.mode == modeBatch && (arrive || r.sub.stopNote.Load() != nil)
+	// reach: whether this process reaches its collector is news to the control
+	// plane. It is told at once, also while no session runs: that is when a
+	// wrong collector URL can still be put right before it costs a run. Not
+	// while the control plane refuses the requests of an idle process.
+	reach := streaming && r.reachNews() && (!r.refused || r.busy)
+	hello := r.mode == modeBatch && (arrive || reach || r.sub.stopNote.Load() != nil)
 	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
 		return
 	}
@@ -480,6 +501,14 @@ func (r *reporter) renote(sn *snapshot, now time.Time) {
 	r.wasBlind = sn.blind
 }
 
+// reachNews reports whether the exporter knows something about reaching the
+// collector that the control plane was not told on this stream: that it can
+// or cannot, or another reason why not.
+func (r *reporter) reachNews() bool {
+	cur := r.exp.reach.Load()
+	return cur != nil && (r.reachTold == nil || *cur != *r.reachTold)
+}
+
 // beat reports whether a heartbeat is due: the active set names a session,
 // and the control plane has not answered a batch of this process for the
 // heartbeat period (the one it asked for, or cfg.Heartbeat). A tick early
@@ -560,6 +589,10 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 	if note != nil {
 		b.Stopped = *note
 	}
+	reach := r.exp.reach.Load()
+	if reach != nil {
+		b.Collector = &collectorNote{Reachable: reach.ok, Error: reach.err}
+	}
 	for i, x := range chunk {
 		b.Reports[i] = batchReport{Session: x.sid, Recorded: x.d.Recorded, Delivered: x.d.Delivered, Dropped: x.d.Dropped,
 			Buffered: x.d.Buffered, LastError: x.d.LastError, Final: x.d.Final}
@@ -586,6 +619,9 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 			}
 		}
 		r.hello, r.beatAt = false, time.Now()
+		if reach != nil {
+			r.reachTold = reach
+		}
 		if note != nil {
 			r.toldAt = r.beatAt
 		}

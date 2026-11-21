@@ -131,10 +131,11 @@ func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscr
 //
 // A service that silently stopped recording would leave its sessions
 // complete with its events missing. So the reporter, which goes on, tells
-// the control plane (stopNote), and that marks the sessions that run then
-// incomplete. It tells it again for as long as the loop is being started
-// again, and once more when recording has resumed (see reporter.renote): a
-// session that began meanwhile is missing events too.
+// the control plane (stopNote), and that notes it on the sessions that run
+// then: those this process took part in end incomplete, and the others say
+// that it may have missed events of theirs. It tells it again for as long as
+// the loop is being started again, and once more when recording has resumed
+// (see reporter.renote): a session that began meanwhile is missing events too.
 func (s *Subscriber) panicked(final bool) {
 	old := s.snap.Load()
 	s.snap.Store(&snapshot{blind: true, reports: old.reports, heartbeat: old.heartbeat})
