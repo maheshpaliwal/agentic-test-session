@@ -110,7 +110,12 @@ Rolling back:
   but can be guessed for short tokens, `KeyMaskOff` nothing; `WithMaskKeys` adds patterns. Which names count as
   secret is a heuristic (all-lower-case tokens, e-mail addresses and phone numbers as key parts are not
   caught): the list for your environment is a decision for whoever owns its data policy. A test puts a random
-  secret into random commands and checks that no part of it reaches a recorded event.
+  secret into random commands and checks that no part of it reaches a recorded event. An independent review
+  then found nine leaks outside what that test generates (a value stored through `BinaryMarshaler`, sensitive
+  keys read through `XREAD` and commands missing from the table, the replies of a hand-typed `MULTI`/`EXEC`,
+  names such as `oauth2_token:` and `PHPREDIS_SESSION:`, names longer than 1 KB); eight are fixed and pinned by
+  tests, and the package doc lists what is still recorded as written (script source among it). A recording can
+  still hold a credential: treat exports as test data that may contain secrets.
 - `tracectl start --id-only` prints just the session id, for scripts; `tracectl doctor --require-services N`
   exits 3 with fewer connected SDK instances (a CI preflight).
 - **`tracectl digest <id|name>`**: a whole session in one bounded answer for an AI agent or a person: the

@@ -160,8 +160,7 @@ func (h *Redactor) MaskArgs(name string, args []any, keys []int) (out []string, 
 	case "config":
 		if up(1) == "SET" {
 			for i := 2; i+1 < n; i += 2 {
-				switch strings.ToLower(out[i]) {
-				case "requirepass", "masterauth", "masteruser":
+				if configSecret(out[i]) {
 					mask(i + 1)
 				}
 			}
@@ -206,6 +205,11 @@ func (h *Redactor) MaskArgs(name string, args []any, keys []int) (out []string, 
 		case "eval", "evalsha", "eval_ro", "evalsha_ro", "fcall", "fcall_ro":
 			// no KEYS: ARGV still follows numkeys
 		default:
+			if _, known := Lookup(lname); !known || lname == "xread" || lname == "xreadgroup" {
+				for i := 1; i < n; i++ {
+					anySens = anySens || h.KeySensitive(out[i])
+				}
+			}
 			if _, known := Lookup(lname); !known {
 				// A command we cannot classify: any argument may be a value.
 				rng(1, n, false)
@@ -323,7 +327,7 @@ func pathSensitive[T any](out []T, i int) bool {
 // (MONITOR, SLOWLOG) or a value in a form that cannot be scrubbed (DUMP,
 // DEBUG).
 var opaqueReplies = map[string]bool{
-	"acl": true, "dump": true, "debug": true, "migrate": true, "monitor": true, "slowlog": true,
+	"acl": true, "dump": true, "exec": true, "debug": true, "migrate": true, "monitor": true, "slowlog": true,
 }
 
 // IsScript reports whether the named command runs a script or a function,
@@ -381,6 +385,9 @@ func (h *Redactor) MaskReply(session, name string, args []any, keys []int, v any
 	lname := strings.ToLower(name)
 	if scalar {
 		if _, status := v.(string); !status || lname != "set" || !hasOption(args, 3, "GET") {
+			if !status && (lname == "hincrby" || lname == "hincrbyfloat") && len(args) > 2 && NameSensitive(Str(args[2])) {
+				return masked, true
+			}
 			if !status && len(keys) > 0 && h.KeySensitive(Str(args[keys[0]])) {
 				switch lname {
 				case "incr", "incrby", "decr", "decrby", "hincrby", "setrange", "append":
@@ -397,7 +404,7 @@ func (h *Redactor) MaskReply(session, name string, args []any, keys []int, v any
 		names: lname == "keys" || lname == "hkeys", pairs: lname == "hgetall"}
 	_, known := Lookup(lname)
 	switch {
-	case opaqueReplies[lname], (!known || IsScript(lname)) && sensitive:
+	case opaqueReplies[lname], (!known || IsScript(lname) || lname == "xread" || lname == "xreadgroup") && sensitive:
 		return masked, true
 	case lname == "hvals":
 		return maskEach(v), true

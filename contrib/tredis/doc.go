@@ -162,6 +162,22 @@
 //     ("session:abcdefgh");
 //   - an e-mail address or a phone number as a segment ("user:<address>");
 //   - a secret name in the middle of a '/' path ("cache/session/<token>");
+//   - a name joined to its secret by something other than ':' and the
+//     separators the rule knows ("session|<token>", "session%3A<token>",
+//     "app.session.<token>"), and a name that is not ASCII;
+//   - a secret stored under a name that says nothing ("note"): a value is
+//     masked only under a sensitive name, as "key=value" with one, as a
+//     bearer token, or when it is a JSON Web Token on its own;
+//   - the text of a script (EVAL, FUNCTION LOAD), which is recorded as
+//     written, with any key or secret that is typed into it, and what a
+//     script returns after reading a sensitive field of a key whose name
+//     says nothing;
+//   - numbers about a sensitive value: its length (STRLEN, HSTRLEN) and its
+//     bits (GETBIT, BITCOUNT).
+//
+// So a recording can still hold a credential. Treat an export as test data
+// that may contain secrets, and keep real credentials out of the
+// environments you record.
 //
 // and they mask segments that hold no secret: the 42 of "auth:user:42", the
 // address of "rate:session:10.0.0.1". List the keys of the first kind with

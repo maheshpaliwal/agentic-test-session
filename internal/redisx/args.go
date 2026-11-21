@@ -3,6 +3,7 @@
 package redisx
 
 import (
+	"encoding"
 	"fmt"
 	"strings"
 )
@@ -18,6 +19,11 @@ func Str(v any) string {
 		return string(t)
 	case nil:
 		return ""
+	case encoding.BinaryMarshaler:
+		if b, err := t.MarshalBinary(); err == nil {
+			return string(b)
+		}
+		return masked
 	default:
 		return fmt.Sprint(t)
 	}

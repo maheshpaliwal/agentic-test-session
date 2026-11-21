@@ -126,10 +126,12 @@ func (h *Redactor) ShowText(session, s string) string {
 // it still reads as one that holds a secret (ShowText).
 func (h *Redactor) Text(session, s string) string { return h.ShowText(session, RedactStr(s)) }
 
-const maxKeyLike = 1024
-
+// keyLike reports whether s can be a key name: no blank in it, and not a
+// JSON document. Its length says nothing: a token after a secret name can be
+// kilobytes long (a JWT with many claims), and it is cut off by its prefix
+// like a short one.
 func keyLike(s string) bool {
-	if s == "" || len(s) > maxKeyLike {
+	if s == "" {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -250,7 +252,11 @@ func secretPart(seg string, after *bool) cut {
 			return cut{lead + i + 1, end}
 		}
 	}
-	if isJWT(s) || !strings.Contains(s, masked) && hasLetter(s) && NameSensitive(s) {
+	if isJWT(s) {
+		return cut{lead, end}
+	}
+	if !strings.Contains(s, masked) && hasLetter(s) && NameSensitive(s) {
+		*after = true // the secret may be this segment or the next: mask both
 		return cut{lead, end}
 	}
 	return cut{}
@@ -303,8 +309,9 @@ func secretName(s string) bool {
 }
 
 func secretWord(s string) bool {
+	last := s[strings.LastIndexAny(s, "_-.")+1:]
 	for _, p := range secretPrefixes {
-		if strings.EqualFold(s, p) {
+		if strings.EqualFold(s, p) || strings.EqualFold(last, p) {
 			return true
 		}
 	}
