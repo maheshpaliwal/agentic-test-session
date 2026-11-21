@@ -236,27 +236,36 @@ func TestDeliveryForgery(t *testing.T) {
 		stop, stopped := make(chan struct{}), make(chan struct{})
 		go func() {
 			defer close(stopped)
+			// The new stream is open before the old one is closed: an instance
+			// that is not connected when the drain looks is one that has left,
+			// and is not waited for.
+			closeOld := func() {}
+			defer func() { closeOld() }()
 			for {
 				ctx, cancel := context.WithCancel(context.Background())
 				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, f.in.cpSrv.URL+"/v1/active/stream", nil)
 				req.Header.Set(core.HeaderService, "ghost")
 				req.Header.Set(core.HeaderDeliveryInstance, "ghost-1")
 				resp, err := deliveryHTTP.Do(req)
-				select {
-				case <-stop:
-				case <-time.After(300 * time.Millisecond):
-				}
-				cancel()
-				if err == nil {
-					resp.Body.Close()
+				closeOld()
+				closeOld = func() {
+					cancel()
+					if err == nil {
+						resp.Body.Close()
+					}
 				}
 				select {
 				case <-stop:
 					return
-				default:
+				case <-time.After(300 * time.Millisecond):
 				}
 			}
 		}()
+		for deadline := time.Now().Add(10 * time.Second); len(f.in.cp.Subscribers()) == 0; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				panic("the stream was never opened")
+			}
+		}
 		infos, longest := f.each(1, func(id string) {
 			f.honest(id)
 			f.ingest(id, "ghost", "ghost-1", 2)

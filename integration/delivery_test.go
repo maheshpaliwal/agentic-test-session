@@ -8,7 +8,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -122,16 +121,16 @@ func newDeliveryBase(t *testing.T) *deliveryEnv {
 	e := &deliveryEnv{t: t, app: app, tracectl: buildBinary(t, dir, "tracectl", ".", "./cmd/tracectl")}
 
 	col := collector.New(store.NewMem(), collector.Config{Window: 100 * time.Millisecond})
-	colSrv := httptest.NewServer(col.Handler()) // 127.0.0.1
+	colSrv := countedServer(t, "collector", col.Handler()) // 127.0.0.1
 	e.gate = &ingestGate{next: col.Handler()}
-	gateSrv := httptest.NewServer(e.gate)
+	gateSrv := countedServer(t, "collector's gate", e.gate)
 	mgr := controlplane.NewManager(controlplane.Config{
-		Collector:    &controlplane.HTTPCollector{BaseURL: colSrv.URL},
+		Collector:    &controlplane.HTTPCollector{BaseURL: colSrv.URL, Client: collectorHTTP},
 		PollInterval: 100 * time.Millisecond, HeartbeatPeriod: time.Second,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go mgr.Run(ctx)
-	cpSrv := httptest.NewServer(mgr.Handler())
+	cpSrv := countedServer(t, "control plane", mgr.Handler())
 	t.Cleanup(func() {
 		cancel()
 		cpSrv.Close()
@@ -141,6 +140,7 @@ func newDeliveryBase(t *testing.T) *deliveryEnv {
 		col.Close()
 		// The connections to servers that are gone now: give their ports back.
 		deliveryHTTP.CloseIdleConnections()
+		collectorHTTP.CloseIdleConnections()
 	})
 	e.colURL, e.gateURL, e.cpURL = colSrv.URL, gateSrv.URL, cpSrv.URL
 	return e

@@ -36,7 +36,12 @@ func deliveryRuns() int {
 // deliveryHTTP is the HTTP client of the scenarios' own requests. It keeps
 // its connections: hundreds of sessions that poll at once would otherwise
 // open one per request and run the machine out of local ports.
-var deliveryHTTP = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{MaxIdleConns: 4096, MaxIdleConnsPerHost: 1024}}
+//
+// At most 128 connections to one server at a time: the requests of 500
+// sessions that stop together take their turn on those (each is answered in
+// well under a millisecond), instead of holding 500 local ports that stay in
+// TIME_WAIT for half a minute after the test.
+var deliveryHTTP = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{MaxIdleConns: 1024, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 128}}
 
 // deliveryRun is how one session of a scenario ended.
 type deliveryRun struct {
