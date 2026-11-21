@@ -60,6 +60,11 @@ Rolling back:
 
 ### Added
 
+- **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
+  entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
+  `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;
+  `''` or `--unknown-key` reads changes recorded without a key. `tracectl rename|stop|abort|status|wait --short`
+  print `<id> <STATE>` instead of JSON.
 - **`tracectl run [flags] -- <command>`** starts a session, runs the command with `TSESSION_ID` in its
   environment, stops and seals the session, prints the summary to stderr and can write a report (`--report FILE`).
   It exits with the command's status if that failed, else 1 if the session could not be sealed or read, else 3 if
@@ -116,6 +121,8 @@ Rolling back:
 
 ### Changed
 
+- `tracectl history` for an entity the session did not change exits 1 and names what was looked up; it used to
+  print `0 mutation(s)` and exit 0.
 - **Redaction is stricter.** Sensitive names also match as whole words (`user[password]`,
   `password_confirmation`, `currentPasswordValue`, `card.cvv`, `X-Auth-Key`); new default keys (`passphrase`,
   `auth`, `jwt`, `signature`, `session_id`, `sessionid`, `otp`); query strings and form bodies also mask `key`,
@@ -165,6 +172,7 @@ Rolling back:
 
 ### Fixed
 
+- Collector: a bare numeric key of 1,000,000 or more did not match in entity history.
 - Dashboard opened on an exported file showed a duration of 0 for a recording shorter than a second.
 - `tracectl diff` treated `HTTP 500` and `HTTP 503` (and differing SQLSTATE, MySQL error numbers and unnamed
   gRPC codes) as the same failure and reported no differences. `tracectl report --fail-on-incomplete` now also
