@@ -274,6 +274,8 @@ tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", E
 
 Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
 `client.Options.QuiesceSeconds` if your system has no asynchronous work.
+When a service still holds events it cannot deliver, or its reports do not arrive, the stop waits about ten
+seconds more for it (`--delivery-grace` on the control plane) before it calls the session incomplete.
 
 `sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
 `Trace`).
