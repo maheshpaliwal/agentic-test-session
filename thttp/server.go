@@ -94,6 +94,7 @@ func serve(h http.Handler, w http.ResponseWriter, r *http.Request) {
 			if stream {
 				span.SetAttr("stream", "true")
 			}
+			setStatusAttr(span, status)
 			span.SetResp(message{Status: status, Headers: redactHeaders(w.Header()),
 				Body: rw.cap.body(w.Header().Get("Content-Type")), BodySize: rw.cap.size()})
 			if reqCap.cut() || rw.cap.cut() {

@@ -130,8 +130,8 @@ compact JSON text, clipped, or `null` for no value.
 
 A tree line: `depth` (0 for a root; a line's parent is the nearest line above it with a smaller depth), `seq`,
 `service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome the line would
-otherwise not show: a gRPC status other than `OK`, or an HTTP status of 400 and above as `HTTP 404`; an HTTP
-response too large to be recorded whole has none), `flags` (the event's flags), `hidden` (lines below it that were left
+otherwise not show: a gRPC status other than `OK`, or an HTTP status of 400 and above as `HTTP 404`; from an SDK
+older than the `http.status` attribute, a response too large to be recorded whole has none), `flags` (the event's flags), `hidden` (lines below it that were left
 out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`; its `duration_ns` and
 `mutations` are totals and its `name` is normalised.
 

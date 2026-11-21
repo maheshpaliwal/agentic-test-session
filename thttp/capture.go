@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -239,3 +240,16 @@ func (t *teeBody) Read(p []byte) (int, error) {
 }
 
 func (t *teeBody) Close() error { return t.cl() }
+
+// StatusAttr is the attribute that carries the HTTP status of a request that
+// was refused or failed (400 and above). The status is also in the recorded
+// response, but that is a payload: it is cut when the body is large, and a
+// reader of the event must not have to parse it to tell a 404 from a 200.
+// Requests that went well carry no such attribute, so they cost nothing more.
+const StatusAttr = "http.status"
+
+func setStatusAttr(span *core.Span, status int) {
+	if status >= 400 {
+		span.SetAttr(StatusAttr, strconv.Itoa(status))
+	}
+}

@@ -386,6 +386,11 @@ func outcomeCode(e *core.Event) string {
 		}
 		return c
 	}
+	if s := e.Attrs["http.status"]; s != "" { // thttp.StatusAttr: set for 400 and above
+		return "HTTP " + s
+	}
+	// Events of an SDK that does not set the attribute: the status is in
+	// the recorded response, when that was small enough to be kept whole.
 	if (e.Kind == core.KindAPIIn || e.Kind == core.KindAPIOut) && len(e.Resp.Inline) > 0 {
 		var r struct {
 			Status int `json:"status"`

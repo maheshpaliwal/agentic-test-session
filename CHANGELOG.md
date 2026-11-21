@@ -116,6 +116,9 @@ Rolling back:
 
 ### Added
 
+- `thttp` sets the attribute `http.status` (`thttp.StatusAttr`) on a request that was answered with 400 or
+  above, on both sides. The status was only in the recorded response, which is cut when the body is large; the
+  digest's `code` reads the attribute. Requests that went well carry no such attribute.
 - `tracectl digest`: failures merged into one entry keep the first one's error as it was recorded
   (`(the first: "dial tcp 10.0.0.7:8080: connect: connection refused")`, `first_error` in JSON), so the host or
   key that normalising takes out is still there. Left out when the budget is tight.

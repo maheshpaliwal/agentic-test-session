@@ -901,6 +901,7 @@ func TestOutcomeCode(t *testing.T) {
 		{"grpc ok", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}}, ""},
 		{"grpc ok whose message has a status field", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}, Resp: resp(`{"sku":"A","status":500}`)}, ""},
 		{"grpc failed whose message has a status field", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "NotFound"}, Resp: resp(`{"status":500}`)}, "NotFound"},
+		{"the attribute, with a response that was cut", core.Event{Kind: core.KindAPIIn, Attrs: map[string]string{"http.status": "404"}, Resp: resp(`"{\"status\":404,\"body\":\"xxx…"`)}, "HTTP 404"},
 		{"a status that is not a number", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":"404"}`)}, ""},
 	} {
 		if got := outcomeCode(&tc.ev); got != tc.want {
