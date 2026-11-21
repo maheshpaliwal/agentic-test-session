@@ -1,30 +1,53 @@
 # Changelog
 
-Everything below is relative to the last state of `main` before this work. Benchmark figures were measured once
+Everything below is relative to the last state of `main` before this work; part of it has since been merged
+there, so someone upgrading from a recent `main` has already met the older entries. Benchmark figures were measured once
 on a development laptop, mostly against in-process fakes; treat them as indications, not guarantees.
 
 ## Unreleased
 
 ### Upgrading
 
-- Added: `ExporterConfig.ReachCheck` (zero, off, for `NewExporter`; `runtime.Start` sets 30 s),
-  `client.Info.StoppedInstances`, `client.Subscriber.Collector`; a session has `stopped_instances` (at most 64)
-  and `stopped_instances_more`, left out of `GET /v1/sessions`.
+Before deploying:
+
 - `GET /healthz` of the collector and the control plane can answer `503 degraded: <reason>`: while a background
   loop of theirs restarts after a panic, and once the panic budget is spent. `tracectl doctor` then prints
   `DEGRADED <reason>` and exits 1. A health check that restarts on the first non-200 will restart sooner than
   the service would have exited by itself.
 - Both services exit 1 after 5 panics of their background loops (sweep, janitor, retention) within 10 minutes,
   after an orderly shutdown of at most 20 seconds. Run them under a supervisor that restarts them; the Compose
-  file has `restart: on-failure:5` (not tried with Docker).
-- `controlplane.Config` and `collector.Config` gained `OnPanicBudgetSpent`.
-Before deploying:
-
+  file has `restart: on-failure:5` (not tried with Docker). That exit does not wait for the collector's own
+  flush of up to 15 seconds (see "Give the collector at least 25 seconds" below): what it still held is lost.
+- Embedders of `controlplane.Manager`: start it with `m.RunInBackground(ctx)` where you had `go m.Run(ctx)`; a
+  bare `Run` has no panic recovery and no panic budget.
+- A custom `controlplane.Collector` must fill `DrainStatus.Instances` (and may implement `InstanceCounter`);
+  without them every session with delivery reports ends `delivery_unconfirmed`.
+- SDKs started with `runtime.Start` ask their collector's `/healthz` every 30 seconds while idle. Behind a proxy
+  that answers that path with a 5xx the service shows as `CANNOT REACH COLLECTOR` in `tracectl doctor`, and
+  `doctor --require-delivery` fails; a negative `runtime.Config.Exporter.ReachCheck` turns the check off.
+- Stopping a session can take up to 10 seconds longer, while the control plane waits for a service that is
+  silent or cannot deliver (`--delivery-grace`, `TSESSION_CP_DELIVERY_GRACE`; 0 turns the check off), and 12 to
+  18 seconds while a service's delivery reports are failing.
+- The first line of every export carries a `tsession_session` object next to the event. Decoders that refuse
+  unknown fields, and golden files of exports, change.
+- `tsession.digest/v1` changed within the version: a running session has `recording: unknown` (it was
+  `complete`), failures that did the same thing are one entry, `omitted.section` can be `verdict`, and fields
+  were added (`code`, `first_error`, `rolled_back_by`, `drill_down_note`, `hidden`). A reader that only adds
+  what it knows is unaffected; one that compared the text is not.
+- HTTP events answered with 400 or above carry the attribute `http.status`. Recordings compared across versions
+  differ in it, and the digest no longer merges requests with different statuses into one line.
+- `tracectl list --state` refuses a word that is not a state, and `--cp` / `--collector` (and their environment
+  variables) are refused without a scheme; both exited 0 or failed later. The dashboard binary exits 2 with a
+  stack trace on a start-up error (it exited 1 with one line). Ten log lines of the services moved from warn to
+  error level.
 - Custom implementations need new methods: `collector/store.Store.DeleteSession(ctx, sessionID) error` (a missing
   id is not an error), `controlplane.Store.Delete(id string) error`, `controlplane.Collector.Delete(ctx, id) error`.
   `controlplane.Evictor.Evict` is now `Evict(ids ...string)`. A store that keeps the old `Evict(id string)` still
   compiles, because the interface is optional, but is then silently not used for eviction.
-- `collector.Config` and `controlplane.Config` gained fields; unkeyed struct literals no longer compile.
+- These structs gained fields, so unkeyed literals of them no longer compile: `collector.Config` and
+  `controlplane.Config` (`OnPanicBudgetSpent` among them), `runtime.ExporterConfig` (`ReachCheck`),
+  `controlplane.Session`, `Subscriber`, `ActiveSet` and `DrainStatus`, `collector.DrainStatus`, `Status` and
+  `Entity`, `client.Info`, `Subscriber` and `Entity`.
 - `tsql` records rows under the primary key the database catalog names, where it used `id`, and records no diff
   for an `UPDATE` whose row cannot be read back. Tests that assert on recorded keys or diffs of tables keyed by
   something other than `id` will see different values, and the database user needs to read the catalog
@@ -57,7 +80,9 @@ Before deploying:
   now passes `--fail-on-error` and `RequireNoFailures`. Assert on the attribute `grpc.code` if a test relied on
   them failing.
 - `sdk/client/tsessiontest` panics where it called `t.Fatalf` for a broken set-up (a session that cannot be
-  started or stopped, `Ambient` without a surrounding `tracectl run`): the message is the same, but a panic ends
+  started or stopped, `Ambient` without a surrounding `tracectl run`, `Stop` or a `Require` function on the
+  ambient session, a summary, mutations or events that cannot be read, `RequireMutation` on a session that was
+  not sealed): the message is the same, but a panic ends
   the whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped. An
   assertion that does not hold (`RequireNoFailures`, `RequireDeliveryConfirmed`, `RequireMutation`,
   `RequireNoMutation`) reports with `t.Errorf` and stops with `t.FailNow`: it fails its test only, and the
@@ -121,6 +146,9 @@ Rolling back:
 
 ### Added
 
+- `ExporterConfig.ReachCheck` (zero, off, for `NewExporter`; `runtime.Start` sets 30 s),
+  `client.Info.StoppedInstances`, `client.Subscriber.Collector`; a session has `stopped_instances` (at most 64)
+  and `stopped_instances_more`, left out of `GET /v1/sessions`.
 - A collector URL that leads nowhere shows before any session: the SDK checks its collector's `/healthz` while
   idle (every 30 s, not per event) and tells the control plane; `GET /v1/subscribers` gains `collector`, and
   `tracectl doctor` prints `CANNOT REACH COLLECTOR: <error>` for such a service and exits 3 under
@@ -141,7 +169,8 @@ Rolling back:
   command line says that its drill-down commands need the same flags (`drill_down_note`; left out when the
   budget is tight).
 - The SDK tells the control plane when it stops recording (`stopped` in `POST /v1/delivery`): the sessions
-  running at that moment end incomplete, naming the service and instance. `Manager.Health`, `Collector.Health`;
+  running at that moment that it took part in end incomplete, naming the service and instance; for the others
+  it is a `delivery_unconfirmed` line. `Manager.Health`, `Collector.Health`;
   label `compaction` on `tsession_controlplane_goroutine_panics_total`; "Health and panics" in `docs/CONFIG.md`.
 - `dashboard -demo`: the incomplete session carries a delivery report and the reason drawn from it, and one
   update changes a masked column, so the delivery table and the "changed (value hidden)" row can be seen without
@@ -240,7 +269,7 @@ Rolling back:
 - **Go tests under `tracectl run`.** `client.AttachEnv` returns the session named in `TSESSION_ID`, and
   `tsessiontest.Ambient(t, o)` joins it from a test without stopping it. `tsessiontest.Run` still starts one
   session per test and ignores the variable. There are no assertions on the shared session: its verdict exists
-  only once `tracectl run` has sealed it, so `tsessiontest.Stop` and `Require*` fail the test when given that
+  only once `tracectl run` has sealed it, so `tsessiontest.Stop` and `Require*` panic when given that
   session and never stop it. An empty header-mode session makes `tracectl run` say why.
 - **Delete and retention.** `DELETE /v1/sessions/{id}` on the control plane, `tracectl delete` and a two-click
   Delete in the dashboard remove a finished session with its events, seal and bundle. The collector's
@@ -315,8 +344,7 @@ Rolling back:
   active set again. A panic under a lock no longer leaves the lock held.
   Known limits: a subscriber that stays stopped is reported once, and later sessions seal without that service's
   events and without a mark (it then counts as a service that is not connected, which `doctor --require-services`
-  sees); `stopped` marks every running session, whether or not the instance took part, and any caller that
-  reaches the control plane can send it; panics of the seal retry and of compaction are outside the budget.
+  sees); any caller that reaches the control plane can send `stopped`; panics of the seal retry and of compaction are outside the budget.
 - `tracectl list` refuses a reply whose sessions have no state (`--cp` pointing at the collector) with exit 1; it
   printed a row of blanks. `tracectl summary` of a session without events says that nothing was recorded.
 - `tracectl start --name X` notes on standard error when an earlier session is also named X, with its id and
@@ -562,7 +590,7 @@ Rolling back:
   assertion therefore stops its package's test binary at once; the other packages still run.
 - `internal/slicex`, `internal/mapx`, `internal/set`; hand-written loops and `sort.Slice` calls replaced by them
   or by the standard `slices` / `maps` / `cmp` packages.
-- `slicex.FilterMap` and `slicex.ToMap` are back, with `slicex.Count` and `mapx.MapKeys`; 23 more loops in
+- `slicex.Count` and `mapx.MapKeys` join `slicex.FilterMap` and `slicex.ToMap`; 23 more loops in
   `core`, `cmd/tracectl`, `contrib/tsql`, `contrib/tqueue`, `contrib/tdynamo` and `internal/redisx` use them, the
   standard library, or one shared function (`refsOf`, `identsOf`, `digestFlags`) where the same loop stood twice.
 - The go-redis v8 and v9 wrappers share one implementation (`internal/redisx.Tracer`).

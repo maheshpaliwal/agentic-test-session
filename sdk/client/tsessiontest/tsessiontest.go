@@ -250,8 +250,8 @@ func stop(ctx context.Context, s *client.Session) error {
 // is a broken set-up, not a finding of the test: they panic, which ends the test binary of the package. An
 // assertion that does not hold (RequireNoFailures, RequireMutation, ...) fails its test only.
 //
-// Stop, and with it every Require function, fails the test instead when s is the ambient session (the one
-// named in TSESSION_ID): that session is tracectl run's to stop.
+// Stop, and with it every Require function, panics instead when s is the ambient session (the one named in
+// TSESSION_ID): that session is tracectl run's to stop.
 func Stop(t testing.TB, s *client.Session) client.Summary {
 	t.Helper()
 	if ambient(s) {
