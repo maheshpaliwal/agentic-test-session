@@ -148,13 +148,14 @@ func produceBatch(ctx context.Context, w KafkaWriter, msgs []kafka.Message) erro
 	return Publish(ctx, info, carrier, func(c context.Context) error {
 		for i := range cp {
 			kc := kafkaCarrier{&cp[i].Headers}
+			// The trace context and the clock go through WriteTraceparent,
+			// which decides per message whether its traceparent is the
+			// application's. carrier was empty, so its traceparent is the
+			// one tsession wrote.
+			core.WriteTraceparent(kc, carrier[core.KeyTraceparent], carrier[core.KeyHLC])
 			for k, v := range carrier {
 				switch k {
-				case core.KeyTraceparent:
-					// Decided per message by WriteTraceparent: a message
-					// may carry the application's own.
-				case core.KeyTSessionTraceparent:
-					core.WriteTraceparent(kc, v)
+				case core.KeyTraceparent, core.KeyTSessionTraceparent, core.KeyHLC:
 				default:
 					kc.Set(k, v)
 				}

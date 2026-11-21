@@ -310,8 +310,8 @@ func (s *Session) Header() http.Header {
 // tracing (see core.WriteTraceparent).
 func (s *Session) Inject(h http.Header) {
 	h.Set(core.KeySession, s.ID)
-	core.WriteTraceparent(core.HTTPHeaderCarrier(h), "00-"+core.NewTraceID()+"-"+core.NewSpanID()+"-01")
-	h.Set(core.KeyHLC, strconv.FormatUint(core.HLCNow(), 10))
+	core.WriteTraceparent(core.HTTPHeaderCarrier(h), "00-"+core.NewTraceID()+"-"+core.NewSpanID()+"-01",
+		strconv.FormatUint(core.HLCNow(), 10))
 }
 
 // Transport wraps rt (default http.DefaultTransport) so every request it

@@ -45,10 +45,10 @@ func TestClientKeepsApplicationTraceparent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rec := setup(t, active("s1"))
 			var gotApp []string
-			var gotOwn string
+			var gotOwn, gotHLC string
 			down := httptest.NewServer(Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotApp = r.Header.Values("Traceparent")
-				gotOwn = r.Header.Get(core.KeyTSessionTraceparent)
+				gotOwn, gotHLC = r.Header.Get(core.KeyTSessionTraceparent), r.Header.Get(core.KeyHLC)
 			})))
 			defer down.Close()
 
@@ -68,7 +68,7 @@ func TestClientKeepsApplicationTraceparent(t *testing.T) {
 			if len(out) != 1 || len(in) != 1 {
 				t.Fatalf("api.out/api.in = %d/%d", len(out), len(in))
 			}
-			if want := "00-" + root.TraceID + "-" + out[0].SpanID + "-01"; gotOwn != want {
+			if want := "00-" + root.TraceID + "-" + out[0].SpanID + "-01;" + gotHLC; gotOwn != want {
 				t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, gotOwn, want)
 			}
 			if in[0].ParentID != out[0].SpanID || in[0].TraceID != root.TraceID {
@@ -100,8 +100,8 @@ func TestClientWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 		t.Fatalf("api.out = %d", len(out))
 	}
 	want := "00-" + root.TraceID + "-" + out[0].SpanID + "-01"
-	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want {
-		t.Fatalf("traceparent %q, %s %q, want both %q", got.Get("Traceparent"), core.KeyTSessionTraceparent,
+	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want+";"+got.Get(core.KeyHLC) {
+		t.Fatalf("traceparent %q, %s %q, want %q and that with the clock", got.Get("Traceparent"), core.KeyTSessionTraceparent,
 			got.Get(core.KeyTSessionTraceparent), want)
 	}
 }
@@ -118,5 +118,25 @@ func TestHandlerReadsTraceparentFromOlderSDK(t *testing.T) {
 	in := kind(rec.Events(), core.KindAPIIn)
 	if len(in) != 1 || in[0].ParentID != span || in[0].TraceID != trace {
 		t.Fatalf("api.in = %+v", in)
+	}
+}
+
+// A request that a service on an older SDK forwarded with the headers it
+// received from a new one (a reverse proxy): it wrote its span into
+// traceparent and a new x-tsession-hlc, and copied the x-tsession-traceparent
+// it does not know. The parent is the forwarder's span, not the first
+// sender's.
+func TestHandlerIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
+	rec := setup(t, active("s1"))
+	trace, sender, forwarder := core.NewTraceID(), core.NewSpanID(), core.NewSpanID()
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set(core.KeySession, "s1")
+	req.Header.Set(core.KeyTSessionTraceparent, "00-"+trace+"-"+sender+"-01;1000")
+	req.Header.Set("Traceparent", "00-"+trace+"-"+forwarder+"-01")
+	req.Header.Set(core.KeyHLC, "2000")
+	Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	in := kind(rec.Events(), core.KindAPIIn)
+	if len(in) != 1 || in[0].ParentID != forwarder || in[0].TraceID != trace {
+		t.Fatalf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender)
 	}
 }

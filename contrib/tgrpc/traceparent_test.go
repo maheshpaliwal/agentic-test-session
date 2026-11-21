@@ -118,7 +118,11 @@ func assertTraceparentKept(t *testing.T, rec *core.MemRecorder, md metadata.MD, 
 	if in == nil || out == nil {
 		t.Fatalf("events: %+v", evs)
 	}
-	own, want := md.Get(core.KeyTSessionTraceparent), "00-"+root.TraceID+"-"+out.SpanID+"-01"
+	hlc := md.Get(core.KeyHLC)
+	if len(hlc) != 1 {
+		t.Fatalf("%s = %q", core.KeyHLC, hlc)
+	}
+	own, want := md.Get(core.KeyTSessionTraceparent), "00-"+root.TraceID+"-"+out.SpanID+"-01;"+hlc[0]
 	if len(own) != 1 || own[0] != want {
 		t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, own, want)
 	}
@@ -181,5 +185,25 @@ func TestServerReadsTraceparentFromOlderSDK(t *testing.T) {
 	in := byKind(rec.Events(), core.KindAPIIn)
 	if in == nil || in.ParentID != span || in.TraceID != trace {
 		t.Fatalf("api.in = %+v", in)
+	}
+}
+
+// A call that a service on an older SDK forwarded with the metadata it
+// received from a new one: its span is in traceparent, with a new
+// x-tsession-hlc, next to the x-tsession-traceparent it copied. The parent is
+// the forwarder's span.
+func TestServerIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
+	rec, conn := setup(t, sess("s1"))
+	trace, sender, forwarder := core.NewTraceID(), core.NewSpanID(), core.NewSpanID()
+	ctx := metadata.AppendToOutgoingContext(context.Background(), core.KeySession, "s1",
+		core.KeyTSessionTraceparent, "00-"+trace+"-"+sender+"-01;1000",
+		core.KeyTraceparent, "00-"+trace+"-"+forwarder+"-01",
+		core.KeyHLC, "2000")
+	if err := conn.Invoke(ctx, "/test.Echo/Echo", wrapperspb.String("hi"), new(wrapperspb.StringValue)); err != nil {
+		t.Fatal(err)
+	}
+	in := byKind(rec.Events(), core.KindAPIIn)
+	if in == nil || in.ParentID != forwarder || in.TraceID != trace {
+		t.Fatalf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender)
 	}
 }

@@ -57,8 +57,8 @@ func TestLifecycle(t *testing.T) {
 	if sc, ok := core.ExtractSpanContext(core.HTTPHeaderCarrier(h)); !ok || len(sc.TraceID) != 32 || len(sc.SpanID) != 16 || sc.HLC == 0 {
 		t.Fatalf("bad propagation headers: %v", h)
 	}
-	if tp := h.Get(core.KeyTSessionTraceparent); tp == "" || h.Get(core.KeyTraceparent) != tp {
-		t.Fatalf("want traceparent and %s set to the same value: %v", core.KeyTSessionTraceparent, h)
+	if tp := h.Get(core.KeyTraceparent); tp == "" || h.Get(core.KeyTSessionTraceparent) != tp+";"+h.Get(core.KeyHLC) {
+		t.Fatalf("want traceparent, and %s holding it and the clock: %v", core.KeyTSessionTraceparent, h)
 	}
 	// A traceparent from the test's own tracing is kept; injecting again
 	// replaces only what the client wrote.
@@ -70,7 +70,7 @@ func TestLifecycle(t *testing.T) {
 		t.Fatalf("caller's traceparent not kept: %v", h2)
 	}
 	s.Inject(h)
-	if tp := h.Get(core.KeyTSessionTraceparent); h.Get(core.KeyTraceparent) != tp {
+	if tp := h.Get(core.KeyTraceparent); h.Get(core.KeyTSessionTraceparent) != tp+";"+h.Get(core.KeyHLC) {
 		t.Fatalf("second Inject left a stale traceparent: %v", h)
 	}
 

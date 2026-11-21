@@ -2,6 +2,8 @@ package tkafkaconfluent
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
@@ -23,6 +25,13 @@ func pubs(rec *core.MemRecorder) []core.Event {
 }
 
 func tpFor(pub core.Event) string { return "00-" + pub.TraceID + "-" + pub.SpanID + "-01" }
+
+// ownFor is the x-tsession-traceparent value for that span among headers h:
+// the trace context bound to the x-tsession-hlc written with it.
+func ownFor(pub core.Event, h []kafka.Header) string {
+	hlc, _ := hdr(h, core.KeyHLC)
+	return tpFor(pub) + ";" + hlc
+}
 
 // assertWorker checks that the latest worker.start is a child of pub.
 func assertWorker(t *testing.T, rec *core.MemRecorder, pub core.Event) {
@@ -54,8 +63,8 @@ func TestProduceKeepsApplicationTraceparent(t *testing.T) {
 	if v, n := hdr(sent.Headers, "traceparent"); n != 1 || v != appTP {
 		t.Fatalf("application traceparent is now %q (%d headers)", v, n)
 	}
-	if v, n := hdr(sent.Headers, core.KeyTSessionTraceparent); n != 1 || v != tpFor(pub) {
-		t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, v, tpFor(pub))
+	if v, n := hdr(sent.Headers, core.KeyTSessionTraceparent); n != 1 || v != ownFor(pub, sent.Headers) {
+		t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, v, ownFor(pub, sent.Headers))
 	}
 	if err := Consume(context.Background(), sent, func(context.Context) error { return nil }); err != nil {
 		t.Fatal(err)
@@ -73,8 +82,8 @@ func TestProduceWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	want := tpFor(pubs(rec)[0])
 	own, _ := hdr(p.got[0].Headers, core.KeyTSessionTraceparent)
 	tp, _ := hdr(p.got[0].Headers, "traceparent")
-	if own != want || tp != want {
-		t.Fatalf("traceparent %q, %s %q, want both %q", tp, core.KeyTSessionTraceparent, own, want)
+	if hlc, n := hdr(p.got[0].Headers, core.KeyHLC); n != 1 || own != want+";"+hlc || tp != want {
+		t.Fatalf("traceparent %q, %s %q, want %q and that with the clock %q", tp, core.KeyTSessionTraceparent, own, want, hlc)
 	}
 }
 
@@ -101,8 +110,8 @@ func TestProduceReplacesStaleContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			second, pub2 := p.got[1], pubs(rec)[1]
-			if v, n := hdr(second.Headers, core.KeyTSessionTraceparent); n != 1 || v != tpFor(pub2) {
-				t.Fatalf("%s = %q (%d), want the second publish %q", core.KeyTSessionTraceparent, v, n, tpFor(pub2))
+			if v, n := hdr(second.Headers, core.KeyTSessionTraceparent); n != 1 || v != ownFor(pub2, second.Headers) {
+				t.Fatalf("%s = %q (%d), want the second publish %q", core.KeyTSessionTraceparent, v, n, ownFor(pub2, second.Headers))
 			}
 			want := tpFor(pub2)
 			if app != "" {
@@ -131,6 +140,37 @@ func TestConsumeReadsTraceparentFromOlderSDK(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWorker(t, rec, core.Event{TraceID: trace, SpanID: span})
+}
+
+// A record produced by a new SDK, then produced again to a retry topic by a
+// service on an older SDK with the headers copied: that SDK replaces
+// traceparent and x-tsession-hlc and leaves the x-tsession-traceparent it does
+// not know. The worker's parent is the republisher's span.
+func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
+	rec, ctx := setup(t)
+	p := &fakeProducer{}
+	if err := Produce(ctx, p, &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("a")}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := pubs(rec)[0]
+	republisher := core.Event{TraceID: first.TraceID, SpanID: core.NewSpanID()}
+	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("a.retry")}}
+	for _, h := range p.got[0].Headers {
+		switch h.Key {
+		case core.KeyTraceparent:
+			h.Value = []byte(tpFor(republisher))
+		case core.KeyHLC:
+			h.Value = []byte(strconv.FormatUint(core.HLCNow(), 10))
+		}
+		msg.Headers = append(msg.Headers, h)
+	}
+	if v, _ := hdr(msg.Headers, core.KeyTSessionTraceparent); !strings.HasPrefix(v, tpFor(first)) {
+		t.Fatalf("the copied %s is %q, want the first publish", core.KeyTSessionTraceparent, v)
+	}
+	if err := Consume(context.Background(), msg, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertWorker(t, rec, republisher)
 }
 
 // The injection budget (8 headers, 1 KiB) still holds the whole carrier.

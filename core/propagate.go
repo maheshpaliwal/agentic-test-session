@@ -34,14 +34,20 @@ func FromContext(ctx context.Context) (SpanContext, bool) {
 //
 // KeyTraceparent is the W3C Trace Context header, which the application's own
 // tracing (OpenTelemetry, say) uses as well. KeyTSessionTraceparent carries
-// the same format under a name only tsession writes; it is the one tsession
-// reads first. See WriteTraceparent for who writes which.
+// tsession's trace context under a name only tsession writes, bound to the
+// KeyHLC value written with it; it is the one tsession reads first. See
+// WriteTraceparent for who writes which, and ownTraceparent for the binding.
 const (
 	KeyTraceparent         = "traceparent"            // 00-<32hex trace>-<16hex span>-01
-	KeyTSessionTraceparent = "x-tsession-traceparent" // same format, tsession's own
+	KeyTSessionTraceparent = "x-tsession-traceparent" // <traceparent format>;<x-tsession-hlc value>
 	KeySession             = "x-tsession-id"
 	KeyHLC                 = "x-tsession-hlc"
 )
+
+// ownSep separates the trace context from the clock value in
+// KeyTSessionTraceparent. It cannot occur in a traceparent, so the value is
+// never mistaken for one.
+const ownSep = ";"
 
 // HeaderService and HeaderInstance are sent by the SDK when it follows the
 // control plane's active set, so the control plane can list which services
@@ -76,8 +82,8 @@ func (h HTTPHeaderCarrier) Get(k string) string { return http.Header(h).Get(k) }
 // Set implements Carrier.
 func (h HTTPHeaderCarrier) Set(k, v string) { http.Header(h).Set(k, v) }
 
-// Inject writes the current span context (if any) into c: the session id,
-// the clock, and the trace context as described at WriteTraceparent.
+// Inject writes the current span context (if any) into c: the session id, and
+// the trace context and the clock as described at WriteTraceparent.
 func Inject(ctx context.Context, c Carrier) {
 	sc, ok := FromContext(ctx)
 	if !ok || !Enabled() {
@@ -87,32 +93,59 @@ func Inject(ctx context.Context, c Carrier) {
 	if span == "" {
 		span = NewSpanID()
 	}
-	WriteTraceparent(c, "00-"+sc.TraceID+"-"+span+"-01")
+	WriteTraceparent(c, "00-"+sc.TraceID+"-"+span+"-01", strconv.FormatUint(HLCNow(), 10))
 	c.Set(KeySession, sc.SessionID)
-	c.Set(KeyHLC, strconv.FormatUint(HLCNow(), 10))
 }
 
 // WriteTraceparent writes tsession's trace context tp (the traceparent format)
-// into c. It always sets KeyTSessionTraceparent, replacing an earlier value.
-// It sets KeyTraceparent only when that cannot destroy a value the application
-// wrote:
+// and the sender's clock hlc (decimal, the KeyHLC value) into c.
+//
+// It always sets KeyHLC to hlc and KeyTSessionTraceparent to tp, ";", hlc,
+// replacing earlier values. The clock value inside KeyTSessionTraceparent
+// binds that key to this write: a hop that does not know the key (an SDK from
+// before it existed) and passes it on unchanged still replaces KeyHLC, and a
+// reader then sees that the key is out of date (see ownTraceparent).
+//
+// It sets KeyTraceparent to tp only when that cannot destroy a value the
+// application wrote:
 //
 //   - c has no traceparent, or
-//   - c's traceparent equals the x-tsession-traceparent c held before this
-//     call: tsession wrote both and they were copied here together (a
-//     consumer that republishes a message with its headers, a proxy that
-//     forwards them, a second Inject on one carrier). Leaving it would hand a
-//     stale parent to a reader that knows only traceparent; or
+//   - c's traceparent equals the trace context in the x-tsession-traceparent c
+//     held before this call: tsession wrote both and they were copied here
+//     together (a consumer that republishes a message with its headers, a
+//     proxy that forwards them, a second Inject on one carrier). Leaving it
+//     would hand a stale parent to a reader that knows only traceparent; or
 //   - Config.OverwriteTraceparent is set.
 //
 // Any other traceparent belongs to the application and is left as it is.
-func WriteTraceparent(c Carrier, tp string) {
+func WriteTraceparent(c Carrier, tp, hlc string) {
 	app := c.Get(KeyTraceparent)
-	own := c.Get(KeyTSessionTraceparent)
-	c.Set(KeyTSessionTraceparent, tp)
+	own, _, _ := strings.Cut(c.Get(KeyTSessionTraceparent), ownSep)
+	c.Set(KeyTSessionTraceparent, tp+ownSep+hlc)
+	c.Set(KeyHLC, hlc)
 	if app == "" || app == own || cfg.Load().OverwriteTraceparent {
 		c.Set(KeyTraceparent, tp)
 	}
+}
+
+// ownTraceparent returns the trace context in the x-tsession-traceparent
+// value own of a carrier whose x-tsession-hlc is hlc, or "" when own is not
+// current: the clock value it was written with is not the carrier's.
+//
+// Every write sets both keys, and no later hop produces the same clock value
+// (it has observed the one it received, so its own is greater). A difference
+// therefore means that a hop which does not know x-tsession-traceparent wrote
+// its own context into traceparent and x-tsession-hlc afterwards and passed
+// this key on as it received it.
+//
+// A carrier without x-tsession-hlc was not rewritten by such a hop, which
+// always writes one; something on the way dropped that key, and own is used.
+func ownTraceparent(own, hlc string) string {
+	tp, bound, ok := strings.Cut(own, ownSep)
+	if !ok || bound == "" || (hlc != "" && hlc != bound) {
+		return ""
+	}
+	return tp
 }
 
 // parseTraceparent returns the ids in a traceparent value.
@@ -126,18 +159,20 @@ func parseTraceparent(v string) (trace, span string, ok bool) {
 
 // ExtractSpanContext parses c without validating the session is active.
 //
-// The trace context is read from x-tsession-traceparent. When that key is
-// absent (the sender runs an SDK from before the key existed) or does not
-// parse, it is read from traceparent instead. That fallback cannot tell
-// tsession's value from the application's: see the compatibility note in
-// docs/PROTOCOL.md.
+// The trace context is read from x-tsession-traceparent when that key is
+// current (see ownTraceparent). When it is absent (the sender runs an SDK from
+// before the key existed), out of date (such an SDK passed the carrier on) or
+// does not parse, the trace context is read from traceparent instead. That
+// fallback cannot tell tsession's value from the application's: see the
+// compatibility note in docs/PROTOCOL.md.
 func ExtractSpanContext(c Carrier) (SpanContext, bool) {
 	sid := c.Get(KeySession)
 	if sid == "" {
 		return SpanContext{}, false
 	}
 	sc := SpanContext{SessionID: sid}
-	trace, span, ok := parseTraceparent(c.Get(KeyTSessionTraceparent))
+	h := c.Get(KeyHLC)
+	trace, span, ok := parseTraceparent(ownTraceparent(c.Get(KeyTSessionTraceparent), h))
 	if !ok {
 		trace, span, ok = parseTraceparent(c.Get(KeyTraceparent))
 	}
@@ -146,7 +181,7 @@ func ExtractSpanContext(c Carrier) (SpanContext, bool) {
 	} else {
 		sc.TraceID = NewTraceID()
 	}
-	if h := c.Get(KeyHLC); h != "" {
+	if h != "" {
 		sc.HLC, _ = strconv.ParseUint(h, 10, 64)
 	}
 	return sc, true

@@ -3,6 +3,7 @@ package tqueue
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,6 +24,10 @@ func noop(context.Context) error { return nil }
 
 // tpFor is the trace context tsession sends for a recorded publish span.
 func tpFor(pub core.Event) string { return "00-" + pub.TraceID + "-" + pub.SpanID + "-01" }
+
+// ownFor is the x-tsession-traceparent value for that span on a carrier whose
+// x-tsession-hlc is hlc: the trace context bound to the clock written with it.
+func ownFor(pub core.Event, hlc string) string { return tpFor(pub) + ";" + hlc }
 
 // lastPub returns the most recent queue.publish span.
 func lastPub(t *testing.T, rec *core.MemRecorder) core.Event {
@@ -77,6 +82,75 @@ func oldSQSGet(attrs map[string]types.MessageAttributeValue) func(string) string
 	}
 }
 
+// A message published by a new SDK and then published again by a service on
+// an older SDK with its headers copied (a retry or dead-letter queue). That
+// SDK writes its own span into traceparent and a new x-tsession-hlc, and
+// copies the x-tsession-traceparent it does not know. The worker's parent is
+// the republisher's span, not the first publisher's.
+func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
+	newClock := func() string { return strconv.FormatUint(core.HLCNow(), 10) }
+	for name, run := range map[string]func(t *testing.T, ctx context.Context, republisher core.Event){
+		"kafka": func(t *testing.T, ctx context.Context, republisher core.Event) {
+			w := &batchWriter{}
+			if err := ProduceMessages(ctx, w, kafka.Message{Topic: "a", Value: []byte(`{}`)}); err != nil {
+				t.Fatal(err)
+			}
+			msg := w.calls[0][0]
+			c := kafkaCarrier{&msg.Headers}
+			c.Set(core.KeyTraceparent, tpFor(republisher))
+			c.Set(core.KeySession, "s1")
+			c.Set(core.KeyHLC, newClock())
+			if err := ConsumeMessage(context.Background(), msg, noop); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"amqp": func(t *testing.T, ctx context.Context, republisher core.Event) {
+			ch := &fakeAMQP{}
+			if err := PublishAMQP(ctx, ch, "ex", "k", false, false, amqp.Publishing{Body: []byte(`{}`)}); err != nil {
+				t.Fatal(err)
+			}
+			h := ch.got[0].Headers
+			h[core.KeyTraceparent], h[core.KeySession], h[core.KeyHLC] = tpFor(republisher), "s1", newClock()
+			if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: h, RoutingKey: "k", DeliveryTag: 1}, 0, noop); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"sqs": func(t *testing.T, ctx context.Context, republisher core.Event) {
+			attrs := sqsSend(t, ctx, fill(2), SQSOptions{})
+			if sqsForm(attrs) != "full" {
+				t.Fatalf("form %q", sqsForm(attrs))
+			}
+			attrs[core.KeyTraceparent], attrs[core.KeySession], attrs[core.KeyHLC] = strAttr(tpFor(republisher)), strAttr("s1"), strAttr(newClock())
+			sqsConsume(t, attrs, SQSOptions{})
+		},
+		"side channel": func(t *testing.T, ctx context.Context, republisher core.Event) {
+			sc := &MemSideChannel{}
+			if err := PublishVia(ctx, sc, "m1", Message{Queue: "q", JobName: "j"}, noop); err != nil {
+				t.Fatal(err)
+			}
+			m, _ := sc.Get(ctx, SideKey("m1"))
+			m[core.KeyTraceparent], m[core.KeySession], m[core.KeyHLC] = tpFor(republisher), "s1", newClock()
+			if err := sc.Put(ctx, SideKey("m1"), m, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m1"}, noop); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec, ctx := setup(t, true)
+			sc, _ := core.FromContext(ctx)
+			republisher := core.Event{TraceID: sc.TraceID, SpanID: core.NewSpanID()}
+			run(t, ctx, republisher)
+			if first := lastPub(t, rec); first.SpanID == republisher.SpanID {
+				t.Fatal("test setup: the two publishers have one span id")
+			}
+			assertLastWorker(t, rec, republisher)
+		})
+	}
+}
+
 // ---- Kafka ----
 
 func kafkaHeaders(m kafka.Message, key string) []string {
@@ -109,11 +183,11 @@ func TestKafkaKeepsApplicationTraceparent(t *testing.T) {
 			if tp := kafkaHeaders(got[0], "traceparent"); len(tp) != 1 || tp[0] != appTP {
 				t.Fatalf("application traceparent is now %q", tp)
 			}
-			if own := kafkaHeaders(got[0], core.KeyTSessionTraceparent); len(own) != 1 || own[0] != tpFor(pubOf(0)) {
-				t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, own, tpFor(pubOf(0)))
+			if own, want := kafkaHeaders(got[0], core.KeyTSessionTraceparent), ownFor(pubOf(0), header(got[0], core.KeyHLC)); len(own) != 1 || own[0] != want {
+				t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, own, want)
 			}
 			// Without an application value both keys carry tsession's.
-			if header(got[1], "traceparent") != tpFor(pubOf(1)) || header(got[1], core.KeyTSessionTraceparent) != tpFor(pubOf(1)) {
+			if header(got[1], "traceparent") != tpFor(pubOf(1)) || header(got[1], core.KeyTSessionTraceparent) != ownFor(pubOf(1), header(got[1], core.KeyHLC)) {
 				t.Fatalf("message without application tracing: %v", got[1].Headers)
 			}
 			for i, m := range got {
@@ -156,8 +230,11 @@ func TestKafkaRepublishWithCopiedHeaders(t *testing.T) {
 			if pub2.SpanID == pub1.SpanID {
 				t.Fatal("second publish not recorded")
 			}
-			if own := kafkaHeaders(second, core.KeyTSessionTraceparent); len(own) != 1 || own[0] != tpFor(pub2) {
-				t.Fatalf("%s = %q, want the second publish %q", core.KeyTSessionTraceparent, own, tpFor(pub2))
+			if own, want := kafkaHeaders(second, core.KeyTSessionTraceparent), ownFor(pub2, header(second, core.KeyHLC)); len(own) != 1 || own[0] != want {
+				t.Fatalf("%s = %q, want the second publish %q", core.KeyTSessionTraceparent, own, want)
+			}
+			if hlc := kafkaHeaders(second, core.KeyHLC); len(hlc) != 1 {
+				t.Fatalf("%s = %q, want one", core.KeyHLC, hlc)
 			}
 			want := tpFor(pub2) // tsession's own stale copy is replaced
 			if app != "" {
@@ -217,7 +294,7 @@ func TestAMQPKeepsApplicationTraceparent(t *testing.T) {
 			default:
 				t.Fatalf("application traceparent is now %T", v)
 			}
-			if got[core.KeyTSessionTraceparent] != tpFor(pub) || got["app"] != "1" {
+			if hlc, _ := got[core.KeyHLC].(string); got[core.KeyTSessionTraceparent] != ownFor(pub, hlc) || got["app"] != "1" {
 				t.Fatalf("headers: %v", got)
 			}
 			if len(in.Headers) != 2 {
@@ -247,7 +324,7 @@ func TestAMQPRepublishWithCopiedHeaders(t *testing.T) {
 	}
 	pub2 := lastPub(t, rec)
 	got := ch.got[1].Headers
-	if got[core.KeyTSessionTraceparent] != tpFor(pub2) || got["traceparent"] != tpFor(pub2) {
+	if hlc, _ := got[core.KeyHLC].(string); got[core.KeyTSessionTraceparent] != ownFor(pub2, hlc) || got["traceparent"] != tpFor(pub2) {
 		t.Fatalf("stale context passed on: %v, want %q", got, tpFor(pub2))
 	}
 	if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: got, RoutingKey: "k2", DeliveryTag: 2}, 0, noop); err != nil {
@@ -347,15 +424,16 @@ func TestSQSFormsAndAttributeLimit(t *testing.T) {
 			}
 			switch tc.form {
 			case "full":
-				if got := aws.ToString(sent[core.KeyTSessionTraceparent].StringValue); got != tpFor(pub) {
-					t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, got, tpFor(pub))
+				want := ownFor(pub, aws.ToString(sent[core.KeyHLC].StringValue))
+				if got := aws.ToString(sent[core.KeyTSessionTraceparent].StringValue); got != want {
+					t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, got, want)
 				}
 				if !has(in, "traceparent") && aws.ToString(sent["traceparent"].StringValue) != tpFor(pub) {
 					t.Fatalf("traceparent = %q, want tsession's", aws.ToString(sent["traceparent"].StringValue))
 				}
 			case "compact":
 				q, err := url.ParseQuery(aws.ToString(sent[ctxAttr].StringValue))
-				if err != nil || q.Get(core.KeyTSessionTraceparent) != tpFor(pub) || q.Get(core.KeyTraceparent) != tpFor(pub) ||
+				if err != nil || q.Get(core.KeyTSessionTraceparent) != ownFor(pub, q.Get(core.KeyHLC)) || q.Get(core.KeyTraceparent) != tpFor(pub) ||
 					q.Get(core.KeySession) != "s1" || q.Get(core.KeyHLC) == "" {
 					t.Fatalf("compact attribute = %v (%v)", q, err)
 				}
@@ -520,7 +598,7 @@ func TestSideChannelRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m[core.KeyTSessionTraceparent] != tpFor(pub) || m[core.KeyTraceparent] != tpFor(pub) || m[core.KeySession] != "s1" {
+	if m[core.KeyTSessionTraceparent] != ownFor(pub, m[core.KeyHLC]) || m[core.KeyHLC] == "" || m[core.KeyTraceparent] != tpFor(pub) || m[core.KeySession] != "s1" {
 		t.Fatalf("record = %v", m)
 	}
 	if err := ConsumeVia(context.Background(), sc, Delivery{Queue: "q", JobName: "j", MessageID: "m1"}, noop); err != nil {

@@ -306,28 +306,37 @@ headers, SQS message attributes, side-channel record):
 | Key | Value | Written by |
 |---|---|---|
 | `x-tsession-id` | session id | tsession |
-| `x-tsession-traceparent` | `00-<32 hex trace id>-<16 hex span id>-01`: the trace and the span that is the parent of whatever the receiver starts | tsession, always |
+| `x-tsession-traceparent` | `00-<32 hex trace id>-<16 hex span id>-01;<clock>`: the trace and the span that is the parent of whatever the receiver starts, then `;` and the `x-tsession-hlc` value written with it | tsession, always |
 | `x-tsession-hlc` | sender's hybrid logical clock, decimal | tsession |
-| `traceparent` | same format | tsession only where the application has not set one; see below |
+| `traceparent` | `00-<32 hex trace id>-<16 hex span id>-01` | tsession only where the application has not set one; see below |
 
 `traceparent` is the W3C Trace Context header, which the application's own tracing (OpenTelemetry, for example) uses
 too. tsession never replaces a `traceparent` the application set.
 
-**Writing** (`core.Inject`, `core.WriteTraceparent`). `x-tsession-traceparent` is always set, replacing a value
-already there. `traceparent` is set to the same value only when
+**Writing** (`core.Inject`, `core.WriteTraceparent`). `x-tsession-traceparent` and `x-tsession-hlc` are always set
+together, replacing values already there. `traceparent` is set to the same trace context only when
 1. the carrier has no `traceparent`, or
-2. the carrier's `traceparent` equals the `x-tsession-traceparent` it held before this write. tsession wrote both, and
-   they arrived here together: a consumer that publishes the message it received with its headers, a proxy that
-   forwards headers, a message value produced twice. Or
+2. the carrier's `traceparent` equals the trace context in the `x-tsession-traceparent` it held before this write.
+   tsession wrote both, and they arrived here together: a consumer that publishes the message it received with its
+   headers, a proxy that forwards headers, a message value produced twice. Or
 3. `TSESSION_OVERWRITE_TRACEPARENT=true` (`runtime.Config.OverwriteTraceparent`); see the compatibility note.
 
 So a system without application tracing has the wire it had before, plus one key. The test client
 (`sdk/client`, `Session.Inject`) follows the same rule.
 
 **Reading** (`core.ExtractSpanContext`). The session comes from `x-tsession-id`; without it nothing is read. The trace
-and parent span come from `x-tsession-traceparent`. If that key is absent or does not parse (four `-`-separated
-fields, a 32-character trace id and a 16-character span id), they come from `traceparent`, judged the same way. If
-neither parses, the event still joins the session, with a new trace id and no parent.
+and parent span come from `x-tsession-traceparent` when that key is current: the clock value after its `;` equals
+the carrier's `x-tsession-hlc`, or the carrier has no `x-tsession-hlc`. Otherwise, and when the key is absent or
+its trace context does not parse (four `-`-separated fields, a 32-character trace id and a 16-character span id),
+they come from `traceparent`, judged the same way. If neither parses, the event still joins the session, with a new
+trace id and no parent.
+
+The clock value is what ties `x-tsession-traceparent` to the hop that wrote it. A service on an SDK that predates
+the key and passes a carrier on with its keys copied (a retry or dead-letter topic, a forwarded request) writes its
+own span into `traceparent` and a new `x-tsession-hlc`, and copies the `x-tsession-traceparent` it does not know.
+The receiver sees that the two clock values differ and reads `traceparent`, which names that service's span. Two
+hops never write the same clock value on one carrier: a service that received it has moved its clock past the value
+it received before it writes its own.
 
 **Order of instrumentation.** On an HTTP client the application's tracing transport may wrap tsession's (`thttp`
 or the patched default transport) or be wrapped by it; on a gRPC client its interceptor or stats handler may run
@@ -336,31 +345,73 @@ before or after tsession's. Run first, it has set `traceparent` and tsession lea
 `x-tsession-traceparent`.
 
 **Compatibility with SDKs that predate `x-tsession-traceparent`** ("old": they write and read `traceparent` only,
-and overwrite the application's). Per hop:
+and overwrite the application's). The tables below are produced by `core.TestPropagationMatrix`, which runs every
+combination against the current code and a copy of the old logic, and fails when this file differs from its output.
+"Application tracing writes before tsession" means the application set `traceparent` on the request or message
+before tsession's instrumentation ran; "after" means its instrumentation ran last.
 
-| Sender | Receiver | Application `traceparent` on the request | tsession parent link | Application's trace |
+<!-- matrix:begin (written by core.TestPropagationMatrix; do not edit) -->
+Sender calls receiver:
+
+| Sender SDK | Application tracing on the sender | Receiver SDK | Receiver's tsession parent | Application's `traceparent` |
 |---|---|---|---|---|
-| any | any | none | correct | (none) |
-| new | new | set | correct | intact |
-| new | old | set | wrong: see below | intact |
-| old | old or new | set, tsession injects last | correct | broken: its `traceparent` is replaced |
-| old | old or new | set, application tracing writes last | wrong: see below | intact |
+| old | none | old | correct | (none) |
+| old | none | new | correct | (none) |
+| old | writes before tsession | old | correct | replaced |
+| old | writes before tsession | new | correct | replaced |
+| old | writes after tsession | old | the application's span | intact |
+| old | writes after tsession | new | the application's span | intact |
+| new | none | old | correct | (none) |
+| new | none | new | correct | (none) |
+| new | writes before tsession | old | the application's span | intact |
+| new | writes before tsession | new | correct | intact |
+| new | writes after tsession | old | the application's span | intact |
+| new | writes after tsession | new | correct | intact |
+| new, overwrite setting on | none | old | correct | (none) |
+| new, overwrite setting on | none | new | correct | (none) |
+| new, overwrite setting on | writes before tsession | old | correct | replaced |
+| new, overwrite setting on | writes before tsession | new | correct | replaced |
+| new, overwrite setting on | writes after tsession | old | the application's span | intact |
+| new, overwrite setting on | writes after tsession | new | correct | intact |
 
-"Wrong" means: the receiver reads the application's ids from `traceparent`. Its events are still recorded in the
-session (`x-tsession-id` arrives as before), but they carry the application's trace id, and their parent (for a
-worker, also its link to the publish span) is the application's span id, which no recorded event has. Nothing
-downstream of that receiver is affected beyond inheriting that trace id.
+Sender calls a forwarder, which passes the keys it received on to the receiver. The receiver's parent should be
+the forwarder's span. Combinations that are not listed link correctly:
 
-The new-sender, old-receiver row is the one this version changes for the worse: the same two services had correct
-tsession links and a broken application trace before. To avoid it, upgrade receivers (servers, consumers) before
-senders, or set `TSESSION_OVERWRITE_TRACEPARENT=true` on upgraded senders until their receivers are upgraded. With
-the setting a new sender writes `traceparent` as an old one does (and `x-tsession-traceparent` as well), with the
-same cost to the application's trace. Where the application's tracing writes after tsession, the setting changes
-nothing.
+| Forwarder SDK | Application tracing on the forwarder | Receiver SDK | First sender (SDK / application tracing) | Receiver's tsession parent |
+|---|---|---|---|---|
+| old | writes after tsession | old | any | the application's span |
+| old | writes after tsession | new | any | the application's span |
+| new | none | old | old / none; old / writes before tsession | the first sender's span |
+| new | none | old | old / writes after tsession; new / writes before tsession; new / writes after tsession; new, overwrite setting on / writes after tsession | the span of the first sender's application tracing |
+| new | writes before tsession | old | any | the application's span |
+| new | writes after tsession | old | any | the application's span |
+| new, overwrite setting on | writes after tsession | old | any | the application's span |
 
-One more case needs an old receiver: a new service that passes on headers it received from an old sender (a
-republished message, a forwarded request) cannot tell that the `traceparent` among them is tsession's, and leaves it.
-A new receiver reads `x-tsession-traceparent` and links correctly; an old one links to the span of the first sender.
+111 of the 162 forwarded combinations link correctly.
+<!-- matrix:end -->
+
+Where the parent is not correct, the receiver's events are still recorded in the session (`x-tsession-id` arrives as
+before), but they hang from the wrong place:
+- "the application's span": the receiver read the application's ids from `traceparent`. Its events carry the
+  application's trace id, and their parent (for a worker, also its link to the publish span) is the application's
+  span id, which no recorded event has. Everything downstream of the receiver inherits that trace id.
+- "the first sender's span": the events are in the right trace, as children of the first sender's span instead of
+  the forwarder's.
+
+What follows from the tables:
+- **A new receiver never does worse than an old one.** The only rows in which a new receiver has the wrong parent
+  are those with an old SDK on the last hop and application tracing writing after it, which were wrong before.
+  Upgrade receivers (servers, consumers) before the services that call them, and no link gets worse at any step.
+- **A new sender in front of an old receiver** loses the link when the sender runs application tracing: the old
+  receiver reads the application's `traceparent`, which tsession no longer replaces. The same two services had
+  correct tsession links and a broken application trace before. If such a sender must be upgraded first, set
+  `TSESSION_OVERWRITE_TRACEPARENT=true` on it until its receivers are upgraded. With the setting a new SDK writes
+  `traceparent` as an old one does (and `x-tsession-traceparent` as well), with the same cost to the application's
+  trace. Where the application's tracing writes after tsession, the setting changes nothing, as before.
+- **A new forwarder in front of an old receiver** leaves a `traceparent` it received and passes on, unless that is a
+  copy of the `x-tsession-traceparent` that came with it: it cannot tell an old sender's `traceparent` from an
+  application's. The old receiver then links to the first sender, or reads the ids of the first sender's
+  application tracing. The setting on the forwarder restores these links too.
 
 ### Bindings
 Implements `docs/BINDING.md` (control plane half).

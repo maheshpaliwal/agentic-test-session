@@ -83,12 +83,14 @@ func (c sqsAttrs) Set(key, val string)   { sqsCarrier(c).Set(key, val) }
 
 // stale reports which carrier attributes c already has from an earlier
 // publish: a compact attribute that holds a session id (an application
-// attribute of that name does not), and a traceparent equal to
-// x-tsession-traceparent, which tsession wrote.
+// attribute of that name does not), and a traceparent equal to the trace
+// context in x-tsession-traceparent, which tsession wrote (the rule of
+// core.WriteTraceparent).
 func (c sqsAttrs) stale() (compact, traceparent bool) {
 	q, err := url.ParseQuery(c.Get(ctxAttr))
 	tp := c.Get(core.KeyTraceparent)
-	return err == nil && q.Get(core.KeySession) != "", tp != "" && tp == c.Get(core.KeyTSessionTraceparent)
+	own, _, _ := strings.Cut(c.Get(core.KeyTSessionTraceparent), ";")
+	return err == nil && q.Get(core.KeySession) != "", tp != "" && tp == own
 }
 
 func encodeTS(m core.MapCarrier) string {

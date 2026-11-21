@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,12 @@ func propSetup(t *testing.T, c Config) (context.Context, SpanContext) {
 
 func tpOf(sc SpanContext) string { return "00-" + sc.TraceID + "-" + sc.SpanID + "-01" }
 
+// ownOf returns the trace context in c's x-tsession-traceparent, or "" when
+// the key is absent or is not bound to c's x-tsession-hlc.
+func ownOf(c Carrier) string {
+	return ownTraceparent(c.Get(KeyTSessionTraceparent), c.Get(KeyHLC))
+}
+
 // oldExtract is ExtractSpanContext as SDKs before x-tsession-traceparent
 // implemented it: the trace context comes from traceparent only.
 func oldExtract(c Carrier) (SpanContext, bool) {
@@ -36,27 +43,30 @@ func oldExtract(c Carrier) (SpanContext, bool) {
 	} else {
 		sc.TraceID = NewTraceID()
 	}
+	if h := c.Get(KeyHLC); h != "" {
+		sc.HLC, _ = strconv.ParseUint(h, 10, 64)
+	}
 	return sc, true
 }
 
-// oldInject is what those SDKs wrote.
+// oldInject is Inject as those SDKs implemented it.
 func oldInject(c Carrier, sc SpanContext) {
 	c.Set(KeyTraceparent, tpOf(sc))
 	c.Set(KeySession, sc.SessionID)
-	c.Set(KeyHLC, "1")
+	c.Set(KeyHLC, strconv.FormatUint(HLCNow(), 10))
 }
 
 func TestInjectWritesBothKeysWhenCarrierHasNone(t *testing.T) {
 	ctx, sc := propSetup(t, Config{})
 	for name, c := range map[string]Carrier{"map": MapCarrier{}, "http": HTTPHeaderCarrier(http.Header{})} {
 		Inject(ctx, c)
-		if got := c.Get(KeyTSessionTraceparent); got != tpOf(sc) {
-			t.Errorf("%s: %s = %q, want %q", name, KeyTSessionTraceparent, got, tpOf(sc))
+		if got, want := c.Get(KeyTSessionTraceparent), tpOf(sc)+";"+c.Get(KeyHLC); got != want {
+			t.Errorf("%s: %s = %q, want %q", name, KeyTSessionTraceparent, got, want)
 		}
 		if got := c.Get(KeyTraceparent); got != tpOf(sc) {
 			t.Errorf("%s: traceparent = %q, want tsession's %q", name, got, tpOf(sc))
 		}
-		if c.Get(KeySession) != "s1" || c.Get(KeyHLC) == "" {
+		if _, err := strconv.ParseUint(c.Get(KeyHLC), 10, 64); c.Get(KeySession) != "s1" || err != nil {
 			t.Errorf("%s: session or clock missing", name)
 		}
 	}
@@ -74,8 +84,8 @@ func TestInjectLeavesApplicationTraceparent(t *testing.T) {
 	if h.Get("Tracestate") != "vendor=1" {
 		t.Fatal("tracestate changed")
 	}
-	if got := h.Get(KeyTSessionTraceparent); got != tpOf(sc) {
-		t.Fatalf("%s = %q, want %q", KeyTSessionTraceparent, got, tpOf(sc))
+	if got := ownOf(HTTPHeaderCarrier(h)); got != tpOf(sc) {
+		t.Fatalf("%s holds %q, want %q", KeyTSessionTraceparent, got, tpOf(sc))
 	}
 	got, ok := ExtractSpanContext(HTTPHeaderCarrier(h))
 	if !ok || got.TraceID != sc.TraceID || got.SpanID != sc.SpanID {
@@ -92,15 +102,18 @@ func TestInjectReplacesItsOwnStaleValues(t *testing.T) {
 	first := SpanContext{SessionID: "s1", TraceID: NewTraceID(), SpanID: NewSpanID()}
 	c := MapCarrier{}
 	Inject(ContextWith(context.Background(), first), c)
+	if c.Get(KeyTraceparent) != tpOf(first) || ownOf(c) != tpOf(first) {
+		t.Fatalf("first inject: %v", c)
+	}
 	Inject(ctx, c)
-	if c.Get(KeyTSessionTraceparent) != tpOf(sc) || c.Get(KeyTraceparent) != tpOf(sc) {
+	if ownOf(c) != tpOf(sc) || c.Get(KeyTraceparent) != tpOf(sc) {
 		t.Fatalf("stale context left behind: %v", c)
 	}
 
 	// With the application's traceparent in between, only the own key moves.
-	c = MapCarrier{KeyTraceparent: appTP, KeyTSessionTraceparent: tpOf(first)}
+	c = MapCarrier{KeyTraceparent: appTP, KeyTSessionTraceparent: tpOf(first) + ";7", KeyHLC: "7"}
 	Inject(ctx, c)
-	if c.Get(KeyTSessionTraceparent) != tpOf(sc) || c.Get(KeyTraceparent) != appTP {
+	if ownOf(c) != tpOf(sc) || c.Get(KeyTraceparent) != appTP {
 		t.Fatalf("got %v", c)
 	}
 }
@@ -109,7 +122,7 @@ func TestInjectOverwriteTraceparentSetting(t *testing.T) {
 	ctx, sc := propSetup(t, Config{OverwriteTraceparent: true})
 	c := MapCarrier{KeyTraceparent: appTP}
 	Inject(ctx, c)
-	if c.Get(KeyTraceparent) != tpOf(sc) || c.Get(KeyTSessionTraceparent) != tpOf(sc) {
+	if c.Get(KeyTraceparent) != tpOf(sc) || ownOf(c) != tpOf(sc) {
 		t.Fatalf("opt-out did not overwrite: %v", c)
 	}
 	// What the setting is for: an old reader now links correctly.
@@ -138,12 +151,23 @@ func TestExtractSpanContextSources(t *testing.T) {
 		c           MapCarrier
 		trace, span string // "" trace: any fresh id
 	}{
-		{"own key preferred", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own, KeyTraceparent: tp}, ownTrace, ownSpan},
-		{"own key alone", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own}, ownTrace, ownSpan},
-		{"old upstream: traceparent only", MapCarrier{KeySession: "s1", KeyTraceparent: tp}, tpTrace, tpSpan},
-		{"malformed own key falls back", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: "00-zz-01", KeyTraceparent: tp}, tpTrace, tpSpan},
+		{"own key preferred", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";7", KeyHLC: "7", KeyTraceparent: tp}, ownTrace, ownSpan},
+		{"own key alone", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";7", KeyHLC: "7"}, ownTrace, ownSpan},
+		{"old upstream: traceparent only", MapCarrier{KeySession: "s1", KeyTraceparent: tp, KeyHLC: "7"}, tpTrace, tpSpan},
+		// The clock was replaced after the own key was written: an old SDK
+		// passed the carrier on and wrote its context into traceparent.
+		{"own key out of date", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";7", KeyHLC: "8", KeyTraceparent: tp}, tpTrace, tpSpan},
+		{"own key out of date, no traceparent", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";7", KeyHLC: "8"}, "", ""},
+		// The clock was dropped on the way (an allow-list): no old SDK did
+		// that, it always writes one.
+		{"clock dropped", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";7", KeyTraceparent: tp}, ownTrace, ownSpan},
+		{"own key without a clock value", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own, KeyHLC: "7", KeyTraceparent: tp}, tpTrace, tpSpan},
+		{"own key with an empty clock value", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";", KeyTraceparent: tp}, tpTrace, tpSpan},
+		{"malformed own key falls back", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: "00-zz-01;7", KeyHLC: "7", KeyTraceparent: tp}, tpTrace, tpSpan},
+		// Two values joined into one by a proxy.
+		{"joined own key falls back", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: own + ";7, " + own + ";7", KeyHLC: "7", KeyTraceparent: tp}, tpTrace, tpSpan},
 		{"empty own key falls back", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: "", KeyTraceparent: tp}, tpTrace, tpSpan},
-		{"both malformed", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: "x", KeyTraceparent: "y"}, "", ""},
+		{"both malformed", MapCarrier{KeySession: "s1", KeyTSessionTraceparent: "x;7", KeyHLC: "7", KeyTraceparent: "y"}, "", ""},
 		{"neither", MapCarrier{KeySession: "s1"}, "", ""},
 	} {
 		sc, ok := ExtractSpanContext(tc.c)
@@ -154,51 +178,80 @@ func TestExtractSpanContextSources(t *testing.T) {
 			t.Errorf("%s: got trace %q span %q", tc.name, sc.TraceID, sc.SpanID)
 		}
 	}
-	if _, ok := ExtractSpanContext(MapCarrier{KeyTSessionTraceparent: own, KeyTraceparent: tp}); ok {
+	if _, ok := ExtractSpanContext(MapCarrier{KeyTSessionTraceparent: own + ";7", KeyHLC: "7", KeyTraceparent: tp}); ok {
 		t.Error("a trace context without a session id is not a session")
 	}
 }
 
-// The version matrix of docs/PROTOCOL.md ("Trace context"), one row per case.
-func TestPropagationAcrossSDKVersions(t *testing.T) {
-	ctx, sc := propSetup(t, Config{})
+// The defect the clock binding exists for: a new sender, then a service on an
+// old SDK that passes the carrier on with its keys copied (a retry topic, a
+// reverse proxy), then a new receiver. The old SDK writes its own span into
+// traceparent and x-tsession-hlc and copies the x-tsession-traceparent it does
+// not know; the receiver must link to the old service, not to the sender.
+func TestExtractIgnoresOwnKeyCopiedByOldHop(t *testing.T) {
+	ctx, sender := propSetup(t, Config{})
+	for _, app := range []string{"", appTP} {
+		c := MapCarrier{}
+		if app != "" {
+			c[KeyTraceparent] = app // the sender's application tracing
+		}
+		Inject(ctx, c)
 
-	t.Run("old upstream, new downstream", func(t *testing.T) {
-		c := MapCarrier{}
-		oldInject(c, sc)
+		in, _ := oldExtract(c)
+		HLCObserve(in.HLC) // as the old SDK's ingress span did
+		fwd := SpanContext{SessionID: "s1", TraceID: in.TraceID, SpanID: NewSpanID()}
+		oldInject(c, fwd)
+		if c.Get(KeyTSessionTraceparent) == "" || ownOf(c) != "" {
+			t.Fatalf("app=%q: want the sender's own key still on the carrier and out of date: %v", app, c)
+		}
+
 		got, ok := ExtractSpanContext(c)
-		if !ok || got.TraceID != sc.TraceID || got.SpanID != sc.SpanID {
-			t.Fatalf("got %+v", got)
+		if !ok || got.SpanID != fwd.SpanID || got.TraceID != fwd.TraceID {
+			t.Errorf("app=%q: receiver's parent is %s/%s, want the forwarder's %s/%s (the sender's span is %s)",
+				app, got.TraceID, got.SpanID, fwd.TraceID, fwd.SpanID, sender.SpanID)
 		}
-	})
-	t.Run("new upstream, old downstream, no application traceparent", func(t *testing.T) {
-		c := MapCarrier{}
-		Inject(ctx, c)
-		got, ok := oldExtract(c)
-		if !ok || got.TraceID != sc.TraceID || got.SpanID != sc.SpanID {
-			t.Fatalf("got %+v", got)
+	}
+}
+
+// No hop that received a carrier can write the clock value the carrier came
+// with: observing it moves the local clock past it.
+func TestForwarderClockDiffersFromSenders(t *testing.T) {
+	ctx, _ := propSetup(t, Config{})
+	c := MapCarrier{}
+	Inject(ctx, c)
+	// A sender whose clock is ahead of this process by less than the skew
+	// limit, which is the case where the local clock alone would not do.
+	h, _ := strconv.ParseUint(c[KeyHLC], 10, 64)
+	ahead := h + MaxHLCSkew/2
+	c[KeyHLC] = strconv.FormatUint(ahead, 10)
+	in, _ := ExtractSpanContext(c)
+	HLCObserve(in.HLC)
+	if now := HLCNow(); now <= ahead {
+		t.Fatalf("forwarder's clock %d is not past the sender's %d", now, ahead)
+	}
+}
+
+// The "equals the previous own key" rule compares the trace context inside
+// the own key, whatever clock value follows it.
+func TestWriteTraceparentReplacesCopyOfOwnKey(t *testing.T) {
+	propSetup(t, Config{})
+	const first, next = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", "00-0af7651916cd43dd8448eb211c80319c-1111111111111111-01"
+	for _, tc := range []struct {
+		name string
+		c    MapCarrier
+		want string // traceparent afterwards
+	}{
+		{"copy of the own key", MapCarrier{KeyTraceparent: first, KeyTSessionTraceparent: first + ";7", KeyHLC: "7"}, next},
+		{"copy of an out-of-date own key", MapCarrier{KeyTraceparent: first, KeyTSessionTraceparent: first + ";7", KeyHLC: "9"}, next},
+		{"application's", MapCarrier{KeyTraceparent: appTP, KeyTSessionTraceparent: first + ";7", KeyHLC: "7"}, appTP},
+		{"application's, no own key", MapCarrier{KeyTraceparent: appTP}, appTP},
+		{"none", MapCarrier{}, next},
+	} {
+		WriteTraceparent(tc.c, next, "12")
+		if tc.c[KeyTraceparent] != tc.want || tc.c[KeyTSessionTraceparent] != next+";12" || tc.c[KeyHLC] != "12" {
+			t.Errorf("%s: %v", tc.name, tc.c)
 		}
-	})
-	t.Run("new upstream, old downstream, application traceparent", func(t *testing.T) {
-		c := MapCarrier{KeyTraceparent: appTP}
-		Inject(ctx, c)
-		got, ok := oldExtract(c)
-		// The event still joins the session, with the application's ids.
-		if !ok || got.SessionID != "s1" {
-			t.Fatal("session lost")
-		}
-		if got.SpanID == sc.SpanID || !strings.Contains(appTP, got.TraceID+"-"+got.SpanID) {
-			t.Fatalf("old reader got %+v; the note says it reads the application's ids", got)
-		}
-	})
-	t.Run("old upstream overwrote, new downstream", func(t *testing.T) {
-		c := MapCarrier{KeyTraceparent: appTP}
-		oldInject(c, sc) // the defect: the application's header is gone
-		got, _ := ExtractSpanContext(c)
-		if got.SpanID != sc.SpanID {
-			t.Fatalf("got %+v", got)
-		}
-	})
+	}
 }
 
 func TestBeginIngressParentFromOwnKey(t *testing.T) {
@@ -206,7 +259,7 @@ func TestBeginIngressParentFromOwnKey(t *testing.T) {
 	rec := &MemRecorder{}
 	SetRecorder(rec)
 	t.Cleanup(func() { SetRecorder(nil) })
-	c := MapCarrier{KeySession: "s1", KeyTSessionTraceparent: tpOf(sc), KeyTraceparent: appTP}
+	c := MapCarrier{KeySession: "s1", KeyTSessionTraceparent: tpOf(sc) + ";7", KeyHLC: "7", KeyTraceparent: appTP}
 	_, sp := BeginIngress(context.Background(), KindAPIIn, "in", c)
 	if sp == nil {
 		t.Fatal("no span")

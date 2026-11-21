@@ -89,8 +89,8 @@ func TestTransportWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	rec, root := traceparentSetup(t, core.Config{})
 	got, out := roundTrip(t, rec, root, &Transport{Base: &http.Transport{}})
 	want := "00-" + root.TraceID + "-" + out.SpanID + "-01"
-	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want {
-		t.Fatalf("traceparent %q, own key %q, want both %q", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want)
+	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want+";"+got.Get(core.KeyHLC) {
+		t.Fatalf("traceparent %q, own key %q, want %q and that with the clock", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want)
 	}
 }
 
@@ -101,8 +101,8 @@ func TestTransportOverwriteTraceparentSetting(t *testing.T) {
 	rec, root := traceparentSetup(t, core.Config{OverwriteTraceparent: true})
 	got, out := roundTrip(t, rec, root, otelLike{next: &Transport{Base: &http.Transport{}}, tp: appTraceparent})
 	want := "00-" + root.TraceID + "-" + out.SpanID + "-01"
-	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want {
-		t.Fatalf("traceparent %q, own key %q, want both %q", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want)
+	if got.Get("Traceparent") != want || got.Get(core.KeyTSessionTraceparent) != want+";"+got.Get(core.KeyHLC) {
+		t.Fatalf("traceparent %q, own key %q, want %q and that with the clock", got.Get("Traceparent"), got.Get(core.KeyTSessionTraceparent), want)
 	}
 }
 
