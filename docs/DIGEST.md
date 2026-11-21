@@ -21,12 +21,14 @@ name by the SDK, like everything recorded).
 1. **Verdict**: `failed`, `incomplete`, `empty` or `passed`; the session state; whether the recording is
    complete and, if not, why; the service instances whose delivery the control plane could not confirm
    (`delivery unconfirmed`, a warning that does not change the verdict); counts by service, kind, entity and flag. A session that is not sealed is marked
-   live: everything in the digest can still change.
-2. **Failures**: every failed event (service, kind, name, error), with the chain of its ancestors from the root
+   live: everything in the digest can still change, and whether its recording is complete is `not yet known`.
+2. **Failures**: the failed events (service, kind, name, error; those that did the same thing in the same
+   place as one entry with a count and the first one's error as recorded), with the chain of its ancestors from the root
    request down. An async edge (a worker run under the publish that caused it) is marked `~>`. At most 5
    ancestors are listed: the root and the 4 nearest.
 3. **Mutations**: per store, entity and key, each change with its operation, transaction outcome (`effective`,
-   `rolled back`, `outcome unknown`), the changed fields (`before -> after`, `∅` for no value) and the flags of
+   `rolled back`, `outcome unknown`), for one that was rolled back the first statement of its transaction that
+   failed after it, the changed fields (`before -> after`, `∅` for no value) and the flags of
    its event. A change is marked `UNCERTAIN` when one of those flags is a `core.UncertainFlag` (`pk_unknown`,
    `pk_not_unique`, `after_unavailable`, `image_skipped:...`, ...; see `contrib/tsql/doc.go`): its key or row
    image is incomplete, so its values are not established fact. An update whose new values were not captured
@@ -41,7 +43,8 @@ name by the SDK, like everything recorded).
 5. **Omitted**: what was left out to fit the budget, each with the commands that print it. That includes the
    verdict's own text: a reason that was shortened, and the unconfirmed instances beyond the first four, are
    counted here (`tracectl status <id>` prints them whole).
-6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`).
+6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`), and a
+   note that they need the `--cp` and `--collector` the digest was read with, when it was read with them.
 
 The output for the same recorded session is the same, byte for byte: entities are sorted by the number of their
 mutations, most first (so that a cut drops the least changed), then by store, entity and key, failures and changes by `seq`, counts by size and then name (in JSON: by name).
@@ -100,7 +103,7 @@ Lists are never `null`.
 | `tree` | list | the lines of the call tree in pre-order, see below |
 | `omitted` | list | `section` (`verdict`, `counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out. `verdict`: how many of `incomplete_reasons` and `delivery_unconfirmed` are shortened or not listed |
 | `drill_down` | list | `command`, `prints` |
-| `drill_down_note` | string | present when the digest was read with `--cp` or `--collector` on the command line: the commands of `drill_down` need the same flags |
+| `drill_down_note` | string | present when the digest was read with `--cp` or `--collector` on the command line: the commands of `drill_down` need the same flags. Left out when the budget is tight |
 | `max_bytes` | number | the budget this digest was made for |
 
 A failure: `seq`, `service`, `kind`, `name`, `error`, `in_tree` (false: the call tree does not hold the event),
@@ -112,23 +115,23 @@ Failed events that did the same thing in the same place (same service, kind, nor
 the same chain of ancestors) are one entry with `count` (above 1) and `last_seq`; its `seq` and `path` are those
 of the first, and its `name` and `error` are normalised; `first_error` is the first one's error as recorded,
 when normalising took something out of it (the host, the key), and is left out when the budget is tight.
-A failed job is recorded at its start and at its end: when both carry the same error only the
-`worker.start` is listed. `counts.failures` is still the number of failed events.
+`counts.failures` is still the number of failed events.
 In Markdown such an entry reads `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`. The call tree
 merges them the same way, by its own rule (consecutive siblings).
 
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
 `changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`),
-`rolled_back_by` (the `seq` of the first failed event of the transaction of a change that was rolled back; absent
-when none failed), `uncertain`,
+`rolled_back_by` (the `seq` of the first event of the same transaction that failed after a change that was rolled
+back; absent when none did. That it caused the rollback is likely, not recorded), `uncertain`,
 `flags`, `after_unavailable`, `fields`, `fields_omitted`. A field: `field`, `before`, `after`, `hidden` (true when
 the column is masked and changed: `before` and `after` then read the same); the values are
 compact JSON text, clipped, or `null` for no value.
 
 A tree line: `depth` (0 for a root; a line's parent is the nearest line above it with a smaller depth), `seq`,
 `service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome the line would
-otherwise not show: a gRPC status other than `OK`, or an HTTP status of 400 and above as `HTTP 404`), `flags` (the event's flags), `hidden` (lines below it that were left
+otherwise not show: a gRPC status other than `OK`, or an HTTP status of 400 and above as `HTTP 404`; an HTTP
+response too large to be recorded whole has none), `flags` (the event's flags), `hidden` (lines below it that were left
 out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`; its `duration_ns` and
 `mutations` are totals and its `name` is normalised.
 

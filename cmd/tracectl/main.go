@@ -190,13 +190,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		root.Usage()
 		return 2
 	}
-	for flagName, v := range map[string]string{"--cp": *cp, "--collector": *col} {
-		if v != "" && !strings.Contains(v, "://") {
-			fmt.Fprintf(stderr, "tracectl: %s %q is not a URL: it needs a scheme, as in http://%s\n", flagName, v, v)
-			return 2
+	name, rest := root.Arg(0), root.Args()[1:]
+	if name != "version" {
+		for _, u := range []struct{ flag, env, value string }{{"--cp", "TSESSION_CONTROLPLANE_URL", *cp}, {"--collector", "TSESSION_COLLECTOR_URL", *col}} {
+			from, v := u.flag, u.value
+			if v == "" {
+				from, v = "$"+u.env, os.Getenv(u.env)
+			}
+			if v != "" && !strings.Contains(v, "://") {
+				fmt.Fprintf(stderr, "tracectl: %s %q is not a URL: it needs a scheme, as in http://%s\n", from, v, v)
+				return 2
+			}
 		}
 	}
-	name, rest := root.Arg(0), root.Args()[1:]
 	cmd, ok := commands[name]
 	if !ok {
 		fmt.Fprintf(stderr, "tracectl: unknown command %q; run 'tracectl --help' for the list of commands\n", name)

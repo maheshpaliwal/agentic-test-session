@@ -36,10 +36,13 @@ func (c *cli) diff(ctx context.Context, args []string) error {
 			return err
 		}
 		info := s.Info()
-		refs[i] = sessionRef{ID: info.ID, Name: info.Name, Recording: recordingOf(info)}
 		if evs[i], err = s.Events(ctx); err != nil {
 			return err
 		}
+		// What the collector knows of lost events (dropped, quarantined) is in its summary, not in the
+		// session. A summary that cannot be read does not stop the comparison.
+		sum, _ := s.Summary(ctx)
+		refs[i] = sessionRef{ID: info.ID, Name: info.Name, Recording: recordingOf(info, sum)}
 	}
 	rep := diffEvents(evs[0], evs[1], *ignoreCounts)
 	rep.A, rep.B = refs[0], refs[1]
@@ -185,8 +188,8 @@ type sessionRef struct {
 }
 
 // recordingOf is the Recording of a session reference.
-func recordingOf(info client.Info) string {
-	if info.Incomplete || len(info.IncompleteReasons) > 0 || info.SealError != "" {
+func recordingOf(info client.Info, sum client.Summary) string {
+	if sum.Incomplete || info.Incomplete || len(info.IncompleteReasons) > 0 || info.SealError != "" {
 		return "incomplete"
 	}
 	return ""

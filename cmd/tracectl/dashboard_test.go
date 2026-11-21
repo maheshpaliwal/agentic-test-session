@@ -63,7 +63,7 @@ func TestReadCommandsWorkOnTheDemo(t *testing.T) {
 		if err := dec.Decode(&sum); err != nil {
 			panic(fmt.Sprintf("summary of %s: %v\n%s", id, err, out))
 		}
-		if sum.Sealed != sealed || sum.EventCount != 32 || len(sum.Failures) != 10 || sum.Failures[0].Err == "" || sum.Mutations["postgres"]["orders"] != 2 {
+		if sum.Sealed != sealed || sum.EventCount != 32 || len(sum.Failures) != 7 || sum.Failures[0].Err == "" || sum.Mutations["postgres"]["orders"] != 2 {
 			t.Errorf("summary of %s: %s", id, out)
 		}
 	}

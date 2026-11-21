@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -21,16 +22,16 @@ func TestDeliveryShortfallIsShownAndFailsTheGate(t *testing.T) {
 
 	// The gates: the reason is in the message; without the gate nothing fails.
 	g := gates{onError: true, onIncomplete: true, onEmpty: true}
-	err := g.check(info, sum, 0)
+	err := g.check(io.Discard, info, sum, 0)
 	if err == nil || !strings.Contains(err.Error(), "session is incomplete ("+reason+")") {
 		panic(fmt.Sprintf("--fail-on-incomplete: %v", err))
 	}
-	if err := (&gates{onError: true, onEmpty: true}).check(info, sum, 0); err != nil {
+	if err := (&gates{onError: true, onEmpty: true}).check(io.Discard, info, sum, 0); err != nil {
 		panic(fmt.Sprintf("without --fail-on-incomplete: %v", err))
 	}
 	// An unconfirmed delivery is a warning: it does not fail the gate.
 	warn := client.Info{ID: "ts_2", State: "SEALED", DeliveryUnconfirmed: info.DeliveryUnconfirmed}
-	if err := g.check(warn, sum, 0); err != nil {
+	if err := g.check(io.Discard, warn, sum, 0); err != nil {
 		panic(fmt.Sprintf("delivery_unconfirmed alone failed the gate: %v", err))
 	}
 
@@ -155,7 +156,7 @@ func TestSummaryHeaderSaysIncompleteForTheControlPlanesVerdict(t *testing.T) {
 		if !strings.Contains(out.String(), "session    ts_3  slow  (SEALED, incomplete)\n") {
 			panic(fmt.Sprintf("%s:\n%s", name, out.String()))
 		}
-		if err := (&gates{onIncomplete: true}).check(info, sum, 0); err == nil {
+		if err := (&gates{onIncomplete: true}).check(io.Discard, info, sum, 0); err == nil {
 			panic(fmt.Sprintf("%s: the gate passes a session whose header says incomplete", name))
 		}
 	}

@@ -119,9 +119,11 @@ Rolling back:
 - `tracectl digest`: failures merged into one entry keep the first one's error as it was recorded
   (`(the first: "dial tcp 10.0.0.7:8080: connect: connection refused")`, `first_error` in JSON), so the host or
   key that normalising takes out is still there. Left out when the budget is tight.
-- `tracectl digest`: a change that was rolled back names the failed event of its transaction (`ROLLED BACK (its
-  transaction failed at #12)`, `rolled_back_by` in JSON). A digest read with `--cp` or `--collector` on the
-  command line says that its drill-down commands need the same flags (`drill_down_note`).
+- `tracectl digest`: a change that was rolled back names the first event of its transaction that failed after it
+  (`ROLLED BACK (a later statement of its transaction failed: #12)`, `rolled_back_by` in JSON); that this
+  failure caused the rollback is likely, not recorded. A digest read with `--cp` or `--collector` on the
+  command line says that its drill-down commands need the same flags (`drill_down_note`; left out when the
+  budget is tight).
 - The SDK tells the control plane when it stops recording (`stopped` in `POST /v1/delivery`): the sessions
   running at that moment end incomplete, naming the service and instance. `Manager.Health`, `Collector.Health`;
   label `compaction` on `tsession_controlplane_goroutine_panics_total`; "Health and panics" in `docs/CONFIG.md`.
@@ -274,11 +276,11 @@ Rolling back:
 
 ### Changed
 
-- `tracectl digest` lists a failed job once: a `worker.end` that failed with the error of its `worker.start` is
-  not a failure entry of its own (the count of failed events is unchanged). A small budget went on such pairs.
+- `dashboard -demo`: the start of a job carries no error, as the SDK records it (`worker.start` is a point
+  event; a failed job fails at its `worker.end`). The demo session has 7 failed events where it had 10.
 - `tracectl diff` says when a side is incomplete (`note: b is incomplete: ...`, and `"recording": "incomplete"`
   on that side in JSON): what such a side lacks may be events that were lost, not what the run did.
-- `tracectl digest` shows an HTTP status of 400 and above on a request's line (`code HTTP 404`, `"code"` in
+- `tracectl digest` shows an HTTP status of 400 and above on a request's line (`code "HTTP 404"`, `"code"` in
   JSON). A 4xx is not a failed event, so a request the test was refused read like one that went well.
   Requests with different statuses are no longer merged into one line.
 - `--fail-on-incomplete` on a session that is still running prints a note on standard error that it can only

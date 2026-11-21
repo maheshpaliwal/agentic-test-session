@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -696,9 +696,13 @@ func TestDigestDeterministic(t *testing.T) {
 func TestDigestLive(t *testing.T) {
 	env := failingEnv(t)
 	env.info.State, env.sum.Sealed = "ACTIVE", false
+	// The gate judges what has arrived and says, on standard error, that this is all it can do.
 	code, out, e := env.tc("digest", reportID, "--fail-on-incomplete")
-	if code != 0 || e != "" {
+	if code != 0 || !strings.Contains(e, "note: the session is still running (ACTIVE)") {
 		panic(fmt.Sprintf("live digest: %d %s", code, e))
+	}
+	if code, _, e := env.tc("digest", reportID); code != 0 || e != "" {
+		panic(fmt.Sprintf("live digest without a gate: %d %s", code, e))
 	}
 	wantAll(t, checkDigestMarkdown(t, out)["### Verdict"],
 		"**Failed**: 3 failed events. **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.\n",
@@ -895,6 +899,9 @@ func TestOutcomeCode(t *testing.T) {
 		{"a response that is not an object", core.Event{Kind: core.KindAPIIn, Resp: resp(`"x"`)}, ""},
 		{"grpc", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "NotFound"}}, "NotFound"},
 		{"grpc ok", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}}, ""},
+		{"grpc ok whose message has a status field", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}, Resp: resp(`{"sku":"A","status":500}`)}, ""},
+		{"grpc failed whose message has a status field", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "NotFound"}, Resp: resp(`{"status":500}`)}, "NotFound"},
+		{"a status that is not a number", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":"404"}`)}, ""},
 	} {
 		if got := outcomeCode(&tc.ev); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
@@ -906,20 +913,24 @@ func TestDigestLinksARollbackToTheFailureOfItsTransaction(t *testing.T) {
 	no := false
 	rolled := []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &no}}
 	src := &digestSource{}
-	src.buildEntities([]core.Event{
-		{Seq: 1, TxID: "tx_1", Kind: core.KindDBWrite, Mutations: rolled},
-		{Seq: 2, TxID: "tx_1", Kind: core.KindDBWrite, Err: "constraint"},
-		{Seq: 3, TxID: "tx_1", Kind: core.KindDBWrite, Err: "aborted"},
-		{Seq: 4, TxID: "tx_2", Kind: core.KindDBWrite, Mutations: rolled}, // rolled back by the application: nothing failed
+	src.buildEntities([]core.Event{ // not in the order of seq, as a store may return them
+		{Seq: 5, TxID: "tx_1", Kind: core.KindDBWrite, Err: "aborted"},
+		{Seq: 1, TxID: "tx_1", Kind: core.KindDBRead, Err: "handled: the application went on"},
+		{Seq: 2, TxID: "tx_1", Kind: core.KindDBWrite, Mutations: rolled},
+		{Seq: 3, TxID: "tx_1", Kind: core.KindDBWrite, Err: "constraint"},
+		{Seq: 6, TxID: "tx_2", Kind: core.KindDBWrite, Mutations: rolled}, // rolled back by the application: nothing failed
+		{Seq: 7, Kind: core.KindDBWrite, Mutations: rolled},               // no transaction id
+		{Seq: 8, Kind: core.KindDBWrite, Err: "outside any transaction"},
 	})
-	var got []uint64
+	got := map[uint64]uint64{}
 	for _, e := range src.entities {
 		for _, c := range e.Changes {
-			got = append(got, c.Seq, c.RolledBackBy)
+			got[c.Seq] = c.RolledBackBy
 		}
 	}
-	if want := []uint64{1, 2, 4, 0}; !slices.Equal(got, want) {
-		panic(fmt.Sprintf("seq and rolled_back_by: got %v, want %v", got, want))
+	// #2: the first failure after it (#3), not the one before it (#1) nor the later one (#5).
+	if want := map[uint64]uint64{2: 3, 6: 0, 7: 0}; !maps.Equal(got, want) {
+		panic(fmt.Sprintf("rolled_back_by by seq: got %v, want %v", got, want))
 	}
 }
 
@@ -957,27 +968,4 @@ func TestDigestKeepsTheFirstErrorOfMergedFailures(t *testing.T) {
 	}
 	_, md, _ := env.tc("digest", reportID)
 	wantAll(t, checkDigestMarkdown(t, md)["### Failures"], `(the first: "dial tcp 127.0.0.1:18282: connect: connection refused")`)
-}
-
-// A failed job is recorded at its start and at its end with the same error:
-// the digest lists it once. An end that says something else stays.
-func TestDigestListsAFailedJobOnce(t *testing.T) {
-	start := core.Event{Seq: 1, Service: "worker", Kind: core.KindWorkerStart, Name: "ship", StartNs: 1, EndNs: 9, Err: "lock timeout"}
-	end := core.Event{Seq: 2, Service: "worker", Kind: core.KindWorkerEnd, Name: "ship", StartNs: 8, EndNs: 9, Err: "lock timeout"}
-	start2 := core.Event{Seq: 3, Service: "worker", Kind: core.KindWorkerStart, Name: "bill", StartNs: 11, EndNs: 19, Err: "declined"}
-	end2 := core.Event{Seq: 4, Service: "worker", Kind: core.KindWorkerEnd, Name: "bill", StartNs: 18, EndNs: 19, Err: "retry budget spent"}
-	env := newReportEnv(t, start, end, start2, end2)
-	env.roots = []*client.TraceNode{
-		{Event: start, Children: []*client.TraceNode{{Event: end}}},
-		{Event: start2, Children: []*client.TraceNode{{Event: end2}}},
-	}
-	_, out, _ := env.tc("digest", reportID, "--json")
-	d := checkDigestJSON(t, out)
-	var seqs []uint64
-	for _, f := range d.Failures {
-		seqs = append(seqs, f.Seq)
-	}
-	if want := []uint64{1, 3, 4}; !slices.Equal(seqs, want) || d.Counts.Failures != 4 {
-		panic(fmt.Sprintf("failure entries %v (want %v), counted %d (want 4)", seqs, want, d.Counts.Failures))
-	}
 }

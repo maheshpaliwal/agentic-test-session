@@ -95,7 +95,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	} else if _, err := c.stdout.Write(out); err != nil {
 		return err
 	}
-	return g.check(src.rep.info, src.rep.sum, len(src.rep.failures))
+	return g.check(c.stderr, src.rep.info, src.rep.sum, len(src.rep.failures))
 }
 
 // digestRenderer returns the renderer of a --format value.
@@ -244,10 +244,11 @@ type dChange struct {
 	Seq     uint64 `json:"seq"`
 	Op      string `json:"op"`
 	Outcome string `json:"outcome"` // effective, rolled_back or unknown
-	// RolledBackBy is the first failed event of the transaction of a change
-	// that was rolled back: where to look for why the change did not stay.
-	// Absent when no event of that transaction failed (the application
-	// rolled back on its own).
+	// RolledBackBy is the first event of the transaction that failed after a
+	// change that was rolled back: where to look for why the change did not
+	// stay. That the failure caused the rollback is likely, not recorded.
+	// Absent when nothing of the transaction failed after the change (the
+	// application rolled back on its own).
 	RolledBackBy uint64 `json:"rolled_back_by,omitempty"`
 	// Uncertain: a flag says the key or the row image is incomplete, so the
 	// fields below are not established fact.
@@ -377,7 +378,12 @@ func (src *digestSource) buildTree(tr client.Trace) {
 // without the code a request the test was refused reads like one that went
 // well.
 func outcomeCode(e *core.Event) string {
-	if c := e.Attrs["grpc.code"]; c != "" && c != "OK" {
+	if c := e.Attrs["grpc.code"]; c != "" {
+		// A gRPC call: its response is a message of the application, and a
+		// field "status" in it is not an HTTP status.
+		if c == "OK" {
+			return ""
+		}
 		return c
 	}
 	if (e.Kind == core.KindAPIIn || e.Kind == core.KindAPIOut) && len(e.Resp.Inline) > 0 {
@@ -501,21 +507,8 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 	// not three hundred lines: failures that did the same thing in the same
 	// place are listed once, with a count.
 	groups := map[string]int{} // signature -> index in src.failures
-	errOf := map[uint64]string{}
-	for _, f := range src.rep.failures {
-		errOf[f.Seq] = f.Err
-	}
 	for _, f := range src.rep.failures {
 		p, ok := places[f.Seq]
-		// A job that fails is recorded twice with the same error, at its
-		// start (the span of the whole job) and at its end. The end says
-		// nothing the start does not, and the pair of every failed job is
-		// what a small budget would be spent on: the start stands for both.
-		if n := len(p.path); f.Kind == core.KindWorkerEnd && n > 0 {
-			if par := p.path[n-1]; par.Kind == string(core.KindWorkerStart) && errOf[par.Seq] == f.Err {
-				continue
-			}
-		}
 		if p.path == nil {
 			p.path = []dStep{} // "path" is always a list, also for a failed root
 		}
@@ -547,14 +540,25 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 func (src *digestSource) buildEntities(evs []core.Event) {
 	type key struct{ store, entity, pk string }
 	byKey := map[key]*dEntity{}
-	// The first failed event of every transaction.
-	txFailed := map[string]uint64{}
+	// The failed events of every transaction, by seq.
+	txFailed := map[string][]uint64{}
 	for i := range evs {
 		if e := &evs[i]; e.TxID != "" && e.Err != "" {
-			if _, seen := txFailed[e.TxID]; !seen {
-				txFailed[e.TxID] = e.Seq
-			}
+			txFailed[e.TxID] = append(txFailed[e.TxID], e.Seq)
 		}
+	}
+	for _, seqs := range txFailed {
+		slices.Sort(seqs)
+	}
+	// failedAfter is the first failed event of the transaction after seq; 0
+	// when there is none. One before it did not undo a change made later:
+	// the application went on after it.
+	failedAfter := func(tx string, seq uint64) uint64 {
+		seqs := txFailed[tx]
+		if i, _ := slices.BinarySearch(seqs, seq+1); i < len(seqs) {
+			return seqs[i]
+		}
+		return 0
 	}
 	for i := range evs {
 		e := &evs[i]
@@ -585,7 +589,7 @@ func (src *digestSource) buildEntities(evs []core.Event) {
 			default:
 				ent.RolledBack++
 				ch.Outcome = "rolled_back"
-				ch.RolledBackBy = txFailed[e.TxID]
+				ch.RolledBackBy = failedAfter(e.TxID, e.Seq)
 			}
 			if uncertain {
 				ent.Uncertain++
@@ -795,7 +799,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 			{"tracectl events " + id + " --errors", "the failed events"},
 		},
 	}
-	if src.urlFlags {
+	if src.urlFlags && !tight {
 		d.DrillDownNote = drillDownNote
 	}
 	// The reasons are part of the verdict and always stay; what is cut of
@@ -1088,7 +1092,7 @@ func mdEntity(b *strings.Builder, e *dEntity) {
 		outcome := map[string]string{"effective": "effective", "rolled_back": "ROLLED BACK"}[c.Outcome]
 		fmt.Fprintf(b, "  #%d %s %s", c.Seq, mdToken(c.Op), cmp.Or(outcome, "outcome unknown"))
 		if c.RolledBackBy != 0 {
-			fmt.Fprintf(b, " (its transaction failed at #%d)", c.RolledBackBy)
+			fmt.Fprintf(b, " (a later statement of its transaction failed: #%d)", c.RolledBackBy)
 		}
 		if c.Uncertain {
 			b.WriteString(" UNCERTAIN")

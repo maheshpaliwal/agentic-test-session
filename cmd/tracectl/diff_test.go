@@ -563,13 +563,17 @@ func TestCLIDiffUsage(t *testing.T) {
 }
 
 func TestDiffNamesAnIncompleteSide(t *testing.T) {
-	if got := recordingOf(client.Info{State: "SEALED"}); got != "" {
+	if got := recordingOf(client.Info{State: "SEALED"}, client.Summary{}); got != "" {
 		panic(fmt.Sprintf("complete: %q", got))
 	}
 	for _, info := range []client.Info{{Incomplete: true}, {IncompleteReasons: []string{"x"}}, {SealError: "x"}} {
-		if got := recordingOf(info); got != "incomplete" {
+		if got := recordingOf(info, client.Summary{}); got != "incomplete" {
 			panic(fmt.Sprintf("%+v: %q", info, got))
 		}
+	}
+	// What only the collector knows: events it was told were dropped.
+	if got := recordingOf(client.Info{State: "SEALED"}, client.Summary{Incomplete: true}); got != "incomplete" {
+		panic(fmt.Sprintf("incomplete by the collector's summary: %q", got))
 	}
 	var b bytes.Buffer
 	printDiff(&b, diffReport{A: sessionRef{ID: "ts_a", Name: "a"}, B: sessionRef{ID: "ts_b", Name: "b", Recording: "incomplete"}})

@@ -244,7 +244,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 		}
 		printSummary(c.stderr, s.Info(), sum)
 		c.hintUntagged(byID, sum)
-		return g.check(s.Info(), sum, len(sum.Failures)), nil
+		return g.check(c.stderr, s.Info(), sum, len(sum.Failures)), nil
 	}
 	rep, err := loadReport(ctx, s)
 	if err != nil {
@@ -252,7 +252,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	}
 	printSummary(c.stderr, rep.info, rep.sum)
 	c.hintUntagged(byID, rep.sum)
-	gateErr = g.check(rep.info, rep.sum, len(rep.failures))
+	gateErr = g.check(c.stderr, rep.info, rep.sum, len(rep.failures))
 	out, err := render(rep)
 	if err != nil {
 		return gateErr, err

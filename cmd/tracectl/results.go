@@ -37,7 +37,7 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	} else {
 		printSummary(c.stdout, s.Info(), sum)
 	}
-	return g.check(s.Info(), sum, len(sum.Failures))
+	return g.check(c.stderr, s.Info(), sum, len(sum.Failures))
 }
 
 // gates are the --fail-on-* checks of summary, report, digest and run.
@@ -52,7 +52,7 @@ func (g *gates) register(fs *flag.FlagSet) {
 
 // check returns a checkError naming every gate the session fails; failures
 // is the number of failed events the caller found.
-func (g *gates) check(info client.Info, sum client.Summary, failures int) error {
+func (g *gates) check(stderr io.Writer, info client.Info, sum client.Summary, failures int) error {
 	var failed []string
 	if g.onError && failures > 0 {
 		failed = append(failed, fmt.Sprintf("%d failed event(s)", failures))
@@ -76,7 +76,8 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 		// verdict on it is given when it ends. The gate judges what there is
 		// and says so; the exit status stays what it was for scripts that
 		// look at a session while it runs.
-		fmt.Fprintf(os.Stderr, "tracectl: note: the session is still running (%s): --fail-on-incomplete can only judge what has arrived so far; stop it first for a verdict (tracectl stop %s --wait)\n", info.State, info.ID)
+		fmt.Fprintf(stderr, "tracectl: note: the session is still running (%s): --fail-on-incomplete can only judge what has arrived so far; stop it first for a verdict (tracectl stop %s --wait)\n",
+			dataText(info.State, 20), dataText(info.ID, 64))
 	}
 	if g.onUnconfirmed && !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != "") {
 		// The stricter gate on its own: a session known to have lost events

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -17,27 +18,27 @@ func TestFailOnUnconfirmed(t *testing.T) {
 	const warn = "service orders-api (instance o-1): it follows the control plane, but no delivery report of it has arrived since it connected (its log says why); the collector has no events from it for this session, so whether it recorded any is unknown"
 	sum := client.Summary{EventCount: 1}
 	unconfirmed := client.Info{ID: "ts_1", State: "SEALED", DeliveryUnconfirmed: []string{warn, "another"}}
-	if err := (&gates{onError: true, onIncomplete: true, onEmpty: true}).check(unconfirmed, sum, 0); err != nil {
+	if err := (&gates{onError: true, onIncomplete: true, onEmpty: true}).check(io.Discard, unconfirmed, sum, 0); err != nil {
 		panic(fmt.Sprintf("without the flag: %v", err))
 	}
-	err := (&gates{onUnconfirmed: true}).check(unconfirmed, sum, 0)
+	err := (&gates{onUnconfirmed: true}).check(io.Discard, unconfirmed, sum, 0)
 	if err == nil || err.Error() != "check failed: delivery is unconfirmed ("+warn+"; another)" {
 		panic(fmt.Sprintf("--fail-on-unconfirmed: %v", err))
 	}
-	if err := (&gates{onUnconfirmed: true}).check(client.Info{ID: "ts_1", State: "SEALED"}, sum, 0); err != nil {
+	if err := (&gates{onUnconfirmed: true}).check(io.Discard, client.Info{ID: "ts_1", State: "SEALED"}, sum, 0); err != nil {
 		panic(fmt.Sprintf("a confirmed session: %v", err))
 	}
 	// It does not stand in for --fail-on-incomplete, and adds to it.
 	incomplete := client.Info{ID: "ts_1", State: "SEALED", Incomplete: true, IncompleteReasons: []string{"lost"}, DeliveryUnconfirmed: []string{warn}}
-	if err := (&gates{onUnconfirmed: true, onIncomplete: true}).check(incomplete, sum, 0); err == nil ||
+	if err := (&gates{onUnconfirmed: true, onIncomplete: true}).check(io.Discard, incomplete, sum, 0); err == nil ||
 		!strings.Contains(err.Error(), "session is incomplete (lost); delivery is unconfirmed (") {
 		panic(fmt.Sprintf("both gates: %v", err))
 	}
 	// A session the control plane no longer knows: nothing confirms anything.
-	if err := (&gates{onUnconfirmed: true}).check(client.Info{ID: "ts_1"}, sum, 0); err == nil || !strings.Contains(err.Error(), "whether its delivery was confirmed is unknown") {
+	if err := (&gates{onUnconfirmed: true}).check(io.Discard, client.Info{ID: "ts_1"}, sum, 0); err == nil || !strings.Contains(err.Error(), "whether its delivery was confirmed is unknown") {
 		panic(fmt.Sprintf("an unknown session: %v", err))
 	}
-	if err := (&gates{onUnconfirmed: true, onIncomplete: true}).check(client.Info{ID: "ts_1"}, sum, 0); err == nil || strings.Count(err.Error(), "no longer knows") != 1 {
+	if err := (&gates{onUnconfirmed: true, onIncomplete: true}).check(io.Discard, client.Info{ID: "ts_1"}, sum, 0); err == nil || strings.Count(err.Error(), "no longer knows") != 1 {
 		panic(fmt.Sprintf("an unknown session, both gates: %v", err))
 	}
 

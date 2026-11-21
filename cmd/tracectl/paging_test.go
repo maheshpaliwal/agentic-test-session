@@ -258,3 +258,21 @@ func TestListRefusesAReplyThatIsNotAControlPlanes(t *testing.T) {
 		panic(fmt.Sprintf("exit %d, out %q, stderr %q", code, out, e))
 	}
 }
+
+func TestURLFromTheEnvironmentWithoutASchemeIsRefused(t *testing.T) {
+	t.Setenv("TSESSION_CONTROLPLANE_URL", "127.0.0.1:7070")
+	t.Setenv("TSESSION_COLLECTOR_URL", "127.0.0.1:7071")
+	var out, errb bytes.Buffer
+	// Both are wrong: the control plane's is named, every time.
+	for range 20 {
+		errb.Reset()
+		if code := run([]string{"list"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "$TSESSION_CONTROLPLANE_URL") {
+			panic(fmt.Sprintf("exit %d, stderr %q", code, errb.String()))
+		}
+	}
+	// version asks no service and is not stopped by it.
+	errb.Reset()
+	if code := run([]string{"version"}, &out, &errb); code != 0 {
+		panic(fmt.Sprintf("version: exit %d, stderr %q", code, errb.String()))
+	}
+}
