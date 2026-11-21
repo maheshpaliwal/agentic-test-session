@@ -210,7 +210,7 @@ func (m *Manager) ReportDelivery(id string, d Delivery) (bool, error) {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.heardLocked(deliveryKey(d.Service, d.Instance), now)
+	m.heardLocked(deliveryKey(d.Service, d.Instance), now, true)
 	return m.reportLocked(id, d, now)
 }
 
@@ -243,7 +243,7 @@ func (m *Manager) ReportDeliveries(b DeliveryBatch) ([]DeliveryResult, error) {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.heardLocked(deliveryKey(service, instance), now)
+	m.heardLocked(deliveryKey(service, instance), now, len(reports) > 0)
 	for i, r := range reports {
 		if out[i].Status != "" {
 			continue
@@ -270,17 +270,56 @@ func (m *Manager) ReportDeliveries(b DeliveryBatch) ([]DeliveryResult, error) {
 	return out, nil
 }
 
-// heardLocked notes that a delivery report (of any session, or of none)
-// arrived from the instance behind key: its reports get through. It is noted
-// on the instance's connection to the active set, which is what the drain of
-// a session looks at (see silentLocked and unheardLocked).
-func (m *Manager) heardLocked(key string, now time.Time) {
+// heardLocked notes that a request with delivery reports arrived from the
+// instance behind key: its reports get through. One without reports is the
+// instance's heartbeat: it sends one when it connects, and every
+// heartbeatPeriod while the control plane has a session. One with reports
+// (reports) is also a sign that the instance is at work on its sessions. Both
+// are noted on the instance's connection to the active set, which is what the
+// drain of a session looks at (see unheard and silentLocked).
+func (m *Manager) heardLocked(key string, now time.Time, reports bool) {
 	for ch, sub := range m.subs {
 		if sub.stream && sub.DeliveryInstance != "" && deliveryKey(sub.Service, sub.DeliveryInstance) == key {
 			sub.heard, sub.LastDeliveryReport = now, now.UTC()
+			if reports {
+				sub.reported = now
+			}
 			m.subs[ch] = sub
 		}
 	}
+}
+
+// heartbeatPeriod is how often an instance that follows the active set is
+// asked to say that its reports arrive while a session runs (see
+// ActiveSet.DeliveryHeartbeatMs): half the grace, so that a healthy instance
+// is never a whole grace without a word. Zero when the check is off.
+func (m *Manager) heartbeatPeriod() time.Duration {
+	return max(m.cfg.DeliveryGrace/2, 0)
+}
+
+// unheard reports whether nothing has arrived for too long from an instance
+// that follows the active set and said that it sends delivery reports:
+// something between it and here refuses its reports, now if not from the
+// start. That is
+//
+//   - no report (of any session) and no heartbeat at all since it connected,
+//     DeliveryGrace/10 ago or longer: it sends one when it connects; or
+//   - none for DeliveryGrace, two heartbeat periods, while the control plane
+//     has had a session for DeliveryGrace/10 or longer. Without a session an
+//     instance sends no heartbeat, and its first is due when it learns that
+//     there is one; so its silence says nothing before that.
+//
+// The third review's F5: the question used to be asked once per connection
+// ("has it ever been heard of"), so an instance whose reports stopped
+// arriving after the first was never named.
+func (m *Manager) unheard(sub Subscriber, now time.Time) bool {
+	if !sub.stream || sub.DeliveryInstance == "" || m.cfg.DeliveryGrace < 0 {
+		return false
+	}
+	if sub.heard.IsZero() {
+		return now.Sub(sub.since) >= m.cfg.DeliveryGrace/10
+	}
+	return !m.busySince.IsZero() && now.Sub(m.busySince) >= m.cfg.DeliveryGrace/10 && now.Sub(sub.heard) >= m.cfg.DeliveryGrace
 }
 
 // staleReport reports whether d, a report of the instance prev is of, is an
@@ -464,8 +503,10 @@ func (m *Manager) reporterConnectedLocked(key string) bool {
 //
 // It is waited for (wait) until it has had DeliveryGrace since its last sign
 // of life: the drain's begin, its connecting, or a report of it for any
-// session, whichever is latest. silent lists those that sent no report at
-// all for the session and have had that time.
+// session, whichever is latest. Its heartbeat is not one: that says that the
+// instance reaches the control plane, not that it is at work on a session,
+// and it comes more often than the grace is long. silent lists those that
+// sent no report at all for the session and have had that time.
 func (m *Manager) silentLocked(s Session, st *deliveryState, begin, now time.Time, cur collectorCounts) (silent []Subscriber, wait bool) {
 	seen := map[string]struct{}{}
 	for _, sub := range m.subs {
@@ -482,7 +523,7 @@ func (m *Manager) silentLocked(s Session, st *deliveryState, begin, now time.Tim
 			continue
 		}
 		since := begin
-		for _, t := range []time.Time{sub.since, sub.heard} {
+		for _, t := range []time.Time{sub.since, sub.reported} {
 			if t.After(since) {
 				since = t
 			}
@@ -502,23 +543,31 @@ func (m *Manager) silentLocked(s Session, st *deliveryState, begin, now time.Tim
 	return silent, wait
 }
 
-// unheardLocked lists the instances that follow the active set, said that
-// they send delivery reports, and of which not one report (of any session)
-// has arrived since they connected, DeliveryGrace/10 ago or longer: something
-// between them and here refuses their reports. skip names the ones that are
-// accounted for otherwise.
+// unheardLocked lists the instances of which nothing has arrived for too
+// long (see unheard). skip names the ones that are accounted for otherwise.
+// An instance with several connections is unheard when all of them are, and
+// is listed with the one heard of last.
 func (m *Manager) unheardLocked(now time.Time, skip func(key string) bool) []Subscriber {
 	var out []Subscriber
-	seen := map[string]struct{}{}
+	best := map[string]Subscriber{}
+	heardOf := map[string]struct{}{}
 	for _, sub := range m.subs {
-		if !sub.stream || sub.DeliveryInstance == "" || !sub.heard.IsZero() || now.Sub(sub.since) < m.cfg.DeliveryGrace/10 {
+		if !sub.stream || sub.DeliveryInstance == "" {
 			continue
 		}
 		key := deliveryKey(sub.Service, sub.DeliveryInstance)
-		if _, dup := seen[key]; dup || skip(key) {
+		if !m.unheard(sub, now) {
+			heardOf[key] = struct{}{}
 			continue
 		}
-		seen[key] = struct{}{}
+		if b, ok := best[key]; !ok || sub.heard.After(b.heard) {
+			best[key] = sub
+		}
+	}
+	for key, sub := range best {
+		if _, ok := heardOf[key]; ok || skip(key) {
+			continue
+		}
 		out = append(out, sub)
 	}
 	slices.SortFunc(out, func(a, b Subscriber) int {
@@ -860,9 +909,11 @@ func unreported(service, instance string, have int64) string {
 // It is unconfirmed (delivery_unconfirmed, a warning) for what deliveryVerdict
 // lists as such, and for:
 //
-//   - a connected instance of which no report has ever arrived (see
-//     unheardLocked) and no event of the session either: whether it took part
-//     cannot be known;
+//   - a connected instance of which nothing has arrived for too long, no
+//     report and no heartbeat (see unheard), and of which the session has no
+//     report: whether it took part cannot be known. Also one whose last
+//     report for the session was not final and agrees with the collector:
+//     whether it recorded more since cannot be known;
 //   - the instances beyond the MaxDeliveryInstances whose reports are stored
 //     and the maxDeliveryRefused whose reports are kept: nothing is known of
 //     them.
@@ -889,12 +940,36 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 		shortfalls = append(shortfalls, unreported(sub.Service, sub.DeliveryInstance, have))
 	}
 	if m.cfg.DeliveryGrace >= 0 {
-		for _, sub := range m.unheardLocked(time.Now(), func(key string) bool {
-			_, convicted := silent[key]
-			_, refused := st.refused[key]
-			return convicted || refused || slices.ContainsFunc(s.Delivery, func(d Delivery) bool { return deliveryKey(d.Service, d.Instance) == key })
+		now := time.Now()
+		// stopped: the instance has a report for the session that is not final
+		// and that the verdict above had nothing to say about.
+		stopped := map[string]Delivery{}
+		for _, sub := range m.unheardLocked(now, func(key string) bool {
+			if _, convicted := silent[key]; convicted {
+				return true
+			}
+			for _, d := range st.reports(*s) {
+				if deliveryKey(d.Service, d.Instance) != key {
+					continue
+				}
+				if have, ok := counts.of(d.Service, d.Instance); !d.Final && d.Dropped == 0 && ok && have == d.Recorded {
+					stopped[key] = d
+					return false
+				}
+				return true
+			}
+			return false
 		}) {
-			msg := who(sub.Service, sub.DeliveryInstance) + ": it follows the control plane, but no delivery report of it has arrived since it connected (its log says why)"
+			msg := who(sub.Service, sub.DeliveryInstance) + ": it follows the control plane, but "
+			if sub.heard.IsZero() {
+				msg += "no delivery report of it has arrived since it connected (its log says why)"
+			} else {
+				msg += fmt.Sprintf("neither a delivery report nor a heartbeat of it has arrived for %s (its log says why)", now.Sub(sub.heard).Round(time.Second))
+			}
+			if d, ok := stopped[deliveryKey(sub.Service, sub.DeliveryInstance)]; ok {
+				unconfirmed = append(unconfirmed, msg+fmt.Sprintf("; its last report for this session, of %d events, was not final, so whether it recorded more since is unknown", d.Recorded))
+				continue
+			}
 			switch have, ok := counts.of(sub.Service, sub.DeliveryInstance); {
 			case !ok:
 				msg += ", so whether it recorded anything for this session is unknown"

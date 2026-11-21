@@ -592,3 +592,71 @@ func TestDelivery_HealthyRunsRepeated(t *testing.T) {
 		}
 	}
 }
+
+// The third review's F5: the reports of a service arrive when it connects,
+// and are refused from then on (a proxy rule that changed, a token that ran
+// out), while its collector URL is wrong. Nothing of what it records for a
+// session reaches anybody. The control plane used to ask only whether a
+// report of the service had ever arrived, so the session was complete,
+// without a line anywhere. The service now heartbeats while a session runs,
+// and one that has not been heard of for the grace is named: the session says
+// delivery_unconfirmed, and the strict gate fails.
+func TestDelivery_ReportsThatStopArrivingAreNotASilentMiss(t *testing.T) {
+	e := newDeliveryBase(t)
+	var block atomic.Bool
+	proxy := e.cpProxy(func(r *http.Request) int {
+		if block.Load() && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/delivery") {
+			return http.StatusForbidden
+		}
+		return 0
+	})
+	inventory := e.startSvc("inventory", svcOpts{})
+	orders := e.startSvc("orders-api", svcOpts{collector: "http://" + freeAddr(t), cp: proxy})
+	e.connected("inventory")
+	e.connected("orders-api")
+	e.heard("orders-api") // its first request got through
+	block.Store(true)
+	runs := repeat(t, "reports-stop-wrong-url", deliveryRuns(), 8, func(int) deliveryRun {
+		s, err := e.begin(0)
+		if err != nil {
+			return failed(err)
+		}
+		for _, a := range []*svcApp{inventory, orders} {
+			if err := a.burst(s, 5); err != nil {
+				return failed(err)
+			}
+		}
+		// The grace (10s): two heartbeats of orders-api do not arrive.
+		time.Sleep(11 * time.Second)
+		return e.finish(s, 12)
+	})
+	for _, r := range runs {
+		if r.info.Incomplete || len(r.info.IncompleteReasons) != 0 || r.got != 6 || len(r.info.DeliveryUnconfirmed) != 1 ||
+			!strings.Contains(r.info.DeliveryUnconfirmed[0], "service orders-api (instance ") ||
+			!strings.Contains(r.info.DeliveryUnconfirmed[0], "neither a delivery report nor a heartbeat of it has arrived for ") ||
+			!strings.Contains(r.info.DeliveryUnconfirmed[0], "the collector has no events from it for this session") {
+			t.Errorf("want orders-api under delivery_unconfirmed, and nothing else: %s", r)
+		}
+		if r.drain > 5*time.Second {
+			t.Errorf("the drain was held for an instance nothing is known of: %s", r)
+		}
+	}
+	if code, out := e.runTracectl("summary", runs[0].info.ID, "--fail-on-unconfirmed"); code != 3 || !strings.Contains(out, "check failed: delivery is unconfirmed (service orders-api") {
+		t.Errorf("summary --fail-on-unconfirmed: exit %d\n%s", code, out)
+	}
+	// The same service once its reports arrive again. Without a session it
+	// sends nothing; when one begins it tries at once, whatever pause its
+	// refused requests had grown to, so a session after the outage says
+	// nothing about it.
+	block.Store(false)
+	s, err := e.begin(0)
+	if err != nil {
+		panic(err)
+	}
+	if err := inventory.burst(s, 5); err != nil {
+		panic(err)
+	}
+	if r := e.finish(s, 6); r.info.Incomplete || len(r.info.DeliveryUnconfirmed) != 0 {
+		t.Errorf("a session after the outage, in which orders-api took no part: %s", r)
+	}
+}

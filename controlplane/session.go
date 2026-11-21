@@ -133,6 +133,12 @@ type ActiveSet struct {
 	// something on the way: it keeps trying, and says so in its log. SDKs that
 	// do not know the field ignore it.
 	DeliveryReports bool `json:"delivery_reports,omitempty"`
+	// DeliveryHeartbeatMs asks an SDK that follows the stream to send a
+	// request without reports that often while this set names a session and
+	// it has sent no report meanwhile: the control plane judges an instance by
+	// how long it has not heard of it (see Manager.unheard). Omitted when the
+	// delivery check is off.
+	DeliveryHeartbeatMs int64 `json:"delivery_heartbeat_ms,omitempty"`
 	// Generation counts the changes to the active set since the control plane
 	// started. Compare it with Subscriber.Generation to see which followers
 	// have been sent this version.

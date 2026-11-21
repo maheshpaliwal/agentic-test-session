@@ -97,23 +97,29 @@ func TestDigestSaysWhenItShortensTheReasons(t *testing.T) {
 }
 
 // doctor names a connected service whose delivery reports do not arrive: it
-// follows the control plane, said that it reports, and has not been heard of.
+// follows the control plane, said that it reports, and the control plane has
+// heard nothing of it for too long (delivery_unheard: its rule, the one a
+// session's verdict goes by; doctor had a threshold of its own, of 2s against
+// the verdict's 1s, and the two disagreed for a second).
 func TestDoctorNamesAServiceWithoutDeliveryReports(t *testing.T) {
 	long := time.Now().Add(-time.Minute)
 	rep := doctorReport{ControlPlane: probeResult{OK: true}, Collector: probeResult{OK: true}, Subscribers: []client.Subscriber{
-		{Service: "orders-api", Instance: "pod-1", DeliveryInstance: "pod-1-ab", ConnectedAt: long},
-		{Service: "inventory", Instance: "pod-2", DeliveryInstance: "pod-2-cd", ConnectedAt: long, LastDeliveryReport: long},
-		{Service: "legacy", Instance: "pod-3", ConnectedAt: long},                                    // an SDK that sends none
-		{Service: "fresh", Instance: "pod-4", DeliveryInstance: "pod-4-ef", ConnectedAt: time.Now()}, // connected this moment
+		{Service: "orders-api", Instance: "pod-1", DeliveryInstance: "pod-1-ab", ConnectedAt: long, DeliveryUnheard: true},
+		{Service: "payments", Instance: "pod-5", DeliveryInstance: "pod-5-gh", ConnectedAt: long, LastDeliveryReport: long, DeliveryUnheard: true},
+		{Service: "inventory", Instance: "pod-2", DeliveryInstance: "pod-2-cd", ConnectedAt: long, LastDeliveryReport: long}, // idle: the control plane has no session
+		{Service: "legacy", Instance: "pod-3", ConnectedAt: long},                                                            // an SDK that sends none
+		{Service: "fresh", Instance: "pod-4", DeliveryInstance: "pod-4-ef", ConnectedAt: time.Now()},                         // connected this moment
 	}}
 	var out bytes.Buffer
 	rep.print(&out)
 	for _, line := range strings.Split(out.String(), "\n") {
-		if got, want := strings.Contains(line, "NO DELIVERY REPORTS"), strings.Contains(line, "orders-api"); got != want {
+		want := strings.Contains(line, "orders-api") || strings.Contains(line, "payments")
+		if got := strings.Contains(line, "NO DELIVERY REPORTS"); got != want {
 			t.Errorf("line %q: flagged=%v, want %v", line, got, want)
 		}
 	}
-	if !strings.Contains(out.String(), "orders-api") {
+	if !strings.Contains(out.String(), "NO DELIVERY REPORTS: none has arrived from it; its log says why") ||
+		!strings.Contains(out.String(), "NO DELIVERY REPORTS: none has arrived from it for 1m0s; its log says why") {
 		panic(fmt.Sprintf("doctor:\n%s", out.String()))
 	}
 }

@@ -371,7 +371,7 @@ func newReportEnvOn(t *testing.T, cp *reportCP, mut func(*ExporterConfig), tune 
 	e.sub = newSubscriber(e.cp.srv.URL, "svc", "raw-instance", "svc-1-abcdef")
 	rcfg := reporterConfig{Tick: 5 * time.Millisecond,
 		Interval: testInterval, FirstDelay: testFirstDelay, DrainFlush: 50 * time.Millisecond, KickEvery: 20 * time.Millisecond,
-		RetryBase: 20 * time.Millisecond, DrainRetry: 5 * time.Millisecond}
+		RetryBase: 20 * time.Millisecond, DrainRetry: 5 * time.Millisecond, Heartbeat: time.Hour}
 	for _, f := range tune {
 		f(&rcfg)
 	}

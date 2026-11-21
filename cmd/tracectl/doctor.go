@@ -134,10 +134,16 @@ func (r doctorReport) print(w io.Writer) {
 		}
 		fmt.Fprintf(w, "  %-24s %-28s connected %s", clip(s.Service, 24), clip(s.Instance, 28),
 			time.Since(s.ConnectedAt).Round(time.Second))
-		// It said that it sends delivery reports, and none has arrived since
-		// it connected (it sends one at once): something refuses them.
-		if s.DeliveryInstance != "" && s.LastDeliveryReport.IsZero() && time.Since(s.ConnectedAt) > 2*time.Second {
+		// It said that it sends delivery reports, and the control plane has
+		// heard nothing of it for too long: something refuses them. The control
+		// plane decides that, by the rule a session's verdict goes by, so the
+		// two never disagree.
+		switch {
+		case !s.DeliveryUnheard:
+		case s.LastDeliveryReport.IsZero():
 			fmt.Fprint(w, "  NO DELIVERY REPORTS: none has arrived from it; its log says why")
+		default:
+			fmt.Fprintf(w, "  NO DELIVERY REPORTS: none has arrived from it for %s; its log says why", time.Since(s.LastDeliveryReport).Round(time.Second))
 		}
 		fmt.Fprintln(w)
 	}

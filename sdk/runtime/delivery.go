@@ -126,6 +126,12 @@ type reporterConfig struct {
 	// every further one (default 1s), up to 4 times as long for a control
 	// plane that does not answer or fails, 32 times for one that refuses.
 	RetryBase time.Duration
+	// Heartbeat is how often a request is sent that only says that the
+	// reports of this process arrive, while the active set names a session and
+	// no report was sent meanwhile (default 5s). The control plane names a
+	// process it has not heard of for twice as long; it can ask for another
+	// period in the active set, which then counts.
+	Heartbeat time.Duration
 	// DrainRetry is the pause after a failed report while the report of a
 	// draining session is waiting, whatever RetryBase has grown to (default
 	// 200ms, so that the next pass tries again: a request every 250ms). The
@@ -156,7 +162,12 @@ type reporter struct {
 	// hello is set while the control plane has not been told, since the
 	// stream was last opened, that the reports of this process arrive. A
 	// batch says so, also one without reports.
-	hello    bool
+	hello bool
+	// beatAt is when the control plane last answered a batch, with reports or
+	// without: the next heartbeat is due a period after it.
+	beatAt time.Time
+	// busy: the active set named a session at the last pass.
+	busy     bool
 	connects uint64
 	failures int
 	failedAt time.Time // when the last report failed
@@ -204,6 +215,7 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	def(&cfg.Timeout, 2*time.Second)
 	def(&cfg.RetryBase, time.Second)
 	def(&cfg.DrainRetry, 200*time.Millisecond)
+	def(&cfg.Heartbeat, 5*time.Second)
 	def(&cfg.PassBudget, cfg.Tick)
 	if cfg.Burst <= 0 {
 		cfg.Burst = 32
@@ -230,9 +242,11 @@ func (r *reporter) loop() {
 		case <-t.C:
 			r.pass()
 		case <-r.sub.opened:
-			// The stream was opened: say at once that the reports of this
-			// process arrive, not a tick later. The control plane names a
-			// process it has not heard of a second after it connected.
+			// The stream was opened, or the active set names a session after
+			// naming none: say at once that the reports of this process arrive,
+			// not a tick later. The control plane names a process it has not
+			// heard of a second after it connected, or after the first session
+			// began.
 			r.pass()
 		}
 	}
@@ -277,7 +291,13 @@ type due struct {
 // only when the collector has events of that process for the session.
 //
 // When the stream is opened, one request tells the control plane that the
-// reports of this process arrive, also when nothing is due (see hello).
+// reports of this process arrive, also when nothing is due (see hello). The
+// same request is its heartbeat: while the active set names a session, of
+// this process or not, one is sent whenever the control plane has not
+// answered a batch for a heartbeat period (see beat). The control plane judges
+// a process by how long it has not heard of it, so one whose reports stop
+// arriving in the middle of a session is noticed. A process that follows no
+// session sends nothing.
 //
 // While the stream is down this process learns of a drain late, from a poll,
 // or not at all. Its reports then do not wait for FirstDelay or Interval:
@@ -304,11 +324,19 @@ func (r *reporter) pass() {
 		}
 	}
 	streaming := r.sub.streaming.Load()
-	hello := r.hello && streaming && r.mode == modeBatch
+	now := time.Now()
+	if busy := len(sn.active) > 0; busy != r.busy {
+		// The first session after none: the control plane expects to hear of
+		// this process now, so a pause that refused requests left behind (there
+		// was nothing to send, and nothing to end it) is over.
+		if r.busy = busy; busy {
+			r.retryAt = time.Time{}
+		}
+	}
+	hello := streaming && r.mode == modeBatch && (r.hello || r.beat(sn, now))
 	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
 		return
 	}
-	now := time.Now()
 	total := r.rec.deliveredTotal()
 	stuck, turned, urgent := false, false, false
 	var todo []due
@@ -369,6 +397,29 @@ func (r *reporter) pass() {
 		r.kickedAt = now
 		r.exp.kick()
 	}
+}
+
+// beat reports whether a heartbeat is due: the active set names a session,
+// and the control plane has not answered a batch of this process for the
+// heartbeat period (the one it asked for, or cfg.Heartbeat). A tick early
+// rather than late (a quarter of the period at most): the control plane
+// counts from when it heard of this process, and the next pass is a tick
+// away.
+func (r *reporter) beat(sn *snapshot, now time.Time) bool {
+	if len(sn.active) == 0 {
+		return false
+	}
+	period := r.period(sn)
+	return now.Sub(r.beatAt) >= period-min(r.cfg.Tick, period/4)
+}
+
+// period is the heartbeat period: the one the control plane asked for, or
+// cfg.Heartbeat.
+func (r *reporter) period(sn *snapshot) time.Duration {
+	if sn.heartbeat > 0 {
+		return sn.heartbeat
+	}
+	return r.cfg.Heartbeat
 }
 
 // paused reports whether a failed request keeps this pass from sending. The
@@ -449,7 +500,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 				x.st.closed = true
 			}
 		}
-		r.hello = false
+		r.hello, r.beatAt = false, time.Now()
 		r.sub.setAnnounce(true)
 		r.up()
 		return true
@@ -506,7 +557,9 @@ func (r *reporter) noEndpoint(code int) bool {
 // failed notes a report that did not arrive and pauses reporting: RetryBase
 // after the first failure, twice as long after each further one, up to 4
 // times RetryBase. A request that was refused (4xx) will be refused again
-// until someone changes something, so its pause grows to 32 times RetryBase.
+// until someone changes something, so its pause grows to 32 times RetryBase;
+// no pause is longer than a heartbeat period, and the first session after
+// none is a reason to try at once (see pass).
 // While the report of a draining session waits the pause is DrainRetry (see
 // paused). The outage is logged once: at the first refusal, and at the second
 // failure in a row otherwise (a single lost request is retried without a
@@ -519,7 +572,9 @@ func (r *reporter) failed(code int) {
 		steps = 5
 	}
 	r.failedAt = time.Now()
-	r.retryAt = r.failedAt.Add(r.cfg.RetryBase << min(r.failures-1, steps))
+	// Never longer than a heartbeat period: when the outage is over, the
+	// control plane hears of this process as soon as it would of a healthy one.
+	r.retryAt = r.failedAt.Add(min(r.cfg.RetryBase<<min(r.failures-1, steps), r.period(r.sub.snap.Load())))
 	if r.down || !refused && r.failures < 2 {
 		return
 	}

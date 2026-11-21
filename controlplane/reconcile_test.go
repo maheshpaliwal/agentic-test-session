@@ -460,13 +460,46 @@ func TestDrainSilentParticipant(t *testing.T) {
 		}
 		for range 6 { // twice the grace
 			time.Sleep(testGrace / 3)
-			hello(t, e.m, "orders-api", "o-1")
+			if _, err := e.m.ReportDeliveries(DeliveryBatch{Service: "orders-api", Instance: "o-1",
+				Reports: []json.RawMessage{json.RawMessage(`{"session":"ts_another","recorded":1,"delivered":1}`)}}); err != nil {
+				panic(err)
+			}
 		}
 		if s, _ := e.m.Get(e.id); s.State != StateDraining {
 			panic(fmt.Sprintf("sealed while reports of the instance were arriving: %+v", s))
 		}
 		e.report(final(rep("orders-api", "o-1", 3, 3, 0)))
 		wantComplete(t, e.sealed())
+	})
+	// Its heartbeat is not such a sign: it says that the instance reaches the
+	// control plane, and comes twice per grace for as long as a session runs.
+	// A drain that took it for one would wait until max_drain for an instance
+	// whose report for the session never comes.
+	t.Run("its heartbeat does not start the grace over", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("orders-api", "o-1", 3)
+		defer follow(e.m, "orders-api", "o-1")()
+		began := time.Now()
+		if _, err := e.m.Stop(e.id); err != nil {
+			panic(err)
+		}
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(testGrace / 4):
+					_, _ = e.m.ReportDeliveries(DeliveryBatch{Service: "orders-api", Instance: "o-1"})
+				}
+			}
+		}()
+		s := e.sealed()
+		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
+		if took := time.Since(began); took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
+			panic(fmt.Sprintf("sealed after %v, want the grace (%v)", took, testGrace))
+		}
 	})
 	// It reported before it recorded its last events. The drain waits for the
 	// report that covers them; if none comes, nothing says how many there

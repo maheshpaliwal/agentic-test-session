@@ -78,6 +78,10 @@ type Manager struct {
 	// progress is, per reporting instance, when it was last seen to deliver
 	// events of any session (see noteProgressLocked).
 	progress map[string]instanceProgress
+	// busySince is when the control plane last went from no session that is
+	// ACTIVE or DRAINING to one; zero while there is none. The SDKs send
+	// heartbeats from then on (see unheard).
+	busySince time.Time
 
 	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
 	// O(all sessions ever). terminal queues finished sessions for eviction.
@@ -197,10 +201,16 @@ type termEntry struct {
 // is single-threaded in the constructor).
 func (m *Manager) indexLocked(s Session) {
 	if !s.State.Terminal() {
+		if len(m.live) == 0 {
+			m.busySince = time.Now()
+		}
 		m.live[s.ID] = s
 		return
 	}
 	delete(m.live, s.ID)
+	if len(m.live) == 0 {
+		m.busySince = time.Time{}
+	}
 	ended := s.EndedAt
 	if ended.IsZero() {
 		ended = s.CreatedAt
@@ -519,7 +529,8 @@ func (m *Manager) exclusiveLocked() string {
 }
 
 func (m *Manager) activeLocked() ActiveSet {
-	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen, DeliveryReports: true}
+	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen, DeliveryReports: true,
+		DeliveryHeartbeatMs: m.heartbeatPeriod().Milliseconds()}
 	for _, s := range m.live {
 		a.Active = append(a.Active, s.ID)
 		if s.Mode == ModeExclusive {
@@ -567,10 +578,16 @@ type Subscriber struct {
 	// as they are written. An in-process follower (Subscribe) receives every
 	// version through its channel and is reported as up to date.
 	stream bool
+	// DeliveryUnheard: the follower names a DeliveryInstance and nothing of
+	// it has arrived for too long, no report and no heartbeat (see
+	// Manager.unheard): its reports do not get through. It is what the verdict
+	// of a session that ended now would go by.
+	DeliveryUnheard bool `json:"delivery_unheard,omitempty"`
 	// since and heard are ConnectedAt and LastDeliveryReport as the drain
 	// counts from them: with the monotonic clock reading, which a step of the
-	// wall clock does not move.
-	since, heard time.Time
+	// wall clock does not move. reported is when a request that carried a
+	// report last arrived (heard: also one without, a heartbeat).
+	since, heard, reported time.Time
 }
 
 // Subscribers lists the current followers of the active set, by service and
@@ -578,10 +595,12 @@ type Subscriber struct {
 func (m *Manager) Subscribers() []Subscriber {
 	m.mu.Lock()
 	out := make([]Subscriber, 0, len(m.subs))
+	now := time.Now()
 	for _, s := range m.subs {
 		if !s.stream {
 			s.Generation = m.gen
 		}
+		s.DeliveryUnheard = m.unheard(s, now)
 		out = append(out, s)
 	}
 	m.mu.Unlock()

@@ -558,6 +558,11 @@ type Subscriber struct {
 	// none has since it connected. A process that names a DeliveryInstance
 	// and stays at zero cannot get its reports through.
 	LastDeliveryReport time.Time `json:"last_delivery_report,omitzero"`
+	// DeliveryUnheard: the control plane has heard nothing of the process for
+	// too long, no delivery report and no heartbeat, although it names a
+	// DeliveryInstance: its reports do not get through. A session that ended
+	// now would name it under delivery_unconfirmed, or be incomplete for it.
+	DeliveryUnheard bool `json:"delivery_unheard,omitempty"`
 	// Generation is the newest version of the active set sent to it.
 	Generation uint64 `json:"generation"`
 }

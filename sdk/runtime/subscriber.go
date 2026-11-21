@@ -26,6 +26,9 @@ type activeSet struct {
 	// takes delivery reports. One that does not say so may still take them
 	// (the first that did, did not say it).
 	DeliveryReports bool `json:"delivery_reports"`
+	// DeliveryHeartbeatMs is optional: how often the control plane wants to
+	// hear from this process while the set names a session.
+	DeliveryHeartbeatMs int64 `json:"delivery_heartbeat_ms"`
 }
 
 type snapshot struct {
@@ -37,6 +40,9 @@ type snapshot struct {
 	// reports: the control plane said that it takes delivery reports. A 404
 	// to a report then does not mean "a control plane without the endpoint".
 	reports bool
+	// heartbeat is how often the control plane asked to hear from this
+	// process while the set names a session; zero when it did not say.
+	heartbeat time.Duration
 }
 
 // Subscriber tracks the control plane's active set and implements
@@ -63,7 +69,7 @@ type Subscriber struct {
 	// connects counts the streams that were opened and have delivered the
 	// active set: a new one may lead to another control plane (a restart, an
 	// upgrade), and what that one says of itself is in the set. opened is
-	// signalled for each.
+	// signalled for each, and when the set names a session after naming none.
 	connects atomic.Uint64
 	opened   chan struct{}
 
@@ -192,9 +198,23 @@ func (s *Subscriber) Close() {
 
 func (s *Subscriber) apply(a activeSet) {
 	sn := &snapshot{active: set.Of(a.Active...), draining: set.Of(a.Draining...), exclusive: a.Exclusive, kill: a.Kill,
-		bindings: core.NewBindingSet(a.Bindings), reports: a.DeliveryReports}
-	s.snap.Store(sn)
+		bindings: core.NewBindingSet(a.Bindings), reports: a.DeliveryReports,
+		heartbeat: time.Duration(max(a.DeliveryHeartbeatMs, 0)) * time.Millisecond}
+	old := s.snap.Swap(sn)
 	s.ready.Store(true)
+	if len(old.active) == 0 && len(sn.active) > 0 {
+		// The first session after none: the reporter looks at once whether a
+		// heartbeat is due, instead of at its next tick (see reporter.pass).
+		s.wake()
+	}
+}
+
+// wake makes the reporter look at its accounts now.
+func (s *Subscriber) wake() {
+	select {
+	case s.opened <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Subscriber) run(ctx context.Context) {
@@ -293,10 +313,7 @@ func (s *Subscriber) stream(parent context.Context) bool {
 						// with the control plane behind it, and knows from the set
 						// whether that one says that it takes reports.
 						s.connects.Add(1)
-						select {
-						case s.opened <- struct{}{}:
-						default:
-						}
+						s.wake()
 					}
 					got = true
 				}

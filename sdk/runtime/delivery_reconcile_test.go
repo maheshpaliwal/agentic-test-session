@@ -553,3 +553,99 @@ func TestReporterWaitsForTheFirstSetOfAStream(t *testing.T) {
 		panic(fmt.Sprintf("streams %q: the announcement was taken back", s))
 	}
 }
+
+// beats is the number of accepted batches without reports.
+func (cp *reportCP) beats() int {
+	_, hellos, _ := cp.seen()
+	return hellos
+}
+
+// The third review's F5: while the active set names a session, the reporter
+// sends a request without reports whenever the control plane has not answered
+// one of its batches for the heartbeat period, so the control plane can tell
+// a process whose reports stopped arriving from one that has nothing to say.
+// A process that follows no session sends nothing.
+func TestReporterHeartbeat(t *testing.T) {
+	const period = 100 * time.Millisecond
+	beat := func(c *reporterConfig) { c.Heartbeat = period }
+	t.Run("no session: nothing but the hello", func(t *testing.T) {
+		cp := newReportCP(t, `{"active":[]}`)
+		newReportEnvOn(t, cp, nil, beat)
+		eventually(t, "the hello", func() bool { return cp.beats() == 1 })
+		time.Sleep(4 * period)
+		if n := cp.beats(); n != 1 {
+			panic(fmt.Sprintf("%d requests from a process that follows no session, want the one at its connect", n))
+		}
+		// A session begins: the first heartbeat is sent at once, not a period later.
+		began := time.Now()
+		cp.set(`{"active":["someone-elses"]}`)
+		eventually(t, "a heartbeat when a session begins", func() bool { return cp.beats() == 2 })
+		if took := time.Since(began); took > period/2 {
+			panic(fmt.Sprintf("the first heartbeat took %v", took))
+		}
+	})
+	t.Run("a session of somebody else: one per period", func(t *testing.T) {
+		cp := newReportCP(t, `{"active":["someone-elses"]}`)
+		newReportEnvOn(t, cp, nil, beat)
+		eventually(t, "the hello", func() bool { return cp.beats() >= 1 })
+		before := cp.beats()
+		time.Sleep(10 * period)
+		if n := cp.beats() - before; n < 8 || n > 12 {
+			panic(fmt.Sprintf("%d heartbeats in ten periods", n))
+		}
+		if posts := cp.postCount(); posts != 0 {
+			panic(fmt.Sprintf("%d requests with reports from a process that recorded nothing", posts))
+		}
+	})
+	t.Run("the control plane names the period", func(t *testing.T) {
+		cp := newReportCP(t, `{"active":["someone-elses"],"delivery_reports":true,"delivery_heartbeat_ms":40}`)
+		newReportEnvOn(t, cp, nil) // its own period is an hour
+		eventually(t, "heartbeats at the period the control plane asked for", func() bool { return cp.beats() >= 4 })
+	})
+	t.Run("a batch with reports is one", func(t *testing.T) {
+		cp := newReportCP(t, `{"active":["s1"],"draining":["s1"]}`)
+		e := newReportEnvOn(t, cp, nil, beat)
+		eventually(t, "the hello", func() bool { return cp.beats() == 1 })
+		// A report every half period: no request without reports is needed.
+		for range 12 {
+			e.record("s1", 1)
+			time.Sleep(period / 2)
+		}
+		if n := cp.beats(); n > 2 {
+			panic(fmt.Sprintf("%d heartbeats from a process whose reports arrived twice per period", n))
+		}
+	})
+	t.Run("refused: retried and logged like a report", func(t *testing.T) {
+		out := logTo(t)
+		cp := newReportCP(t, `{"active":["someone-elses"],"delivery_reports":true}`)
+		newReportEnvOn(t, cp, nil, beat)
+		eventually(t, "the hello", func() bool { return cp.beats() >= 1 })
+		cp.setStatus(http.StatusForbidden)
+		eventually(t, "refused heartbeats", func() bool { return cp.postCount() >= 2 })
+		if logged := out.String(); strings.Count(logged, "cannot send delivery reports") != 1 {
+			panic(fmt.Sprintf("log:\n%s", logged))
+		}
+		before := cp.beats()
+		cp.setStatus(0)
+		eventually(t, "a heartbeat after the outage", func() bool { return cp.beats() > before })
+	})
+	t.Run("without the stream: none", func(t *testing.T) {
+		cp := &reportCP{fakeCP: newFakeCP(`{"active":["someone-elses"]}`), got: map[string][]deliveryReport{}, answer: map[string]string{}}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/active", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, cp.get()) })
+		mux.HandleFunc("/v1/active/stream", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no stream here", http.StatusBadGateway) })
+		mux.HandleFunc("POST /v1/delivery", cp.batch)
+		cp.srv = httptest.NewServer(mux)
+		t.Cleanup(cp.srv.Close)
+		rec := NewRecorder(64)
+		exp := NewExporter(rec, ExporterConfig{CollectorURL: "http://127.0.0.1:1", FlushInterval: 2 * time.Millisecond, HTTPTimeout: time.Second})
+		sub := NewSubscriberFor(cp.srv.URL, "svc", "raw")
+		rep := newReporter(rec, exp, sub, "svc", "svc-1", reporterConfig{Tick: 5 * time.Millisecond, Heartbeat: period})
+		t.Cleanup(func() { exp.Close(10 * time.Millisecond); rep.close(10 * time.Millisecond); sub.Close() })
+		eventually(t, "the active set, from a poll", sub.Ready)
+		time.Sleep(5 * period)
+		if n := cp.beats(); n != 0 {
+			panic(fmt.Sprintf("%d heartbeats from a process that polls: the control plane does not look for them", n))
+		}
+	})
+}

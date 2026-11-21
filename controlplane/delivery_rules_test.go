@@ -692,3 +692,119 @@ func TestActiveSetSaysThatReportsAreTaken(t *testing.T) {
 		panic(fmt.Sprintf("the set a follower is sent: %+v", a))
 	}
 }
+
+// The third review's F5: whether the reports of a connected instance arrive
+// is judged by how long nothing has arrived of it, not by whether anything
+// ever did. An instance whose reports got through when it connected and are
+// refused since (and whose collector is unreachable) recorded for a session
+// and left no trace: the session was complete. It heartbeats twice per grace
+// while a session runs, so a grace without a word names it.
+func TestDeliveryUnheardIsJudgedByTheTimeSinceTheLastWord(t *testing.T) {
+	silence := testGrace + testGrace/4
+	t.Run("heard once, then nothing for the grace: unconfirmed, not waited for", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting()
+		defer follow(e.m, "orders-api", "o-1")()
+		hello(t, e.m, "orders-api", "o-1")
+		time.Sleep(silence)
+		if subs := e.m.Subscribers(); len(subs) != 1 || !subs[0].DeliveryUnheard {
+			panic(fmt.Sprintf("the list of followers does not mark it: %+v", subs))
+		}
+		s, took := e.stop()
+		if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 ||
+			!strings.HasPrefix(s.DeliveryUnconfirmed[0], "service orders-api (instance o-1): it follows the control plane, but neither a delivery report nor a heartbeat of it has arrived for ") ||
+			!strings.HasSuffix(s.DeliveryUnconfirmed[0], "(its log says why); the collector has no events from it for this session, so whether it recorded any is unknown") {
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
+		}
+		if took >= testGrace/2 {
+			panic(fmt.Sprintf("the drain waited %v for it", took))
+		}
+	})
+	t.Run("the collector has its events: incomplete", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("orders-api", "o-1", 3)
+		defer follow(e.m, "orders-api", "o-1")()
+		hello(t, e.m, "orders-api", "o-1")
+		time.Sleep(silence)
+		s, _ := e.stop()
+		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
+		if len(s.DeliveryUnconfirmed) != 0 {
+			panic(fmt.Sprintf("named twice: unconfirmed=%q", s.DeliveryUnconfirmed))
+		}
+	})
+	t.Run("heartbeats: heard, however long the session", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting()
+		defer follow(e.m, "orders-api", "o-1")()
+		for range 6 { // three graces
+			hello(t, e.m, "orders-api", "o-1")
+			time.Sleep(e.m.heartbeatPeriod())
+		}
+		hello(t, e.m, "orders-api", "o-1")
+		if subs := e.m.Subscribers(); len(subs) != 1 || subs[0].DeliveryUnheard {
+			panic(fmt.Sprintf("marked although it heartbeats: %+v", subs))
+		}
+		s, _ := e.stop()
+		wantComplete(t, s)
+	})
+	// A report for the session that was in order and not final, and then
+	// nothing: the instance may have recorded more, and neither its report nor
+	// the collector would show it.
+	t.Run("a report that was in order, then nothing for the grace", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("orders-api", "o-1", 3)
+		defer follow(e.m, "orders-api", "o-1")()
+		e.report(rep("orders-api", "o-1", 3, 3, 0))
+		time.Sleep(silence)
+		s, _ := e.stop()
+		if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "neither a delivery report nor a heartbeat of it has arrived for ") ||
+			!strings.HasSuffix(s.DeliveryUnconfirmed[0], "its last report for this session, of 3 events, was not final, so whether it recorded more since is unknown") {
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
+		}
+		// With a final report it has said all there is to say.
+		e = newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("orders-api", "o-1", 3)
+		defer follow(e.m, "orders-api", "o-1")()
+		e.report(final(rep("orders-api", "o-1", 3, 3, 0)))
+		time.Sleep(silence)
+		s, _ = e.stop()
+		wantComplete(t, s)
+	})
+	// Without a session an instance sends no heartbeat: its silence says
+	// nothing, however long, and it is given the time to send its first when a
+	// session begins.
+	t.Run("no session: silence says nothing", func(t *testing.T) {
+		col := newScriptCollector()
+		col.counting()
+		m := NewManager(Config{Collector: col, PollInterval: 2 * time.Millisecond, TimeUnit: 10 * time.Millisecond, DeliveryGrace: testGrace})
+		t.Cleanup(m.Close)
+		defer follow(m, "orders-api", "o-1")()
+		hello(t, m, "orders-api", "o-1")
+		time.Sleep(silence)
+		if subs := m.Subscribers(); len(subs) != 1 || subs[0].DeliveryUnheard {
+			panic(fmt.Sprintf("marked while the control plane has no session: %+v", subs))
+		}
+		s, err := m.Start(StartRequest{Name: "d", QuiesceSeconds: 2, MaxDrainSeconds: 1000})
+		if err != nil {
+			panic(err)
+		}
+		if subs := m.Subscribers(); subs[0].DeliveryUnheard {
+			panic(fmt.Sprintf("marked the moment a session began: %+v", subs))
+		}
+		hello(t, m, "orders-api", "o-1") // what the SDK does when it learns of the session
+		e := &deliveryEnv{t: t, m: m, col: col, id: s.ID}
+		sealed, _ := e.stop()
+		wantComplete(t, sealed)
+		// The session is over: the mark is not left standing by its end.
+		time.Sleep(silence)
+		if subs := m.Subscribers(); subs[0].DeliveryUnheard {
+			panic(fmt.Sprintf("marked after the last session ended: %+v", subs))
+		}
+	})
+	if a := (&Manager{cfg: Config{DeliveryGrace: 10 * time.Second}}).activeLocked(); !a.DeliveryReports || a.DeliveryHeartbeatMs != 5000 {
+		panic(fmt.Sprintf("the active set asks for a heartbeat every %dms, want half the grace", a.DeliveryHeartbeatMs))
+	}
+	if a := (&Manager{cfg: Config{DeliveryGrace: -1}}).activeLocked(); a.DeliveryHeartbeatMs != 0 {
+		panic(fmt.Sprintf("the active set asks for a heartbeat with the check off: %+v", a))
+	}
+}
