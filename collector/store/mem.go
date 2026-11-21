@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
@@ -90,6 +91,37 @@ func (m *Mem) ListSessions(context.Context) ([]SessionInfo, error) {
 		out = append(out, si)
 	}
 	slicex.SortBy(out, func(s SessionInfo) string { return s.ID })
+	return out, nil
+}
+
+// ListExpired implements ExpiredLister. Events are read only for sessions
+// that were never sealed.
+func (m *Mem) ListExpired(_ context.Context, cutoff time.Time, after string, limit int) ([]SessionInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []SessionInfo
+	for id, evs := range m.ev {
+		if id <= after {
+			continue
+		}
+		if s, ok := m.seal[id]; ok {
+			if s.SealedAt.Before(cutoff) {
+				out = append(out, SessionInfo{ID: id, Sealed: true})
+			}
+			continue
+		}
+		var last int64
+		for i := range evs {
+			last = max(last, evs[i].EndNs)
+		}
+		if last > 0 && last < cutoff.UnixNano() {
+			out = append(out, SessionInfo{ID: id, LastNs: last})
+		}
+	}
+	slicex.SortBy(out, func(s SessionInfo) string { return s.ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

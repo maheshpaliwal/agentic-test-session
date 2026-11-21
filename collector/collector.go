@@ -92,6 +92,9 @@ type Collector struct {
 	stopOnce  sync.Once
 	stop      chan struct{} // closed by Close
 	retention chan struct{} // closed when the retention loop has exited
+
+	sweepMu    sync.Mutex
+	sweepAfter string // where the next retention sweep resumes; "" is the start
 }
 
 // New builds a Collector over st.
@@ -342,20 +345,71 @@ func (c *Collector) retentionLoop() {
 	}
 }
 
+// retentionPage is how many sessions a retention sweep asks a
+// store.ExpiredLister for at a time.
+const retentionPage = 256
+
 // PurgeExpired deletes the sessions whose retention has run out as of now and
 // returns how many were deleted. It is what the retention loop runs; with
 // Config.Retention unset it does nothing.
+//
+// A store.ExpiredLister is asked only for the sessions that may be due, a
+// page at a time until there are no more, so one call still deletes every
+// due session. A call that ends early (ctx, or the store failing to list)
+// leaves the rest to the next call, which carries on after the last session
+// this one looked at instead of starting over: sessions that cannot be
+// deleted do not keep the ones behind them waiting. Any other store is
+// listed whole.
 func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
 	if c.cfg.Retention <= 0 {
 		return 0, nil
 	}
-	sessions, err := c.st.ListSessions(ctx)
-	if err != nil {
-		return 0, err
-	}
 	cutoff := now.Add(-c.cfg.Retention)
+	el, ok := c.st.(store.ExpiredLister)
+	if !ok {
+		sessions, err := c.st.ListSessions(ctx)
+		if err != nil {
+			return 0, err
+		}
+		n, _, err := c.purge(ctx, sessions, cutoff)
+		return n, err
+	}
+	c.sweepMu.Lock()
+	defer c.sweepMu.Unlock()
 	n := 0
 	var firstErr error
+	for ctx.Err() == nil {
+		page, err := el.ListExpired(ctx, cutoff, c.sweepAfter, retentionPage)
+		if err == nil && len(page) > 0 && page[len(page)-1].ID <= c.sweepAfter {
+			err = fmt.Errorf("store listed session %s after %s", page[len(page)-1].ID, c.sweepAfter)
+		}
+		if err != nil {
+			firstErr = cmp.Or(firstErr, err)
+			break
+		}
+		d, last, err := c.purge(ctx, page, cutoff)
+		n += d
+		firstErr = cmp.Or(firstErr, err)
+		if last < len(page) {
+			// Cut short: the next sweep resumes behind the last session tried.
+			if last > 0 {
+				c.sweepAfter = page[last-1].ID
+			}
+			break
+		}
+		if len(page) < retentionPage {
+			c.sweepAfter = ""
+			break
+		}
+		c.sweepAfter = page[len(page)-1].ID
+	}
+	return n, firstErr
+}
+
+// purge deletes those of sessions that are expired at cutoff, stopping when
+// ctx ends. It returns how many it deleted, how many it got through and the
+// first error.
+func (c *Collector) purge(ctx context.Context, sessions []store.SessionInfo, cutoff time.Time) (n, tried int, firstErr error) {
 	for _, s := range sessions {
 		expired, err := c.expired(ctx, s, cutoff)
 		if err == nil && expired {
@@ -366,11 +420,12 @@ func (c *Collector) PurgeExpired(ctx context.Context, now time.Time) (int, error
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("session %s: %w", s.ID, err)
 		}
+		tried++
 		if ctx.Err() != nil {
 			break
 		}
 	}
-	return n, firstErr
+	return n, tried, firstErr
 }
 
 func (c *Collector) expired(ctx context.Context, s store.SessionInfo, cutoff time.Time) (bool, error) {
