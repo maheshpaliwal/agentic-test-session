@@ -90,6 +90,9 @@ func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	if sum.Incomplete || len(info.IncompleteReasons) > 0 {
 		state += ", incomplete"
 	}
+	if len(info.DeliveryUnconfirmed) > 0 {
+		state += ", delivery unconfirmed"
+	}
 	fmt.Fprintf(w, "session    %s  %s  (%s)\n", info.ID, displayName(info), state)
 	fmt.Fprintf(w, "events     %d over %s\n", sum.EventCount, time.Duration(sum.DurationNs).Round(time.Millisecond))
 	fmt.Fprintf(w, "failures   %d\n", len(sum.Failures))

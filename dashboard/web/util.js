@@ -108,6 +108,12 @@
     (s.incomplete_reasons || []).forEach((r) => w.push('Events did not reach the collector: ' + r));
     return w;
   }
+  // The service instances whose delivery the control plane could not
+  // confirm. A warning of its own: the session is not incomplete for it.
+  function deliveryUnconfirmed(s) {
+    const list = s && Array.isArray(s.delivery_unconfirmed) ? s.delivery_unconfirmed : [];
+    return list.filter((r) => typeof r === 'string' && r).map((r) => 'Delivery not confirmed: ' + r);
+  }
 
   // Colour/icon group for an event kind: api db cache queue worker retry dlq tx sys.
   function kindGroup(k) {
@@ -559,7 +565,7 @@
   }
 
   const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
-    mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
+    mergeEvents, ndjson, sessionWarnings, deliveryUnconfirmed, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
 })(typeof window !== 'undefined' ? window : globalThis);

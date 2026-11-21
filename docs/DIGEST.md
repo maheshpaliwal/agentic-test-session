@@ -19,7 +19,8 @@ name by the SDK, like everything recorded).
 ## What it holds, in this order
 
 1. **Verdict**: `failed`, `incomplete`, `empty` or `passed`; the session state; whether the recording is
-   complete and, if not, why; counts by service, kind, entity and flag. A session that is not sealed is marked
+   complete and, if not, why; the service instances whose delivery the control plane could not confirm
+   (`delivery unconfirmed`, a warning that does not change the verdict); counts by service, kind, entity and flag. A session that is not sealed is marked
    live: everything in the digest can still change.
 2. **Failures**: every failed event (service, kind, name, error), with the chain of its ancestors from the root
    request down. An async edge (a worker run under the publish that caused it) is marked `~>`. At most 5
@@ -88,7 +89,7 @@ Lists are never `null`.
 | `schema` | string | `"tsession.digest/v1"` |
 | `notice` | string | the fixed notice above |
 | `session` | object | `id`, `name`, `state` (empty: the control plane no longer knows the session), `live` (not sealed yet) |
-| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown`; `incomplete_reasons`: strings, when incomplete |
+| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown`; `incomplete_reasons`: strings, when incomplete; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
 | `counts` | object | `events`, `failures`, `mutations`, `duration_ns`, `pending_async`, `dropped_events`, `quarantined`; and the maps `by_service`, `by_kind`, `mutations_by_entity` (key `store/entity`), `flags`, each with its 16 largest entries |
 | `failures` | list | in `seq` order, see below |
 | `mutations` | list | one object per changed entity, see below |

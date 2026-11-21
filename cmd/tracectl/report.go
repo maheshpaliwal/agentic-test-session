@@ -359,6 +359,10 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	if !info.Done() {
 		verdict += " The session is still " + mdEscape(info.State, 40) + ", so this report can change."
 	}
+	if len(info.DeliveryUnconfirmed) > 0 {
+		// A warning, not a failure: but "Passed" alone would hide it.
+		verdict += " Whether every event arrived could not be confirmed for " + plural(len(info.DeliveryUnconfirmed), "service instance") + " (see below)."
+	}
 	b.WriteString(verdict + "\n\n")
 	mdTable(&b, []string{"State", "Events", "Duration", "Services"}, [][]string{{
 		mdCell(info.State, 40), strconv.Itoa(sum.EventCount),
@@ -388,6 +392,14 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	if rep.incomplete {
 		b.WriteString("\n### Why it is incomplete\n\n")
 		for _, r := range rep.reasons {
+			b.WriteString("- " + mdEscape(r, 2*reportErrMax) + "\n")
+		}
+	}
+
+	if len(info.DeliveryUnconfirmed) > 0 {
+		b.WriteString("\n### Delivery not confirmed\n\n")
+		b.WriteString("The control plane could not tell whether all events of these service instances reached the collector. The session is not marked incomplete for it.\n\n")
+		for _, r := range info.DeliveryUnconfirmed {
 			b.WriteString("- " + mdEscape(r, 2*reportErrMax) + "\n")
 		}
 	}
@@ -479,7 +491,16 @@ func renderJUnit(rep *sessionReport) ([]byte, error) {
 	info := rep.info
 	suite := junitSuite{Name: cmp.Or(info.Name, info.ID), Time: junitSeconds(rep.sum.DurationNs), Properties: []junitProperty{
 		{Name: "session_id", Value: info.ID}, {Name: "state", Value: info.State},
+		{Name: "incomplete", Value: strconv.FormatBool(rep.incomplete)},
 	}}
+	// Why the session is incomplete, and what could not be confirmed, as
+	// properties: a CI system shows them also when no test case failed.
+	for _, r := range rep.reasons {
+		suite.Properties = append(suite.Properties, junitProperty{Name: "incomplete_reason", Value: clip(r, 2*reportErrMax)})
+	}
+	for _, r := range info.DeliveryUnconfirmed {
+		suite.Properties = append(suite.Properties, junitProperty{Name: "delivery_unconfirmed", Value: clip(r, 2*reportErrMax)})
+	}
 	roots := rep.roots
 	if len(roots) > junitMaxCases {
 		// Keep the failed ones: a stable sort moves them to the front.

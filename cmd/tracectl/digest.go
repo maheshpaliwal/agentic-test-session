@@ -161,7 +161,15 @@ type dVerdict struct {
 	Status    string   `json:"status"`    // failed, incomplete, empty or passed
 	Recording string   `json:"recording"` // complete, incomplete or unknown
 	Reasons   []string `json:"incomplete_reasons,omitempty"`
+	// Unconfirmed names the service instances of which the control plane
+	// could not tell whether all their events arrived. The recording is not
+	// incomplete for it, and not known to be complete either.
+	Unconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
+
+// digestMaxUnconfirmed bounds dVerdict.Unconfirmed: the verdict is the part
+// of a digest that is never cut to fit the budget.
+const digestMaxUnconfirmed = 4
 
 type dCounts struct {
 	Events       int            `json:"events"`
@@ -708,6 +716,13 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	case info.State == "":
 		d.Verdict.Recording = "unknown"
 	}
+	for i, w := range info.DeliveryUnconfirmed {
+		if i == digestMaxUnconfirmed {
+			d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, fmt.Sprintf("and %d more", len(info.DeliveryUnconfirmed)-i))
+			break
+		}
+		d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, dataText(w, reasonMax))
+	}
 	switch {
 	case len(src.failures) > 0:
 		d.Verdict.Status = "failed"
@@ -1073,6 +1088,9 @@ func (digestMarkdown) render(d *digest) []byte {
 	fmt.Fprintf(&b, "\n\n- state: %s; recording: %s\n", state, d.Verdict.Recording)
 	for _, r := range d.Verdict.Reasons {
 		b.WriteString("- incomplete: " + mdEscape(r, 2*digestErrMax) + "\n")
+	}
+	for _, r := range d.Verdict.Unconfirmed {
+		b.WriteString("- delivery unconfirmed: " + mdEscape(r, 2*digestErrMax) + "\n")
 	}
 	fmt.Fprintf(&b, "- events: %d over %s; %s; %s\n", c.Events, time.Duration(c.DurationNs).Round(time.Millisecond),
 		plural(c.Failures, "failure"), plural(c.Mutations, "mutation"))

@@ -685,7 +685,8 @@
         h('td', null, h('div', { class: 'stats' }, h('span', { title: 'events captured' }, h('b', { text: s.event_count === undefined ? '-' : s.event_count }), 'events'),
           s.service_count !== undefined ? h('span', { title: 'services seen' }, h('b', { text: s.service_count }), 'services') : null,
           h('span', { title: 'wall-clock duration' }, icon('clock', 'sm'), h('b', { text: dur })))),
-        h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', 'some async work or events are missing', 'warn') : null,
+        h('td', null, h('div', { class: 'cell-flags' }, s.incomplete ? tag('incomplete', 't-warn', (s.incomplete_reasons || [])[0] || 'some async work or events are missing', 'warn') : null,
+          U.deliveryUnconfirmed(s).length ? tag('delivery unconfirmed', 't-warn', U.deliveryUnconfirmed(s)[0], 'warn') : null,
           s.dropped_events ? tag(s.dropped_events + ' dropped', 't-err') : null, s.seal_error ? tag(s.seal_pending ? 'seal retrying' : 'seal error', 't-err', s.seal_error) : null)),
         h('td', { class: 'num' }, stop, del));
     }
@@ -1037,6 +1038,7 @@
       }), statePill(s.state),
       isLive(s) ? h('span', { class: 'live-tag' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), 'live tail') : null,
       s.incomplete ? tag('incomplete', 't-warn', 'some async work or events are missing', 'warn') : null,
+      U.deliveryUnconfirmed(s).length ? tag('delivery unconfirmed', 't-warn', 'whether every event arrived could not be confirmed', 'warn') : null,
       s.reason ? tag('reason: ' + s.reason, 't-warn', 'why the session ended') : null,
       h('span', { class: 'grow' }),
       h('div', { class: 'shead-actions' },
@@ -1069,6 +1071,13 @@
       const w = U.sessionWarnings(Object.assign({}, s, { seal_error: '' }));
       head.appendChild(h('div', { class: 'callout warn', role: 'alert' }, icon('warn'), h('div', { class: 'ct' },
         h('strong', { text: s.incomplete ? 'Incomplete session' : 'Dropped events' }), w.map((x) => h('span', { text: x })))));
+    }
+    const unconfirmed = U.deliveryUnconfirmed(s);
+    if (unconfirmed.length) {
+      head.appendChild(h('div', { class: 'callout warn', role: 'note' }, icon('warn'), h('div', { class: 'ct' },
+        h('strong', { text: 'Delivery not confirmed' }),
+        h('span', { text: 'The control plane could not tell whether every event of these service instances reached the collector. The session is not marked incomplete for it.' }),
+        unconfirmed.map((x) => h('span', { text: x })))));
     }
   }
 

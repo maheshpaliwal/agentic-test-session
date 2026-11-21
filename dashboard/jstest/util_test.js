@@ -59,6 +59,13 @@ assert.deepStrictEqual(U.sessionWarnings({}), []);
 assert.strictEqual(U.sessionWarnings({ seal_error: 'x', incomplete: true, dropped_events: 3 }).length, 2);
 assert.deepStrictEqual(U.sessionWarnings({ incomplete: true, incomplete_reasons: ['service a (instance i): 0 of 2 recorded events reached the collector'] }).slice(1),
   ['Events did not reach the collector: service a (instance i): 0 of 2 recorded events reached the collector']);
+assert.deepStrictEqual(U.deliveryUnconfirmed({}), []);
+assert.deepStrictEqual(U.deliveryUnconfirmed(null), []);
+assert.deepStrictEqual(U.deliveryUnconfirmed({ delivery_unconfirmed: 'x' }), []);
+assert.deepStrictEqual(U.deliveryUnconfirmed({ delivery_unconfirmed: ['service b (instance j): the collector has 9 events', '', 3] }),
+  ['Delivery not confirmed: service b (instance j): the collector has 9 events']);
+// The warning stands on its own: such a session is not incomplete.
+assert.deepStrictEqual(U.sessionWarnings({ delivery_unconfirmed: ['x'] }), []);
 assert.strictEqual(U.kindGroup('api.in'), 'api');
 assert.strictEqual(U.kindGroup('db.tx.commit'), 'tx');
 assert.strictEqual(U.kindGroup('db.write'), 'db');

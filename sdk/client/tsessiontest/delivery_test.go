@@ -52,3 +52,32 @@ func TestRequireNoFailuresWithUndeliveredEvents(t *testing.T) {
 		t.Fatalf("a healthy session failed: %q (info %+v)", out, s.Info())
 	}
 }
+
+// A delivery the control plane could not confirm does not fail
+// RequireNoFailures, which logs it; RequireDeliveryConfirmed fails on it.
+func TestRequireDeliveryConfirmed(t *testing.T) {
+	e := newEnv(t)
+	var s *client.Session
+	failed, out := check(t, func(tb testing.TB) {
+		s = tsessiontest.Run(t, e.opts)
+		// It held events when it last reported, and was not heard of again.
+		reportDelivery(t, s, e.opts.BaseURL, `{"service":"batch","instance":"b-1","recorded":5,"delivered":3,"buffered":2}`)
+		tsessiontest.RequireNoFailures(tb, s)
+	})
+	if failed || !strings.Contains(out, "delivery unconfirmed: service batch (instance b-1): 3 of 5") {
+		t.Fatalf("RequireNoFailures: failed=%v output %q (info %+v)", failed, out, s.Info())
+	}
+	failed, out = check(t, func(tb testing.TB) { tsessiontest.RequireDeliveryConfirmed(tb, s) })
+	if !failed || !strings.Contains(out, "delivery unconfirmed: service batch (instance b-1): 3 of 5") {
+		t.Fatalf("RequireDeliveryConfirmed: failed=%v output %q", failed, out)
+	}
+
+	failed, out = check(t, func(tb testing.TB) {
+		s = tsessiontest.Run(t, e.opts)
+		reportDelivery(t, s, e.opts.BaseURL, `{"service":"batch","instance":"b-1","recorded":5,"delivered":5,"final":true}`)
+		tsessiontest.RequireDeliveryConfirmed(tb, s)
+	})
+	if failed {
+		t.Fatalf("RequireDeliveryConfirmed on a healthy session: %q", out)
+	}
+}

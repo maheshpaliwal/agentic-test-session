@@ -273,8 +273,11 @@ func Stop(t testing.TB, s *client.Session) client.Summary {
 var failuresListed sync.Map
 
 // RequireNoFailures fails the test if the session recorded a failed event or is incomplete (dropped or
-// quarantined events, asynchronous work that never finished, events a service recorded and could not
-// deliver to the collector).
+// quarantined events, asynchronous work that never finished, events a service recorded that the collector
+// does not have). Each reason the control plane gives is printed.
+//
+// A delivery the control plane could not confirm (Info.DeliveryUnconfirmed) is logged and does not fail
+// the test; `go test` shows a passing test's log only with -v. Use RequireDeliveryConfirmed to fail on it.
 func RequireNoFailures(t testing.TB, s *client.Session) {
 	t.Helper()
 	sum := Stop(t, s)
@@ -306,6 +309,22 @@ func RequireNoFailures(t testing.TB, s *client.Session) {
 		t.Errorf("tsession: the control plane marked session %s incomplete", s.ID)
 	}
 	if len(sum.Failures) > 0 || sum.Incomplete || info.SealError != "" || info.DrainTimedOut || info.Incomplete {
+		t.FailNow()
+	}
+}
+
+// RequireDeliveryConfirmed fails the test if the control plane could not tell, for some service instance,
+// whether all its events reached the collector: an instance that recorded more after its last delivery
+// report and then stopped reporting (it was killed, say). The session is not incomplete for that, so
+// RequireNoFailures passes. It stops the session first, like RequireNoFailures, and can be called after it.
+func RequireDeliveryConfirmed(t testing.TB, s *client.Session) {
+	t.Helper()
+	Stop(t, s)
+	info := s.Info()
+	for _, w := range info.DeliveryUnconfirmed {
+		t.Errorf("tsession: session %s: delivery unconfirmed: %s", s.ID, w)
+	}
+	if len(info.DeliveryUnconfirmed) > 0 {
 		t.FailNow()
 	}
 }
