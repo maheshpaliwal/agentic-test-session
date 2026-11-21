@@ -33,6 +33,7 @@ type stmtTrace struct {
 	retAll   bool // result rows are full-row RETURNING * images
 	before   []img
 	beforeOK bool
+	ups      *upsertRead // an upsert whose rows can be found by a key (upsert.go)
 }
 
 // flag adds a span flag once.
@@ -223,6 +224,10 @@ func (t *stmtTrace) rewrite() string {
 
 func (t *stmtTrace) preImage() {
 	in := t.info
+	if in.Kind == mutation.Upsert {
+		t.upsertBefore()
+		return
+	}
 	if !t.write || !t.cfg.images || t.skip || (in.Kind != mutation.Update && in.Kind != mutation.Delete) {
 		return
 	}
@@ -258,10 +263,18 @@ func (t *stmtTrace) preImage() {
 
 // capture runs a capture query and translates its outcome into span flags.
 func (t *stmtTrace) capture(q string, vals []driver.Value, limit int, failFlag string) ([]img, bool) {
-	rs, st := t.c.capture(t.ctx, t.pg(), q, vals, limit, t.pk)
+	rs, st := t.captureKeyed(q, vals, limit, failFlag, t.pk)
+	return rs, st == capOK
+}
+
+// captureKeyed is capture for rows that are told apart by keyCols, which need
+// not be the primary key; it also says how the capture ended. With no
+// failFlag a capture that failed is left to the caller to flag.
+func (t *stmtTrace) captureKeyed(q string, vals []driver.Value, limit int, failFlag string, keyCols []string) ([]img, capStatus) {
+	rs, st := t.c.capture(t.ctx, t.pg(), q, vals, limit, keyCols)
 	switch st {
 	case capOK:
-		return rs, true
+		return rs, st
 	case capSerializable:
 		t.flag("image_skipped")
 		t.flag("image_skipped:serializable")
@@ -273,9 +286,11 @@ func (t *stmtTrace) capture(q string, vals []driver.Value, limit int, failFlag s
 	case capTimeout:
 		t.flag("image_timeout")
 	default:
-		t.flag(failFlag)
+		if failFlag != "" {
+			t.flag(failFlag)
+		}
 	}
-	return nil, false
+	return nil, st
 }
 
 func (t *stmtTrace) finishExec(res driver.Result, err error) {

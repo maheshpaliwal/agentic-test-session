@@ -69,6 +69,7 @@
     returning_partial: 'the statement returned only some of the row\'s columns',
     oversize_dropped: 'payload dropped for exceeding size limits',
     after_failed: 'reading the row back after the write failed; its new values are not known',
+    upsert_unknown: 'whether this upsert inserted the row or updated one that was there is not known, so no changed fields are listed',
     image_timeout: 'reading the row images took too long and was abandoned', image_failed: 'reading the row images failed',
     image_truncated: 'the statement changed more rows than are captured; only some have images', diff_truncated: 'the list of changed fields was cut short',
     propagation_skipped: 'session context was not propagated downstream', unattributed: 'event could not be attributed to a session with certainty' };

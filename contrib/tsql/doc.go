@@ -76,7 +76,8 @@
 // ("image_skipped" with its reason, "image_timeout" or "image_failed"; see
 // the caveats below) and the mutation has the after image only.
 //
-// Three flags mark a write whose key or new values are not known:
+// Three flags mark a write whose key or new values are not known (a fourth,
+// "upsert_unknown", is described under Upserts):
 //
 //   - "pk_unknown": no value for the key columns was found in the row images,
 //     the predicate or the VALUES list (typically the table has no "id" and
@@ -89,6 +90,83 @@
 //   - "pk_not_unique": the key columns matched more rows than the statement
 //     wrote, so they are not the table's key. The after image is dropped
 //     ("after_unavailable" applies) and the key is looked up afresh.
+//
+// # Upserts
+//
+// An upsert either inserts a row or updates one that is there, and the
+// statement's result does not say which. tsql finds out from the row itself
+// and records each row as what happened to it:
+//
+//   - inserted: op "upsert", the new row as after image, every field in the
+//     diff set from nothing.
+//   - updated: op "update", the row before and after, and only the fields
+//     that differ in the diff, like an UPDATE. A row the update moved to
+//     another key has the before image only ("after_unavailable").
+//   - not known: op "upsert" and the flag "upsert_unknown". The mutation has
+//     no before image and no diff; it has the row after the statement where
+//     that could be read, and is filed under the key in VALUES only when
+//     that key is the one the statement collides on.
+//
+// On Postgres the row is looked for by the columns of the conflict target,
+// "ON CONFLICT (a, b)", with the values in VALUES: once before the statement
+// and once after it, each a capture like any other (fenced, skipped under
+// SERIALIZABLE, never outside a session or with WithImages(false)). The
+// target need not be the primary key; the mutation is filed under the
+// primary key the row has. The read after the statement also takes the row
+// version's xmax: 0 on a version an INSERT wrote, set on the one ON CONFLICT
+// DO UPDATE wrote. That is what tells an insert from an update; the read
+// before it gives the old values. The statement itself is never changed (a
+// RETURNING clause would need SELECT rights it may not have, fails with a
+// system column on a partitioned table, and changes what the application
+// receives), also when it has a RETURNING of its own.
+//
+// The read before the statement is not locked, so another connection can
+// insert or delete the row between it and the statement. The two reads then
+// disagree (no row before, yet not a fresh one after; or a row before, yet a
+// fresh one after) and the row is recorded as not known rather than as
+// either. What is not noticed: another writer that changes a row which is
+// there before and after (the before image is then older than the values
+// the statement met, as for an UPDATE), and, in autocommit, one that updates
+// the row between the statement and the read after it. A view has no xmax,
+// and neither has every database that speaks the Postgres protocol: there
+// the first read fails inside its fence, is made again without, and for 30
+// seconds the table is not asked for it; the read before the statement
+// alone then says whether the row was there, and the race is not noticed.
+//
+// Several rows in VALUES (up to WithMaxImageRows) are read with one SELECT
+// before and one after. The statement's row count has to account for them:
+// rows the WHERE of DO UPDATE left as they were (they are locked all the
+// same) are no mutation, and where the count cannot be matched to the rows
+// found, all are recorded as not known.
+//
+// The outcome is not known, and nothing is read, when the statement does
+// not say by which values a row is found: ON CONFLICT ON CONSTRAINT, a
+// target with an expression, a collation, an operator class or the predicate
+// of a partial index, a key that is not a plain placeholder or literal in
+// VALUES (or is NULL), INSERT ... SELECT, MERGE. Reading by the primary key
+// in VALUES instead would record a row the statement may not have touched.
+// ON CONFLICT DO NOTHING writes new rows only: it is recorded as an INSERT is
+// and nothing is read before it.
+//
+// WithUpsertBefore(false) drops the read before the statement. On Postgres
+// an inserted row is still recorded as above; an updated one is an update
+// with its after image only, no diff, flag "image_skipped" (reason
+// "upsert_before_off").
+//
+// MySQL (INSERT ... ON DUPLICATE KEY UPDATE, REPLACE) has not been run
+// against a server, and is kept to what holds in either client convention
+// for affected rows. The row is looked for by the primary key in VALUES,
+// before and after (one SELECT each). It is recorded as inserted when it was
+// not there before, is there after, and one row was affected; as updated
+// when it was there and the count is 2 (or, with CLIENT_FOUND_ROWS, 1 for a
+// row set to the values it had; exactly 2 for REPLACE, which is recorded as
+// an update although it deletes and inserts: columns it does not name go
+// back to their defaults). Everything else is not known: a count that says
+// another unique key was hit or more rows were deleted, a generated key
+// (the row the server reports as inserted is read back as the after image),
+// several rows in VALUES, WithUpsertBefore(false). A table with more than
+// one unique key can update a row other than the one with the primary key
+// in VALUES; that shows only where the count gives it away.
 //
 // # Redaction
 //
@@ -196,8 +274,12 @@
 // "ROLLBACK"), which also puts statement_timeout back to what the application
 // had. An UPDATE reads the rows before and after (7 round trips in all), a
 // DELETE before and an INSERT with its key in VALUES after (4 each); an INSERT
-// whose key the database generates is not re-read (1). These counts were
-// measured with pgx on Postgres 14 only. Sending two statements
+// whose key the database generates is not re-read (1). An upsert that can
+// update reads the rows before and after like an UPDATE (7; 4 with
+// WithUpsertBefore(false)), whatever the number of rows in VALUES and also
+// when it returns its rows; one whose rows cannot be looked for is not read
+// (1); ON CONFLICT DO NOTHING costs what an INSERT costs. These counts
+// were measured with pgx on Postgres 14 only. Sending two statements
 // in one text needs a driver that uses the simple query protocol for an Exec
 // without arguments (pgx and lib/pq do). tsql finds out per connection, where a
 // refusal cannot hurt, so the first capture on a connection costs one or two

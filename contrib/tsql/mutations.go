@@ -95,7 +95,9 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 	}
 	pkCols := t.pk
 	var muts []core.Mutation
-	emit := func(before, after *img, fallback map[string]any) {
+	// emit records one row. noDiff: the two images are not the row before
+	// and after one known change, so their difference says nothing.
+	emit := func(op string, before, after *img, fallback map[string]any, noDiff bool) {
 		m := t.newMutation(op)
 		var bd, ad map[string]any
 		if before != nil {
@@ -126,7 +128,7 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		// not read back the new values are not known, and with no image from
 		// before the write the old ones are not: a diff against nothing would
 		// show every column as removed, or as set from nothing.
-		if (bd != nil || ad != nil) && !(in.Kind == mutation.Update && (bd == nil || ad == nil)) {
+		if (bd != nil || ad != nil) && !noDiff && !(op == "update" && (bd == nil || ad == nil)) {
 			var hidden bool
 			if m.Diff, hidden = diffMaps(bd, ad); hidden {
 				t.flag("diff_truncated")
@@ -135,8 +137,8 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		muts = append(muts, m)
 	}
 
-	switch in.Kind {
-	case mutation.Update, mutation.Delete:
+	switch {
+	case in.Kind == mutation.Update || in.Kind == mutation.Delete:
 		eq := t.pkFromValues(in.Equals, pkCols)
 		var after []img
 		if in.Kind == mutation.Update && t.cfg.images {
@@ -161,14 +163,14 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 		case t.beforeOK:
 			for i := range t.before {
 				b := t.before[i]
-				emit(&b, matchAfter(after, b, i, pkCols, len(t.before)), eq.disp)
+				emit(op, &b, matchAfter(after, b, i, pkCols, len(t.before)), eq.disp, false)
 			}
 		case len(after) > 0:
 			for i := range after {
-				emit(nil, &after[i], eq.disp)
+				emit(op, nil, &after[i], eq.disp, false)
 			}
 		default:
-			emit(nil, nil, eq.disp)
+			emit(op, nil, nil, eq.disp, false)
 		}
 		if in.Kind == mutation.Update && t.cfg.images && len(muts) > 0 && muts[0].After.IsZero() {
 			t.flag("after_unavailable")
@@ -181,7 +183,9 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 			!t.flagged["image_skipped"] && !t.flagged["image_timeout"] && !t.flagged["image_failed"] {
 			t.flag("image_failed")
 		}
-	default: // insert, upsert
+	case in.Kind == mutation.Upsert && !in.Conflict.DoNothing:
+		t.addUpserts(res, ret, affected, emit)
+	default: // insert, and an upsert that writes new rows only (DO NOTHING)
 		var after []img
 		if in.Bulk {
 			t.flag("bulk_copy")
@@ -230,10 +234,10 @@ func (t *stmtTrace) addMutations(res driver.Result, ret []img, affected int64) {
 			t.flag("multi_row_insert")
 		}
 		if len(after) == 0 {
-			emit(nil, nil, t.pkFromValues(in.Values, pkCols).disp)
+			emit(op, nil, nil, t.pkFromValues(in.Values, pkCols).disp, false)
 		}
 		for i := range after {
-			emit(nil, &after[i], nil)
+			emit(op, nil, &after[i], nil, false)
 		}
 	}
 	if len(muts) > t.cfg.maxRows {
@@ -305,43 +309,8 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 		}
 		seen[k] = struct{}{}
 	}
-	dollar := t.pg()
-	var vals []driver.Value
-	ph := func(v driver.Value) string {
-		vals = append(vals, v)
-		if dollar {
-			return "$" + strconv.Itoa(len(vals))
-		}
-		return "?"
-	}
-	q := quoter(t.store, t.pkCatalog)
-	var b strings.Builder
-	b.WriteString("SELECT * FROM " + t.info.TableSQL + " WHERE ")
-	if len(pkCols) == 1 {
-		b.WriteString(q(pkCols[0]) + " IN (")
-		for i, r := range refs {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(ph(r.raw[pkCols[0]]))
-		}
-		b.WriteString(")")
-	} else {
-		for i, r := range refs {
-			if i > 0 {
-				b.WriteString(" OR ")
-			}
-			b.WriteString("(")
-			for j, c := range pkCols {
-				if j > 0 {
-					b.WriteString(" AND ")
-				}
-				b.WriteString(q(c) + " = " + ph(r.raw[c]))
-			}
-			b.WriteString(")")
-		}
-	}
-	rs, ok := t.capture(b.String(), vals, len(refs)+1, "after_failed")
+	q, vals := t.keySelect(pkCols, t.pkCatalog, refs, false)
+	rs, ok := t.capture(q, vals, len(refs)+1, "after_failed")
 	if !ok {
 		return nil
 	}
@@ -355,6 +324,53 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 		return nil
 	}
 	return rs
+}
+
+// keySelect builds the SELECT of the statement's table for the rows whose
+// cols have the values in refs. exact says cols are the catalog's spelling
+// (see quoter); sys adds the row version's xmax (xmaxCol; Postgres only).
+func (t *stmtTrace) keySelect(cols []string, exact bool, refs []pkRef, sys bool) (string, []driver.Value) {
+	dollar := t.pg()
+	var vals []driver.Value
+	ph := func(v driver.Value) string {
+		vals = append(vals, v)
+		if dollar {
+			return "$" + strconv.Itoa(len(vals))
+		}
+		return "?"
+	}
+	q := quoter(t.store, exact)
+	var b strings.Builder
+	b.WriteString("SELECT *")
+	if sys {
+		b.WriteString(", xmax::text AS " + xmaxCol)
+	}
+	b.WriteString(" FROM " + t.info.TableSQL + " WHERE ")
+	if len(cols) == 1 {
+		b.WriteString(q(cols[0]) + " IN (")
+		for i, r := range refs {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(ph(r.raw[cols[0]]))
+		}
+		b.WriteString(")")
+	} else {
+		for i, r := range refs {
+			if i > 0 {
+				b.WriteString(" OR ")
+			}
+			b.WriteString("(")
+			for j, c := range cols {
+				if j > 0 {
+					b.WriteString(" AND ")
+				}
+				b.WriteString(q(c) + " = " + ph(r.raw[c]))
+			}
+			b.WriteString(")")
+		}
+	}
+	return b.String(), vals
 }
 
 // quoter quotes a column name for store. exact says the name is the
