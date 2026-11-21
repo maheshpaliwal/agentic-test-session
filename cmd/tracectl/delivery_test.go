@@ -131,3 +131,29 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 		panic(fmt.Sprintf("digest of a healthy session: %s", clean))
 	}
 }
+
+// The header of a summary says "incomplete" whenever the gate would: also
+// for a session the control plane alone marked incomplete, with nothing the
+// collector's summary shows (a drain that timed out, a seal that failed). It
+// said "(SEALED)" for those, and --fail-on-incomplete exited 3 on them.
+func TestSummaryHeaderSaysIncompleteForTheControlPlanesVerdict(t *testing.T) {
+	sum := client.Summary{SessionID: "ts_3", Sealed: true, EventCount: 1, ByService: map[string]int{"batch": 1}}
+	for name, info := range map[string]client.Info{
+		"a drain that timed out": {ID: "ts_3", Name: "slow", State: "SEALED", Incomplete: true, DrainTimedOut: true, MaxDrainSeconds: 60},
+		"a seal that failed":     {ID: "ts_3", Name: "slow", State: "SEALED", Incomplete: true, SealError: "collector unavailable"},
+	} {
+		var out bytes.Buffer
+		printSummary(&out, info, sum)
+		if !strings.Contains(out.String(), "session    ts_3  slow  (SEALED, incomplete)\n") {
+			panic(fmt.Sprintf("%s:\n%s", name, out.String()))
+		}
+		if err := (&gates{onIncomplete: true}).check(info, sum, 0); err == nil {
+			panic(fmt.Sprintf("%s: the gate passes a session whose header says incomplete", name))
+		}
+	}
+	var out bytes.Buffer
+	printSummary(&out, client.Info{ID: "ts_3", Name: "fine", State: "SEALED"}, sum)
+	if !strings.Contains(out.String(), "session    ts_3  fine  (SEALED)\n") {
+		panic(out.String())
+	}
+}

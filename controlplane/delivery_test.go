@@ -451,6 +451,25 @@ func TestDrainDroppedEventsAreIncompleteWithoutWaiting(t *testing.T) {
 	if took >= testGrace {
 		panic(fmt.Sprintf("the drain waited %v for events that are gone", took))
 	}
+	// The same against the collector's count: the instance owes what it
+	// recorded and did not give up, less what the collector has. (A mutation
+	// that left the dropped events out of that survived the third review: the
+	// verdict is the same, only the drain waits the grace for nothing.)
+	e = newDeliveryEnv(t, testGrace, nil)
+	e.col.counting().has("svc", "i", 3)
+	e.report(final(rep("svc", "i", 5, 3, 2)))
+	if owed := countsOf(e.col.st, true).owed(final(rep("svc", "i", 5, 3, 2))); owed {
+		panic("an instance that dropped what the collector lacks owes it nothing")
+	}
+	s, took = e.stop()
+	wantShortfall(t, s, "3 of 5 recorded events reached the collector", "2 dropped by the SDK")
+	if took >= testGrace/2 {
+		panic(fmt.Sprintf("the drain waited %v for events the instance had dropped", took))
+	}
+	// And it does owe what it still holds.
+	if owed := countsOf(e.col.st, true).owed(rep("svc", "i", 6, 3, 2)); !owed {
+		panic("an instance that holds an event the collector lacks owes it")
+	}
 }
 
 // Everything stays bounded by max_drain.

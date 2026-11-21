@@ -95,7 +95,11 @@ const emptySession = "session recorded no events (see tracectl doctor)"
 
 func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	state := info.State
-	if sum.Incomplete || len(info.IncompleteReasons) > 0 {
+	// The control plane's verdict counts as the collector's does: a drain that
+	// timed out, or a seal that failed, leaves a session the collector may
+	// find nothing wrong with. (The header of such a session said "(SEALED)",
+	// and --fail-on-incomplete exited 3 on it.)
+	if sum.Incomplete || info.Incomplete || len(info.IncompleteReasons) > 0 {
 		state += ", incomplete"
 	}
 	if len(info.DeliveryUnconfirmed) > 0 {
