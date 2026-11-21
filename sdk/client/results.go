@@ -3,7 +3,6 @@ package client
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -72,6 +71,11 @@ type Entity struct {
 	// "pk_not_unique"); History shows which. Zero also from a collector that
 	// predates the field.
 	Uncertain int `json:"uncertain,omitempty"`
+	// Services are the services whose events changed the entity, sorted. Two
+	// services that mask one Redis key each with its own secret record two
+	// entities, told apart by this. Empty also from a collector that predates
+	// the field.
+	Services []string `json:"services,omitempty"`
 }
 
 // EntityMutation is one change to an entity.
@@ -221,15 +225,54 @@ func (s *Session) Mutations(ctx context.Context, f MutationFilter) ([]Mutation, 
 // in Seq order, and returns how many it wrote. This is the format
 // `tracectl export` produces and `dashboard -open` reads. Events hold recorded
 // payloads (redacted, but possibly still sensitive): treat the output accordingly.
+//
+// The first line also carries the session's verdict as the control plane has
+// it now (core.ExportSession, the member "tsession_session" of the line's
+// object): whether the session is incomplete and why, which no event holds.
+// What reads the file gives the same verdict as the live session then. The
+// verdict is left out when the control plane does not know the session (a
+// handle from Detached), and it is final only for a session that has ended.
+//
+// A session without events is written as one line that holds its id and the
+// verdict (core.ExportHeader): the export of a session whose services could
+// not deliver anything says so, instead of being an empty file. Only when
+// the control plane does not know the session either is nothing written.
 func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
 	evs, err := s.Events(ctx)
 	if err != nil {
 		return 0, err
 	}
+	// After the events: a session that was sealed meanwhile says so.
+	var meta *core.ExportSession
+	if info, err := s.Get(ctx); err == nil && info.State != "" {
+		meta = &core.ExportSession{State: info.State, Incomplete: info.Incomplete, IncompleteReasons: info.IncompleteReasons,
+			DeliveryUnconfirmed: info.DeliveryUnconfirmed, DrainTimedOut: info.DrainTimedOut, SealError: info.SealError}
+		if info.DrainTimedOut {
+			meta.MaxDrainSeconds = info.MaxDrainSeconds // the limit the drain ran into
+		}
+		if len(evs) == 0 {
+			meta.StartedAt, meta.EndedAt = info.StartedAt, info.EndedAt
+		}
+	} else if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
 	out := bufio.NewWriter(w)
-	enc := json.NewEncoder(out)
+	if len(evs) == 0 && meta != nil {
+		line, err := core.ExportHeader(s.ID, meta)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := out.Write(append(line, '\n')); err != nil {
+			return 0, err
+		}
+	}
 	for i := range evs {
-		if err := enc.Encode(&evs[i]); err != nil {
+		line, err := core.ExportLine(&evs[i], meta)
+		if err != nil {
+			return i, err
+		}
+		meta = nil
+		if _, err := out.Write(append(line, '\n')); err != nil {
 			return i, err
 		}
 	}

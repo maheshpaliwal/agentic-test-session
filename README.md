@@ -274,6 +274,8 @@ tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", E
 
 Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
 `client.Options.QuiesceSeconds` if your system has no asynchronous work.
+When a service still holds events it cannot deliver, or its reports do not arrive, the stop waits about ten
+seconds more for it (`--delivery-grace` on the control plane) before it calls the session incomplete.
 
 `sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
 `Trace`).
@@ -302,10 +304,13 @@ tracectl run --name my-run --fail-on-error --fail-on-incomplete --fail-on-empty 
 # the control plane no longer knows), or no events at all
 tracectl report my-run --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
 tracectl report my-run --format junit -o tsession-junit.xml
-# Limit: the gates see what reached the collector. A service that could not deliver its events (wrong
-# TSESSION_COLLECTOR_URL) says so only in its own log, and the session still passes if another service recorded.
+# A service that could not deliver its events (wrong TSESSION_COLLECTOR_URL) makes the session incomplete and is
+# named. A connected service whose reports do not arrive is "delivery unconfirmed": that passes the gates above;
+# add --fail-on-unconfirmed where every connected service is yours (not in a shared environment).
+# Still not seen: a service that is killed before it ever reports, and one running an older SDK.
 
-# keep a run after the job is gone: export it, then open the file without the services
+# keep a run after the job is gone: export it, then open the file without the services. The export carries
+# the session's verdict (alone, when there are no events), so the gates exit for the file as for the session.
 tracectl export my-run -o run.ndjson
 go run ./cmd/dashboard -open run.ndjson      # the UI, and it prints the flags for the next line
 # the same commands as on a live session (summary, events, trace, entities, history, show, report, digest, diff)

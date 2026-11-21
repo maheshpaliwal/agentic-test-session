@@ -16,7 +16,7 @@ export TSESSION_TEST_PG_DSN="$TSESSION_IT_PG_DSN" # contrib/tsql's tests against
 export TSESSION_TEST_REDIS_ADDR="$TSESSION_IT_REDIS_ADDR"
 
 run_tests() {
-  (cd "$HERE" && go test -count=1 -v -timeout 300s ./...)
+  (cd "$HERE" && go test -count=1 -v -timeout 900s ./...) # about five minutes: the delivery tests run real binaries
   (cd "$HERE/../contrib/tsql" && go test -count=1 -tags integration -timeout 300s ./...)
   (cd "$HERE/../contrib/tredis" && go test -count=1 -timeout 300s ./...)
   (cd "$HERE/../contrib/tredisv8" && go test -count=1 -timeout 300s ./...)

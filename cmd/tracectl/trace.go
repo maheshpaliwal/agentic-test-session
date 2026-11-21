@@ -191,13 +191,32 @@ func printEvent(w io.Writer, e *core.Event) {
 			continue
 		}
 		for _, d := range m.Diff {
-			fmt.Fprintf(w, "            %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
+			fmt.Fprintf(w, "            %s\n", diffLine(d))
 		}
 		if len(m.Diff) == 0 {
 			printPayload(w, "  before", m.Before)
 			printPayload(w, "  after", m.After)
 		}
 	}
+}
+
+// hiddenChange reports a field recorded with the redaction marker on both
+// sides: the value changed (being listed is what says so) and neither side
+// can be shown.
+func hiddenChange(d core.FieldChange) bool {
+	return d.Old == core.RedactedValue && d.New == core.RedactedValue
+}
+
+// hiddenChangeText stands for the two equal values of a hidden change, which
+// would read as no change at all.
+const hiddenChangeText = "changed (value hidden)"
+
+// diffLine renders one recorded field change, as "show" and "history" print it.
+func diffLine(d core.FieldChange) string {
+	if hiddenChange(d) {
+		return d.Field + ": " + hiddenChangeText
+	}
+	return fmt.Sprintf("%s: %s -> %s", d.Field, compact(d.Old), compact(d.New))
 }
 
 // afterUnavailable is printed in place of the diff of an update whose row

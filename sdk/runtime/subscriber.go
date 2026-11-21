@@ -20,13 +20,29 @@ type activeSet struct {
 	Kill      bool     `json:"kill"`
 	// Bindings is optional: older control planes omit it.
 	Bindings []core.Binding `json:"bindings"`
+	// Draining is optional too: the ids in Active that are DRAINING.
+	Draining []string `json:"draining"`
+	// DeliveryReports is optional as well: the control plane says that it
+	// takes delivery reports. One that does not say so may still take them
+	// (the first that did, did not say it).
+	DeliveryReports bool `json:"delivery_reports"`
+	// DeliveryHeartbeatMs is optional: how often the control plane wants to
+	// hear from this process while the set names a session.
+	DeliveryHeartbeatMs int64 `json:"delivery_heartbeat_ms"`
 }
 
 type snapshot struct {
 	active    map[string]struct{}
+	draining  map[string]struct{}
 	exclusive string
 	kill      bool
 	bindings  core.BindingSet
+	// reports: the control plane said that it takes delivery reports. A 404
+	// to a report then does not mean "a control plane without the endpoint".
+	reports bool
+	// heartbeat is how often the control plane asked to hear from this
+	// process while the set names a session; zero when it did not say.
+	heartbeat time.Duration
 }
 
 // Subscriber tracks the control plane's active set and implements
@@ -39,9 +55,23 @@ type Subscriber struct {
 	client     *http.Client  // own transport: unaffected by DefaultTransport patching
 	service    string        // reported to the control plane, for its list of connected services
 	instance   string
-	snap       atomic.Pointer[snapshot]
-	ready      atomic.Bool
-	streaming  atomic.Bool
+	// reportsAs is the instance name this process sends delivery reports
+	// under; empty when it sends none. The stream announces it while announce
+	// is set: not to a control plane that turned out not to take the reports
+	// (see setAnnounce).
+	reportsAs string
+	announce  atomic.Bool
+	// streamCancel ends the stream that is open, nil when none is.
+	streamCancel atomic.Pointer[context.CancelFunc]
+	snap         atomic.Pointer[snapshot]
+	ready        atomic.Bool
+	streaming    atomic.Bool
+	// connects counts the streams that were opened and have delivered the
+	// active set: a new one may lead to another control plane (a restart, an
+	// upgrade), and what that one says of itself is in the set. opened is
+	// signalled for each, and when the set names a session after naming none.
+	connects atomic.Uint64
+	opened   chan struct{}
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -56,6 +86,12 @@ func NewSubscriber(controlPlaneURL string) *Subscriber {
 // control plane lists service and instance among its connected services
 // (GET /v1/subscribers, `tracectl doctor`).
 func NewSubscriberFor(controlPlaneURL, service, instance string) *Subscriber {
+	return newSubscriber(controlPlaneURL, service, instance, "")
+}
+
+// newSubscriber is NewSubscriberFor for a process that also sends delivery
+// reports, as instance reportsAs (see core.HeaderDeliveryInstance).
+func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscriber {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Subscriber{
 		base:       strings.TrimRight(controlPlaneURL, "/"),
@@ -64,12 +100,29 @@ func NewSubscriberFor(controlPlaneURL, service, instance string) *Subscriber {
 		client:     &http.Client{Transport: newPlainTransport()},
 		service:    service,
 		instance:   instance,
+		reportsAs:  reportsAs,
+		opened:     make(chan struct{}, 1),
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
 	s.snap.Store(&snapshot{})
+	s.announce.Store(reportsAs != "")
 	go s.run(ctx)
 	return s
+}
+
+// setAnnounce says whether the stream names the instance this process sends
+// delivery reports under. The announcement tells the control plane to expect
+// reports from this process, so it is taken back when the control plane does
+// not take them (an older one), and made again when it does. A change opens
+// the stream anew: the announcement is a header of the request.
+func (s *Subscriber) setAnnounce(on bool) {
+	if s.reportsAs == "" || s.announce.Swap(on) == on {
+		return
+	}
+	if cancel := s.streamCancel.Load(); cancel != nil {
+		(*cancel)()
+	}
 }
 
 // IsActive reports whether id is ACTIVE/DRAINING and the kill switch is off.
@@ -144,9 +197,24 @@ func (s *Subscriber) Close() {
 }
 
 func (s *Subscriber) apply(a activeSet) {
-	sn := &snapshot{active: set.Of(a.Active...), exclusive: a.Exclusive, kill: a.Kill, bindings: core.NewBindingSet(a.Bindings)}
-	s.snap.Store(sn)
+	sn := &snapshot{active: set.Of(a.Active...), draining: set.Of(a.Draining...), exclusive: a.Exclusive, kill: a.Kill,
+		bindings: core.NewBindingSet(a.Bindings), reports: a.DeliveryReports,
+		heartbeat: time.Duration(max(a.DeliveryHeartbeatMs, 0)) * time.Millisecond}
+	old := s.snap.Swap(sn)
 	s.ready.Store(true)
+	if len(old.active) == 0 && len(sn.active) > 0 {
+		// The first session after none: the reporter looks at once whether a
+		// heartbeat is due, instead of at its next tick (see reporter.pass).
+		s.wake()
+	}
+}
+
+// wake makes the reporter look at its accounts now.
+func (s *Subscriber) wake() {
+	select {
+	case s.opened <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Subscriber) run(ctx context.Context) {
@@ -196,6 +264,9 @@ func (s *Subscriber) poll(ctx context.Context) {
 func (s *Subscriber) stream(parent context.Context) bool {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// Before the announcement is read: a change after this ends the stream.
+	s.streamCancel.Store(&cancel)
+	defer s.streamCancel.Store(nil)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+"/v1/active/stream", nil)
 	if err != nil {
 		return false
@@ -206,6 +277,9 @@ func (s *Subscriber) stream(parent context.Context) bool {
 	}
 	if s.instance != "" {
 		req.Header.Set(core.HeaderInstance, s.instance)
+	}
+	if s.reportsAs != "" && s.announce.Load() {
+		req.Header.Set(core.HeaderDeliveryInstance, s.reportsAs)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -234,6 +308,13 @@ func (s *Subscriber) stream(parent context.Context) bool {
 				var a activeSet
 				if json.Unmarshal([]byte(data.String()), &a) == nil {
 					s.apply(a)
+					if !got {
+						// The first set of this stream: the reporter starts over
+						// with the control plane behind it, and knows from the set
+						// whether that one says that it takes reports.
+						s.connects.Add(1)
+						s.wake()
+					}
 					got = true
 				}
 				data.Reset()

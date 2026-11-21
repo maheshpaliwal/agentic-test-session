@@ -60,6 +60,9 @@ func Middleware(opts ...Option) func(*middleware.Stack) error {
 
 // Apply appends the middleware to opts.APIOptions (no-op when disabled).
 func Apply(opts *dynamodb.Options, o ...Option) {
+	if opts != nil && !core.Enabled() {
+		core.NoteWrapWhileDisabled("tdynamo.Apply") // the client stays untraced when the SDK starts later
+	}
 	if opts == nil || !core.Enabled() {
 		return
 	}

@@ -283,6 +283,14 @@ type DrainStatus struct {
 	DroppedEvents   int64 `json:"dropped_events"`
 	// Quarantined counts poison events isolated and dropped for the session.
 	Quarantined int `json:"quarantined"`
+	// Instances is what the collector has of the session from every SDK
+	// instance (see InstanceCount); always present, empty for a session without
+	// events. InstancesTruncated is set when more than MaxStatusInstances
+	// instances sent events: the list then holds the first ones in order, and
+	// an instance that is not in it may have sent events all the same (ask
+	// about it by name: InstanceCounts).
+	Instances          []InstanceCount `json:"instances"`
+	InstancesTruncated bool            `json:"instances_truncated,omitempty"`
 }
 
 // DrainStatus reports how much work is still outstanding for a session. It
@@ -292,9 +300,37 @@ func (c *Collector) DrainStatus(ctx context.Context, id string) (DrainStatus, er
 	if err != nil {
 		return DrainStatus{}, err
 	}
+	inst := st.Instances
+	if inst == nil {
+		inst = []InstanceCount{} // "none", not "unknown": a control plane tells the two apart
+	}
 	return DrainStatus{Pending: st.Pending, LastEventUnixNs: st.LastEventNs, ReceivedUnixNs: st.LastEventNs,
-		EventCount: st.EventCount, DroppedEvents: st.Dropped, Quarantined: st.Quarantined}, nil
+		EventCount: st.EventCount, DroppedEvents: st.Dropped, Quarantined: st.Quarantined,
+		Instances: inst, InstancesTruncated: st.InstancesTruncated}, nil
 }
+
+// MaxInstanceCountsAsk bounds the instances one InstanceCounts call asks
+// about.
+const MaxInstanceCountsAsk = 512
+
+// InstanceCounts reports how many events of a session the collector has from
+// each of the instances asked about (see InstanceCount), in the order asked,
+// zero for one without events. Unlike DrainStatus.Instances the answer cannot
+// be crowded out by other instances: the control plane asks this about the
+// instances whose delivery reports it holds when that list was cut short.
+// Like DrainStatus it creates no in-memory state.
+func (c *Collector) InstanceCounts(ctx context.Context, id string, ask []InstanceCount) ([]InstanceCount, error) {
+	if len(ask) > MaxInstanceCountsAsk {
+		return nil, fmt.Errorf("%w: at most %d instances per request", errBadAsk, MaxInstanceCountsAsk)
+	}
+	st, err := c.seq.Status(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return st.countsOf(ask), nil
+}
+
+var errBadAsk = errors.New("invalid request")
 
 // SealResult is the seal response body.
 type SealResult struct {
@@ -341,7 +377,7 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 		// validID admits no path separators and no leading dot, so the join
 		// cannot leave BundleDir.
 		if err := os.RemoveAll(filepath.Join(c.cfg.BundleDir, id)); err != nil {
-			c.log.Warn("session deleted but its bundle could not be removed", "session", id, "err", err)
+			c.log.Error("session deleted but its bundle could not be removed", "session", id, "err", err)
 		}
 	}
 	c.tel.deleted.With(cause).Inc()
@@ -371,7 +407,7 @@ func (c *Collector) retentionLoop() {
 			close(swept)
 			cancel()
 			if err != nil {
-				c.log.Warn("retention sweep", "err", err)
+				c.log.Error("retention sweep", "err", err)
 			}
 			if n > 0 {
 				c.log.Info("retention sweep deleted expired sessions", "sessions", n, "retention", c.cfg.Retention)

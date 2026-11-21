@@ -830,3 +830,51 @@ func TestDigestGroupsEqualFailures(t *testing.T) {
 	sec := checkDigestMarkdown(t, md)
 	wantAll(t, sec["### Failures"], `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`, `300x #2 api db.write`, `#601 api api.in "GET /health" ERR "HTTP 503"`)
 }
+
+// The call tree keeps apart what ended differently and merges what ended the
+// same: three hundred requests that fail the same way are one line, a call
+// that returned NotFound is not folded into those that returned OK and shows
+// its status, and a flag counted in the verdict is on the line of its event.
+func TestDigestTreeOutcomes(t *testing.T) {
+	var evs []core.Event
+	for i := range 300 {
+		evs = append(evs, core.Event{Seq: uint64(i + 1), Service: "api", Kind: core.KindAPIIn, Name: fmt.Sprintf("GET /fail/%d", i), Err: "HTTP 500"})
+	}
+	evs = append(evs,
+		core.Event{Seq: 301, Service: "api", Kind: core.KindAPIOut, Name: "/shop.Stock/Get", Attrs: map[string]string{"grpc.code": "OK"}},
+		core.Event{Seq: 302, Service: "api", Kind: core.KindAPIOut, Name: "/shop.Stock/Get", Attrs: map[string]string{"grpc.code": "NotFound"}},
+		core.Event{Seq: 303, Service: "api", Kind: core.KindAPIOut, Name: "/shop.Stock/Get", Attrs: map[string]string{"grpc.code": "OK"}},
+		core.Event{Seq: 304, Service: "api", Kind: core.KindDBWrite, Name: "DO $$ BEGIN END $$", Flags: []string{"effects_unknown"}},
+	)
+	env := newReportEnv(t, evs...)
+	for i := range len(evs) {
+		env.roots = append(env.roots, env.node(i+1, nil, nil))
+	}
+	_, out, _ := env.tc("digest", reportID, "--max-bytes", "4096")
+	sec := checkDigestMarkdown(t, out)
+	tree := sec["### Call tree"]
+	wantAll(t, tree,
+		`300x api api.in "GET /fail/?" #1..#300`, `ERR "HTTP 500"`,
+		`#302 api api.out "/shop.Stock/Get" code NotFound`,
+		`#304 api db.write "DO $$ BEGIN END $$" [effects_unknown]`)
+	if n := strings.Count(tree, "GET /fail"); n != 1 {
+		t.Errorf("the failing requests take %d lines of the tree, want one:\n%s", n, tree)
+	}
+	if strings.Contains(tree, `3x api api.out`) || strings.Count(tree, `"/shop.Stock/Get"`) != 3 {
+		t.Errorf("calls with different statuses were merged:\n%s", tree)
+	}
+	_, js, _ := env.tc("digest", reportID, "--json")
+	d := checkDigestJSON(t, js)
+	var codes, flags int
+	for _, n := range d.Tree {
+		if n.Code == "NotFound" {
+			codes++
+		}
+		if len(n.Flags) == 1 && n.Flags[0] == "effects_unknown" {
+			flags++
+		}
+	}
+	if codes != 1 || flags != 1 {
+		t.Errorf("JSON tree: %d lines with code NotFound, %d with the flag; want one each", codes, flags)
+	}
+}

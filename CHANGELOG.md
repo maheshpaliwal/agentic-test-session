@@ -49,6 +49,14 @@ Before deploying:
   failed `RequireMutation`, `RequireNoMutation` or `Ambient`): the message is the same, but a panic ends the
   whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped.
   `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
+- Delivery accounting: upgrade the collector with or before the control plane, otherwise every session with
+  reports is `delivery_unconfirmed`. A proxy between services and control plane must pass `POST /v1/delivery`;
+  if it answers 404 or 403 a session the service took part in ends `incomplete`, and one it did not take part in
+  `delivery_unconfirmed`. Sessions whose services recorded events
+  the collector lacks are now `incomplete`, so a gate that passed may fail. An older control plane rewriting
+  `--store-file` keeps `incomplete` but drops the reasons. The export of a session without events is one line,
+  not an empty file, and an older `dashboard -open` refuses it. `tracectl summary` prints `(SEALED, incomplete)`
+  for a timed-out drain or a failed seal.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -100,6 +108,46 @@ Rolling back:
 
 ### Added
 
+- `tracectl doctor` marks a connected service that reports events it cannot deliver, with the count, the last
+  error and what to check; `doctor --require-delivery` exits 3 for it and for a service whose delivery reports
+  do not arrive (a preflight to run while a session is active: it only sees services that report). `GET
+  /v1/subscribers` carries an optional `delivery_pending` per follower.
+- The dashboard's entity view follows the diff the SDK recorded, so a field that changed under redaction reads
+  "changed · value hidden" (it read "no field changes"); `tracectl show`, `history` and `digest` say
+  `changed (value hidden)`. The session page lists the delivery reports per service instance, and every event
+  flag has help text.
+- An entity names the services that changed it (optional `services` on the collector's entity rows), shown by
+  `tracectl entities`, the `history` header and the dashboard: the same Redis key masked by two services is
+  two rows, and now says which is whose.
+- **Delivery accounting: a service that cannot deliver its events no longer passes the gates.** Each SDK
+  instance reports to the control plane how many events it recorded per session (`POST /v1/delivery`, batched,
+  plus one small request every 5 s while a session runs). When a drain ends, the control plane compares that
+  with what the collector stored for the instance, and a shortfall makes the session `incomplete` with a reason
+  that names the service, the instance and both numbers. A drain also waits for an instance that still owes
+  events while it makes progress. Before, a service with a wrong `TSESSION_COLLECTOR_URL` lost its events and
+  `--fail-on-incomplete` still passed.
+  - Where the control plane cannot tell (a connected service whose reports do not arrive, an old collector) the
+    session is `delivery_unconfirmed`: shown by `summary`, `report`, `digest`, `run` and the dashboard, and
+    failed only by the new `--fail-on-unconfirmed` (and `tsessiontest.RequireDeliveryConfirmed`). Use that gate
+    where every connected service is yours; in a shared environment another team's service can trip it.
+    The strict gate includes the plain one: on its own it also fails a session that is known to be incomplete.
+  - Measured with real binaries, 50 to 2,000 runs per scenario: no false `incomplete` on healthy systems
+    (parallel sessions, 500 sessions stopping together, slow or briefly unreachable collector and report
+    endpoint, idle services frozen or half-open); healthy drain time unchanged.
+  - Not detected: a service killed before it ever reports, a service on an older SDK, and a session that ends
+    sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off).
+  - Reported as `incomplete` although nothing is missing: a service whose reports are blocked while its events
+    all arrived, and one frozen for longer than the grace after delivering and before reporting. The control
+    plane cannot know that without the report, and the reason says so.
+  - The endpoint is unauthenticated, like stop and abort. `docs/PROTOCOL.md` lists what a caller who can reach
+    the control plane or the collector can do: make a session incomplete, hold a drain up to `max_drain`, and,
+    by ingesting events in a service's name or forging a matching final report for a service whose own reports
+    are blocked, make an incomplete session look complete. Whether that is acceptable is for whoever owns the
+    environment's security to decide.
+  - `tracectl export` carries the verdict, also for a session without events, so the gates exit for an
+    exported file as for the live session.
+- `client.StatusError` and `client.StatusCode(err)`: the error of a request the service answered with a non-2xx
+  status now carries the code, so callers no longer match its text (it reads the same as before).
 - **Redis writes carry a diff** when before-images are on (`tredis.WithBeforeImage`): the value of a string,
   per field of a hash, per member of a sorted set, `added`/`removed` for a set, by index for a list. It adds no
   round trips. Collections beyond the image cap get a partial diff or none, flagged `diff_truncated`; a diff
@@ -131,6 +179,8 @@ Rolling back:
   output, not a model's judgement of what the text says.
   Failures that did the same thing in the same place are listed once with a count, so 300 requests failing
   the same way take one line, not the whole budget.
+  The call tree merges them the same way, keeps apart calls that ended differently (a gRPC `NotFound` is not
+  folded into the `OK` calls next to it) and shows a call's status code and an event's flags on its line.
 - **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
   entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
   `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;
@@ -201,6 +251,7 @@ Rolling back:
 
 ### Changed
 
+- Collector and control plane log lines that carry an error are at error level (ten were warnings).
 - The dashboard binary panics on a start-up error (a refused listen address, an unreadable `-open` file) where
   it called `log.Fatalf`: the message is the same, followed by a stack trace, and the exit status is 2, not 1.
 - **gRPC failures follow the HTTP rule.** A call is a failed event when its status says the callee failed
@@ -262,13 +313,16 @@ Rolling back:
 
 ### Fixed
 
+- Control plane and client: a large answer from the collector was not read to its end, so its connection could
+  not be reused and every poll opened a new one; repeated rounds of 500 sessions ran a machine out of ports.
 - `tredis`: values that were recorded although the key or field is sensitive: the reply of `SET ... GET`,
   `HVALS`, `CONFIG GET` of credentials, `ACL`, and the value moved by `RENAME`. The error of a command with a
   masked argument keeps its code and kind only, since Redis and scripts quote arguments in error text.
   `PUBLISH` no longer records a changed key; `GETSET` on a new key is a mutation; a command queued by a raw
   `MULTI` is not. Members of a sorted set that redact alike are kept apart, and infinite scores are recorded.
 - Every wrapper that records nothing when created before the SDK starts now says so (`tredis.Wrap`,
-  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`); only `thttp.Handler` did.
+  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`, `tsql.Open`, `tsql.OpenDB`, `tsql.WrapDriver`,
+  `tmongo.Apply`, `tdynamo.Apply`); only `thttp.Handler` did.
 - `tsql`: `DO`, `CALL` and `EXECUTE` were recorded as reads. They are writes whose row changes tsql cannot
   see, recorded as `db.write` with the new flag `effects_unknown` and no mutations.
 - An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record

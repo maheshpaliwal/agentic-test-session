@@ -273,7 +273,11 @@ func Stop(t testing.TB, s *client.Session) client.Summary {
 var failuresListed sync.Map
 
 // RequireNoFailures fails the test if the session recorded a failed event or is incomplete (dropped or
-// quarantined events, asynchronous work that never finished).
+// quarantined events, asynchronous work that never finished, events a service recorded that the collector
+// does not have). Each reason the control plane gives is printed.
+//
+// A delivery the control plane could not confirm (Info.DeliveryUnconfirmed) is logged and does not fail
+// the test; `go test` shows a passing test's log only with -v. Use RequireDeliveryConfirmed to fail on it.
 func RequireNoFailures(t testing.TB, s *client.Session) {
 	t.Helper()
 	sum := Stop(t, s)
@@ -290,15 +294,50 @@ func RequireNoFailures(t testing.TB, s *client.Session) {
 	// The control plane knows things the collector's summary does not: a drain
 	// that ran out of time and a seal that failed.
 	info := s.Info()
+	for _, r := range info.IncompleteReasons {
+		t.Errorf("tsession: session %s is incomplete: %s", s.ID, r)
+	}
+	for _, w := range info.DeliveryUnconfirmed {
+		t.Logf("tsession: session %s: delivery unconfirmed: %s", s.ID, w)
+	}
 	switch {
 	case info.SealError != "":
 		t.Errorf("tsession: session %s was not sealed: %s", s.ID, info.SealError)
 	case info.DrainTimedOut:
 		t.Errorf("tsession: session %s stopped draining at its time limit with asynchronous work still running", s.ID)
-	case info.Incomplete && !sum.Incomplete:
+	case info.Incomplete && !sum.Incomplete && len(info.IncompleteReasons) == 0:
 		t.Errorf("tsession: the control plane marked session %s incomplete", s.ID)
 	}
 	if len(sum.Failures) > 0 || sum.Incomplete || info.SealError != "" || info.DrainTimedOut || info.Incomplete {
+		t.FailNow()
+	}
+}
+
+// RequireDeliveryConfirmed fails the test if the control plane could not tell, for some service instance,
+// whether all its events reached the collector: an instance that recorded more after its last delivery
+// report and then stopped reporting (it was killed, say), or one that follows the control plane and whose
+// delivery reports never arrive (a proxy refuses them), so that nothing says whether it took part. The
+// session is not incomplete for that, so RequireNoFailures passes. It stops the session first, like
+// RequireNoFailures, and can be called after it.
+//
+// It is the strict form of the delivery check (`tracectl ... --fail-on-unconfirmed` is the same for a
+// CLI gate). Use it where every connected service is yours and expected to work: a test environment of
+// your own, a CI job that starts its services. Do not use it in a large shared environment: one service
+// of another team whose reports are blocked then fails every test of yours, and anything that can reach
+// the control plane can make a session unconfirmed (docs/PROTOCOL.md, "Limits").
+func RequireDeliveryConfirmed(t testing.TB, s *client.Session) {
+	t.Helper()
+	Stop(t, s)
+	info := s.Info()
+	// The stricter check includes the plain one: a session known to have
+	// lost events does not pass it.
+	for _, w := range info.IncompleteReasons {
+		t.Errorf("tsession: session %s is incomplete: %s", s.ID, w)
+	}
+	for _, w := range info.DeliveryUnconfirmed {
+		t.Errorf("tsession: session %s: delivery unconfirmed: %s", s.ID, w)
+	}
+	if len(info.DeliveryUnconfirmed) > 0 || len(info.IncompleteReasons) > 0 || info.Incomplete {
 		t.FailNow()
 	}
 }

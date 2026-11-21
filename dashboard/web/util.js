@@ -56,6 +56,57 @@
   /* An update whose row could not be read back: the before image is known, the new values are not. Its diff, if an
      older SDK sent one, lists every field as removed and must not be shown. Mirrors core.Mutation.AfterUnavailable. */
   const afterUnavailable = (mu) => !!mu && mu.op === 'update' && hasPayload(mu.before) && !hasPayload(mu.after);
+  // One row per leaf of a JSON value: {"a":{"b":1},"c":[2]} -> {"a.b":"1","c[0]":"2"} (values as JSON text).
+  function flatten(v, prefix, out) {
+    if (v !== null && typeof v === 'object') {
+      const keys = Object.keys(v);
+      if (!keys.length) { out[prefix || '(root)'] = Array.isArray(v) ? '[]' : '{}'; return out; }
+      keys.forEach((k) => flatten(v[k], prefix ? prefix + (Array.isArray(v) ? '[' + k + ']' : '.' + k) : k, out));
+    } else out[prefix || '(root)'] = JSON.stringify(v);
+    return out;
+  }
+  const HIDDEN_CHANGE = 'changed \u00b7 value hidden';
+  /* The rows of a mutation's diff table: {field, old, nw, kind}, old and nw as JSON text (undefined: absent), kind one of
+     add, del, chg, same, hid. The diff the SDK recorded is the source of truth: it says what the images cannot (a value
+     that changed under redaction, the members a Redis set gained and lost, list indexes), so the images only add the
+     fields of a row or a hash that are equal in both and that the diff does not name. A field recorded with the redaction marker on both
+     sides changed, and is a 'hid' row with no values. Only a mutation without a recorded diff (an older SDK) is
+     compared image against image. */
+  function diffRows(mu) {
+    const hasB = !!mu.before && mu.before.inline !== undefined, hasA = !!mu.after && mu.after.inline !== undefined;
+    const b = hasB ? flatten(mu.before.inline, '', {}) : {};
+    const a = hasA ? flatten(mu.after.inline, '', {}) : {};
+    const rows = [];
+    const rec = Array.isArray(mu.diff) ? mu.diff : [];
+    if (rec.length) {
+      const text = (v) => v === undefined || v === null ? undefined : JSON.stringify(v);
+      rec.forEach((d) => {
+        let o = text(d.old), n = text(d.new);
+        // The diff leaves out a null value; the image tells a field that was null from one that was not there.
+        if (o === undefined && b[d.field] === 'null') o = 'null';
+        if (n === undefined && a[d.field] === 'null') n = 'null';
+        if (isRedactedValue(o) && isRedactedValue(n)) { rows.push({ field: String(d.field), old: undefined, nw: undefined, kind: 'hid' }); return; }
+        rows.push({ field: String(d.field), old: o, nw: n, kind: o === undefined ? 'add' : n === undefined ? 'del' : 'chg' });
+      });
+      const named = (k) => rec.some((d) => { const f = String(d.field); return k === f || k.indexOf(f + '.') === 0 || k.indexOf(f + '[') === 0; });
+      // Only rows and hashes have fields to list as unchanged: the members of a set or a list are not compared by
+      // position, and a plain value is the one thing the diff is about.
+      const fields = (p) => p !== null && typeof p === 'object' && !Array.isArray(p);
+      if (hasB && hasA && fields(mu.before.inline) && fields(mu.after.inline)) {
+        Object.keys(a).forEach((k) => { if (k in b && a[k] === b[k] && !named(k)) rows.push({ field: k, old: b[k], nw: a[k], kind: 'same' }); });
+      }
+      return rows;
+    }
+    const keys = Object.keys(b);
+    Object.keys(a).forEach((k) => { if (!(k in b)) keys.push(k); });
+    keys.forEach((k) => {
+      let kind = 'same';
+      if (!(k in b)) kind = 'add'; else if (!(k in a)) kind = 'del';
+      else if (a[k] !== b[k]) kind = 'chg';
+      rows.push({ field: k, old: b[k], nw: a[k], kind: kind });
+    });
+    return rows;
+  }
   // Canonical form used in URL paths (the collector accepts the canonical JSON string).
   function pkRaw(pk) {
     if (pk === undefined || pk === null) return '';
@@ -69,10 +120,13 @@
   /* Event flags that say the recorded key or row image of the event's mutations is incomplete or uncertain.
      Mirrors core.UncertainFlag (the collector counts the same flags in an entity's `uncertain`). */
   const UNCERTAIN = { pk_unknown: 1, pk_not_unique: 1, pk_lookup_failed: 1, after_unavailable: 1, after_from_args: 1, after_failed: 1,
-    image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1, upsert_unknown: 1 };
+    image_skipped: 1, image_timeout: 1, image_failed: 1, image_truncated: 1, diff_truncated: 1, diff_concurrent: 1, upsert_unknown: 1 };
   const uncertainFlag = (f) => UNCERTAIN[flagBase(f)] === 1;
   // How many entries of an entity history carry such a flag (entries of an older collector have no flags: 0).
   const uncertainCount = (ms) => (ms || []).filter((m) => m && Array.isArray(m.flags) && m.flags.some(uncertainFlag)).length;
+
+  // The services that changed an entity, as the entities list names them (none from an older collector).
+  const entityServices = (x) => x && Array.isArray(x.services) ? x.services.filter((s) => typeof s === 'string' && s) : [];
 
   const unresolvedMut = (e) => !!e && (e.mutations || []).some((m) => m.effective === null || m.effective === undefined);
   const hasUnresolved = (events) => events.some(unresolvedMut);
@@ -105,7 +159,37 @@
     if (s.seal_error) w.push('Seal failed: ' + s.seal_error);
     if (s.incomplete) w.push('This session is incomplete: some events or async work may be missing' + (s.dropped_events ? ' (' + s.dropped_events + ' events dropped)' : '') + '. Treat the history as a lower bound.');
     else if (s.dropped_events) w.push(s.dropped_events + ' events were dropped.');
+    // Most reasons name an instance whose events did not all arrive. Two do
+    // not say that anything is missing: an instance that did not report how
+    // many events it recorded, and reports beyond the ones a session keeps.
+    (s.incomplete_reasons || []).forEach((r) => w.push((/^(the collector has |more than )/.test(r) ? 'Delivery is not accounted for: ' : 'Events did not reach the collector: ') + r));
     return w;
+  }
+  // The service instances whose delivery the control plane could not
+  // confirm. A warning of its own: the session is not incomplete for it.
+  function deliveryUnconfirmed(s) {
+    const list = s && Array.isArray(s.delivery_unconfirmed) ? s.delivery_unconfirmed : [];
+    return list.filter((r) => typeof r === 'string' && r).map((r) => 'Delivery not confirmed: ' + r);
+  }
+
+  /* The delivery reports of a session's SDK instances as table rows: which service and instance, and its own count of
+     the events it recorded and of what became of them. short marks an instance that, by that count, did not get every
+     event to the collector; such rows come first. The verdict itself (incomplete_reasons, delivery_unconfirmed) also
+     holds a report against what the collector has, so a row that is not short can still be named there. */
+  function deliveryRows(s) {
+    const num = (v) => typeof v === 'number' && isFinite(v) ? v : 0;
+    const rows = (s && Array.isArray(s.delivery) ? s.delivery : []).filter((d) => d && typeof d === 'object').map((d) => {
+      const r = { service: String(d.service || ''), instance: String(d.instance || ''), recorded: num(d.recorded), delivered: num(d.delivered),
+        dropped: num(d.dropped), buffered: num(d.buffered), final: d.final === true, lastError: String(d.last_error || '') };
+      r.short = r.dropped > 0 || r.buffered > 0 || r.delivered < r.recorded;
+      return r;
+    });
+    return rows.sort((a, b) => (b.short - a.short) || a.service.localeCompare(b.service) || a.instance.localeCompare(b.instance));
+  }
+  // The line that opens the delivery table.
+  function deliverySummary(rows) {
+    const short = rows.filter((r) => r.short).length;
+    return 'Delivery reports: ' + rows.length + ' instance' + (rows.length === 1 ? '' : 's') + (short ? ', ' + short + ' with events not delivered' : ', all delivered by their own count');
   }
 
   // Colour/icon group for an event kind: api db cache queue worker retry dlq tx sys.
@@ -557,8 +641,8 @@
       ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
   }
 
-  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
-    mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flatten, diffRows, HIDDEN_CHANGE, flagBase, uncertainFlag, uncertainCount, entityServices, unresolvedMut, hasUnresolved,
+    mergeEvents, ndjson, sessionWarnings, deliveryUnconfirmed, deliveryRows, deliverySummary, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
 })(typeof window !== 'undefined' ? window : globalThis);

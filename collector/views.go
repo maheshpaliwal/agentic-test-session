@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 )
 
 // Node is one span in the trace tree.
@@ -79,6 +80,10 @@ type Entity struct {
 	// recorded row image is incomplete or uncertain (core.UncertainFlag);
 	// omitted when there are none.
 	Uncertain int `json:"uncertain,omitempty"`
+	// Services are the services whose events changed the entity, sorted. A
+	// Redis key that two services mask each with its own secret is two
+	// entities: this is what tells them apart.
+	Services []string `json:"services,omitempty"`
 }
 
 // EntityMutation is one entry of an entity's history. Flags are the flags of
@@ -140,8 +145,11 @@ func pkMatches(pk map[string]any, want string) bool {
 // sorted by store, entity and primary key.
 func ListEntities(evs []core.Event) []Entity {
 	type k struct{ s, e, p string }
-	type n struct{ all, uncertain int }
-	cnt := map[k]n{}
+	type n struct {
+		all, uncertain int
+		services       set.Set[string]
+	}
+	cnt := map[k]*n{}
 	for i := range evs {
 		uncertain := 0
 		if core.HasUncertainFlag(evs[i].Flags) {
@@ -150,12 +158,24 @@ func ListEntities(evs []core.Event) []Entity {
 		for _, m := range evs[i].Mutations {
 			key := k{m.Store, m.Entity, pkString(m.PK)}
 			c := cnt[key]
-			cnt[key] = n{c.all + 1, c.uncertain + uncertain}
+			if c == nil {
+				c = &n{services: set.Set[string]{}}
+				cnt[key] = c
+			}
+			c.all++
+			c.uncertain += uncertain
+			if evs[i].Service != "" {
+				c.services.Add(evs[i].Service)
+			}
 		}
 	}
 	out := make([]Entity, 0, len(cnt))
 	for key, c := range cnt {
-		out = append(out, Entity{key.s, key.e, key.p, c.all, c.uncertain})
+		e := Entity{Store: key.s, Entity: key.e, PK: key.p, MutationCount: c.all, Uncertain: c.uncertain}
+		if len(c.services) > 0 { // nil, not empty, when no event names one: the field is then left out
+			e.Services = set.Sorted(c.services)
+		}
+		out = append(out, e)
 	}
 	slices.SortFunc(out, func(a, b Entity) int {
 		return cmp.Or(cmp.Compare(a.Store, b.Store), cmp.Compare(a.Entity, b.Entity), cmp.Compare(a.PK, b.PK))

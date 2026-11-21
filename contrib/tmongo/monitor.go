@@ -163,6 +163,9 @@ func Monitor(opts ...Option) *event.CommandMonitor {
 // Apply installs the monitor on clientOpts, chaining any monitor already set.
 // It is a no-op when the SDK is disabled or the options are already traced.
 func Apply(clientOpts *options.ClientOptions, opts ...Option) *options.ClientOptions {
+	if clientOpts != nil && !core.Enabled() {
+		core.NoteWrapWhileDisabled("tmongo.Apply") // the client stays untraced when the SDK starts later
+	}
 	if clientOpts == nil || !core.Enabled() {
 		return clientOpts
 	}

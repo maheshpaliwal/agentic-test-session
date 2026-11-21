@@ -22,7 +22,10 @@ func (m *Manager) startDrainLocked(id string) {
 }
 
 // drain polls the collector until the session is quiet or max_drain elapses,
-// seals it, and records the outcome. A seal that still fails when
+// seals it, and records the outcome. Quiet also means that no SDK instance
+// that sent delivery reports still owes the collector events it may yet
+// deliver, and that the reports of every connected instance cover what the
+// collector has from it (see deliverySettled). A seal that still fails when
 // SealRetryBudget is spent ends the session SEALED with SealError and
 // SealPending, and is retried in the background (see sealretry.go).
 func (m *Manager) drain(ctx context.Context, id string) {
@@ -50,7 +53,7 @@ func (m *Manager) drain(ctx context.Context, id string) {
 			return
 		}
 		if err != nil {
-			m.log.Warn("drain-status failed", "id", id, "err", err)
+			m.log.Error("drain-status failed", "id", id, "err", err)
 		} else {
 			last = st
 			if !haveStatus || st.signature() != prev.signature() {
@@ -59,12 +62,18 @@ func (m *Manager) drain(ctx context.Context, id string) {
 				}
 				prev, haveStatus = st, true
 			}
-			if st.Pending == 0 && time.Since(changedAt) >= quiet {
+			// The reports are looked at last, and only once the collector is
+			// quiet: a delivery it has just seen restarts the quiet window, so
+			// the instance has that long to say so before the reports close.
+			if st.Pending == 0 && time.Since(changedAt) >= quiet && m.deliverySettled(id, begin, m.countsFor(ctx, id, st, true), false) {
 				break
 			}
 		}
 		if !time.Now().Before(deadline) {
+			// The reports close here too: one that arrived during the seal
+			// would be stored and never judged.
 			timedOut = true
+			m.deliverySettled(id, begin, m.countsFor(ctx, id, last, haveStatus), true)
 			break
 		}
 		select {
@@ -74,6 +83,17 @@ func (m *Manager) drain(ctx context.Context, id string) {
 		}
 	}
 
+	// The reports are closed. The collector is asked once more, so that the
+	// verdict holds them against counts that are no older than they are: an
+	// event that was delivered and reported between the last look and the
+	// close must not read as missing.
+	if st, err := m.cfg.Collector.DrainStatus(ctx, id); err == nil {
+		last, haveStatus = st, true
+	}
+	counts := m.countsFor(ctx, id, last, haveStatus)
+	if ctx.Err() != nil {
+		return
+	}
 	res, err := m.sealWithRetry(ctx, id)
 	if ctx.Err() != nil {
 		return
@@ -97,7 +117,8 @@ func (m *Manager) drain(ctx context.Context, id string) {
 	}
 	m.tel.finished.With(string(cur.State)).Inc()
 	cur.DrainTimedOut = timedOut
-	cur.Incomplete = timedOut || err != nil || res.Incomplete
+	short := m.judgeDeliveryLocked(&cur, counts)
+	cur.Incomplete = timedOut || err != nil || res.Incomplete || short
 	cur.DroppedEvents = last.DroppedEvents
 	cur.BundleURI = res.BundleURI
 	if perr := m.putLocked(cur); perr != nil {
@@ -120,7 +141,7 @@ func (m *Manager) sealWithRetry(ctx context.Context, id string) (SealResult, err
 		if err == nil || ctx.Err() != nil {
 			return res, err
 		}
-		m.log.Warn("seal failed", "id", id, "err", err)
+		m.log.Error("seal failed", "id", id, "err", err)
 		if !time.Now().Add(delay).Before(end) {
 			return res, fmt.Errorf("seal failed after retries: %w", err)
 		}

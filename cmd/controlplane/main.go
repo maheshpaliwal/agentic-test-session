@@ -2,6 +2,7 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ func main() {
 	hosts := flag.String("allowed-hosts", svc.Env("TSESSION_CP_ALLOWED_HOSTS", ""), "extra comma-separated Host values to accept (e.g. controlplane:7070); default loopback only")
 	origins := flag.String("allowed-origins", svc.Env("TSESSION_CP_ALLOWED_ORIGINS", ""), "comma-separated browser Origins allowed to call the API (default none)")
 	retention := flag.Duration("retention", svc.EnvPositiveDur("TSESSION_CP_RETENTION", 24*time.Hour), "keep finished sessions in memory this long; without --store-file they are then forgotten")
+	grace := flag.Duration("delivery-grace", svc.EnvDur("TSESSION_CP_DELIVERY_GRACE", 10*time.Second), "how long a drain waits for a service that still owes the collector events and gets nowhere, or that took part and whose delivery report does not arrive, before the session is sealed incomplete; 0 turns the check off")
 	showVersion := svc.VersionFlag("tsession-controlplane")
 	flag.Parse()
 	showVersion()
@@ -43,19 +45,21 @@ func main() {
 		// release the archive file.
 		defer func() {
 			if err := fs.Compact(); err != nil {
-				log.Warn("compact store", "err", err)
+				log.Error("compact store", "err", err)
 			}
 			if err := fs.Close(); err != nil {
-				log.Warn("close store", "err", err)
+				log.Error("close store", "err", err)
 			}
 		}()
 	}
 	m := controlplane.NewManager(controlplane.Config{
 		Store:      store,
-		Collector:  &controlplane.HTTPCollector{BaseURL: *collector, Client: &http.Client{Timeout: 30 * time.Second}},
+		Collector:  &controlplane.HTTPCollector{BaseURL: *collector, Client: controlplane.NewCollectorClient(30 * time.Second)},
 		Logger:     log,
 		DefaultTTL: *ttl,
 		Retention:  *retention,
+		// For Config zero means the default, so "off" is passed as negative.
+		DeliveryGrace: cmp.Or(*grace, -1),
 
 		AllowedHosts:   svc.SplitCSV(*hosts),
 		AllowedOrigins: svc.SplitCSV(*origins),

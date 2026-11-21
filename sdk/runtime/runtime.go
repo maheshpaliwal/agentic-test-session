@@ -56,6 +56,7 @@ type state struct {
 	rec      *Recorder
 	exp      *Exporter
 	sub      *Subscriber
+	rep      *reporter
 	origTrip http.RoundTripper
 	patched  bool
 }
@@ -91,7 +92,11 @@ func Start(cfg Config) error {
 		OverwriteTraceparent: cfg.OverwriteTraceparent})
 	s := &state{rec: NewRecorder(cfg.BufferSize)}
 	s.exp = NewExporter(s.rec, cfg.Exporter)
-	s.sub = NewSubscriberFor(cfg.ControlPlaneURL, cfg.Service, cfg.Instance)
+	// The reports name the instance as the events do (core made it unique for
+	// this process), not as the stream does; the stream says which that is.
+	inst := core.GetConfig().Instance
+	s.sub = newSubscriber(cfg.ControlPlaneURL, cfg.Service, cfg.Instance, inst)
+	s.rep = newReporter(s.rec, s.exp, s.sub, cfg.Service, inst, reporterConfig{})
 	core.SetRecorder(s.rec)
 	core.SetSessions(s.sub)
 	if cfg.PatchDefaultTransport {
@@ -128,6 +133,7 @@ func Stop() {
 	core.SetSessions(nil)
 	s.exp.Close(2 * time.Second)
 	core.SetRecorder(nil)
+	s.rep.close(2 * time.Second) // the last word on what was and was not delivered
 	core.Configure(core.Config{})
 	s.sub.Close()
 	if s.patched {

@@ -20,7 +20,9 @@ import (
 const maxExportLine = 64 << 20
 
 // NewOffline serves sessions read from files written by `tracectl export`
-// (one event per line). Each file becomes one read-only, sealed session named
+// (one event per line, the session's verdict on the first: see
+// core.ExportSession; or the verdict alone, for a session without events:
+// see core.ExportHeader). Each file becomes one read-only, sealed session named
 // after the file, so a run can be opened without the services that recorded
 // it: attach the export to a failed CI job and open it locally. The read
 // endpoints answer as the real services do, so tracectl reads the file too.
@@ -46,8 +48,10 @@ func loadExport(path string) (*demoSess, error) {
 	}
 	defer f.Close()
 	var evs []core.Event
-	seqs := map[uint64]int{} // seq -> line that holds it
-	torn := false            // the previous line did not parse
+	var meta *core.ExportSession // the session's verdict, on the line of an event (the first)
+	id := ""                     // the session of the file
+	seqs := map[uint64]int{}     // seq -> line that holds it
+	torn := false                // the previous line did not parse
 	var tornErr error
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), maxExportLine)
@@ -63,6 +67,17 @@ func loadExport(path string) (*demoSess, error) {
 			torn, tornErr = true, fmt.Errorf("%s:%d: not an exported event: %w", path, line, err)
 			continue
 		}
+		// The line of a session without events: its id and its verdict.
+		if sid, m, ok := core.ExportHeaderOf(sc.Bytes()); ok {
+			if id != "" && sid != id {
+				return nil, fmt.Errorf("%s:%d: two sessions (%s and %s) in one file", path, line, id, sid)
+			}
+			if meta == nil {
+				meta = m
+			}
+			id = sid
+			continue
+		}
 		if e.SessionID == "" || e.Seq == 0 {
 			return nil, fmt.Errorf("%s:%d: not an exported event (no session_id or seq)", path, line)
 		}
@@ -73,19 +88,23 @@ func loadExport(path string) (*demoSess, error) {
 			return nil, fmt.Errorf("%s:%d: seq %d was already used on line %d", path, line, e.Seq, first)
 		}
 		seqs[e.Seq] = line
-		if len(evs) > 0 && e.SessionID != evs[0].SessionID {
-			return nil, fmt.Errorf("%s:%d: events of two sessions (%s and %s) in one file", path, line, evs[0].SessionID, e.SessionID)
+		if meta == nil {
+			meta = core.ExportSessionOf(sc.Bytes())
 		}
+		if id != "" && e.SessionID != id {
+			return nil, fmt.Errorf("%s:%d: events of two sessions (%s and %s) in one file", path, line, id, e.SessionID)
+		}
+		id = e.SessionID
 		evs = append(evs, e)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if len(evs) == 0 {
+	if id == "" {
 		if torn {
 			return nil, tornErr
 		}
-		return nil, fmt.Errorf("%s: no events", path)
+		return nil, fmt.Errorf("%s: no events, and no session: an export of a session without events holds one line with its verdict", path)
 	}
 	slicex.SortBy(evs, func(e core.Event) uint64 { return e.Seq })
 	var first, last int64
@@ -98,23 +117,38 @@ func loadExport(path string) (*demoSess, error) {
 	if first == 0 {
 		first = last
 	}
+	if len(evs) == 0 && meta != nil && !meta.StartedAt.IsZero() {
+		// No event says when the session ran: the verdict's line does.
+		first = meta.StartedAt.UnixNano()
+		if last = first; meta.EndedAt.After(meta.StartedAt) {
+			last = meta.EndedAt.UnixNano()
+		}
+	}
 	// The collector's view of the session. The events are served as they are:
 	// they were read from the collector, so they already carry transaction
 	// outcomes and the orphaned flag. What the seal held besides them is
 	// worked out the way the collector does it: the jobs no worker finished
 	// and the events the SDKs dropped.
 	open, dropped := ledger(evs)
-	cv := &colView{id: evs[0].SessionID, evs: evs, sealed: true, pending: open, dropped: dropped,
+	cv := &colView{id: id, evs: evs, sealed: true, pending: open, dropped: dropped,
 		// A file cut short mid-line (an interrupted export) still opens; what it holds is not everything.
 		incomplete: len(open) > 0 || dropped > 0 || torn}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	// To the nanosecond: a recording is often shorter than a second, and whole
 	// seconds would show its duration as zero.
 	start, end := time.Unix(0, first).UTC(), time.Unix(0, last).UTC()
-	return &demoSess{
-		Session: Session{ID: cv.id, Name: name, Mode: controlplane.ModeHeader, State: controlplane.StateSealed, InitiatedBy: "file",
-			CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped, Incomplete: cv.incomplete},
-		events: evs, sealed: true, file: cv, path: path}, nil
+	sess := Session{ID: cv.id, Name: name, Mode: controlplane.ModeHeader, State: controlplane.StateSealed, InitiatedBy: "file",
+		CreatedAt: start, StartedAt: start, EndedAt: end, DroppedEvents: dropped, Incomplete: cv.incomplete}
+	// What the control plane knew and the events do not show: that events
+	// never reached the collector, that the drain ran out of time, that the
+	// seal failed. An export from before the verdict was carried has none,
+	// and the session is then judged on its events alone.
+	if meta != nil {
+		sess.Incomplete = sess.Incomplete || meta.Incomplete
+		sess.IncompleteReasons, sess.DeliveryUnconfirmed = meta.IncompleteReasons, meta.DeliveryUnconfirmed
+		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
+	}
+	return &demoSess{Session: sess, events: evs, sealed: true, file: cv, path: path}, nil
 }
 
 // readOnlyAPI refuses everything that would change a session, and says that

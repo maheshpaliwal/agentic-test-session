@@ -52,9 +52,18 @@ const ownSep = ";"
 // HeaderService and HeaderInstance are sent by the SDK when it follows the
 // control plane's active set, so the control plane can list which services
 // are connected. They identify the process, not a request.
+//
+// HeaderDeliveryInstance is sent as well by an SDK that sends delivery
+// reports: the instance name those reports (and its events) carry, which is
+// unique to the process, unlike HeaderInstance. With it the control plane
+// knows which connected process a report, or the events the collector has,
+// belong to: an instance that took part in a session and is connected is
+// expected to report it. The SDK does not send the header to a control plane
+// that turned out not to take its reports.
 const (
-	HeaderService  = "X-Tsession-Service"
-	HeaderInstance = "X-Tsession-Instance"
+	HeaderService          = "X-Tsession-Service"
+	HeaderInstance         = "X-Tsession-Instance"
+	HeaderDeliveryInstance = "X-Tsession-Delivery-Instance"
 )
 
 // Carrier abstracts a header-like key/value store. Keys are lowercase.

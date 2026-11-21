@@ -1,13 +1,17 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
@@ -233,14 +237,103 @@ type Status struct {
 	EventCount  int
 	Dropped     int64
 	Quarantined int
+	// Instances counts the session's events by the service and instance that
+	// recorded them, sorted by both; InstancesTruncated says that there were
+	// more than MaxStatusInstances and the rest is left out.
+	Instances          []InstanceCount
+	InstancesTruncated bool
+	// all holds every instance's count when Instances was cut short; never
+	// changed once the status is built.
+	all map[instKey]int
 }
+
+// InstanceCount is how many events of a session the collector has from one
+// SDK instance: those it stored and those still in the reorder window. An
+// event is counted once however often it was sent (duplicates are dropped on
+// instance and local_seq). The sdk.dropped events an SDK sends to report its
+// drop counts are not events of the session and are not counted.
+type InstanceCount struct {
+	Service string `json:"service,omitempty"`
+	// Instance is the instance of the events: the id the SDK made unique for
+	// its process, which is also the one its delivery reports carry.
+	Instance string `json:"instance"`
+	Events   int    `json:"events"`
+}
+
+// MaxStatusInstances bounds Status.Instances, and with it the size of a
+// drain-status response.
+const MaxStatusInstances = 512
+
+// instKey identifies the SDK instance an event came from.
+type instKey struct{ service, instance string }
+
+// countsForInstance reports whether e is an event its instance recorded for
+// the session, as opposed to the instance's report of a drop count.
+func countsForInstance(e *core.Event) bool { return e.Kind != core.KindSDKDropped }
 
 func (a *sessionActor) status() Status {
 	st := Status{Buffered: len(a.buf), LastEventNs: a.lastRecv, EventCount: a.count, Dropped: a.dropped,
 		Quarantined: a.seqr.quarantined(a.id)}
 	st.Open = mapx.SortedKeys(a.open)
 	st.Pending = len(a.open) + len(a.buf)
+	st.Instances, st.all = a.instances()
+	st.InstancesTruncated = st.all != nil
 	return st
+}
+
+// instances lists what the collector has of the session per instance: the
+// stored events and the ones accepted into the reorder window. When there
+// are more than MaxStatusInstances the list holds the first of them and all
+// is a copy of every count.
+func (a *sessionActor) instances() (list []InstanceCount, all map[instKey]int) {
+	counts := a.inst
+	if len(a.buf) > 0 {
+		if counts = maps.Clone(a.inst); counts == nil {
+			counts = map[instKey]int{}
+		}
+		for i := range a.buf {
+			if e := &a.buf[i].ev; countsForInstance(e) {
+				counts[instKey{e.Service, e.Instance}]++
+			}
+		}
+	}
+	out := make([]InstanceCount, 0, len(counts))
+	for k, n := range counts {
+		out = append(out, InstanceCount{Service: k.service, Instance: k.instance, Events: n})
+	}
+	slices.SortFunc(out, func(x, y InstanceCount) int {
+		return cmp.Or(cmp.Compare(x.Service, y.Service), cmp.Compare(x.Instance, y.Instance))
+	})
+	if len(out) > MaxStatusInstances {
+		if len(a.buf) == 0 {
+			counts = maps.Clone(counts) // a.inst itself: the actor goes on changing it
+		}
+		return out[:MaxStatusInstances:MaxStatusInstances], counts
+	}
+	return out, nil
+}
+
+// countsOf answers how many events the status holds from each instance asked
+// about, in order. Names are compared the way the control plane compares
+// them (ident.Clean): it knows an instance by its cleaned name, and two
+// instances whose names clean to the same are one to it.
+func (st Status) countsOf(ask []InstanceCount) []InstanceCount {
+	clean := func(service, instance string) instKey { return instKey{ident.Clean(service), ident.Clean(instance)} }
+	sum := make(map[instKey]int, len(st.Instances))
+	if st.all != nil {
+		for k, n := range st.all {
+			sum[clean(k.service, k.instance)] += n
+		}
+	} else {
+		for _, i := range st.Instances {
+			sum[clean(i.Service, i.Instance)] += i.Events
+		}
+	}
+	out := make([]InstanceCount, len(ask))
+	for i, q := range ask {
+		out[i] = InstanceCount{Service: q.Service, Instance: q.Instance, Events: sum[clean(q.Service, q.Instance)]}
+	}
+	return out
 }
 
 // Status reports a session's live state without creating an actor: unknown

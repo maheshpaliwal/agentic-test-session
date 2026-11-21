@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,18 +57,52 @@ func withParam(dsn, k, v string) string {
 func newInfra(t *testing.T, st store.Store) *infra {
 	t.Helper()
 	col := collector.New(st, collector.Config{Window: 100 * time.Millisecond})
-	colSrv := httptest.NewServer(col.Handler())
+	colSrv := countedServer(t, "collector", col.Handler())
 	mgr := controlplane.NewManager(controlplane.Config{
-		Collector: &controlplane.HTTPCollector{BaseURL: colSrv.URL},
+		Collector: &controlplane.HTTPCollector{BaseURL: colSrv.URL, Client: collectorHTTP},
 		TimeUnit:  100 * time.Millisecond, PollInterval: 100 * time.Millisecond,
 		HeartbeatPeriod: time.Second,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go mgr.Run(ctx)
-	cpSrv := httptest.NewServer(mgr.Handler())
+	cpSrv := countedServer(t, "control plane", mgr.Handler())
 	in := &infra{col: col, colSrv: colSrv, cp: mgr, cpSrv: cpSrv}
-	t.Cleanup(func() { cancel(); cpSrv.Close(); mgr.Close(); colSrv.Close(); col.Close() })
+	t.Cleanup(func() {
+		cancel()
+		cpSrv.Close()
+		mgr.Close()
+		colSrv.Close()
+		col.Close()
+		collectorHTTP.CloseIdleConnections()
+	})
 	return in
+}
+
+// collectorHTTP is the client of every control plane a test starts for its
+// requests to its collector. It keeps its connections, as the control
+// plane's own does, and opens at most 64 to a collector at a time: hundreds
+// of sessions that drain at once ask a collector that answers in
+// microseconds, and a connection each would be hundreds of local ports held
+// for half a minute after the test (TIME_WAIT), with several test processes
+// at once more than the machine has.
+var collectorHTTP = &http.Client{Timeout: 30 * time.Second,
+	Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, MaxConnsPerHost: 64}}
+
+// countedServer is httptest.NewServer that counts the connections it
+// accepts and logs the number when the test ends (go test -v): what a test
+// costs in local ports is then a line of its output, not a guess.
+func countedServer(t *testing.T, name string, h http.Handler) *httptest.Server {
+	t.Helper()
+	var n atomic.Int64
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			n.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(func() { t.Logf("connections accepted by the %s: %d", name, n.Load()) })
+	return srv
 }
 
 func (in *infra) startRuntime(t *testing.T, service string) {

@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	reportArgs = "<id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]"
+	reportArgs = "<id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed]"
 
 	reportMaxRows     = 50   // rows of a Markdown table
 	junitMaxCases     = 1000 // test cases made from trace roots
@@ -140,6 +140,18 @@ type mutationRow struct {
 // The collector hangs a worker run under the span that published its job
 // (TraceNode.Linked), so walking a root's children and linked spans reaches
 // the async work the request caused.
+// deliveryReasonLabel says what one of the control plane's incomplete_reasons
+// is about. Most name an instance whose events did not all reach the
+// collector. Two do not say that anything is missing: an instance whose
+// events the collector has and that did not report how many it recorded, and
+// reports beyond the ones a session keeps.
+func deliveryReasonLabel(reason string) string {
+	if strings.HasPrefix(reason, "the collector has ") || strings.HasPrefix(reason, "more than ") {
+		return "Delivery is not accounted for: "
+	}
+	return "Events did not reach the collector: "
+}
+
 func buildReport(info client.Info, sum client.Summary, tr client.Trace, muts []client.Mutation) *sessionReport {
 	rep := &sessionReport{info: info, sum: sum, incomplete: sum.Incomplete || info.Incomplete}
 	rootOf := map[uint64]int{}
@@ -213,6 +225,9 @@ func incompleteReasons(info client.Info, sum client.Summary) []string {
 			state = "never finished (orphaned)"
 		}
 		out = append(out, fmt.Sprintf("Unfinished async work: %d published job(s) that a worker %s.", sum.PendingAsync, state))
+	}
+	for _, r := range info.IncompleteReasons {
+		out = append(out, deliveryReasonLabel(r)+clip(r, reportErrMax))
 	}
 	if info.SealError != "" {
 		r := "Seal error: the collector could not seal the session: " + clip(info.SealError, reportErrMax)
@@ -356,6 +371,10 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	if !info.Done() {
 		verdict += " The session is still " + mdEscape(info.State, 40) + ", so this report can change."
 	}
+	if len(info.DeliveryUnconfirmed) > 0 {
+		// A warning, not a failure: but "Passed" alone would hide it.
+		verdict += " Whether every event arrived could not be confirmed (see below)."
+	}
 	b.WriteString(verdict + "\n\n")
 	mdTable(&b, []string{"State", "Events", "Duration", "Services"}, [][]string{{
 		mdCell(info.State, 40), strconv.Itoa(sum.EventCount),
@@ -385,6 +404,14 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	if rep.incomplete {
 		b.WriteString("\n### Why it is incomplete\n\n")
 		for _, r := range rep.reasons {
+			b.WriteString("- " + mdEscape(r, 2*reportErrMax) + "\n")
+		}
+	}
+
+	if len(info.DeliveryUnconfirmed) > 0 {
+		b.WriteString("\n### Delivery not confirmed\n\n")
+		b.WriteString("The control plane could not tell whether all events of these service instances reached the collector. The session is not marked incomplete for it.\n\n")
+		for _, r := range info.DeliveryUnconfirmed {
 			b.WriteString("- " + mdEscape(r, 2*reportErrMax) + "\n")
 		}
 	}
@@ -476,7 +503,16 @@ func renderJUnit(rep *sessionReport) ([]byte, error) {
 	info := rep.info
 	suite := junitSuite{Name: cmp.Or(info.Name, info.ID), Time: junitSeconds(rep.sum.DurationNs), Properties: []junitProperty{
 		{Name: "session_id", Value: info.ID}, {Name: "state", Value: info.State},
+		{Name: "incomplete", Value: strconv.FormatBool(rep.incomplete)},
 	}}
+	// Why the session is incomplete, and what could not be confirmed, as
+	// properties: a CI system shows them also when no test case failed.
+	for _, r := range rep.reasons {
+		suite.Properties = append(suite.Properties, junitProperty{Name: "incomplete_reason", Value: clip(r, 2*reportErrMax)})
+	}
+	for _, r := range info.DeliveryUnconfirmed {
+		suite.Properties = append(suite.Properties, junitProperty{Name: "delivery_unconfirmed", Value: clip(r, 2*reportErrMax)})
+	}
 	roots := rep.roots
 	if len(roots) > junitMaxCases {
 		// Keep the failed ones: a stable sort moves them to the front.

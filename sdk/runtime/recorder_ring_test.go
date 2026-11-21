@@ -51,6 +51,7 @@ func TestRecorderTakeSettleMatchesModel(t *testing.T) {
 			skip := sids[rng.Intn(3)]
 			evs, ids, _ := r.take(0, 1+rng.Intn(8), func(sid string) bool { return sid != skip })
 			var gone []uint64
+			o := outcome{delivered: map[string]uint64{}}
 			for i, ev := range evs {
 				if ev.SessionID == skip {
 					panic(fmt.Sprintf("step %d: take returned an event of a session it was to skip", step))
@@ -58,9 +59,23 @@ func TestRecorderTakeSettleMatchesModel(t *testing.T) {
 				if rng.Intn(3) != 0 {
 					gone = append(gone, ids[i])
 					model = slices.DeleteFunc(model, func(s uint64) bool { return s == ev.LocalSeq })
+					if rng.Intn(4) == 0 { // refused for good
+						o.lost = append(o.lost, ev)
+						continue
+					}
+					if o.delivered[ev.SessionID] == 0 {
+						o.order = append(o.order, ev.SessionID)
+					}
+					o.delivered[ev.SessionID]++
 				}
 			}
-			r.settle(ids, gone)
+			if len(gone) > len(o.lost) && rng.Intn(5) == 0 {
+				o.rejected = uint64(1 + rng.Intn(len(gone)))
+			}
+			r.settle(ids, gone, &o)
+		}
+		if bad := accountErrors(r); len(bad) > 0 {
+			panic(fmt.Sprintf("step %d: %v", step, bad))
 		}
 		got := []uint64{}
 		for _, ev := range r.Peek(16) {
@@ -113,10 +128,14 @@ func TestRecorderEviction(t *testing.T) {
 	if got := seqs(r); !slices.Equal(got, []uint64{2, 3, 7, 8}) || drops(r)["held"] != 3 {
 		panic(fmt.Sprintf("eviction around a sent event: ring %v drops %v", got, drops(r)))
 	}
-	r.settle(ids, nil)
+	r.settle(ids, nil, &outcome{})
 	r.Record(ev("ok", 9))
 	if got := seqs(r); !slices.Equal(got, []uint64{2, 3, 7, 8}) || drops(r)["ok"] != 2 {
 		panic(fmt.Sprintf("only a sent event left: ring %v drops %v", got, drops(r)))
+	}
+	// The accounts say the same: every event that was dropped, whichever way.
+	if a := r.accounts(); a["held"] != (account{recorded: 4, dropped: 3}) || a["ok"] != (account{recorded: 5, dropped: 2}) || len(accountErrors(r)) > 0 {
+		panic(fmt.Sprintf("accounts %+v %v", a, accountErrors(r)))
 	}
 
 	// A held event further from the end than evictScan is not looked for.

@@ -39,6 +39,31 @@ const (
 // running, or a binding is held by another active session (error text carries the conflicting id).
 var ErrConflict = errors.New("tsession: conflicts with a running session")
 
+// StatusError is the error of a request the service answered with a status
+// that is not 2xx. Callers that act on the status (a 404 for a session the
+// control plane no longer knows, an endpoint an older service lacks) read
+// Code through errors.As or StatusCode instead of the text.
+type StatusError struct {
+	Method, Path string
+	Code         int    // the HTTP status code
+	Status       string // the status line, "404 Not Found"
+	Message      string // the service's own message
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("tsession: %s %s: %s: %s", e.Method, e.Path, e.Status, e.Message)
+}
+
+// StatusCode returns the HTTP status of err if it is, or wraps, a
+// StatusError, and 0 otherwise.
+func StatusCode(err error) int {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code
+	}
+	return 0
+}
+
 // Options configure Start. Zero values use control-plane defaults.
 type Options struct {
 	BaseURL string // default $TSESSION_CONTROLPLANE_URL or DefaultURL
@@ -132,6 +157,48 @@ type Info struct {
 	// asynchronous work still outstanding.
 	DrainTimedOut bool      `json:"drain_timed_out,omitempty"`
 	Bindings      []Binding `json:"bindings,omitempty"`
+	// Delivery is the last delivery report of every SDK instance that sent
+	// one: what it recorded for the session and what became of it. Services
+	// with an older SDK, or that were never connected, are not listed. It is
+	// filled by Get and the calls that end a session, not by List: a list of
+	// sessions carries the verdict below without the reports behind it.
+	Delivery []Delivery `json:"delivery,omitempty"`
+	// IncompleteReasons says why the control plane marked the session
+	// incomplete: one line per instance whose events did not all reach the
+	// collector, by the collector's own count of what it has from that
+	// instance. Such a session is Incomplete even when the collector's
+	// summary is not: the missing events never got there.
+	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
+	// DeliveryUnconfirmed names instances of which the control plane cannot
+	// say whether all their events arrived: one that recorded more after its
+	// last report and then stopped reporting, say, or one that follows the
+	// control plane and whose reports never arrive. A warning: the session is
+	// not Incomplete because of it, and it is not known to be complete
+	// (tsessiontest.RequireDeliveryConfirmed and tracectl's
+	// --fail-on-unconfirmed fail on it).
+	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+}
+
+// Delivery is one SDK instance's account of the events it recorded for a
+// session: Recorded = Delivered + Dropped + Buffered.
+type Delivery struct {
+	Service   string `json:"service,omitempty"`
+	Instance  string `json:"instance"`
+	Recorded  int64  `json:"recorded"`
+	Delivered int64  `json:"delivered"` // accepted by the collector, as far as the instance saw
+	Dropped   int64  `json:"dropped"`   // given up by the instance
+	Buffered  int64  `json:"buffered"`  // still held by the instance when it last reported
+	// DeliveredTotal is what the instance had delivered for all its sessions
+	// together when it reported.
+	DeliveredTotal int64 `json:"delivered_total,omitempty"`
+	// LastError is why the instance's last request to the collector failed.
+	LastError string `json:"last_error,omitempty"`
+	// Final is set when the instance reported after it had seen the session
+	// draining, or while it shut down; otherwise it may have recorded or
+	// delivered more since.
+	Final bool `json:"final,omitempty"`
+	// At is when the control plane received the report.
+	At time.Time `json:"at"`
 }
 
 // Done reports whether the session reached a terminal state.
@@ -444,7 +511,15 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 	if err != nil {
 		return nil, scrubURL(err)
 	}
-	defer resp.Body.Close()
+	// Read to its end before it is closed: the transport keeps a connection
+	// only then. A decoder stops at the end of the JSON value, before the
+	// newline that follows it and the last chunk of an answer sent in chunks
+	// (a session with many delivery reports, a page of events), so a caller
+	// that polls opened a connection per request.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+	}()
 	if resp.StatusCode/100 != 2 {
 		var e struct {
 			Error              string   `json:"error"`
@@ -466,10 +541,9 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 		if resp.StatusCode == http.StatusConflict && method == http.MethodPost && path == "/v1/sessions" {
 			return nil, fmt.Errorf("%w: %s", ErrConflict, e.Error)
 		}
-		return nil, fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
+		return nil, &StatusError{Method: method, Path: path, Code: resp.StatusCode, Status: resp.Status, Message: e.Error}
 	}
 	if out == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
 		return resp.Header, nil
 	}
 	return resp.Header, json.NewDecoder(resp.Body).Decode(out)
@@ -479,11 +553,49 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 // normally the SDK inside an instrumented service. Service and Instance are
 // empty for SDKs that do not report them.
 type Subscriber struct {
-	Service     string    `json:"service,omitempty"`
-	Instance    string    `json:"instance,omitempty"`
-	ConnectedAt time.Time `json:"connected_at"`
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	// DeliveryInstance is the instance name the process sends its delivery
+	// reports under (the one its events carry); empty for an SDK that sends
+	// none.
+	DeliveryInstance string    `json:"delivery_instance,omitempty"`
+	ConnectedAt      time.Time `json:"connected_at"`
+	// LastDeliveryReport is when a delivery report of the process last
+	// reached the control plane (it sends one when it connects); zero when
+	// none has since it connected. A process that names a DeliveryInstance
+	// and stays at zero cannot get its reports through.
+	LastDeliveryReport time.Time `json:"last_delivery_report,omitzero"`
+	// DeliveryUnheard: the control plane has heard nothing of the process for
+	// too long, no delivery report and no heartbeat, although it names a
+	// DeliveryInstance: its reports do not get through. A session that ended
+	// now would name it under delivery_unconfirmed, or be incomplete for it.
+	DeliveryUnheard bool `json:"delivery_unheard,omitempty"`
+	// Pending is what the process last told the control plane of its events
+	// of the sessions that run now, when some had not reached the collector
+	// or its last request to it failed. Nil otherwise: all delivered, no
+	// running session, or a control plane that does not send it.
+	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
 	// Generation is the newest version of the active set sent to it.
 	Generation uint64 `json:"generation"`
+}
+
+// PendingDelivery is the events of running sessions that a connected process
+// reported as not delivered: its own word, as old as its newest report (At).
+type PendingDelivery struct {
+	Sessions    int   `json:"sessions"`    // running sessions it holds or gave up events of
+	Undelivered int64 `json:"undelivered"` // events it still holds
+	Dropped     int64 `json:"dropped"`     // events it gave up
+	// LastError is why its last request to the collector failed; empty when
+	// that request succeeded.
+	LastError string    `json:"last_error,omitempty"`
+	At        time.Time `json:"at"`
+}
+
+// Stuck reports whether the process holds or lost events and its last
+// request to the collector failed: it cannot deliver, by its own word.
+// Events held without an error are on their way.
+func (p *PendingDelivery) Stuck() bool {
+	return p != nil && p.LastError != "" && (p.Undelivered > 0 || p.Dropped > 0)
 }
 
 // Subscribers lists the processes currently connected to the control plane.
@@ -532,7 +644,7 @@ func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
 			switch {
 			case ctx.Err() != nil:
 				return connected, ctx.Err()
-			case strings.Contains(err.Error(), ": 404 "):
+			case StatusCode(err) == http.StatusNotFound:
 				return 0, nil
 			}
 			return connected, err

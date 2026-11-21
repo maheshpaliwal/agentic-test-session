@@ -25,7 +25,7 @@ import (
 // model: the verdict and the failures first, then what changed, then the call
 // tree with repeated work collapsed. docs/DIGEST.md describes both formats.
 const (
-	digestArgs = "<id|name> [--format markdown|json] [--max-bytes N] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]"
+	digestArgs = "<id|name> [--format markdown|json] [--max-bytes N] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed]"
 
 	digestSchema = "tsession.digest/v1"
 	// digestNotice is the fixed line that tells a reader how to take the
@@ -161,7 +161,15 @@ type dVerdict struct {
 	Status    string   `json:"status"`    // failed, incomplete, empty or passed
 	Recording string   `json:"recording"` // complete, incomplete or unknown
 	Reasons   []string `json:"incomplete_reasons,omitempty"`
+	// Unconfirmed names the service instances of which the control plane
+	// could not tell whether all their events arrived. The recording is not
+	// incomplete for it, and not known to be complete either.
+	Unconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
+
+// digestMaxUnconfirmed bounds dVerdict.Unconfirmed: the verdict is the part
+// of a digest that is never cut to fit the budget.
+const digestMaxUnconfirmed = 4
 
 type dCounts struct {
 	Events       int            `json:"events"`
@@ -235,11 +243,14 @@ type dChange struct {
 }
 
 // dField is one changed field. Before and After are the values as compact
-// JSON text, clipped; null stands for no value.
+// JSON text, clipped; null stands for no value. Hidden marks a value that
+// changed under redaction: both sides hold the marker, and a reader must not
+// take the two equal texts for no change.
 type dField struct {
 	Field  string  `json:"field"`
 	Before *string `json:"before"`
 	After  *string `json:"after"`
+	Hidden bool    `json:"hidden,omitempty"`
 }
 
 // dNode is one line of the call tree, which is listed in pre-order.
@@ -259,7 +270,13 @@ type dNode struct {
 	MaxDurationNs int64  `json:"max_duration_ns,omitempty"`
 	Mutations     int    `json:"mutations,omitempty"`
 	Error         string `json:"error,omitempty"`
-	Hidden        int    `json:"hidden,omitempty"` // lines below this one that were left out
+	// Code is an outcome that is not an error: a gRPC status such as
+	// NotFound, which the call's line would otherwise not show.
+	Code string `json:"code,omitempty"`
+	// Flags are the event's flags (the first few), so that a count under
+	// "flags" in the verdict can be traced to its events.
+	Flags  []string `json:"flags,omitempty"`
+	Hidden int      `json:"hidden,omitempty"` // lines below this one that were left out
 }
 
 type dOmitted struct {
@@ -332,8 +349,20 @@ func (src *digestSource) buildTree(tr client.Trace) {
 	}
 }
 
+// outcomeCode is what a call returned when that is not in its error: a gRPC
+// status other than OK.
+func outcomeCode(e *core.Event) string {
+	if c := e.Attrs["grpc.code"]; c != "" && c != "OK" {
+		return c
+	}
+	return ""
+}
+
 // groupSiblings turns sibling spans into lines, merging neighbours that did
-// the same thing. A span on a failed branch is never merged.
+// the same thing: the same service, kind and normalised name, the same
+// outcome (error text normalised, status code, flags) and the same calls
+// below. Three hundred requests that fail the same way are one line; one
+// that returned NotFound is not merged with one that returned OK.
 func groupSiblings(nodes []*client.TraceNode, async bool) []*treeGroup {
 	var out []*treeGroup
 	for _, n := range nodes {
@@ -346,14 +375,15 @@ func groupSiblings(nodes []*client.TraceNode, async bool) []*treeGroup {
 			failed: e.Err != "", norm: normalizeName(e.Name)}
 		g.kids = append(groupSiblings(n.Children, false), groupSiblings(n.Linked, true)...)
 		h := sha256.New()
-		fmt.Fprintf(h, "%t\x00%s\x00%s\x00%s\x00", async, e.Service, e.Kind, g.norm)
+		fmt.Fprintf(h, "%t\x00%s\x00%s\x00%s\x00%s\x00%s\x00%q\x00", async, e.Service, e.Kind, g.norm,
+			normalizeName(e.Err), outcomeCode(e), e.Flags)
 		for _, k := range g.kids {
 			g.failed = g.failed || k.failed
 			_ = binary.Write(h, binary.BigEndian, int64(k.count))
 			h.Write(k.sig[:])
 		}
 		h.Sum(g.sig[:0])
-		if last := len(out) - 1; last >= 0 && !g.failed && !out[last].failed && out[last].sig == g.sig {
+		if last := len(out) - 1; last >= 0 && out[last].sig == g.sig {
 			p := out[last]
 			p.count++
 			p.lastSeq = e.Seq
@@ -371,8 +401,13 @@ func (src *digestSource) flatten(g *treeGroup, depth int) {
 	e := g.ev
 	n := dNode{Depth: depth, Seq: e.Seq, Async: g.async, Service: dataText(e.Service, 40), Kind: dataText(string(e.Kind), 40),
 		Name: dataText(e.Name, digestNameMax), DurationNs: g.dur, Mutations: g.muts, Error: dataText(e.Err, digestNameMax)}
+	n.Code = dataText(outcomeCode(e), 40)
+	for _, f := range e.Flags[:min(len(e.Flags), digestFlagsMax)] {
+		n.Flags = append(n.Flags, dataText(f, 40))
+	}
 	if g.count > 1 {
 		n.Count, n.LastSeq, n.MaxDurationNs, n.Name = g.count, g.lastSeq, g.maxDur, dataText(g.norm, digestNameMax)
+		n.Error = dataText(normalizeName(e.Err), digestNameMax)
 	}
 	at := len(src.lines)
 	src.lines = append(src.lines, n)
@@ -536,7 +571,7 @@ func changedFields(m *core.Mutation) []dField {
 	}
 	var out []dField
 	for _, d := range m.Diff {
-		out = append(out, dField{Field: dataText(d.Field, 60), Before: value(d.Old), After: value(d.New)})
+		out = append(out, dField{Field: dataText(d.Field, 60), Before: value(d.Old), After: value(d.New), Hidden: hiddenChange(d)})
 	}
 	if len(out) > 0 || m.Before.IsZero() == m.After.IsZero() {
 		return out
@@ -699,14 +734,34 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 			{"tracectl events " + id + " --errors", "the failed events"},
 		},
 	}
+	// The reasons are part of the verdict and always stay; what is cut of
+	// them (a long one shortened, the unconfirmed beyond the first few) is
+	// counted, and "omitted" says where to read them whole.
+	reasonsCut := 0
+	reason := func(text string) string {
+		short := dataText(text, reasonMax)
+		// Shortened here, or before it got here (the report's own bound).
+		if short != dataText(text, len(text)+1) || strings.HasSuffix(text, "…") {
+			reasonsCut++
+		}
+		return short
+	}
 	switch {
 	case src.rep.incomplete:
 		d.Verdict.Recording = "incomplete"
-		for _, reason := range src.rep.reasons {
-			d.Verdict.Reasons = append(d.Verdict.Reasons, dataText(reason, reasonMax))
+		for _, r := range src.rep.reasons {
+			d.Verdict.Reasons = append(d.Verdict.Reasons, reason(r))
 		}
 	case info.State == "":
 		d.Verdict.Recording = "unknown"
+	}
+	for i, w := range info.DeliveryUnconfirmed {
+		if i == digestMaxUnconfirmed {
+			d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, fmt.Sprintf("and %d more", len(info.DeliveryUnconfirmed)-i))
+			reasonsCut += len(info.DeliveryUnconfirmed) - i
+			break
+		}
+		d.Verdict.Unconfirmed = append(d.Verdict.Unconfirmed, reason(w))
 	}
 	switch {
 	case len(src.failures) > 0:
@@ -735,7 +790,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	// The notes are sized before anything is chosen: as if every section
 	// had been cut.
 	note := func(k digestKept) []dOmitted {
-		return k.notes(id, len(src.failures), len(src.entities), len(src.lines), cut)
+		return k.notes(id, len(src.failures), len(src.entities), len(src.lines), cut, reasonsCut)
 	}
 	d.Omitted = note(digestKept{failLevel: detailLeast, mutLevel: detailLeast})
 	room := target - len(r.render(d))
@@ -824,13 +879,16 @@ type digestKept struct {
 }
 
 // notes says what is missing and which command prints it.
-func (k digestKept) notes(id string, failures, entities, lines, counts int) []dOmitted {
+func (k digestKept) notes(id string, failures, entities, lines, counts, reasons int) []dOmitted {
 	out := []dOmitted{}
 	add := func(section, what string, get ...string) {
 		for i := range get {
 			get[i] = "tracectl " + strings.Replace(get[i], "ID", id, 1)
 		}
 		out = append(out, dOmitted{Section: section, What: what, Get: get})
+	}
+	if reasons > 0 {
+		add("verdict", fmt.Sprintf("%d of the reasons why the recording is incomplete or unconfirmed are shortened or not listed", reasons), "status ID")
 	}
 	if counts > 0 {
 		add("counts", fmt.Sprintf("%d smaller entries of the counts", counts), "summary ID --json")
@@ -970,6 +1028,10 @@ func mdEntity(b *strings.Builder, e *dEntity) {
 		}
 		for i, f := range c.Fields {
 			b.WriteString(map[bool]string{true: ": ", false: "; "}[i == 0])
+			if f.Hidden {
+				fmt.Fprintf(b, "%s %s", mdQuote(f.Field), hiddenChangeText)
+				continue
+			}
 			fmt.Fprintf(b, "%s %s -> %s", mdQuote(f.Field), value(f.Before), value(f.After))
 		}
 		if c.FieldsOmitted > 0 {
@@ -1003,6 +1065,12 @@ func mdNode(b *strings.Builder, n *dNode) {
 	}
 	if n.Mutations > 0 {
 		fmt.Fprintf(b, " [%s]", plural(n.Mutations, "mutation"))
+	}
+	if n.Code != "" {
+		b.WriteString(" code " + mdToken(n.Code))
+	}
+	if len(n.Flags) > 0 {
+		b.WriteString(" [" + strings.Join(slicex.Map(n.Flags, mdToken), ", ") + "]")
 	}
 	if n.Error != "" {
 		b.WriteString(" ERR " + mdQuote(n.Error))
@@ -1073,6 +1141,9 @@ func (digestMarkdown) render(d *digest) []byte {
 	fmt.Fprintf(&b, "\n\n- state: %s; recording: %s\n", state, d.Verdict.Recording)
 	for _, r := range d.Verdict.Reasons {
 		b.WriteString("- incomplete: " + mdEscape(r, 2*digestErrMax) + "\n")
+	}
+	for _, r := range d.Verdict.Unconfirmed {
+		b.WriteString("- delivery unconfirmed: " + mdEscape(r, 2*digestErrMax) + "\n")
 	}
 	fmt.Fprintf(&b, "- events: %d over %s; %s; %s\n", c.Events, time.Duration(c.DurationNs).Round(time.Millisecond),
 		plural(c.Failures, "failure"), plural(c.Mutations, "mutation"))

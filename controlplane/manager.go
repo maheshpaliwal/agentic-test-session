@@ -37,6 +37,17 @@ type Config struct {
 	// keeps its SealError and is no longer retried.
 	SealPendingBudget time.Duration
 	HeartbeatPeriod   time.Duration // SSE heartbeat; default 15s
+	// DeliveryGrace is how long a drain waits for an SDK instance that still
+	// owes the collector events and gets nowhere, and for the report of a
+	// connected instance whose events the collector has (see delivery.go);
+	// after it the session is sealed and marked incomplete for them. It must
+	// be longer than an SDK needs to notice that its collector is back (an
+	// exporter pass and its cooldown). A connected instance of which no report
+	// has arrived a tenth of it after it connected is named in
+	// delivery_unconfirmed. Default 10 TimeUnits; negative turns the check
+	// off: reports are stored, nothing is waited for and no session is marked
+	// incomplete because of them.
+	DeliveryGrace time.Duration
 	// Retention is how long terminal sessions stay in the hot in-memory set
 	// before being evicted from it (still readable if the Store archives them,
 	// e.g. FileStore); default 24h.
@@ -62,6 +73,15 @@ type Manager struct {
 	subs    map[chan ActiveSet]Subscriber
 	cancels map[string]context.CancelFunc // in-flight drains
 	pending map[string]*sealRetry         // finished sessions whose seal is still being retried
+	// delivery holds what is not stored of the delivery reports of live sessions.
+	delivery map[string]*deliveryState
+	// progress is, per reporting instance, when it was last seen to deliver
+	// events of any session (see noteProgressLocked).
+	progress map[string]instanceProgress
+	// busySince is when the control plane last went from no session that is
+	// ACTIVE or DRAINING to one; zero while there is none. The SDKs send
+	// heartbeats from then on (see unheard).
+	busySince time.Time
 
 	// live indexes non-terminal sessions so Sweep/active-set are O(live), not
 	// O(all sessions ever). terminal queues finished sessions for eviction.
@@ -116,6 +136,9 @@ func NewManager(cfg Config) *Manager {
 	if cfg.TimeUnit <= 0 {
 		cfg.TimeUnit = time.Second
 	}
+	if cfg.DeliveryGrace == 0 {
+		cfg.DeliveryGrace = 10 * cfg.TimeUnit
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -126,7 +149,7 @@ func NewManager(cfg Config) *Manager {
 		subs:    map[chan ActiveSet]Subscriber{},
 		cancels: map[string]context.CancelFunc{},
 		pending: map[string]*sealRetry{},
-		live:    map[string]Session{},
+		live:    map[string]Session{}, delivery: map[string]*deliveryState{}, progress: map[string]instanceProgress{},
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
@@ -178,10 +201,16 @@ type termEntry struct {
 // is single-threaded in the constructor).
 func (m *Manager) indexLocked(s Session) {
 	if !s.State.Terminal() {
+		if len(m.live) == 0 {
+			m.busySince = time.Now()
+		}
 		m.live[s.ID] = s
 		return
 	}
 	delete(m.live, s.ID)
+	if len(m.live) == 0 {
+		m.busySince = time.Time{}
+	}
 	ended := s.EndedAt
 	if ended.IsZero() {
 		ended = s.CreatedAt
@@ -348,6 +377,7 @@ func (m *Manager) Abort(id string) (Session, error) {
 		c()
 		delete(m.cancels, id)
 	}
+	delete(m.delivery, id)
 	s.State, s.EndedAt = StateAborted, time.Now().UTC()
 	if err := m.putLocked(s); err != nil {
 		return s, err
@@ -431,6 +461,7 @@ func (m *Manager) Sweep(now time.Time) {
 		}
 	}
 	m.pruneLocked(now)
+	m.pruneProgressLocked(time.Now()) // on the clock the progress was noted with
 	m.retrySealsLocked(now)
 	if changed {
 		m.broadcastLocked()
@@ -498,7 +529,8 @@ func (m *Manager) exclusiveLocked() string {
 }
 
 func (m *Manager) activeLocked() ActiveSet {
-	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen}
+	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen, DeliveryReports: true,
+		DeliveryHeartbeatMs: m.heartbeatPeriod().Milliseconds()}
 	for _, s := range m.live {
 		a.Active = append(a.Active, s.ID)
 		if s.Mode == ModeExclusive {
@@ -507,10 +539,13 @@ func (m *Manager) activeLocked() ActiveSet {
 	}
 	slices.Sort(a.Active) // IDs are time-prefixed, so this is creation order
 	for _, id := range a.Active {
-		if s := m.live[id]; s.State == StateActive {
+		switch s := m.live[id]; s.State {
+		case StateActive:
 			for _, b := range s.Bindings {
 				a.Bindings = append(a.Bindings, ActiveBinding{SessionID: id, Binding: b})
 			}
+		case StateDraining:
+			a.Draining = append(a.Draining, id)
 		}
 	}
 	return a
@@ -521,9 +556,20 @@ func (m *Manager) activeLocked() ActiveSet {
 type Subscriber struct {
 	// Service and Instance are what the SDK reported about itself; both are
 	// empty for SDKs that do not send them and for other clients.
-	Service     string    `json:"service,omitempty"`
-	Instance    string    `json:"instance,omitempty"`
-	ConnectedAt time.Time `json:"connected_at"`
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	// DeliveryInstance is the instance name the follower sends its delivery
+	// reports under (the one its events carry, unique to its process); empty
+	// for an SDK that sends no reports. A follower that names it reports the
+	// sessions it recorded events for, and says once, when it connects, that
+	// its reports arrive (see LastDeliveryReport).
+	DeliveryInstance string    `json:"delivery_instance,omitempty"`
+	ConnectedAt      time.Time `json:"connected_at"`
+	// LastDeliveryReport is when a delivery report of the follower last
+	// arrived, for any session or for none (it sends one when it connects);
+	// zero when none has since it connected. A follower that names a
+	// DeliveryInstance and stays at zero cannot get its reports through.
+	LastDeliveryReport time.Time `json:"last_delivery_report,omitzero"`
 	// Generation is the newest ActiveSet.Generation written to this follower's
 	// connection. A follower at or past the generation in which a session
 	// became active has been sent that session (sent, not necessarily applied).
@@ -532,6 +578,21 @@ type Subscriber struct {
 	// as they are written. An in-process follower (Subscribe) receives every
 	// version through its channel and is reported as up to date.
 	stream bool
+	// DeliveryUnheard: the follower names a DeliveryInstance and nothing of
+	// it has arrived for too long, no report and no heartbeat (see
+	// Manager.unheard): its reports do not get through. It is what the verdict
+	// of a session that ended now would go by.
+	DeliveryUnheard bool `json:"delivery_unheard,omitempty"`
+	// Pending is what the follower last said of its events of the sessions
+	// that run now, when some had not reached the collector or its last
+	// request to it failed; nil otherwise. It is how an operator sees, during
+	// a run, a service that follows and reports and cannot deliver.
+	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
+	// since and heard are ConnectedAt and LastDeliveryReport as the drain
+	// counts from them: with the monotonic clock reading, which a step of the
+	// wall clock does not move. reported is when a request that carried a
+	// report last arrived (heard: also one without, a heartbeat).
+	since, heard, reported time.Time
 }
 
 // Subscribers lists the current followers of the active set, by service and
@@ -539,9 +600,15 @@ type Subscriber struct {
 func (m *Manager) Subscribers() []Subscriber {
 	m.mu.Lock()
 	out := make([]Subscriber, 0, len(m.subs))
+	now := time.Now()
+	pending := m.pendingLocked()
 	for _, s := range m.subs {
 		if !s.stream {
 			s.Generation = m.gen
+		}
+		s.DeliveryUnheard = m.unheard(s, now)
+		if s.DeliveryInstance != "" {
+			s.Pending = pending[deliveryKey(s.Service, s.DeliveryInstance)]
 		}
 		out = append(out, s)
 	}
@@ -560,13 +627,15 @@ func (m *Manager) Subscribe() (<-chan ActiveSet, func()) {
 
 // SubscribeAs is Subscribe for a follower that identified itself.
 func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func()) {
-	return m.subscribe(service, instance, false)
+	return m.subscribe(Subscriber{Service: service, Instance: instance})
 }
 
-func (m *Manager) subscribe(service, instance string, stream bool) (chan ActiveSet, func()) {
+func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
+	sub.since = time.Now()
+	sub.ConnectedAt = sub.since.UTC()
 	m.mu.Lock()
-	m.subs[ch] = Subscriber{Service: service, Instance: instance, ConnectedAt: time.Now().UTC(), stream: stream}
+	m.subs[ch] = sub
 	ch <- m.activeLocked()
 	m.mu.Unlock()
 	return ch, func() {

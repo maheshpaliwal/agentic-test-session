@@ -14,6 +14,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
@@ -39,13 +40,14 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	return g.check(s.Info(), sum, len(sum.Failures))
 }
 
-// gates are the --fail-on-* checks of summary, report and run.
-type gates struct{ onError, onIncomplete, onEmpty bool }
+// gates are the --fail-on-* checks of summary, report, digest and run.
+type gates struct{ onError, onIncomplete, onEmpty, onUnconfirmed bool }
 
 func (g *gates) register(fs *flag.FlagSet) {
 	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
-	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined events, orphaned async work, a failed seal)")
+	fs.BoolVar(&g.onIncomplete, "fail-on-incomplete", false, "exit 3 when the session is incomplete (dropped/quarantined/undelivered events, orphaned async work, a failed seal)")
 	fs.BoolVar(&g.onEmpty, "fail-on-empty", false, "exit 3 when the session recorded no events (nothing was instrumented, connected or attributed)")
+	fs.BoolVar(&g.onUnconfirmed, "fail-on-unconfirmed", false, "exit 3 when the control plane could not tell whether every event of every service instance reached the collector (delivery_unconfirmed); for environments where every connected service is yours")
 }
 
 // check returns a checkError naming every gate the session fails; failures
@@ -60,11 +62,31 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 	switch {
 	case !g.onIncomplete:
 	case sum.Incomplete || info.Incomplete || info.SealError != "":
-		failed = append(failed, "session is incomplete")
+		msg := "session is incomplete"
+		if len(info.IncompleteReasons) > 0 {
+			msg += " (" + strings.Join(info.IncompleteReasons, "; ") + ")"
+		}
+		failed = append(failed, msg)
 	case info.State == "":
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
 		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+	}
+	if g.onUnconfirmed && !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != "") {
+		// The stricter gate on its own: a session known to have lost events
+		// must not pass where one that is merely unconfirmed fails.
+		msg := "session is incomplete"
+		if len(info.IncompleteReasons) > 0 {
+			msg += " (" + strings.Join(info.IncompleteReasons, "; ") + ")"
+		}
+		failed = append(failed, msg)
+	}
+	switch {
+	case !g.onUnconfirmed:
+	case len(info.DeliveryUnconfirmed) > 0:
+		failed = append(failed, "delivery is unconfirmed ("+strings.Join(info.DeliveryUnconfirmed, "; ")+")")
+	case info.State == "" && !g.onIncomplete:
+		failed = append(failed, "the control plane no longer knows this session, so whether its delivery was confirmed is unknown")
 	}
 	if g.onEmpty && sum.EventCount == 0 {
 		failed = append(failed, emptySession)
@@ -83,8 +105,15 @@ const emptySession = "session recorded no events (see tracectl doctor)"
 
 func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	state := info.State
-	if sum.Incomplete {
+	// The control plane's verdict counts as the collector's does: a drain that
+	// timed out, or a seal that failed, leaves a session the collector may
+	// find nothing wrong with. (The header of such a session said "(SEALED)",
+	// and --fail-on-incomplete exited 3 on it.)
+	if sum.Incomplete || info.Incomplete || len(info.IncompleteReasons) > 0 {
 		state += ", incomplete"
+	}
+	if len(info.DeliveryUnconfirmed) > 0 {
+		state += ", delivery unconfirmed"
 	}
 	fmt.Fprintf(w, "session    %s  %s  (%s)\n", info.ID, displayName(info), state)
 	fmt.Fprintf(w, "events     %d over %s\n", sum.EventCount, time.Duration(sum.DurationNs).Round(time.Millisecond))
@@ -98,6 +127,15 @@ func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 	}
 	if sum.DroppedEvents > 0 || sum.Quarantined > 0 {
 		fmt.Fprintf(w, "lost       %d dropped by SDKs, %d quarantined by the collector\n", sum.DroppedEvents, sum.Quarantined)
+	}
+	// Events that never reached the collector are in none of the counts
+	// above: only the service that recorded them knows, and it told the
+	// control plane.
+	for _, r := range info.IncompleteReasons {
+		fmt.Fprintf(w, "delivery   incomplete: %s\n", clip(r, 400))
+	}
+	for _, r := range info.DeliveryUnconfirmed {
+		fmt.Fprintf(w, "delivery   unconfirmed: %s\n", clip(r, 400))
 	}
 	if len(sum.ByKind) > 0 {
 		fmt.Fprintf(w, "by kind    %s\n", joinCounts(sum.ByKind))
@@ -253,6 +291,9 @@ func printEntities(w io.Writer, ents []client.Entity) {
 		if e.Uncertain > 0 { // the key or row image of that many is incomplete: "history" shows the flags
 			line += fmt.Sprintf(", %d uncertain", e.Uncertain)
 		}
+		if len(e.Services) > 0 { // absent from an older collector
+			line += "  by " + clip(strings.Join(e.Services, ", "), 60)
+		}
 		fmt.Fprintln(w, line)
 	}
 	fmt.Fprintf(w, "%d entities\n", len(ents))
@@ -309,6 +350,16 @@ func printHistory(w io.Writer, h client.EntityHistory) {
 	if n := uncertainCount(h.Mutations); n > 0 {
 		head += fmt.Sprintf(", %d uncertain (see the flags)", n)
 	}
+	// Who wrote it, as "entities" says it; each line below names its own.
+	services := set.Set[string]{}
+	for _, m := range h.Mutations {
+		if m.Service != "" {
+			services.Add(m.Service)
+		}
+	}
+	if len(services) > 0 {
+		head += "  by " + clip(strings.Join(set.Sorted(services), ", "), 60)
+	}
 	fmt.Fprintln(w, head)
 	for _, m := range h.Mutations {
 		outcome := "tx open"
@@ -329,7 +380,7 @@ func printHistory(w io.Writer, h client.EntityHistory) {
 			continue
 		}
 		for _, d := range m.Diff {
-			fmt.Fprintf(w, "       %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
+			fmt.Fprintf(w, "       %s\n", diffLine(d))
 		}
 	}
 }
@@ -372,6 +423,9 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 	}
 	if *path != "" {
 		fmt.Fprintf(c.stderr, "wrote %d events to %s\n", n, *path)
+		if n == 0 {
+			fmt.Fprintln(c.stderr, "the session has no events: the file holds its verdict only (one line), or nothing if the control plane does not know the session")
+		}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -29,6 +30,7 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}", c.handleHistory)
 	mux.HandleFunc("GET /v1/sessions/{id}/summary", c.handleSummary)
 	mux.HandleFunc("GET /v1/internal/sessions/{id}/drain-status", c.handleDrain)
+	mux.HandleFunc("POST /v1/internal/sessions/{id}/instance-counts", c.handleInstanceCounts)
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
 	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", c.handleDelete)
 	mux.Handle("GET /metrics", c.tel.reg.Handler())
@@ -45,9 +47,10 @@ func (c *Collector) Handler() http.Handler {
 	guarded := core.LoopbackGuard(h, core.GuardConfig{
 		AllowedHosts:   c.cfg.AllowedHosts,
 		AllowedOrigins: c.cfg.AllowedOrigins,
-		// Ingest is the only collector POST with a body (seal sends none), so
-		// protobuf is the only allowed type; the 415 keeps the JSON error shape.
-		BodyContentTypes: []string{tsessionproto.ContentType},
+		// The collector's POSTs with a body: ingest (protobuf; its handler
+		// refuses anything else) and instance-counts (JSON, an internal
+		// endpoint). Seal sends none. The 415 keeps the JSON error shape.
+		BodyContentTypes: []string{tsessionproto.ContentType, "application/json"},
 		OnBadContentType: func(w http.ResponseWriter, _ *http.Request) {
 			writeErr(w, http.StatusUnsupportedMediaType, errBadContentType)
 		},
@@ -273,6 +276,38 @@ func (c *Collector) handleDrain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ds)
+}
+
+// maxInstanceCountsBody bounds the body of an instance-counts request: 512
+// names of two parts of up to 128 bytes each, with room for JSON escapes.
+const maxInstanceCountsBody = 512 << 10
+
+func (c *Collector) handleInstanceCounts(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Instances []InstanceCount `json:"instances"`
+	}
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		writeErr(w, http.StatusUnsupportedMediaType, errors.New("unsupported Content-Type: instance-counts requires application/json"))
+		return
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInstanceCountsBody)).Decode(&req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeErr(w, http.StatusRequestEntityTooLarge, fmt.Errorf("body exceeds %d bytes", maxInstanceCountsBody))
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	got, err := c.InstanceCounts(r.Context(), r.PathValue("id"), req.Instances)
+	switch {
+	case errors.Is(err, errBadAsk):
+		writeErr(w, http.StatusBadRequest, err)
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string][]InstanceCount{"instances": got})
+	}
 }
 
 func (c *Collector) handleSeal(w http.ResponseWriter, r *http.Request) {

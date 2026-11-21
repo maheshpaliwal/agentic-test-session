@@ -3,6 +3,7 @@ package collector
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,6 +79,35 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 	b, _ = json.Marshal(ents)
 	if got := strings.Count(string(b), `"uncertain"`); got != 4 {
 		panic(fmt.Sprintf("%d entities carry uncertain, want 4 (omitted when zero): %s", got, b))
+	}
+}
+
+// An entity names the services that changed it. Two services that mask one
+// Redis key each with its own secret record two keys: without the service the
+// two rows cannot be told apart.
+func TestListEntitiesServices(t *testing.T) {
+	mut := func(key string) []core.Mutation {
+		return []core.Mutation{{Store: "redis", Entity: "session:*", Op: "set", PK: map[string]any{"key": key}}}
+	}
+	ents := ListEntities([]core.Event{
+		{Seq: 1, Service: "worker", Mutations: mut("session:#aaaa")},
+		{Seq: 2, Service: "api", Mutations: mut("session:#bbbb")},
+		{Seq: 3, Service: "api", Mutations: mut("session:#aaaa")},
+		{Seq: 4, Service: "worker", Mutations: mut("session:#aaaa")},
+		{Seq: 5, Mutations: mut("session:#cccc")}, // an event that names no service
+	})
+	want := map[string][]string{`{"key":"session:#aaaa"}`: {"api", "worker"}, `{"key":"session:#bbbb"}`: {"api"}, `{"key":"session:#cccc"}`: nil}
+	if len(ents) != len(want) {
+		panic(fmt.Sprintf("entities: %+v", ents))
+	}
+	for _, e := range ents {
+		if !slices.Equal(e.Services, want[e.PK]) {
+			t.Errorf("%s: services %v, want %v", e.PK, e.Services, want[e.PK])
+		}
+	}
+	b, _ := json.Marshal(ents)
+	if got := strings.Count(string(b), `"services"`); got != 2 {
+		t.Errorf("%d entities carry services, want 2 (omitted when none): %s", got, b)
 	}
 }
 

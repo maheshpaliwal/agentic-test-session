@@ -199,7 +199,25 @@ func TestCLIResults(t *testing.T) {
 	if code, out, _ := env.tc("entities", "run-1"); code != 0 || !strings.Contains(out, `{"id":42}`) || !strings.Contains(out, "1 entities") {
 		panic(fmt.Sprintf("entities: %d\n%s", code, out))
 	}
+	if strings.Contains(out, " by ") { // a collector that predates the services of an entity
+		panic(fmt.Sprintf("entities names services it was not given:\n%s", out))
+	}
+	// The services that wrote an entity: what tells apart one Redis key that
+	// two services masked each with its own secret.
+	env.ents = []client.Entity{
+		{Store: "redis", Entity: "session:*", PK: `{"key":"session:#aaaa"}`, MutationCount: 2, Services: []string{"api"}},
+		{Store: "redis", Entity: "session:*", PK: `{"key":"session:#bbbb"}`, MutationCount: 1, Services: []string{"api", "worker"}},
+	}
+	_, out, _ = env.tc("entities", "run-1")
+	wantAll(t, out, "2 mutation(s)  by api\n", `1 mutation(s)  by api, worker`+"\n")
+	if _, out, _ := env.tc("entities", "run-1", "--json"); !strings.Contains(out, `"services": [`) {
+		t.Errorf("entities --json has no services:\n%s", out)
+	}
+	env.ents = nil
 	code, out, _ = env.tc("history", "run-1", "postgres", "orders", "42")
+	if !strings.Contains(out, `postgres/orders {"id":42}: 2 mutation(s)  by api, worker`+"\n") {
+		t.Errorf("history header does not name the services:\n%s", out)
+	}
 	if code != 0 || !strings.Contains(out, "effective") || !strings.Contains(out, "ROLLED BACK") ||
 		!strings.Contains(out, `status: "new" -> "shipped"`) || !strings.Contains(out, `status: ∅ -> "new"`) {
 		panic(fmt.Sprintf("history: %d\n%s", code, out))

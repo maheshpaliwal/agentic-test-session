@@ -9,6 +9,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -96,8 +97,11 @@ func pkMatches(pk map[string]any, want string) bool {
 // sorted by store, entity and primary key.
 func listEntities(evs []core.Event) []client.Entity {
 	type k struct{ s, e, p string }
-	type n struct{ all, uncertain int }
-	cnt := map[k]n{}
+	type n struct {
+		all, uncertain int
+		services       set.Set[string]
+	}
+	cnt := map[k]*n{}
 	for i := range evs {
 		uncertain := 0
 		if core.HasUncertainFlag(evs[i].Flags) {
@@ -106,12 +110,24 @@ func listEntities(evs []core.Event) []client.Entity {
 		for _, m := range evs[i].Mutations {
 			key := k{m.Store, m.Entity, pkJSON(m.PK)}
 			c := cnt[key]
-			cnt[key] = n{c.all + 1, c.uncertain + uncertain}
+			if c == nil {
+				c = &n{services: set.Set[string]{}}
+				cnt[key] = c
+			}
+			c.all++
+			c.uncertain += uncertain
+			if evs[i].Service != "" {
+				c.services.Add(evs[i].Service)
+			}
 		}
 	}
 	out := make([]client.Entity, 0, len(cnt))
 	for key, c := range cnt {
-		out = append(out, client.Entity{Store: key.s, Entity: key.e, PK: key.p, MutationCount: c.all, Uncertain: c.uncertain})
+		e := client.Entity{Store: key.s, Entity: key.e, PK: key.p, MutationCount: c.all, Uncertain: c.uncertain}
+		if len(c.services) > 0 { // as the collector: left out when no event names a service
+			e.Services = set.Sorted(c.services)
+		}
+		out = append(out, e)
 	}
 	slices.SortFunc(out, func(a, b client.Entity) int {
 		return cmp.Or(cmp.Compare(a.Store, b.Store), cmp.Compare(a.Entity, b.Entity), cmp.Compare(a.PK, b.PK))

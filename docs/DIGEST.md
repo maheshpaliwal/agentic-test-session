@@ -19,7 +19,8 @@ name by the SDK, like everything recorded).
 ## What it holds, in this order
 
 1. **Verdict**: `failed`, `incomplete`, `empty` or `passed`; the session state; whether the recording is
-   complete and, if not, why; counts by service, kind, entity and flag. A session that is not sealed is marked
+   complete and, if not, why; the service instances whose delivery the control plane could not confirm
+   (`delivery unconfirmed`, a warning that does not change the verdict); counts by service, kind, entity and flag. A session that is not sealed is marked
    live: everything in the digest can still change.
 2. **Failures**: every failed event (service, kind, name, error), with the chain of its ancestors from the root
    request down. An async edge (a worker run under the publish that caused it) is marked `~>`. At most 5
@@ -34,8 +35,12 @@ name by the SDK, like everything recorded).
    normalised name, see `tracectl diff`, and the same calls below them) are one line with a count: 40 queries
    that differ only in a literal show as `40x`, which is how an N+1 looks. Such a line carries the normalised
    name, the first and last `seq`, and the total and longest duration; the lines below it are those of the
-   first of the run. A span on a failed branch is never merged.
-5. **Omitted**: what was left out to fit the budget, each with the commands that print it.
+   first of the run. Siblings merge only when their outcome is the same too: the same error (normalised), the
+   same status code and the same flags. Requests that fail the same way are one line; one that returned
+   `NotFound` is not merged with one that returned `OK`.
+5. **Omitted**: what was left out to fit the budget, each with the commands that print it. That includes the
+   verdict's own text: a reason that was shortened, and the unconfirmed instances beyond the first four, are
+   counted here (`tracectl status <id>` prints them whole).
 6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`).
 
 The output for the same recorded session is the same, byte for byte: entities are sorted by the number of their
@@ -88,12 +93,12 @@ Lists are never `null`.
 | `schema` | string | `"tsession.digest/v1"` |
 | `notice` | string | the fixed notice above |
 | `session` | object | `id`, `name`, `state` (empty: the control plane no longer knows the session), `live` (not sealed yet) |
-| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown`; `incomplete_reasons`: strings, when incomplete |
+| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown`; `incomplete_reasons`: strings, when incomplete; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
 | `counts` | object | `events`, `failures`, `mutations`, `duration_ns`, `pending_async`, `dropped_events`, `quarantined`; and the maps `by_service`, `by_kind`, `mutations_by_entity` (key `store/entity`), `flags`, each with its 16 largest entries |
 | `failures` | list | in `seq` order, see below |
 | `mutations` | list | one object per changed entity, see below |
 | `tree` | list | the lines of the call tree in pre-order, see below |
-| `omitted` | list | `section` (`counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out |
+| `omitted` | list | `section` (`verdict`, `counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out. `verdict`: how many of `incomplete_reasons` and `delivery_unconfirmed` are shortened or not listed |
 | `drill_down` | list | `command`, `prints` |
 | `max_bytes` | number | the budget this digest was made for |
 
@@ -106,7 +111,7 @@ Failed events that did the same thing in the same place (same service, kind, nor
 the same chain of ancestors) are one entry with `count` (above 1) and `last_seq`; its `seq` and `path` are those
 of the first, and its `name` and `error` are normalised. `counts.failures` is still the number of failed events.
 In Markdown such an entry reads `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`. The call tree
-is unaffected: there a span on a failed branch is never merged.
+merges them the same way, by its own rule (consecutive siblings).
 
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
@@ -115,7 +120,8 @@ many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of e
 compact JSON text, clipped, or `null` for no value.
 
 A tree line: `depth` (0 for a root; a line's parent is the nearest line above it with a smaller depth), `seq`,
-`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `hidden` (lines below it that were left
+`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome that is not an
+error: a gRPC status other than `OK`), `flags` (the event's flags), `hidden` (lines below it that were left
 out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`; its `duration_ns` and
 `mutations` are totals and its `name` is normalised.
 

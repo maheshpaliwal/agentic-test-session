@@ -53,15 +53,18 @@ type sessionActor struct {
 	sealed     atomic.Bool
 	bufLen     atomic.Int64
 
-	loaded   bool
-	next     uint64 // next Seq to assign
-	seen     map[evKey]struct{}
-	buf      []buffered
-	timer    *time.Timer
-	open     map[string]struct{} // queue.publish span ids awaiting a closing worker event
-	closed   map[string]struct{} // ids closed before their publish was seen
-	dropped  int64
-	count    int
+	loaded  bool
+	next    uint64 // next Seq to assign
+	seen    map[evKey]struct{}
+	buf     []buffered
+	timer   *time.Timer
+	open    map[string]struct{} // queue.publish span ids awaiting a closing worker event
+	closed  map[string]struct{} // ids closed before their publish was seen
+	dropped int64
+	count   int
+	// inst counts the stored events by the service and instance that recorded
+	// them (see instKey), for the delivery check of the control plane.
+	inst     map[instKey]int
 	lastRecv int64 // collector receive time (unix ns) of the latest ingest
 	failures int   // consecutive failed append attempts
 }
@@ -216,6 +219,7 @@ func (a *sessionActor) load(ctx context.Context) error {
 	a.seen = map[evKey]struct{}{}
 	a.open = map[string]struct{}{}
 	a.closed = map[string]struct{}{}
+	a.inst = map[instKey]int{}
 	a.next, a.count, a.dropped = 1, 0, 0
 	for i := range evs {
 		a.apply(&evs[i])
@@ -241,6 +245,9 @@ func closesEntry(e *core.Event) bool {
 func (a *sessionActor) apply(e *core.Event) {
 	a.seen[evKey{e.Instance, e.LocalSeq}] = struct{}{}
 	a.count++
+	if countsForInstance(e) {
+		a.inst[instKey{e.Service, e.Instance}]++
+	}
 	switch e.Kind {
 	case core.KindQueuePub:
 		if _, ok := a.closed[e.SpanID]; ok {
@@ -558,6 +565,6 @@ func (a *sessionActor) quarantine(e *core.Event, err error) {
 	if len(msg) > 200 {
 		msg = msg[:200]
 	}
-	a.seqr.log.Warn("quarantined poison event", "session", a.id, "span", e.SpanID, "kind", e.Kind,
+	a.seqr.log.Error("quarantined poison event", "session", a.id, "span", e.SpanID, "kind", e.Kind,
 		"instance", e.Instance, "local_seq", e.LocalSeq, "err", msg)
 }

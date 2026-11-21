@@ -95,6 +95,25 @@ type Session struct {
 	// Bindings attribute requests carrying a matching attribute to this
 	// session (see docs/BINDING.md). Live only while the session is ACTIVE.
 	Bindings []Binding `json:"bindings,omitempty"`
+	// Delivery is the last delivery report of every SDK instance that sent
+	// one for this session, by service and instance (see Delivery). Instances
+	// that never reported are not listed: an SDK older than the reports, or a
+	// service that was never connected.
+	Delivery []Delivery `json:"delivery,omitempty"`
+	// IncompleteReasons says why the control plane itself marked the session
+	// incomplete, beyond what SealError and DrainTimedOut say: one line per
+	// instance whose events did not all reach the collector, or whose events
+	// the collector has while no report of it for the session arrived (see
+	// judgeDeliveryLocked). A session with a reason is Incomplete whatever the
+	// collector's seal says. At most 16 instances are named.
+	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
+	// DeliveryUnconfirmed names the instances of which the control plane
+	// could not tell whether all their events arrived: nothing shows that
+	// events were lost, and nothing that they were not. It is a warning: the
+	// session is not Incomplete because of it. A gate that wants every
+	// delivery confirmed fails on it (tracectl --fail-on-unconfirmed,
+	// tsessiontest.RequireDeliveryConfirmed).
+	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
 
 // ActiveSet is the payload of GET /v1/active and the SSE stream.
@@ -104,6 +123,22 @@ type ActiveSet struct {
 	Kill      bool     `json:"kill"`
 	// Bindings lists the bindings of ACTIVE sessions only (not DRAINING).
 	Bindings []ActiveBinding `json:"bindings,omitempty"`
+	// Draining lists the ids in Active that are DRAINING. An SDK flushes the
+	// events of such a session and sends its final delivery report; SDKs that
+	// do not know the field keep recording as before.
+	Draining []string `json:"draining,omitempty"`
+	// DeliveryReports says that this control plane takes delivery reports
+	// (POST /v1/delivery). An SDK that reads it knows that a 404 to a report
+	// does not come from a control plane without the endpoint, but from
+	// something on the way: it keeps trying, and says so in its log. SDKs that
+	// do not know the field ignore it.
+	DeliveryReports bool `json:"delivery_reports,omitempty"`
+	// DeliveryHeartbeatMs asks an SDK that follows the stream to send a
+	// request without reports that often while this set names a session and
+	// it has sent no report meanwhile: the control plane judges an instance by
+	// how long it has not heard of it (see Manager.unheard). Omitted when the
+	// delivery check is off.
+	DeliveryHeartbeatMs int64 `json:"delivery_heartbeat_ms,omitempty"`
 	// Generation counts the changes to the active set since the control plane
 	// started. Compare it with Subscriber.Generation to see which followers
 	// have been sent this version.

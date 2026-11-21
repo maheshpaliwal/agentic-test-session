@@ -22,6 +22,49 @@ assert.strictEqual(U.afterUnavailable({ op: 'update' }), false);
 assert.strictEqual(U.afterUnavailable({ op: 'delete', before: img }), false);
 assert.strictEqual(U.afterUnavailable(undefined), false);
 assert.strictEqual(U.pkRaw({ b: 1, a: 2 }), '{"a":2,"b":1}');
+// The diff table follows the diff the SDK recorded. A value that changed under redaction looks the same in both
+// images: the recorded entry is what says it changed, and the row carries neither value.
+{
+  const red = { op: 'update', before: { inline: { id: 1, password: '[REDACTED]' } }, after: { inline: { id: 1, password: '[REDACTED]' } },
+    diff: [{ field: 'password', old: '[REDACTED]', new: '[REDACTED]' }] };
+  assert.deepStrictEqual(U.diffRows(red), [{ field: 'password', old: undefined, nw: undefined, kind: 'hid' },
+    { field: 'id', old: '1', nw: '1', kind: 'same' }]);
+  assert.ok(!JSON.stringify(U.diffRows(red)).includes(U.MARK), 'a hidden change shows neither value');
+  // The same images without a recorded diff (an older SDK): nothing to tell, so the images are compared.
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: red.before, after: red.after }).map((r) => r.kind), ['same', 'same']);
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: red.before, after: red.after, diff: [] }).map((r) => r.kind), ['same', 'same']);
+  // A redacted value on one side only is an added or a removed field, not a hidden change.
+  assert.deepStrictEqual(U.diffRows({ op: 'insert', after: { inline: { token: '[REDACTED]' } }, diff: [{ field: 'token', new: '[REDACTED]' }] }),
+    [{ field: 'token', old: undefined, nw: '"[REDACTED]"', kind: 'add' }]);
+  // A Redis set: the images are two member lists, the diff names what was added and removed. The members are not
+  // compared by position, so none is reported as unchanged or changed beside the recorded rows.
+  const set = { op: 'update', before: { inline: ['a', 'b', 'c'] }, after: { inline: ['a', 'c', 'd'] },
+    diff: [{ field: 'added', new: ['d'] }, { field: 'removed', old: ['b'] }] };
+  assert.deepStrictEqual(U.diffRows(set), [{ field: 'added', old: undefined, nw: '["d"]', kind: 'add' },
+    { field: 'removed', old: '["b"]', nw: undefined, kind: 'del' }]);
+  // A list: the recorded indexes are the changes; the image rows they name are not repeated.
+  const list = { op: 'update', before: { inline: ['x', 'y'] }, after: { inline: ['x', 'z'] }, diff: [{ field: '[1]', old: 'y', new: 'z' }] };
+  assert.deepStrictEqual(U.diffRows(list).map((r) => r.field + ':' + r.kind), ['[1]:chg']);
+  // A Redis string that changed under redaction: one hidden change, and no "unchanged" row for the value itself.
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: { inline: '[REDACTED]' }, after: { inline: '[REDACTED]' },
+    diff: [{ field: 'value', old: '[REDACTED]', new: '[REDACTED]' }] }), [{ field: 'value', old: undefined, nw: undefined, kind: 'hid' }]);
+  // A nested field the diff names as a whole is not listed again leaf by leaf.
+  const nested = { op: 'update', before: { inline: { id: 1, addr: { city: 'A', zip: '1' } } }, after: { inline: { id: 1, addr: { city: 'B', zip: '1' } } },
+    diff: [{ field: 'addr', old: { city: 'A', zip: '1' }, new: { city: 'B', zip: '1' } }] };
+  assert.deepStrictEqual(U.diffRows(nested).map((r) => r.field + ':' + r.kind), ['addr:chg', 'id:same']);
+  // The diff omits a null value: the image tells "was null" from "was not there".
+  const nul = { op: 'update', before: { inline: { note: null } }, after: { inline: { note: 'x' } }, diff: [{ field: 'note', new: 'x' }] };
+  assert.deepStrictEqual(U.diffRows(nul), [{ field: 'note', old: 'null', nw: '"x"', kind: 'chg' }]);
+  // A diff the SDK cut short is shown as recorded: the images do not add changes of their own.
+  const cut = { op: 'update', before: { inline: { a: 1, b: 1 } }, after: { inline: { a: 2, b: 2 } }, diff: [{ field: 'a', old: 1, new: 2 }] };
+  assert.deepStrictEqual(U.diffRows(cut).map((r) => r.field + ':' + r.kind), ['a:chg']);
+  // No recorded diff: image against image, as before.
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: { inline: { a: 1, b: 2 } }, after: { inline: { a: 1, c: 3 } } }).map((r) => r.field + ':' + r.kind),
+    ['a:same', 'b:del', 'c:add']);
+  assert.deepStrictEqual(U.diffRows({ op: 'delete' }), []);
+  assert.deepStrictEqual(U.flatten({ a: { b: 1 }, c: [2], d: {} }, '', {}), { 'a.b': '1', 'c[0]': '2', d: '{}' });
+}
+
 assert.strictEqual(U.pkRaw('{"id":1}'), '{"id":1}');
 
 assert.ok(U.isRedactedValue('[REDACTED]'));
@@ -57,6 +100,39 @@ assert.strictEqual(U.ndjson([{ a: 1 }, { b: 2 }]), '{"a":1}\n{"b":2}\n');
 assert.strictEqual(U.ndjson([]), '');
 assert.deepStrictEqual(U.sessionWarnings({}), []);
 assert.strictEqual(U.sessionWarnings({ seal_error: 'x', incomplete: true, dropped_events: 3 }).length, 2);
+assert.deepStrictEqual(U.sessionWarnings({ incomplete: true, incomplete_reasons: ['service a (instance i): 0 of 2 recorded events reached the collector'] }).slice(1),
+  ['Events did not reach the collector: service a (instance i): 0 of 2 recorded events reached the collector']);
+assert.deepStrictEqual(U.sessionWarnings({ incomplete: true, incomplete_reasons: ['the collector has 3 events from a/i, which did not report how many it recorded'] }).slice(1),
+  ['Delivery is not accounted for: the collector has 3 events from a/i, which did not report how many it recorded']);
+assert.deepStrictEqual(U.deliveryUnconfirmed({}), []);
+assert.deepStrictEqual(U.deliveryUnconfirmed(null), []);
+assert.deepStrictEqual(U.deliveryUnconfirmed({ delivery_unconfirmed: 'x' }), []);
+assert.deepStrictEqual(U.deliveryUnconfirmed({ delivery_unconfirmed: ['service b (instance j): the collector has 9 events', '', 3] }),
+  ['Delivery not confirmed: service b (instance j): the collector has 9 events']);
+// The warning stands on its own: such a session is not incomplete.
+assert.deepStrictEqual(U.sessionWarnings({ delivery_unconfirmed: ['x'] }), []);
+
+// The delivery table: one row per instance report, the ones that did not deliver everything first.
+{
+  const rows = U.deliveryRows({ delivery: [
+    { service: 'api', instance: 'i-1', recorded: 5, delivered: 5, dropped: 0, buffered: 0, final: true, at: '2026-01-01T00:00:00Z' },
+    { service: 'worker', instance: 'w-2', recorded: 7, delivered: 2, dropped: 4, buffered: 1, last_error: 'dial tcp: refused' },
+    { instance: 'x', recorded: 3, delivered: 3 }, null, 'junk'] });
+  assert.deepStrictEqual(rows.map((r) => r.service + '/' + r.instance + ':' + r.short), ['worker/w-2:true', '/x:false', 'api/i-1:false']);
+  assert.deepStrictEqual(rows[0], { service: 'worker', instance: 'w-2', recorded: 7, delivered: 2, dropped: 4, buffered: 1, final: false, lastError: 'dial tcp: refused', short: true });
+  assert.strictEqual(U.deliverySummary(rows), 'Delivery reports: 3 instances, 1 with events not delivered');
+  assert.strictEqual(U.deliverySummary(rows.slice(1, 2)), 'Delivery reports: 1 instance, all delivered by their own count');
+  assert.deepStrictEqual(U.deliveryRows({}), []);
+  assert.deepStrictEqual(U.deliveryRows(null), []);
+  assert.deepStrictEqual(U.deliveryRows({ delivery: 'x' }), []);
+}
+// The services of an entity row; a row of an older collector has none.
+assert.deepStrictEqual(U.entityServices({ services: ['api', '', 3, 'worker'] }), ['api', 'worker']);
+assert.deepStrictEqual(U.entityServices({ store: 'redis' }), []);
+assert.deepStrictEqual(U.entityServices({ services: 'api' }), []);
+assert.deepStrictEqual(U.entityServices(null), []);
+// The flags that mark a change uncertain (the Go test holds the whole list against core.UncertainFlag).
+assert.ok(U.uncertainFlag('diff_concurrent') && U.uncertainFlag('image_skipped:deadline') && !U.uncertainFlag('truncated'));
 assert.strictEqual(U.kindGroup('api.in'), 'api');
 assert.strictEqual(U.kindGroup('db.tx.commit'), 'tx');
 assert.strictEqual(U.kindGroup('db.write'), 'db');

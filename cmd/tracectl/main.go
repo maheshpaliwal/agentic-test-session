@@ -38,7 +38,8 @@ session lifecycle (control plane):
 
 record a command (control plane and collector):
   run [start's session flags, except --id-only] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
-      [--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D] -- <command> [args...]
+      [--fail-on-unconfirmed] [--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D]
+      -- <command> [args...]
                                 start a session, run the command with the session id in $TSESSION_ID, stop
                                 the session, wait for the seal (at most --timeout, default 2m) and print the
                                 summary. The command is not run through a shell. Its stdin, stdout and stderr
@@ -58,8 +59,12 @@ record a command (control plane and collector):
                                 failed; 0. Bad usage of run exits 2.
 
 session results (collector):
-  summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
-                                counts, failures and flags; the --fail-on flags exit 3 for CI gates
+  summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed]
+                                counts, failures and flags; the --fail-on flags exit 3 for CI gates.
+                                --fail-on-incomplete fails on events known to be lost; --fail-on-unconfirmed
+                                also when the control plane could not tell (a connected service whose
+                                delivery reports never arrive, say): use it where every connected service
+                                is yours, not in a large shared environment
   events <id|name> [--kind K[,K]] [--service S] [--errors] [--limit N] [--json]
                                 K is a kind (db.write) or a prefix ending in * (db.*)
   entities <id|name> [--json]   rows/documents/keys the session changed; "N uncertain" counts the
@@ -78,12 +83,17 @@ session results (collector):
   trace <id|name> [--errors] [--depth N] [--json]
                                 the call tree; ~> marks async work a span triggered
   show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
-  export <id|name> [-o FILE]    all events as NDJSON (stdout by default)
+  export <id|name> [-o FILE]    all events as NDJSON (stdout by default), the session's verdict on the
+                                first line (alone, when there are no events): "dashboard -open FILE"
+                                and tracectl against it then say what they say of the live session,
+                                --fail-on flags included
   report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
+         [--fail-on-unconfirmed]
                                 a CI report: Markdown for a job summary (default) or JUnit XML, with
                                 each failure traced to its root request; --fail-on flags as in summary
   digest <id|name> [--format markdown|json] [--max-bytes N] [-o FILE] [--fail-on-error] [--fail-on-incomplete]
-         [--fail-on-empty]      the whole session in one bounded answer, for an AI agent or a paste into a
+         [--fail-on-empty] [--fail-on-unconfirmed]
+                                the whole session in one bounded answer, for an AI agent or a paste into a
                                 model: verdict and counts, every failure with its root request and
                                 ancestors, mutations per entity with changed fields, tx outcome and
                                 flags, and the call tree with repeated siblings collapsed ("40x": an
@@ -99,9 +109,12 @@ session results (collector):
 
   kill on|off|status            the global kill switch: while on, no service records anything, for
                                 any session (kept in memory: a control plane restart turns it off)
-  doctor [--json] [--require-services N]
+  doctor [--json] [--require-services N] [--require-delivery]
                                 check that the control plane and collector answer and list the
-                                services connected to the control plane
+                                services connected to the control plane; one that reports events
+                                it cannot deliver is marked. --require-delivery exits 3 on such a
+                                service, or one whose reports do not arrive: a check for DURING a
+                                run (it sees only services that report, and only running sessions)
   version                       print the tracectl version
 
 exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
