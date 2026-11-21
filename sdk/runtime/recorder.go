@@ -32,6 +32,9 @@ type Recorder struct {
 	acct    map[string]*account
 	last    *account
 	lastSID string
+	// total counts the events delivered for all sessions since the process
+	// started, also those of sessions whose account is gone.
+	total uint64
 }
 
 // account is what became of the events recorded for one session, for the
@@ -40,10 +43,25 @@ type Recorder struct {
 // dropped at once. An event is counted in delivered or dropped when it leaves
 // the ring, never in both, so recorded - delivered - dropped is what the ring
 // still holds of the session.
-type account struct{ recorded, delivered, dropped uint64 }
+//
+// gone marks an account that forget wanted to drop while the ring still held
+// events of the session. It is kept, unseen by accounts, until they have left
+// the ring: dropping it at once would let an event recorded later start a new
+// account at zero, which the older events would then be counted against as
+// they are delivered (delivered > recorded). An event recorded for the
+// session brings the account back as it is.
+type account struct {
+	recorded, delivered, dropped uint64
+	gone                         bool
+}
 
 // buffered is the number of events of the session still in the ring.
-func (a account) buffered() uint64 { return a.recorded - a.delivered - a.dropped }
+func (a account) buffered() uint64 {
+	if a.delivered+a.dropped > a.recorded {
+		return 0 // never a wrapped-around count in a report
+	}
+	return a.recorded - a.delivered - a.dropped
+}
 
 // accountLocked returns the account of sid, creating it. Only Record creates
 // accounts: an event is recorded for a session that was active when its span
@@ -62,29 +80,56 @@ func (r *Recorder) accountLocked(sid string) *account {
 	return a
 }
 
-// accounts returns a copy of the accounts, nil when there are none.
+// accounts returns a copy of the accounts, nil when there are none. The
+// accounts forget has put aside are not among them; those whose events have
+// left the ring meanwhile are dropped here.
 func (r *Recorder) accounts() map[string]account {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.acct) == 0 {
-		return nil
-	}
-	out := make(map[string]account, len(r.acct))
+	var out map[string]account
 	for sid, a := range r.acct {
+		if a.gone {
+			if a.buffered() == 0 {
+				r.dropAccountLocked(sid)
+			}
+			continue
+		}
+		if out == nil {
+			out = make(map[string]account, len(r.acct))
+		}
 		out[sid] = *a
 	}
 	return out
 }
 
+// deliveredTotal is the number of events delivered for all sessions since
+// the process started.
+func (r *Recorder) deliveredTotal() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.total
+}
+
 // forget drops the account of a session that has left the active set. Its
-// events still in the ring are exported as before; they are no longer counted.
+// events still in the ring are exported as before; the account is kept out of
+// sight until they are gone (see account).
 func (r *Recorder) forget(sid string) {
 	r.mu.Lock()
+	if a := r.acct[sid]; a != nil {
+		if a.buffered() == 0 {
+			r.dropAccountLocked(sid)
+		} else {
+			a.gone = true
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *Recorder) dropAccountLocked(sid string) {
 	delete(r.acct, sid)
 	if r.lastSID == sid {
 		r.last, r.lastSID = nil, ""
 	}
-	r.mu.Unlock()
 }
 
 // outcome is what a request did to the events that leave the ring with it.
@@ -106,6 +151,7 @@ func (r *Recorder) addDeliveredLocked(o *outcome) {
 	for _, sid := range o.order {
 		lost := min(o.delivered[sid], rejected)
 		rejected -= lost
+		r.total += o.delivered[sid] - lost
 		if a := r.acct[sid]; a != nil {
 			a.delivered += o.delivered[sid] - lost
 			a.dropped += lost
@@ -141,6 +187,7 @@ func (r *Recorder) Record(e core.Event) {
 	r.mu.Lock()
 	a := r.accountLocked(e.SessionID)
 	a.recorded++
+	a.gone = false
 	if r.n == len(r.buf) && !r.evictLocked(e.SessionID) {
 		a.dropped++
 		r.drops[e.SessionID]++
@@ -415,6 +462,7 @@ func (r *Recorder) commitLocked(n int) {
 	n = max(0, min(n, r.n))
 	for range n {
 		// Whoever reads the ring this way has taken the event.
+		r.total++
 		if a := r.acct[r.buf[r.head].ev.SessionID]; a != nil {
 			a.delivered++
 		}

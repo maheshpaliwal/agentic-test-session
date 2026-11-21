@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/scrub"
 	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
@@ -58,6 +59,8 @@ type Exporter struct {
 	// lastErr is why the last request to the collector failed, nil once one
 	// succeeded. The delivery reporter reads it.
 	lastErr atomic.Pointer[string]
+	// urgent are the sessions whose events go first (see setUrgent).
+	urgent atomic.Pointer[map[string]struct{}]
 
 	// Everything below is touched by the export goroutine only.
 
@@ -304,14 +307,27 @@ func (b *batch) mark(idx []int, st eventState) {
 	}
 }
 
-// freshBatch takes the oldest events of the sessions that are not failing.
-// Nil means there are none.
+// freshBatch takes the oldest events of the sessions that are not failing,
+// those of the urgent sessions before the others. Nil means there are none.
 func (e *Exporter) freshBatch() *batch {
 	fresh := func(sid string) bool { return e.failing[sid] == nil }
 	b := &batch{}
+	if u := e.urgent.Load(); u != nil && len(*u) > 0 {
+		first := func(sid string) bool { _, ok := (*u)[sid]; return ok && fresh(sid) }
+		// The events before the first urgent one stay: freshFrom is not moved.
+		if b.evs, b.ids, _ = e.rec.take(e.freshFrom, e.cfg.BatchSize, first); len(b.evs) > 0 {
+			return e.ready(b, first)
+		}
+	}
 	b.evs, b.ids, e.freshFrom = e.rec.take(e.freshFrom, e.cfg.BatchSize, fresh)
 	return e.ready(b, fresh)
 }
+
+// setUrgent names the sessions whose events are sent before those of the
+// others: the draining ones, which the control plane is waiting for, so that
+// they do not queue behind the backlog of sessions that are still running. A
+// session's own events keep their order. The map must not change afterwards.
+func (e *Exporter) setUrgent(sessions map[string]struct{}) { e.urgent.Store(&sessions) }
 
 // retryBatch takes the oldest events of the failing sessions that are due
 // (all of them with force) and were not tried in this pass. Nil means there
@@ -748,14 +764,16 @@ func (e *Exporter) lastError() string {
 	return ""
 }
 
-// scrubError is the text of a failed request without what the URL may carry
-// of credentials (userinfo, query), cut to what a delivery report holds.
+// scrubError is the text of a failed request without what a URL may carry
+// of credentials (userinfo, query, fragment): the URL of the request, and any
+// other the text names. It is cut to what a delivery report holds.
 func scrubError(err error) string {
 	msg := err.Error()
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		msg = ue.Op + " " + DisplayURL(ue.URL) + ": " + ue.Err.Error()
 	}
+	msg = scrub.Text(msg)
 	if len(msg) > maxReportError {
 		msg = msg[:maxReportError]
 	}

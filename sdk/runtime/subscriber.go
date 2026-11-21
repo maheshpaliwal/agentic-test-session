@@ -42,9 +42,12 @@ type Subscriber struct {
 	client     *http.Client  // own transport: unaffected by DefaultTransport patching
 	service    string        // reported to the control plane, for its list of connected services
 	instance   string
-	snap       atomic.Pointer[snapshot]
-	ready      atomic.Bool
-	streaming  atomic.Bool
+	// reportsAs is the instance name this process sends delivery reports
+	// under; empty when it sends none. The stream announces it.
+	reportsAs string
+	snap      atomic.Pointer[snapshot]
+	ready     atomic.Bool
+	streaming atomic.Bool
 	// connects counts the streams opened: a new one may lead to another
 	// control plane (a restart, an upgrade).
 	connects atomic.Uint64
@@ -62,6 +65,12 @@ func NewSubscriber(controlPlaneURL string) *Subscriber {
 // control plane lists service and instance among its connected services
 // (GET /v1/subscribers, `tracectl doctor`).
 func NewSubscriberFor(controlPlaneURL, service, instance string) *Subscriber {
+	return newSubscriber(controlPlaneURL, service, instance, "")
+}
+
+// newSubscriber is NewSubscriberFor for a process that also sends delivery
+// reports, as instance reportsAs (see core.HeaderDeliveryInstance).
+func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscriber {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Subscriber{
 		base:       strings.TrimRight(controlPlaneURL, "/"),
@@ -70,6 +79,7 @@ func NewSubscriberFor(controlPlaneURL, service, instance string) *Subscriber {
 		client:     &http.Client{Transport: newPlainTransport()},
 		service:    service,
 		instance:   instance,
+		reportsAs:  reportsAs,
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
@@ -213,6 +223,9 @@ func (s *Subscriber) stream(parent context.Context) bool {
 	}
 	if s.instance != "" {
 		req.Header.Set(core.HeaderInstance, s.instance)
+	}
+	if s.reportsAs != "" {
+		req.Header.Set(core.HeaderDeliveryInstance, s.reportsAs)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {

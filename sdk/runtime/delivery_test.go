@@ -69,9 +69,9 @@ func TestAccountsPeekCommitDrainForget(t *testing.T) {
 	if got := r.accounts(); len(got) != 1 || got["a"].recorded != 3 {
 		t.Fatalf("after forget: %+v", got)
 	}
-	r.Drain(4) // b's last event leaves the ring without an account: nothing is counted, nothing breaks
-	if got := r.accounts(); len(got) != 1 {
-		t.Fatalf("an account came back without an event being recorded: %+v", got)
+	r.Drain(4) // b's last event leaves the ring after its account was forgotten: nothing breaks
+	if got := r.accounts(); len(got) != 1 || len(r.acct) != 1 {
+		t.Fatalf("an account came back without an event being recorded: %+v (%d kept)", got, len(r.acct))
 	}
 	r.Record(core.Event{SessionID: "b", LocalSeq: 9}) // a span that ended after the session did
 	if got := r.accounts(); got["b"] != (account{recorded: 1}) {
@@ -92,6 +92,9 @@ type testCollector struct {
 	events   atomic.Int64 // events of the requests it accepted
 	requests atomic.Int64
 	answer   func(n int) string // body of a 200 for n events; nil: all accepted
+	// failSession names a session whose events are failed by name (HTTP 500
+	// with failed_sessions) while the events of the others are taken.
+	failSession atomic.Value
 }
 
 func newTestCollector(t *testing.T) *testCollector {
@@ -104,6 +107,20 @@ func newTestCollector(t *testing.T) *testCollector {
 			return
 		}
 		evs, _ := decodeFrames(body)
+		if sid, _ := c.failSession.Load().(string); sid != "" {
+			others := 0
+			for _, e := range evs {
+				if e.SessionID != sid {
+					others++
+				}
+			}
+			if others < len(evs) {
+				c.events.Add(int64(others))
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, `{"error":"storage error","accepted":%d,"failed_sessions":{%q:"storage"}}`, others, sid)
+				return
+			}
+		}
 		c.events.Add(int64(len(evs)))
 		if c.answer != nil {
 			_, _ = io.WriteString(w, c.answer(len(evs)))
@@ -152,25 +169,39 @@ func newReportCP(t *testing.T, state string) *reportCP {
 	cp := &reportCP{fakeCP: newFakeCP(state), got: map[string][]deliveryReport{}}
 	mux := http.NewServeMux()
 	mux.Handle("/", cp.fakeCP.mux())
-	mux.HandleFunc("POST /v1/sessions/{id}/delivery", func(w http.ResponseWriter, r *http.Request) {
-		cp.mu.Lock()
-		defer cp.mu.Unlock()
-		cp.posts++
-		if cp.status != 0 {
-			http.Error(w, "no", cp.status)
-			return
-		}
-		var d deliveryReport
-		if r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&d) != nil {
-			http.Error(w, "bad", http.StatusBadRequest)
-			return
-		}
-		cp.got[r.PathValue("id")] = append(cp.got[r.PathValue("id")], d)
-		_, _ = io.WriteString(w, `{"accepted":true}`)
-	})
+	mux.HandleFunc("POST /v1/sessions/{id}/delivery", cp.delivery)
 	cp.srv = httptest.NewServer(mux)
 	t.Cleanup(func() { close(cp.drop); cp.srv.CloseClientConnections(); cp.srv.Close() })
 	return cp
+}
+
+// delivery is the delivery endpoint.
+func (cp *reportCP) delivery(w http.ResponseWriter, r *http.Request) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	cp.posts++
+	if cp.status != 0 {
+		http.Error(w, "no", cp.status)
+		return
+	}
+	var d deliveryReport
+	if r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&d) != nil {
+		http.Error(w, "bad", http.StatusBadRequest)
+		return
+	}
+	cp.got[r.PathValue("id")] = append(cp.got[r.PathValue("id")], d)
+	_, _ = io.WriteString(w, `{"accepted":true}`)
+}
+
+// all returns the reports received, by session.
+func (cp *reportCP) all() map[string][]deliveryReport {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	out := make(map[string][]deliveryReport, len(cp.got))
+	for sid, r := range cp.got {
+		out[sid] = append([]deliveryReport(nil), r...)
+	}
+	return out
 }
 
 func (cp *reportCP) setStatus(code int) {
@@ -228,7 +259,8 @@ func newReportEnv(t *testing.T, state string, mut func(*ExporterConfig)) *report
 	e.exp = NewExporter(e.rec, cfg)
 	e.sub = NewSubscriberFor(e.cp.srv.URL, "svc", "raw-instance")
 	e.rep = newReporter(e.rec, e.exp, e.sub, "svc", "svc-1-abcdef", reporterConfig{Tick: 5 * time.Millisecond,
-		Interval: testInterval, FirstDelay: testFirstDelay, DrainFlush: 50 * time.Millisecond, KickEvery: 20 * time.Millisecond})
+		Interval: testInterval, FirstDelay: testFirstDelay, DrainFlush: 50 * time.Millisecond, KickEvery: 20 * time.Millisecond,
+		RetryBase: 20 * time.Millisecond})
 	e.t.Cleanup(func() {
 		e.exp.Close(10 * time.Millisecond)
 		if !e.rep.stopped() {
@@ -263,7 +295,7 @@ func (e *reportEnv) settled(sid string, want deliveryReport) {
 	e.t.Helper()
 	want.Service, want.Instance = "svc", "svc-1-abcdef"
 	deadline := time.Now().Add(5 * time.Second)
-	for e.cp.last(sid) != want {
+	for e.cp.last(sid).counts() != want {
 		if time.Now().After(deadline) {
 			e.t.Fatalf("session %s: reports %+v, want the last to be %+v", sid, e.cp.reports(sid), want)
 		}
