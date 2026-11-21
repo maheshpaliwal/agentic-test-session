@@ -285,13 +285,24 @@ the session leaves the active set.
   most one outage and its recovery per minute. A refused request (`4xx`) is not sent again while the active set
   names no session: it is tried when a session begins, and once on every stream that is opened.
 - **Reports that keep failing.** When its reports have failed for two heartbeat periods (the control plane's
-  grace; it asks once more when that time is up) on a stream on which they arrived before, the SDK opens the
-  stream anew. To the control plane it is then a connection of which nothing has ever arrived, which every
-  session names (see **unheard** below); an instance that was heard of and is merely silent is not named. On
-  the new stream it asks at once, whatever its pause has grown to, so an outage that is just over names
-  nothing. It does this once per outage: a stream on which no report ever arrived is left alone. A time
-  without a session in which nothing was tried does not count as time in which the reports failed; the
-  failures before it do. Two costs, both for a session the instance took part in whose drain is under way at
+  grace; it asks once more when that time is up) on a stream on which the control plane may have heard of it,
+  the SDK opens the stream anew. To the control plane it is then a connection of which nothing has ever
+  arrived, which every session names (see **unheard** below); an instance that was heard of and is merely
+  silent is not named. On the new stream it asks at once, whatever its pause has grown to, so an outage that
+  is just over names nothing. A time without a session in which nothing was tried does not count as time in
+  which the reports failed; the failures before it do.
+  - *Which streams.* One on which a report was answered; and one on which none was, but a request got no
+    answer or a `5xx`: it may have arrived with only its answer lost (a gateway that timed out), and the
+    control plane then takes the instance for one it has heard of.
+  - *Which not.* One on which every request was refused (`4xx`): nothing arrived on it, and the control plane
+    names it as it is. And one the SDK opened anew itself, until a report is answered on it: one new stream
+    per outage.
+  - *How often at most.* Never two within the control plane's grace (two heartbeat periods), nor within 5s
+    when the grace is shorter, whatever the outage looks like; and not while the stream it opened anew has
+    not delivered its first active set. One outage, however long, is one stream; streams that break by
+    themselves during it add at most one per grace.
+
+  Two costs, both for a session the instance took part in whose drain is under way at
   that moment: the new connection is a sign of life, so the drain waits for the instance's report for one more
   grace (drain rule 2); and for the milliseconds between the two streams the instance is not connected, so a
   drain that ends in them does not look at it.
@@ -355,7 +366,15 @@ plane had a session. Without a session an instance sends no heartbeat, so its si
 there is one. The grace of the second case counts from the last report or heartbeat that **arrived**, not from
 the moment the instance stopped: a healthy instance's last word is up to a heartbeat period (5s) old, so an
 instance that is frozen, or whose reports fail, for little more than half the grace (6s) can be unheard at
-the end of it. `GET /v1/subscribers` and `tracectl doctor` show both cases (`delivery_unheard`).
+the end of it. `GET /v1/subscribers` and `tracectl doctor` show both cases (`delivery_unheard`), per
+connection.
+
+An instance with more than one connection (the stream it ended is kept open for a while by a proxy or load
+balancer between it and the control plane, and it has opened another) is unheard when every connection is,
+and is judged by the **newest**: a request of the instance is noted on every connection it has at that
+moment, so the ones that were heard of say the same, and one that says something else is a later one on
+which nothing has arrived. A healthy instance with a stream that lingers is therefore not named, and one
+that opened its stream anew because its reports fail is, whatever becomes of the old stream.
 
 What it costs a session differs:
 
@@ -449,6 +468,30 @@ whoever can reach the control plane can make a session unconfirmed (see the limi
   opened its stream anew, and been connected for a tenth of the grace (about 12s of failing requests with the
   defaults; a time without a session, in which nothing is tried, does not count); the service polls instead
   of following the stream; the service is not connected when the session ends.
+- So a **fresh outage of the report endpoint shorter than about 12s is mostly not detected**: reports that
+  arrived before, fail from some moment of the session on, with the events lost as well. Measured by the fifth
+  review, with the endpoint healthy between runs: 3 of 8 sessions named the instance when the endpoint had
+  been down for 5s at the stop, 1 of 8 at 9s, 8 of 8 at 15s. That is the price of not naming every instance
+  that is silent for the grace in sessions it took no part in.
+- **Stop to sealed takes 12 to 18s** for a session an instance took part in whose reports are failing at the
+  time, where it took 10s before the SDK opened its stream anew and takes 1.2s when everything is healthy
+  (the fifth review's measurement): the drain waits the grace for the report (drain rule 2), and the stream
+  the SDK opens anew meanwhile is a sign of life that starts the grace over, once.
+- A request that arrives **on the stream the SDK opened anew**, with its answer lost, followed by nothing: the
+  control plane has heard of the instance on its newest connection, and the SDK does not open a third stream
+  until a report is answered (it would otherwise open one per grace for as long as an outage lasts, each a
+  new grace for a drain that waits for it). The instance is then "heard of, and silent since" again, and a
+  session of which it left neither a report nor events does not name it. The same for a path that loses the
+  answers and passes the requests for good: the control plane hears the instance and has its reports, which
+  is the truth, and the SDK opens one stream more than it needed.
+- A second outage that begins within the grace (or 5s) of a stream the SDK opened anew is answered with the
+  next stream only when that time is over: up to a grace later than otherwise.
+- A stream on which the reports are lost from the start (no answer, `5xx`), of an instance that delivers its
+  events: the stream is opened anew once, like any other on which a request was lost, and if that falls into
+  the drain of a session it took part in, the drain waits one more grace for it before the session ends
+  `incomplete` (see "Incomplete with nothing missing"); a drain that times out first ends
+  `delivery_unconfirmed` for it instead. With reports that are refused (`4xx`) from the start this does not
+  happen.
 - A process that is cut off from the control plane altogether after its first word arrived, its reports and
   its stream (a half-open connection, a partition that drops packets without closing anything), or that is
   frozen: it cannot open its stream anew, so it stays "heard of, and silent since", and a session of which it
