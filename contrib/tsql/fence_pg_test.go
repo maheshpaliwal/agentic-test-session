@@ -387,6 +387,7 @@ func TestPGFenceInAbortedTransactionSendsNothingMore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer tx.Rollback()                       // a failed assertion must not leave the table locked for the cleanup
 			rtMustExec(t, tx, "SAVEPOINT ts_capture") // the application's own, same name
 			if _, err := tx.ExecContext(bg, "SELECT 1/0"); err == nil {
 				t.Fatal("expected an error")
@@ -506,4 +507,89 @@ func TestPGFenceCancelledCaptureLeavesConnectionClean(t *testing.T) {
 		}
 		clean(t, db)
 	})
+}
+
+// The application opens a transaction inside a multi-statement text, which
+// this connection does not see as a BEGIN, and a statement in it fails. The
+// next write must fail with 25P02 as it does untraced: the fence must not end
+// the application's aborted transaction and let the write commit on its own.
+func TestPGFenceLeavesAnUntrackedAbortedTransactionAlone(t *testing.T) {
+	rtFenceTable(t)
+	for _, warm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multi_statement_proven=%v", warm), func(t *testing.T) {
+			_, ctx := setup(t)
+			bg := context.Background()
+			d := &rtDriver{}
+			db := rtOpen(t, d)
+			c, err := db.Conn(bg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			defer c.ExecContext(bg, "ROLLBACK")
+			if warm {
+				if _, err := c.ExecContext(ctx, "UPDATE tsql_fence SET v = v WHERE id = $1", 2); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := c.ExecContext(bg, "BEGIN; SELECT 1/0"); err == nil {
+				t.Fatal("expected an error")
+			}
+			d.take()
+			_, err = c.ExecContext(ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "leak", 1)
+			calls := rtSQLs(d.take())
+			if err == nil || !strings.Contains(err.Error(), "25P02") {
+				t.Fatalf("the write must fail as it does untraced, got %v; driver saw:\n%s", err, strings.Join(calls, "\n"))
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "exec: ROLLBACK") {
+					t.Fatalf("the fence ended the application's transaction; driver saw:\n%s", strings.Join(calls, "\n"))
+				}
+			}
+			if _, err := c.ExecContext(bg, "ROLLBACK"); err != nil {
+				t.Fatal(err)
+			}
+			if got := rtShow(t, c, "SELECT v FROM tsql_fence WHERE id = 1"); got != "a" {
+				t.Fatalf("v = %q: the write was committed", got)
+			}
+		})
+	}
+}
+
+// A capture that runs longer than a second (WithCaptureTimeout allows it)
+// still gets its fence closed: no timeout, savepoint or read-only transaction
+// stays behind.
+func TestPGFenceClosesAfterASlowCapture(t *testing.T) {
+	rtFenceTable(t)
+	for _, inTx := range []bool{true, false} {
+		t.Run(fmt.Sprintf("in_tx=%v", inTx), func(t *testing.T) {
+			_, ctx := setup(t)
+			bg := context.Background()
+			db := rtOpen(t, &rtDriver{}, tsql.WithCaptureTimeout(3*time.Second))
+			c, err := db.Conn(bg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			defer c.ExecContext(bg, "ROLLBACK")
+			if inTx {
+				rtMustExec(t, c, "BEGIN")
+			}
+			before := rtShow(t, c, "SHOW statement_timeout")
+			if _, err := c.ExecContext(ctx, "UPDATE tsql_fence SET v = 'x' WHERE id = 1 AND (SELECT pg_sleep(1.2)) IS NOT NULL"); err != nil {
+				t.Fatalf("application statement: %v", err)
+			}
+			if got := rtShow(t, c, "SHOW statement_timeout"); got != before {
+				t.Fatalf("statement_timeout is %s after the statement, was %s", got, before)
+			}
+			if got := rtShow(t, c, "SHOW transaction_read_only"); got != "off" {
+				t.Fatalf("transaction_read_only = %s", got)
+			}
+			if inTx {
+				if _, err := c.ExecContext(bg, "ROLLBACK TO SAVEPOINT ts_capture"); err == nil {
+					t.Fatal("the fence's savepoint is still there")
+				}
+			}
+		})
+	}
 }

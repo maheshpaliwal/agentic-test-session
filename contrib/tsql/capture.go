@@ -105,9 +105,12 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 		begin = fenceBegin
 	}
 	timeout := fmt.Sprintf("SET LOCAL statement_timeout = %d", max(eff.Milliseconds(), 1))
-	clean, ccancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-	defer ccancel()
 	closeFence := func() {
+		// Its own second, counted from now: the capture may have used up any
+		// earlier deadline, and a fence left open keeps the timeout and the
+		// savepoint (or, in autocommit, a read-only transaction) in place.
+		clean, ccancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer ccancel()
 		if !inTx {
 			c.execInner(clean, fenceRollback, nil)
 			return
@@ -117,7 +120,9 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 				c.multi = multiYes
 				return
 			}
-			c.multi = multiNo
+			if clean.Err() == nil { // refused, not merely out of time
+				c.multi = multiNo
+			}
 		}
 		c.execInner(clean, fenceRollbackTo, nil)
 		c.execInner(clean, fenceRelease, nil)
@@ -141,9 +146,16 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			}
 			return nil, st
 		default:
+			st = classify(err, cctx)
+			if txAborted(err) {
+				// The server is in an aborted transaction this connection did
+				// not see begin (the application sent "BEGIN; ..." as one
+				// text). It is the application's: a ROLLBACK here would end it
+				// and let the statement that follows commit on its own.
+				return nil, st
+			}
 			// Autocommit: nothing ran, or the BEGIN did and the transaction it
 			// opened is tsql's own. Ending it is right in both cases.
-			st = classify(err, cctx)
 			closeFence()
 			if c.multi == multiYes || cctx.Err() != nil {
 				return nil, st
@@ -190,8 +202,14 @@ const (
 )
 
 // txAborted reports whether err is Postgres refusing a statement because the
-// transaction is already aborted (SQLSTATE 25P02).
+// transaction is already aborted (SQLSTATE 25P02). The code is read from the
+// driver's error where it offers one (pgx, lib/pq); the message is the
+// fallback, and is in English only when the server's lc_messages is.
 func txAborted(err error) bool {
+	var coded interface{ SQLState() string }
+	if errors.As(err, &coded) {
+		return coded.SQLState() == "25P02"
+	}
 	m := err.Error()
 	return strings.Contains(m, "25P02") || strings.Contains(m, "current transaction is aborted")
 }
