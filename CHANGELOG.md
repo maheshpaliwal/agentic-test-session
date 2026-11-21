@@ -21,6 +21,9 @@ Before deploying:
 - `tsql` records binary and over-long primary-key values in a new form (`\xfffe0001`; beyond 64 bytes a
   prefix plus `...[N bytes sha256:…]`), so that different rows no longer share a key. Events recorded earlier
   show such keys as `<3 bytes>` and file under a different key.
+- `tsql` records an upsert that updated a row with op `update`, where it recorded `upsert`. An assertion that
+  filters on `Op: "upsert"` (for example `tsessiontest.RequireMutation`) no longer matches those rows, and
+  `ON CONSTRAINT` upserts lose their image and carry `upsert_unknown`.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -204,6 +207,14 @@ Rolling back:
 
 ### Fixed
 
+- `tsql`: an upsert (`INSERT ... ON CONFLICT DO UPDATE`) that updated an existing row was recorded like an
+  insert, every column as new; with a conflict target other than the primary key it could be filed under a row
+  that was never written. It is now recorded as an `update` with the row's earlier values and a diff of the
+  changed fields, a multi-row upsert as one mutation per row, and an upsert whose outcome cannot be known under
+  the new flag `upsert_unknown`, with no diff. A traced Postgres upsert takes 7 round trips instead of 4
+  (`WithUpsertBefore(false)` keeps 4 and records updates as `upsert_unknown`). Not flagged: another connection
+  updating the same row between the reads. On a table whose AFTER INSERT trigger inserts a row referencing the
+  new one, every inserting upsert is `upsert_unknown`. The MySQL path has only run against a fake.
 - Dashboard: `-demo` and `-open FILE` answered several read endpoints in shapes of their own, so `tracectl` and
   the Go client could not read them. They now answer as the control plane and collector do, which makes every
   read command (`summary`, `events`, `trace`, `entities`, `history`, `show`, `report`, `digest`) work on an
