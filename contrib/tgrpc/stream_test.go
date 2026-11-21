@@ -116,8 +116,9 @@ func TestClientStreamSendEOFKeepsFinalStatus(t *testing.T) {
 	}
 	waitFor(t, func() bool { return len(eventsOf(rec, core.KindAPIOut)) == 1 })
 	out := eventsOf(rec, core.KindAPIOut)[0]
-	if out.Attrs["grpc.code"] != "PermissionDenied" || out.Err == "" {
-		t.Fatalf("span lost the final status: code=%s err=%q", out.Attrs["grpc.code"], out.Err)
+	// PermissionDenied answers the caller, as an HTTP 403 does: recorded, not a failure.
+	if out.Attrs["grpc.code"] != "PermissionDenied" || out.Attrs["grpc.message"] == "" || out.Err != "" {
+		t.Fatalf("span lost the final status: code=%s message=%q err=%q", out.Attrs["grpc.code"], out.Attrs["grpc.message"], out.Err)
 	}
 }
 

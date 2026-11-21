@@ -119,10 +119,29 @@ func finish(span *core.Span, req, resp any, err error) {
 	}
 	code := status.Code(err)
 	span.SetAttr("grpc.code", code.String())
-	if err != nil && code != codes.OK {
+	switch {
+	case err == nil || code == codes.OK:
+	case failure(code):
 		span.SetErr(err)
+	default:
+		// The caller's doing, like an HTTP 4xx: recorded, not a failure.
+		span.SetAttr("grpc.message", core.RedactText(status.Convert(err).Message()))
 	}
 	span.End()
+}
+
+// failure reports whether a status means the callee failed, as an HTTP 5xx
+// does: the codes gRPC maps to 500, 501, 503 and 504, and Unknown, which is
+// also what an error that is not a status reads as. The others (NotFound,
+// InvalidArgument, PermissionDenied, Canceled, ...) answer what the caller
+// asked or did, as an HTTP 4xx does, and a session with such calls has not
+// failed for it.
+func failure(c codes.Code) bool {
+	switch c {
+	case codes.Unknown, codes.DeadlineExceeded, codes.Unimplemented, codes.Internal, codes.Unavailable, codes.DataLoss:
+		return true
+	}
+	return false
 }
 
 // finishStream is finish for a streaming call: req and resp are the message

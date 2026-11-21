@@ -40,6 +40,11 @@ Before deploying:
   changed key, `pipeline_size` and `pipeline_index` no longer count `MULTI`/`EXEC`, `HVALS` replies are always
   masked, and `*` in `WithBeforeImage`, `WithIgnoreKeys` and the other key patterns now also matches `/`. A
   malformed `WithMaskKeys` or `WithRedactKeys` pattern panics when the option is applied.
+- gRPC calls that end with a status the caller causes or expects (`NotFound`, `InvalidArgument`,
+  `AlreadyExists`, `PermissionDenied`, `Unauthenticated`, `FailedPrecondition`, `Aborted`, `OutOfRange`,
+  `ResourceExhausted`, `Canceled`) are no longer failed events: a session whose only "failures" were such calls
+  now passes `--fail-on-error` and `RequireNoFailures`. Assert on the attribute `grpc.code` if a test relied on
+  them failing.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -187,6 +192,10 @@ Rolling back:
 
 ### Changed
 
+- **gRPC failures follow the HTTP rule.** A call is a failed event when its status says the callee failed
+  (`Unknown`, `DeadlineExceeded`, `Unimplemented`, `Internal`, `Unavailable`, `DataLoss`), as an HTTP 5xx is;
+  the other statuses are recorded in `grpc.code` and `grpc.message` and are not failures, as an HTTP 4xx is
+  not. Before, a lookup that missed failed a session over gRPC and passed it over HTTP.
 - Dashboard `-demo` and `-open`: the session list without `limit` is oldest first, as on the control plane, and
   an unknown session reads as empty on the collector side instead of `404`.
 - `tracectl history` for an entity the session did not change exits 1 and names what was looked up; it used to

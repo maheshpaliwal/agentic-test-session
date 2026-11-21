@@ -14,13 +14,15 @@
 // runtime.Start in main): one built earlier passes every call through and
 // records nothing, which the SDK reports when it starts.
 //
-// Failures. A call that ends with any status other than OK is recorded with
-// its error, so it counts as a failed event; the status is in the attribute
-// grpc.code. That includes the statuses a caller causes or expects: NotFound,
-// InvalidArgument, AlreadyExists, PermissionDenied, Canceled. HTTP is
-// recorded differently: a 4xx response is not a failure, only a 5xx is. A
-// lookup that misses therefore fails a session over gRPC and passes it over
-// HTTP; filter on grpc.code when reading failures.
+// Failures. Every call's status is in the attribute grpc.code. A call counts
+// as a failed event when its status says the callee failed, as an HTTP 5xx
+// does: Unknown (also any error that is not a status), DeadlineExceeded,
+// Unimplemented, Internal, Unavailable, DataLoss. The statuses a caller
+// causes or expects (NotFound, InvalidArgument, AlreadyExists,
+// PermissionDenied, Unauthenticated, FailedPrecondition, Aborted,
+// OutOfRange, ResourceExhausted, Canceled) are recorded with their message
+// in grpc.message and do not fail a session, as an HTTP 4xx does not: a
+// lookup that misses is the same event over either protocol.
 //
 // Messages are recorded as JSON with sensitive field names masked (core.RedactAny);
 // stream messages are capped at 50 per direction. Metadata is never recorded.
