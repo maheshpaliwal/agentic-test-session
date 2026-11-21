@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -397,14 +398,21 @@ func groupSiblings(nodes []*client.TraceNode, async bool) []*treeGroup {
 	return out
 }
 
+// digestFlags returns the first digestFlagsMax flags as data text; nil when there is none.
+func digestFlags(flags []string) []string {
+	var out []string
+	for _, f := range flags[:min(len(flags), digestFlagsMax)] {
+		out = append(out, dataText(f, 40))
+	}
+	return out
+}
+
 func (src *digestSource) flatten(g *treeGroup, depth int) {
 	e := g.ev
 	n := dNode{Depth: depth, Seq: e.Seq, Async: g.async, Service: dataText(e.Service, 40), Kind: dataText(string(e.Kind), 40),
 		Name: dataText(e.Name, digestNameMax), DurationNs: g.dur, Mutations: g.muts, Error: dataText(e.Err, digestNameMax)}
 	n.Code = dataText(outcomeCode(e), 40)
-	for _, f := range e.Flags[:min(len(e.Flags), digestFlagsMax)] {
-		n.Flags = append(n.Flags, dataText(f, 40))
-	}
+	n.Flags = digestFlags(e.Flags)
 	if g.count > 1 {
 		n.Count, n.LastSeq, n.MaxDurationNs, n.Name = g.count, g.lastSeq, g.maxDur, dataText(g.norm, digestNameMax)
 		n.Error = dataText(normalizeName(e.Err), digestNameMax)
@@ -492,10 +500,7 @@ func (src *digestSource) buildEntities(evs []core.Event) {
 	byKey := map[key]*dEntity{}
 	for i := range evs {
 		e := &evs[i]
-		var flags []string
-		for _, f := range e.Flags[:min(len(e.Flags), digestFlagsMax)] {
-			flags = append(flags, dataText(f, 40))
-		}
+		flags := digestFlags(e.Flags)
 		uncertain := core.HasUncertainFlag(e.Flags)
 		for j := range e.Mutations {
 			m := &e.Mutations[j]
@@ -539,10 +544,7 @@ func (src *digestSource) buildEntities(evs []core.Event) {
 			ent.Changes = append(ent.Changes, ch)
 		}
 	}
-	keys := make([]key, 0, len(byKey))
-	for k := range byKey {
-		keys = append(keys, k)
-	}
+	keys := slices.Collect(maps.Keys(byKey))
 	// The most changed first: when the budget cuts the list, what goes is
 	// the entities touched once, not the one row the run kept rewriting.
 	slices.SortFunc(keys, func(a, b key) int {

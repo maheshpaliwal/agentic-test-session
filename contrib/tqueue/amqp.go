@@ -10,6 +10,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 type amqpCarrier amqp.Table
@@ -98,10 +99,7 @@ func ConsumeDelivery(ctx context.Context, queue string, dl amqp.Delivery, maxAtt
 			attempt = 2
 		}
 	}
-	h := amqpCarrier{}
-	for k, v := range dl.Headers {
-		h[strings.ToLower(k)] = v
-	}
+	h := amqpCarrier(mapx.MapKeys(dl.Headers, strings.ToLower))
 	d := Delivery{System: "amqp", Queue: queue, JobName: dl.RoutingKey, Params: bodyParams(dl.Body), Attempt: attempt,
 		MessageID: cmp.Or(dl.MessageId, fmt.Sprint(dl.DeliveryTag)), MaxAttempts: maxAttempts}
 	return Consume(ctx, h, d, handler)

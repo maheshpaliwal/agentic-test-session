@@ -457,13 +457,7 @@ func (t *stmtTrace) upsertWritten(res driver.Result, ret []img, affected int64) 
 	case t.retAll && len(ret) > 0:
 		return ret
 	case len(ret) > 0: // RETURNING with some columns: the keys, if they are among them
-		var refs []pkRef
-		for _, r := range ret {
-			if ref := r.ref(t.pk); ref.disp != nil {
-				refs = append(refs, ref)
-			}
-		}
-		if rr := t.reread(refs, t.pk); len(rr) == len(ret) {
+		if rr := t.reread(refsOf(ret, t.pk), t.pk); len(rr) == len(ret) {
 			return rr
 		}
 	case t.store == "mysql" && len(t.pk) == 1 && res != nil && affected == 1 && !t.info.MultiRow:

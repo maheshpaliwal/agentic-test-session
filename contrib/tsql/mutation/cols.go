@@ -49,17 +49,11 @@ var notColumn = map[string]bool{
 // mapCols attributes bind arguments and literals of one statement to columns.
 func (p *parser) mapCols(insertCols []string, t []token) colMap {
 	n := len(t)
-	cm := colMap{args: map[int][]string{}}
+	cm := colMap{args: map[int][]string{}, idents: identsOf(t)}
 	litCols := map[int][]string{}
 	benign := map[int]bool{}
 	mapped := make([]bool, n)
 	open := parenIndex(t)
-
-	for _, tk := range t {
-		if tk.typ == tWord || tk.typ == tQuoted {
-			cm.idents = append(cm.idents, strings.ToLower(tk.name(Postgres)))
-		}
-	}
 
 	assign := func(lo, hi int, col string) {
 		for k := lo; k < hi && k < n; k++ {

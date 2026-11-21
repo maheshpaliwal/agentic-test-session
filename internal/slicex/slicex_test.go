@@ -50,3 +50,38 @@ func TestSplitTrim(t *testing.T) {
 		panic(fmt.Sprintf("got %q", got))
 	}
 }
+
+func TestFilterMap(t *testing.T) {
+	got := FilterMap([]string{"1", "x", "3"}, func(s string) (int, bool) {
+		n, err := strconv.Atoi(s)
+		return n, err == nil
+	})
+	if !reflect.DeepEqual(got, []int{1, 3}) {
+		panic(fmt.Sprintf("got %v", got))
+	}
+	if got := FilterMap([]string{"x"}, func(string) (int, bool) { return 0, false }); got != nil {
+		panic(fmt.Sprintf("nothing kept: got %v, want nil", got))
+	}
+}
+
+func TestToMap(t *testing.T) {
+	type row struct {
+		ID string
+		N  int
+	}
+	got := ToMap([]row{{"a", 1}, {"b", 2}, {"a", 3}}, func(r row) string { return r.ID })
+	want := map[string]row{"a": {"a", 3}, "b": {"b", 2}}
+	if !reflect.DeepEqual(got, want) {
+		panic(fmt.Sprintf("got %v", got))
+	}
+}
+
+func TestCount(t *testing.T) {
+	even := func(n int) bool { return n%2 == 0 }
+	if got := Count([]int{1, 2, 3, 4, 6}, even); got != 3 {
+		panic(fmt.Sprintf("got %d, want 3", got))
+	}
+	if got := Count(nil, even); got != 0 {
+		panic(fmt.Sprintf("nil slice: got %d, want 0", got))
+	}
+}

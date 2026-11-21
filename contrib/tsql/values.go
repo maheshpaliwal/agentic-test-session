@@ -298,6 +298,18 @@ type pkRef struct {
 	raw  map[string]driver.Value
 }
 
+// refsOf returns the key of every row that has all of pkCols, in order. A row without them is left out, so
+// the result can be shorter than rows.
+func refsOf(rows []img, pkCols []string) []pkRef {
+	var refs []pkRef
+	for _, row := range rows {
+		if r := row.ref(pkCols); r.disp != nil {
+			refs = append(refs, r)
+		}
+	}
+	return refs
+}
+
 func (m img) ref(pkCols []string) pkRef {
 	d := pkOf(m.disp, pkCols)
 	if d == nil {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -44,30 +44,13 @@ func LoopbackGuard(next http.Handler, cfg GuardConfig) http.Handler {
 		if name == "localhost" || name == "127.0.0.1" || name == "::1" {
 			return true
 		}
-		for _, a := range cfg.AllowedHosts {
-			if a == h || a == name {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(cfg.AllowedHosts, h) || slices.Contains(cfg.AllowedHosts, name)
 	}
 	originOK := func(o string) bool {
 		if o == "" {
 			return true
 		}
-		if u, err := url.Parse(o); err == nil && hostOK(u.Host) {
-			for _, a := range cfg.AllowedOrigins {
-				if a == o {
-					return true
-				}
-			}
-		}
-		for _, a := range cfg.AllowedOrigins {
-			if a == o {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(cfg.AllowedOrigins, o)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostOK(r.Host) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 const (
@@ -378,10 +379,7 @@ func (t *tracer) pk(table string, item map[string]types.AttributeValue) map[stri
 }
 
 func (t *tracer) learnSchema(ks []types.KeySchemaElement, table string) {
-	names := make([]string, 0, len(ks))
-	for _, k := range ks {
-		names = append(names, str(k.AttributeName))
-	}
+	names := slicex.Map(ks, func(k types.KeySchemaElement) string { return str(k.AttributeName) })
 	if table != "" && len(names) > 0 {
 		t.schema.Store(table, names)
 	}

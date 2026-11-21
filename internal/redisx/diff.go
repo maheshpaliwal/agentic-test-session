@@ -11,6 +11,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/set"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
 const (
@@ -144,11 +145,7 @@ func diffSnaps(b, a *snap) (out []core.FieldChange, truncated bool) {
 
 // byID indexes the items of s by what identifies them.
 func byID(s *snap) map[uint64]item {
-	m := make(map[uint64]item, len(s.items))
-	for _, it := range s.items {
-		m[it.id] = it
-	}
-	return m
+	return slicex.ToMap(s.items, func(it item) uint64 { return it.id })
 }
 
 // diffNamed compares two sets of named values. name, when set, names the only

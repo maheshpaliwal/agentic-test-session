@@ -447,4 +447,7 @@ Rolling back:
   assertion therefore stops its package's test binary at once; the other packages still run.
 - `internal/slicex`, `internal/mapx`, `internal/set`; hand-written loops and `sort.Slice` calls replaced by them
   or by the standard `slices` / `maps` / `cmp` packages.
+- `slicex.FilterMap` and `slicex.ToMap` are back, with `slicex.Count` and `mapx.MapKeys`; 23 more loops in
+  `core`, `cmd/tracectl`, `contrib/tsql`, `contrib/tqueue`, `contrib/tdynamo` and `internal/redisx` use them, the
+  standard library, or one shared function (`refsOf`, `identsOf`, `digestFlags`) where the same loop stood twice.
 - The go-redis v8 and v9 wrappers share one implementation (`internal/redisx.Tracer`).

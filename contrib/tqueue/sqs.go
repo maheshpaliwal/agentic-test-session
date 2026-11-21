@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
 // maxSQSAttrs is the SQS limit on message attributes per message.
@@ -296,10 +297,7 @@ func ConsumeSQSMessageOpts(ctx context.Context, queueURL string, msg types.Messa
 	if !core.AnyActive() {
 		return handler(ctx) // no span could be recorded: skip the lookup
 	}
-	attrs := sqsCarrier{}
-	for k, v := range msg.MessageAttributes {
-		attrs[strings.ToLower(k)] = v
-	}
+	attrs := sqsCarrier(mapx.MapKeys(msg.MessageAttributes, strings.ToLower))
 	var carrier core.Carrier = attrs
 	if opts.SideChannel != nil && attrs.Get(core.KeySession) == "" {
 		md := aws.ToString(msg.MD5OfBody)

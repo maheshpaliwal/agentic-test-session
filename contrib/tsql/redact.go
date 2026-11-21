@@ -4,20 +4,14 @@ import (
 	"database/sql/driver"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql/mutation"
 	"github.com/maheshpaliwal/agentic-test-session/core"
 )
 
-func anySensitive(idents []string) bool {
-	for _, id := range idents {
-		if core.IsSensitiveKey(id) {
-			return true
-		}
-	}
-	return false
-}
+func anySensitive(idents []string) bool { return slices.ContainsFunc(idents, core.IsSensitiveKey) }
 
 // redactSQL masks string/number literals that are assigned to or compared
 // with sensitive columns (password = 'x', INSERT (token) VALUES ('y')). A
@@ -172,12 +166,7 @@ func (t *stmtTrace) sensitive() bool {
 	if t.skip || t.sqlText != t.query {
 		return true
 	}
-	for _, m := range t.mask {
-		if m {
-			return true
-		}
-	}
-	return anySensitive(t.info.Idents)
+	return slices.Contains(t.mask, true) || anySensitive(t.info.Idents)
 }
 
 // setErr records a statement error on the span, redacted.
