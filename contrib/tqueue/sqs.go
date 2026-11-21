@@ -27,7 +27,9 @@ const ctxAttr = "x-tsession-ctx"
 
 // legacyCtxAttr is the compact carrier name written by earlier versions. It is
 // still read, so messages from older producers keep their trace; it is never
-// written, because applications use "ts" for their own data.
+// written, because applications use "ts" for their own data. On a message
+// being sent it is removed only when its value is such a carrier (see
+// sqsAttrs.holdsContext).
 const legacyCtxAttr = "ts"
 
 // sqsOwnKeys are the attributes of the full form that only tsession writes.
@@ -94,16 +96,22 @@ func (c sqsAttrs) Get(key string) string { return sqsCarrier(c).direct(strings.T
 func (c sqsAttrs) Has(key string) bool { return has(c, strings.ToLower(key)) }
 func (c sqsAttrs) Set(key, val string) { sqsCarrier(c).Set(key, val) }
 
-// stale reports which carrier attributes c already has from an earlier
-// publish: a compact attribute that holds a session id (an application
-// attribute of that name does not), and a traceparent equal to the trace
-// context in x-tsession-traceparent, which tsession wrote (the rule of
-// core.WriteTraceparent).
-func (c sqsAttrs) stale() (compact, traceparent bool) {
-	q, err := url.ParseQuery(c.Get(ctxAttr))
+// holdsContext reports whether the attribute name is a compact carrier from an
+// earlier publish: its value parses as one and holds a session id. An
+// application attribute of that name ("ts" holding a timestamp, say) does
+// not, and is never touched.
+func (c sqsAttrs) holdsContext(name string) bool {
+	q, err := url.ParseQuery(c.Get(name))
+	return err == nil && q.Get(core.KeySession) != ""
+}
+
+// staleTraceparent reports whether c's traceparent is left from an earlier
+// publish: it equals the trace context in x-tsession-traceparent, which
+// tsession wrote (the rule of core.WriteTraceparent).
+func (c sqsAttrs) staleTraceparent() bool {
 	tp := c.Get(core.KeyTraceparent)
 	own, _, _ := strings.Cut(c.Get(core.KeyTSessionTraceparent), ";")
-	return err == nil && q.Get(core.KeySession) != "", tp != "" && tp == own
+	return tp != "" && tp == own
 }
 
 func encodeTS(m core.MapCarrier) string {
@@ -179,8 +187,12 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 	// until a publish span exists, so a message outside a session is sent as
 	// the application built it.
 	used := len(attrs)
-	staleCtx, staleTP := sqsAttrs(attrs).stale()
+	staleCtx, staleLegacy := sqsAttrs(attrs).holdsContext(ctxAttr), sqsAttrs(attrs).holdsContext(legacyCtxAttr)
+	staleTP := sqsAttrs(attrs).staleTraceparent()
 	if staleCtx {
+		used--
+	}
+	if staleLegacy {
 		used--
 	}
 	need, ownPresent := 0, 0
@@ -215,6 +227,12 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 			// Whatever carrier the message arrived with is stale now.
 			if staleCtx {
 				delete(attrs, ctxAttr)
+			}
+			if staleLegacy {
+				// Written by an SDK from before x-tsession-ctx. Left in
+				// place, a consumer on such an SDK would read it whenever
+				// this publish writes no attribute it reads first.
+				delete(attrs, legacyCtxAttr)
 			}
 			if mode != "attrs" {
 				for _, k := range sqsOwnKeys {

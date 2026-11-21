@@ -2,6 +2,7 @@ package tqueue
 
 import (
 	"context"
+	"maps"
 	"net/url"
 	"reflect"
 	"strconv"
@@ -753,6 +754,121 @@ func TestSQSRepublishWithCopiedAttributes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A received message that an SDK from before x-tsession-ctx sent in its
+// compact form carries the context in an attribute named "ts". Republished
+// with its attributes, that attribute names the first publish: it is removed
+// in every form, also when nothing fits, so that no consumer reads it.
+func TestSQSRepublishRemovesLegacyCompactAttribute(t *testing.T) {
+	stale := encodeTS(core.MapCarrier{core.KeySession: "s1", core.KeyHLC: "1",
+		core.KeyTraceparent: "00-11111111111111111111111111111111-2222222222222222-01"})
+	for n := 0; n < maxSQSAttrs; n++ { // application attributes beside the legacy carrier
+		for _, side := range []bool{false, true} {
+			// The stale carrier does not count against the limit: with nine
+			// application attributes its slot takes the new compact carrier.
+			form := map[bool]string{true: "full", false: "compact"}[n <= 6]
+			t.Run(strconv.Itoa(n)+" attrs, side channel "+strconv.FormatBool(side), func(t *testing.T) {
+				rec, ctx := setup(t, true)
+				opts := SQSOptions{}
+				if side {
+					opts.SideChannel = &MemSideChannel{}
+				}
+				app := fill(n)
+				in := maps.Clone(app)
+				in[legacyCtxAttr] = strAttr(stale)
+				sent := sqsSend(t, ctx, in, opts)
+				pub := lastPub(t, rec)
+				if has(sent, legacyCtxAttr) {
+					t.Fatalf("the stale %q attribute was sent on: %v", legacyCtxAttr, sent)
+				}
+				for k, v := range app {
+					if !reflect.DeepEqual(sent[k], v) {
+						t.Fatalf("application attribute %q changed", k)
+					}
+				}
+				if got := sqsForm(sent); got != form {
+					t.Fatalf("form %q, want %q", got, form)
+				}
+				sqsConsume(t, sent, opts)
+				assertLastWorker(t, rec, pub)
+				if session, trace, span := oldExtract(oldSQSGet(sent)); session != "s1" || trace != pub.TraceID || span != pub.SpanID {
+					t.Fatalf("older consumer links to %s/%s in session %q, want %s/%s", trace, span, session, pub.TraceID, pub.SpanID)
+				}
+			})
+		}
+	}
+
+	// No form fits: the full form has no room, the application uses the
+	// name x-tsession-ctx itself, and there is no side channel. Nothing is
+	// propagated, and the stale carrier still goes.
+	t.Run("nothing fits", func(t *testing.T) {
+		rec, ctx := setup(t, true)
+		in := fill(maxSQSAttrs - 2)
+		in[legacyCtxAttr] = strAttr(stale)
+		in[ctxAttr] = types.MessageAttributeValue{DataType: aws.String("Binary"), BinaryValue: []byte{1}} // the application's
+		sent := sqsSend(t, ctx, in, SQSOptions{})
+		if has(sent, legacyCtxAttr) || len(sent) != maxSQSAttrs-1 || !reflect.DeepEqual(sent[ctxAttr], in[ctxAttr]) {
+			t.Fatalf("sent %v", sent)
+		}
+		if !contains(lastPub(t, rec).Flags, FlagAttrLimit) {
+			t.Fatalf("flags %v", lastPub(t, rec).Flags)
+		}
+		if session, _, _ := oldExtract(oldSQSGet(sent)); session != "" {
+			t.Fatalf("older consumer still reads session %q from the message", session)
+		}
+		before := len(byKind(rec.Events(), core.KindWorkerStart))
+		sqsConsume(t, sent, SQSOptions{})
+		if len(byKind(rec.Events(), core.KindWorkerStart)) != before {
+			t.Fatal("consumer joined the session through a stale carrier")
+		}
+	})
+
+	// Outside a session the message is sent as it was built.
+	t.Run("untraced", func(t *testing.T) {
+		setup(t, true)
+		sent := sqsSend(t, context.Background(), map[string]types.MessageAttributeValue{legacyCtxAttr: strAttr(stale)}, SQSOptions{})
+		if aws.ToString(sent[legacyCtxAttr].StringValue) != stale || len(sent) != 1 {
+			t.Fatalf("sent %v", sent)
+		}
+	})
+}
+
+// An application attribute named "ts" is not a carrier, whatever it holds,
+// and is sent as it is at every attribute count.
+func TestSQSLeavesApplicationAttributeNamedTS(t *testing.T) {
+	for name, app := range map[string]types.MessageAttributeValue{
+		"timestamp":       strAttr("1700000000"),
+		"query string":    strAttr("a=1&b=2"),
+		"not a query":     strAttr("%zz;=&"),
+		"binary":          {DataType: aws.String("Binary"), BinaryValue: []byte("x-tsession-id=s1")},
+		"number":          {DataType: aws.String("Number"), StringValue: aws.String("17")},
+		"session id only": strAttr("s1"),
+	} {
+		for n := 1; n <= maxSQSAttrs; n++ { // application attributes, "ts" among them
+			form := map[bool]string{true: "full", false: "compact"}[n <= 6]
+			if n == maxSQSAttrs {
+				form = "none"
+			}
+			t.Run(name+", "+strconv.Itoa(n)+" attrs", func(t *testing.T) {
+				rec, ctx := setup(t, true)
+				in := fill(n - 1)
+				in[legacyCtxAttr] = app
+				sent := sqsSend(t, ctx, in, SQSOptions{})
+				if !reflect.DeepEqual(sent[legacyCtxAttr], app) {
+					t.Fatalf("application attribute %q is now %v", legacyCtxAttr, sent[legacyCtxAttr])
+				}
+				if got := sqsForm(sent); got != form {
+					t.Fatalf("form %q, want %q", got, form)
+				}
+				if form == "none" {
+					return
+				}
+				sqsConsume(t, sent, SQSOptions{})
+				assertLastWorker(t, rec, lastPub(t, rec))
+			})
+		}
 	}
 }
 
