@@ -305,10 +305,12 @@ func (s *Session) Header() http.Header {
 	return h
 }
 
-// Inject adds x-tsession-id, traceparent and x-tsession-hlc to h.
+// Inject adds x-tsession-id, x-tsession-traceparent and x-tsession-hlc to h.
+// It also sets traceparent, unless h already has one from the caller's own
+// tracing (see core.WriteTraceparent).
 func (s *Session) Inject(h http.Header) {
 	h.Set(core.KeySession, s.ID)
-	h.Set(core.KeyTraceparent, "00-"+core.NewTraceID()+"-"+core.NewSpanID()+"-01")
+	core.WriteTraceparent(core.HTTPHeaderCarrier(h), "00-"+core.NewTraceID()+"-"+core.NewSpanID()+"-01")
 	h.Set(core.KeyHLC, strconv.FormatUint(core.HLCNow(), 10))
 }
 

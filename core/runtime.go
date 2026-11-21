@@ -20,6 +20,12 @@ type Config struct {
 	// BindPriority is the ordered binding fallback chain (TSESSION_BIND_PRIORITY).
 	// Process-wide; every service in one environment must use the same list.
 	BindPriority []BindingKey
+	// OverwriteTraceparent makes Inject replace a traceparent the application
+	// set with tsession's, as SDKs did before x-tsession-traceparent existed
+	// (TSESSION_OVERWRITE_TRACEPARENT). It breaks the application's own
+	// distributed traces; it is meant only for a rollout in which services
+	// downstream still run such an SDK. See docs/PROTOCOL.md.
+	OverwriteTraceparent bool
 }
 
 var cfg atomic.Pointer[Config]

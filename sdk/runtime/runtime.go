@@ -34,6 +34,11 @@ type Config struct {
 	// TSESSION_BIND_PRIORITY). Local config, not read from the control plane:
 	// every service in one environment must use the same list.
 	BindPriority []core.BindingKey
+	// OverwriteTraceparent makes propagation replace a traceparent the
+	// application set (env TSESSION_OVERWRITE_TRACEPARENT). Off by default:
+	// tsession carries its trace context in x-tsession-traceparent and leaves
+	// the application's traceparent alone. See core.Config.
+	OverwriteTraceparent bool
 }
 
 // Stats is a point-in-time diagnostics snapshot.
@@ -81,7 +86,8 @@ func Start(cfg Config) error {
 	if w := core.WrappedWhileDisabled(); w != "" {
 		log.Printf("tsession: %s was called before the SDK started, so what it wrapped records nothing; start the SDK first (import sdk/autoinit in that package, or wrap inside main)", w)
 	}
-	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority})
+	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority,
+		OverwriteTraceparent: cfg.OverwriteTraceparent})
 	s := &state{rec: NewRecorder(cfg.BufferSize)}
 	s.exp = NewExporter(s.rec, cfg.Exporter)
 	s.sub = NewSubscriberFor(cfg.ControlPlaneURL, cfg.Service, cfg.Instance)

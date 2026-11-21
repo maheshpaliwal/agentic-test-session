@@ -48,6 +48,7 @@ func init() {
 		PropagateHosts:        splitList(os.Getenv("TSESSION_PROPAGATE_HOSTS")),
 		BindPriority:          core.ParseBindPriority(os.Getenv("TSESSION_BIND_PRIORITY")),
 		NoPropagate:           splitList(os.Getenv("TSESSION_NO_PROPAGATE_HOSTS")),
+		OverwriteTraceparent:  envTrue("TSESSION_OVERWRITE_TRACEPARENT"),
 	})
 	if err != nil {
 		log.Printf("tsession: disabled: %v", err)
@@ -58,6 +59,10 @@ func init() {
 		runtime.DisplayURL(cmp.Or(os.Getenv("TSESSION_CONTROLPLANE_URL"), "http://127.0.0.1:7070")),
 		runtime.DisplayURL(cmp.Or(os.Getenv("TSESSION_COLLECTOR_URL"), "http://127.0.0.1:7071")))
 }
+
+// envTrue reports whether the variable is exactly "true", the only value that
+// switches a setting on (as for TSESSION_ENABLED).
+func envTrue(name string) bool { return os.Getenv(name) == "true" }
 
 func splitList(s string) []string {
 	var out []string

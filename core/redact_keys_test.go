@@ -28,7 +28,7 @@ func TestSensitiveKeyMatching(t *testing.T) {
 	plain := []string{
 		"classname", "tokenizer", "max_tokens", "total_tokens", "secretary", "passwordless_login_enabled_at_all"[:12], // "passwordless"
 		"author", "oauth_provider", "authority", "keyboard", "status_code", "key", "code", "state", "id", "user", "",
-		"description", "assigned", "sessions", KeySession, "X-TSession-Id", KeyTraceparent,
+		"description", "assigned", "sessions", KeySession, "X-TSession-Id", KeyTraceparent, KeyTSessionTraceparent,
 	}
 	for _, k := range plain {
 		if IsSensitiveKey(k) {
