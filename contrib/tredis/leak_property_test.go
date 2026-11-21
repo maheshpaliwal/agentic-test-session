@@ -129,7 +129,11 @@ const (
 // The second character is an upper-case letter: the default rules take a
 // lower-case word for a name.
 func (p *leakProbe) secret() string {
-	b := make([]byte, 21+3*p.rng.Intn(5))
+	n := 21 + 3*p.rng.Intn(5)
+	if p.rng.Intn(12) == 0 {
+		n = 1200 + 3*p.rng.Intn(100) // a token of more than a kilobyte, as a JWT with many claims is
+	}
+	b := make([]byte, n)
 	for i := range b {
 		switch i % 3 {
 		case 0:
@@ -162,7 +166,10 @@ func (p *leakProbe) keyName(s string) string {
 		return "cache:eyJ" + s + ".eyJ" + s + "." + s // a JWT
 	default:
 		name := pick(p.rng, "session", "sess", "sid", "token", "auth:token", "password", "secret", "otp", "jwt",
-			"Session", "SESSION", "ApiKey", "api_key", "Token", "tokens", "sessions", "passwords")
+			"Session", "SESSION", "ApiKey", "api_key", "Token", "tokens", "sessions", "passwords",
+			// a digit in the name, and session names as frameworks compose them
+			"oauth2_token", "token2", "api_key_v2", "auth0", "PHPREDIS_SESSION", "redisson:tomcat_session",
+			"myapp.session", "user_sid")
 		return name + ":" + s
 	}
 }
@@ -195,7 +202,9 @@ var fillers = []string{"1", "0.01", "x", "user:1", "2", "WITHSCORES", "MATCH", "
 
 // Commands the tracer has no entry for.
 var unknownCommands = []string{"foo.bar", "bf.add", "ft.search", "echo", "memory", "lolwut", "json.zzz",
-	"cms.incrby", "topk.add", "ts.add", "getfoo", "pubsub"}
+	"cms.incrby", "topk.add", "ts.add", "getfoo", "pubsub",
+	// real commands that read values and have no entry
+	"zunion", "zinter", "zdiff", "sort_ro", "georadius", "zrevrangebylex", "xautoclaim", "lpos", "object"}
 
 // Not run with random arguments: they reach outside the test database.
 var skipped = map[string]bool{"move": true, "flushall": true, "flushdb": true}
