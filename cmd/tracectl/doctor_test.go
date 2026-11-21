@@ -18,6 +18,10 @@ func TestCLIDoctor(t *testing.T) {
 		t.Fatalf("doctor with no services: %d %s\n%s", code, e, out)
 	}
 
+	if code, _, e := env.tc("doctor", "--require-services", "1"); code != 3 || !strings.Contains(e, "0 service(s) connected") {
+		t.Fatalf("doctor --require-services with none connected: %d %s", code, e)
+	}
+
 	named := runtime.NewSubscriberFor(env.cp, "orders-api", "orders-api-1")
 	defer named.Close()
 	unnamed := runtime.NewSubscriber(env.cp)
@@ -34,6 +38,9 @@ func TestCLIDoctor(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "active sessions  1") || !strings.Contains(out, "orders-api") ||
 		!strings.Contains(out, "orders-api-1") || !strings.Contains(out, "1 unnamed") || strings.Contains(out, "note:") {
 		t.Fatalf("doctor with services: %d %s\n%s", code, e, out)
+	}
+	if code, _, e := env.tc("doctor", "--require-services", "2"); code != 0 {
+		t.Fatalf("doctor --require-services with two connected: %d %s", code, e)
 	}
 	if code, out, _ := env.tc("doctor", "--json"); code != 0 || !strings.Contains(out, `"service": "orders-api"`) ||
 		!strings.Contains(out, `"active_sessions": 1`) {

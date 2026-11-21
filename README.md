@@ -77,6 +77,7 @@ TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
 go build -o tracectl ./cmd/tracectl      # or: go run ./cmd/tracectl <command>
 
 tracectl doctor                          # both services answer; which services are connected
+                                         # (CI preflight: --require-services N exits 3 with fewer)
 ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
 curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
 tracectl stop my-run --wait              # drains async work, then seals

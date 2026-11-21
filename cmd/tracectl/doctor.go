@@ -18,6 +18,7 @@ import (
 func (c *cli) doctor(ctx context.Context, args []string) error {
 	fs := c.flags("doctor")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
+	need := fs.Int("require-services", 0, "exit 3 unless at least this many services are connected (a CI preflight)")
 	if _, err := parseArgs(fs, args, 0, ""); err != nil {
 		return err
 	}
@@ -60,6 +61,9 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 	}
 	if !rep.ControlPlane.OK || !rep.Collector.OK {
 		return fmt.Errorf("doctor: a service is unreachable")
+	}
+	if n := len(rep.Subscribers); n < *need {
+		return checkError{msg: fmt.Sprintf("check failed: %d service(s) connected, --require-services wants %d", n, *need)}
 	}
 	return nil
 }

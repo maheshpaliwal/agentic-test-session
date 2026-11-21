@@ -54,7 +54,8 @@ session results (collector):
 
   kill on|off|status            the global kill switch: while on, no service records anything, for
                                 any session (kept in memory: a control plane restart turns it off)
-  doctor [--json]               check that the control plane and collector answer and list the
+  doctor [--json] [--require-services N]
+                                check that the control plane and collector answer and list the
                                 services connected to the control plane
   version                       print the tracectl version
 
