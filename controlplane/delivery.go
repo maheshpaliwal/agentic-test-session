@@ -1035,7 +1035,8 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 	if st == nil {
 		st = &deliveryState{}
 	}
-	shortfalls, unconfirmed := deliveryVerdict(st.reports(*s), counts, st.short)
+	reports := st.reports(*s)
+	shortfalls, unconfirmed := deliveryVerdict(reports, counts, st.short)
 	silent := map[string]struct{}{}
 	for _, sub := range st.silent {
 		key := deliveryKey(sub.Service, sub.DeliveryInstance)
@@ -1053,21 +1054,31 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 		// stopped: the instance has a report for the session that is not final
 		// and that the verdict above had nothing to say about.
 		stopped := map[string]Delivery{}
+		// kept is the report of each instance, by its key. It is built once
+		// per judgement: the lock is held here, and looking through the reports
+		// again for every unheard instance (a thousand streams, 1280 reports)
+		// stalled every request to the control plane for seconds.
+		kept := make(map[string]Delivery, len(reports))
+		for _, d := range reports {
+			// The first one counts: a stored report comes before one kept beside.
+			key := deliveryKey(d.Service, d.Instance)
+			if _, dup := kept[key]; !dup {
+				kept[key] = d
+			}
+		}
 		for _, sub := range m.unheardLocked(now, func(key string) bool {
 			if _, convicted := silent[key]; convicted {
 				return true
 			}
-			for _, d := range st.reports(*s) {
-				if deliveryKey(d.Service, d.Instance) != key {
-					continue
-				}
-				if have, ok := counts.of(d.Service, d.Instance); !d.Final && d.Dropped == 0 && ok && have == d.Recorded {
-					stopped[key] = d
-					return false
-				}
-				return true
+			d, reported := kept[key]
+			if !reported {
+				return false
 			}
-			return false
+			if have, ok := counts.of(d.Service, d.Instance); !d.Final && d.Dropped == 0 && ok && have == d.Recorded {
+				stopped[key] = d
+				return false
+			}
+			return true
 		}) {
 			msg := who(sub.Service, sub.DeliveryInstance) + ": it follows the control plane, but "
 			if sub.heard.IsZero() {
