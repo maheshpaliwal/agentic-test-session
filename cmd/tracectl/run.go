@@ -21,7 +21,7 @@ import (
 
 const (
 	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed] " +
-		"[--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D] -- <command> [args...]"
+		"[--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.
 	sessionEnv = client.SessionEnv
@@ -69,6 +69,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	reportPath := fl.String("report", "", "write a report of the session to this file")
 	format := fl.String("format", "", "format of --report: markdown (default) or junit")
 	digestPath := fl.String("digest", "", "write a digest of the session to this file: Markdown, or JSON if the name ends in .json")
+	maxBytes := fl.Int("max-bytes", digestDefaultBytes, "the --digest file is never larger than this many bytes")
 	timeout := fl.Duration("timeout", 2*time.Minute, "how long to wait for the session to stop and seal")
 	if err := fl.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -89,6 +90,11 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return runUsage("--digest needs a file: standard output belongs to the command")
 	case *reportPath == "" && *format != "":
 		return runUsage("--format needs --report FILE")
+	case *maxBytes < digestMinBytes:
+		// Now, not after the command has run: as digest --max-bytes.
+		return runUsage("--max-bytes must be at least %d", digestMinBytes)
+	case *digestPath == "" && *maxBytes != digestDefaultBytes:
+		return runUsage("--max-bytes needs --digest FILE")
 	}
 	if *digestPath != "" {
 		if st, err := os.Stat(filepath.Dir(*digestPath)); err != nil || !st.IsDir() {
@@ -207,7 +213,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		byID := opts.Mode != "exclusive" && len(opts.Bindings) == 0
 		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render)
 		if err == nil && *digestPath != "" {
-			err = c.runDigest(readCtx, s, *digestPath)
+			err = c.runDigest(readCtx, s, *digestPath, *maxBytes)
 		}
 		cancel()
 		if err != nil {
@@ -260,8 +266,9 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	return gateErr, c.writeReportFile(reportPath, format, out)
 }
 
-// runDigest writes the digest of the session run recorded to path.
-func (c *cli) runDigest(ctx context.Context, s *client.Session, path string) error {
+// runDigest writes the digest of the session run recorded to path, in at
+// most maxBytes bytes.
+func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, maxBytes int) error {
 	format := "markdown"
 	if strings.HasSuffix(path, ".json") {
 		format = "json"
@@ -275,7 +282,7 @@ func (c *cli) runDigest(ctx context.Context, s *client.Session, path string) err
 		return err
 	}
 	src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
-	out, err := src.fit(render, digestDefaultBytes)
+	out, err := src.fit(render, maxBytes)
 	if err != nil {
 		return err
 	}

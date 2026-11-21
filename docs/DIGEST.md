@@ -9,6 +9,7 @@ tracectl digest my-run                                  # Markdown, at most 1638
 tracectl digest my-run --format json --max-bytes 8192   # one line of JSON (also: --json)
 tracectl digest my-run -o digest.md --fail-on-error --fail-on-incomplete --fail-on-empty
 tracectl run --digest digest.md -- ./run-e2e.sh         # written after the seal; digest.json for JSON
+tracectl run --digest digest.md --max-bytes 8192 -- ./run-e2e.sh   # the same bound for run's digest
 ```
 
 It reads the summary, the call tree and the events of the session from the collector and needs nothing else. The
