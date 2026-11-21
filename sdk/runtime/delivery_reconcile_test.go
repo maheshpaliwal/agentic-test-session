@@ -288,7 +288,11 @@ func TestReporterSaysThatItsReportsArrive(t *testing.T) {
 	out := logTo(t)
 	e.cp.setStatus(http.StatusForbidden)
 	e.cp.drop <- struct{}{}
-	eventually(t, "an attempt", func() bool { return e.cp.postCount() >= 1 })
+	// The reporter logs when it has the answer, a moment after the control
+	// plane counted the request.
+	eventually(t, "an attempt, and its log line", func() bool {
+		return e.cp.postCount() >= 1 && strings.Contains(out.String(), "cannot send delivery reports")
+	})
 	if logged := out.String(); strings.Count(logged, "cannot send delivery reports") != 1 || !strings.Contains(logged, "HTTP 403") {
 		panic(fmt.Sprintf("log:\n%s", logged))
 	}
