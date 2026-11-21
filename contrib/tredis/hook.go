@@ -84,6 +84,7 @@ type hook struct{ redisx.Tracer }
 func newHook(c redis.Cmdable, opts []Option) *hook {
 	h := &hook{redisx.NewTracer()}
 	h.Reader, h.Nil, h.Reply, h.PoppedKey = asReader(c), redis.Nil, replyOf, poppedKey
+	h.TxFailed = redis.TxFailedErr
 	for _, o := range opts {
 		o(h)
 	}

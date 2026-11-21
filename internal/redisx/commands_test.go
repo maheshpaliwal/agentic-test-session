@@ -1,6 +1,8 @@
 package redisx
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -101,6 +103,20 @@ func TestNoOp(t *testing.T) {
 	} {
 		if got := NoOp(tc.name, tc.reply); got != tc.want {
 			t.Errorf("NoOp(%s, %v)=%v", tc.name, tc.reply, got)
+		}
+	}
+}
+
+func TestTxOutcome(t *testing.T) {
+	failed := errors.New("redis: transaction failed")
+	tr := &Tracer{TxFailed: failed}
+	for want, err := range map[string]error{
+		"committed": nil,
+		"aborted":   fmt.Errorf("exec: %w", failed),
+		"failed":    errors.New("EXECABORT Transaction discarded because of previous errors."),
+	} {
+		if got := tr.txOutcome(err); got != want {
+			t.Errorf("EXEC error %v: outcome %q, want %q", err, got, want)
 		}
 	}
 }

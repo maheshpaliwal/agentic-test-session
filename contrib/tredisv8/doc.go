@@ -11,6 +11,20 @@
 // redis.Nil is a normal miss. Wrap is a pass-through when !core.Enabled() and
 // idempotent per client.
 //
+// A MULTI/EXEC transaction (TxPipeline, TxPipelined) is a pipeline whose
+// spans also carry transaction=true and transaction_outcome: committed (the
+// commands ran; one can still have failed by itself, Redis does not roll
+// back), aborted (a watched key changed and EXEC ran nothing: every span has
+// the error redis.TxFailedErr and no mutation) or failed (EXEC was refused or
+// never answered). pipeline_size and pipeline_index count the commands the
+// application queued, not the MULTI and EXEC around them.
+//
+// PUBLISH and SPUBLISH are recorded as a write span with the attributes
+// system=redis and queue=<channel> and the number of receivers as the
+// response. They carry no mutation, because a message changes no key, and
+// are not queue.publish spans, because nothing reports that a subscriber
+// finished: such a span would stay an unfinished job of the session.
+//
 // Mutations name only the keys a command writes: the destination of the
 // *STORE family, PFMERGE, BITOP and COPY (not their sources), and the key a
 // multi-key pop (BLPOP, BZPOPMIN, ...) actually popped from. A write whose

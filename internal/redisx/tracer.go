@@ -51,6 +51,7 @@ type Tracer struct {
 
 	Reader    Reader                                // nil disables images
 	Nil       error                                 // the client's "key does not exist" error
+	TxFailed  error                                 // the client's "EXEC aborted: a watched key changed" error
 	Reply     func(Cmd) (v any, scalar, ok bool)    // reply of the common command types
 	PoppedKey func(Cmd) string                      // key a multi-key pop popped from, "" if unknown
 	ImageCtx  func(context.Context) context.Context // optional extra context setup for image reads
@@ -138,6 +139,13 @@ func BeginPipeline[C Cmd](ctx context.Context, t *Tracer, cmds []C) (ops []*Op) 
 	defer core.Recover()
 	ops = make([]*Op, len(cmds))
 	b := t.newBatch(true)
+	// The client frames a transaction with MULTI and EXEC, which are not the
+	// application's commands: size and index count what it queued.
+	size, first := len(cmds), 0
+	tx := isTx(cmds)
+	if tx {
+		size, first = size-2, 1
+	}
 	for i, c := range cmds {
 		name := strings.ToLower(c.Name())
 		if name == "multi" || name == "exec" {
@@ -145,11 +153,33 @@ func BeginPipeline[C Cmd](ctx context.Context, t *Tracer, cmds []C) (ops []*Op) 
 		}
 		ops[i] = t.begin(ctx, c, true, b)
 		if ops[i] != nil {
-			ops[i].span.SetAttr("pipeline_size", strconv.Itoa(len(cmds)))
-			ops[i].span.SetAttr("pipeline_index", strconv.Itoa(i))
+			ops[i].span.SetAttr("pipeline_size", strconv.Itoa(size))
+			ops[i].span.SetAttr("pipeline_index", strconv.Itoa(i-first))
+			if tx {
+				ops[i].span.SetAttr("transaction", "true")
+			}
 		}
 	}
 	return ops
+}
+
+// isTx reports whether a pipeline is a MULTI ... EXEC transaction.
+func isTx[C Cmd](cmds []C) bool {
+	return len(cmds) >= 2 && strings.EqualFold(cmds[0].Name(), "multi") &&
+		strings.EqualFold(cmds[len(cmds)-1].Name(), "exec")
+}
+
+// txOutcome says how the EXEC of a transaction ended: committed (its commands
+// ran; one of them can still have failed by itself), aborted (a watched key
+// changed, nothing ran) or failed (EXEC was refused or never answered).
+func (t *Tracer) txOutcome(exec error) string {
+	switch {
+	case exec == nil:
+		return "committed"
+	case t.TxFailed != nil && errors.Is(exec, t.TxFailed):
+		return "aborted"
+	}
+	return "failed"
 }
 
 // EndPipeline ends the spans started by BeginPipeline. The after-image of a key
@@ -178,11 +208,19 @@ func EndPipeline[C Cmd](ctx context.Context, t *Tracer, ops []*Op, cmds []C) {
 			}
 		}
 	}
+	outcome := ""
+	if isTx(cmds) {
+		outcome = t.txOutcome(cmds[len(cmds)-1].Err())
+	}
 	deadline := t.deadline()
 	for i, o := range ops {
-		if i < len(cmds) {
-			o.finish(ctx, t, cmds[i], cmds[i].Err(), deadline)
+		if i >= len(cmds) || o == nil {
+			continue
 		}
+		if outcome != "" {
+			o.span.SetAttr("transaction_outcome", outcome)
+		}
+		o.finish(ctx, t, cmds[i], cmds[i].Err(), deadline)
 	}
 }
 
@@ -226,7 +264,11 @@ func (t *Tracer) begin(ctx context.Context, cmd Cmd, pipeline bool, b *batch) *O
 		span.SetAttr("pipeline", "true")
 	}
 	o := &Op{span: span, session: sc.SessionID, spec: s, args: args, keys: keys, masked: masked, name: cmd.Name()}
-	if s.Write && b != nil {
+	if IsPublish(cmd.Name()) {
+		// Told apart from a write of a key by the names tqueue gives a publish.
+		span.SetAttr("system", "redis")
+		span.SetAttr("queue", first)
+	} else if s.Write && b != nil {
 		t.beforeImages(ctx, o, b)
 	}
 	return o
@@ -324,8 +366,8 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 			}
 		}
 	}
-	if !o.spec.Write || err != nil || NoOp(o.name, reply) {
-		return // a read, a miss, or a write that changed nothing: no mutation
+	if !o.spec.Write || err != nil || NoOp(o.name, reply) || IsPublish(o.name) {
+		return // a read, a miss, a write that changed nothing or a message: no mutation
 	}
 	name := strings.ToLower(cmd.Name())
 	popped := ""

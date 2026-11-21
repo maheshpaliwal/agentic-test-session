@@ -74,7 +74,8 @@ var commands = map[string]Spec{
 	// geo / hll
 	"geopos": r1, "geodist": r1, "geohash": r1, "geosearch": r1, "pfcount": rN,
 	"geoadd": w1, "pfadd": w1, "pfmerge": wN, "geosearchstore": w(1, 2, 1),
-	// pub/sub: the channel stands in for the key
+	// pub/sub: the channel stands in for the key in the span name; a message
+	// changes no key, see IsPublish
 	"publish": w1, "spublish": w1,
 	// scripting: keys are located via numkeys, see KeysOf
 	"eval": w(0, 0, 0), "evalsha": w(0, 0, 0), "eval_ro": r(0, 0, 0), "evalsha_ro": r(0, 0, 0),
@@ -197,6 +198,18 @@ var destKey = map[string]int{
 var popCmds = map[string]bool{
 	"blpop": true, "brpop": true, "bzpopmin": true, "bzpopmax": true,
 	"lmpop": true, "blmpop": true, "zmpop": true, "bzmpop": true,
+}
+
+// IsPublish reports whether the named command sends a pub/sub message. It is
+// recorded as a write command without a mutation: no key changes. It is not a
+// queue.publish span either, because the collector waits for a worker to
+// finish each of those, and a pub/sub message has no such end.
+func IsPublish(name string) bool {
+	switch strings.ToLower(name) {
+	case "publish", "spublish":
+		return true
+	}
+	return false
 }
 
 // IsPop reports whether the named command pops from one of several keys and

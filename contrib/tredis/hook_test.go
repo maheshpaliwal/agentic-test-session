@@ -28,21 +28,24 @@ const testDB = 15
 // the real server.
 func servers(t *testing.T, run func(t *testing.T, addr string)) {
 	t.Run("miniredis", func(t *testing.T) { run(t, miniredis.RunT(t).Addr()) })
-	t.Run("redis", func(t *testing.T) {
-		addr := os.Getenv(realAddr)
-		if addr == "" {
-			t.Skip(realAddr + " not set")
+	t.Run("redis", func(t *testing.T) { realServer(t, run) })
+}
+
+// realServer runs a test against the real server only, or skips it.
+func realServer(t *testing.T, run func(t *testing.T, addr string)) {
+	addr := os.Getenv(realAddr)
+	if addr == "" {
+		t.Skip(realAddr + " not set")
+	}
+	c := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
+	flush := func() {
+		if err := c.FlushDB(context.Background()).Err(); err != nil {
+			t.Fatal(err)
 		}
-		c := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
-		flush := func() {
-			if err := c.FlushDB(context.Background()).Err(); err != nil {
-				t.Fatal(err)
-			}
-		}
-		flush()
-		t.Cleanup(func() { flush(); c.Close() })
-		run(t, addr)
-	})
+	}
+	flush()
+	t.Cleanup(func() { flush(); c.Close() })
+	run(t, addr)
 }
 
 func setupAt(t *testing.T, addr string, opts ...Option) (redis.UniversalClient, *core.MemRecorder, context.Context) {
