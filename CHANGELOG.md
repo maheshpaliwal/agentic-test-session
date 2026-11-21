@@ -108,6 +108,9 @@ Rolling back:
 
 ### Added
 
+- `dashboard -demo`: the incomplete session carries a delivery report and the reason drawn from it, and one
+  update changes a masked column, so the delivery table and the "changed (value hidden)" row can be seen without
+  any service running.
 - `tracectl list` ends a session's line with `INCOMPLETE` when its record is known to have gaps and with
   `DELIVERY-UNCONFIRMED` when the delivery of some instance could not be confirmed. Lines of other sessions are
   unchanged.

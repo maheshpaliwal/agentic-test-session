@@ -123,7 +123,11 @@ func newDemoAt(now func() time.Time) *Demo {
 		Session: Session{ID: "ts_demo0003", Name: "nightly regression (buffer overflow)", Mode: "header", State: "SEALED",
 			InitiatedBy: "api", CreatedAt: ts(base3), StartedAt: ts(base3), EndedAt: ts(time.Unix(0, drop.EndNs).Add(4 * time.Second)),
 			TTLSeconds: 3600, QuiesceSeconds: 3, MaxDrainSeconds: 60, Incomplete: true, DroppedEvents: 12,
-			Reason: "ttl", SealError: "collector seal: synthetic timeout after 3 attempts"},
+			Reason: "ttl", SealError: "collector seal: synthetic timeout after 3 attempts",
+			// What an instance that overflowed its buffer reports, and what the control plane concludes from it.
+			Delivery: []controlplane.Delivery{{Service: "orders-api", Instance: "orders-api-1", Recorded: 26, Delivered: 14, Dropped: 12,
+				DeliveredTotal: 14, Final: true, At: time.Unix(0, drop.EndNs).Add(3 * time.Second).UTC()}},
+			IncompleteReasons: []string{"service orders-api (instance orders-api-1): 14 of 26 recorded events reached the collector, 12 dropped by the SDK"}},
 		events: part, sealed: true})
 	base4 := t.Add(-time.Minute)
 	d.sess = append(d.sess, &demoSess{

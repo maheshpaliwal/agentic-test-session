@@ -93,7 +93,7 @@ Lists are never `null`.
 | `schema` | string | `"tsession.digest/v1"` |
 | `notice` | string | the fixed notice above |
 | `session` | object | `id`, `name`, `state` (empty: the control plane no longer knows the session), `live` (not sealed yet) |
-| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown`; `incomplete_reasons`: strings, when incomplete; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
+| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown` (also while the session is still running); `incomplete_reasons`: strings, when incomplete; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
 | `counts` | object | `events`, `failures`, `mutations`, `duration_ns`, `pending_async`, `dropped_events`, `quarantined`; and the maps `by_service`, `by_kind`, `mutations_by_entity` (key `store/entity`), `flags`, each with its 16 largest entries |
 | `failures` | list | in `seq` order, see below |
 | `mutations` | list | one object per changed entity, see below |

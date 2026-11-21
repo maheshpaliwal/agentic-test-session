@@ -187,9 +187,11 @@ func demoEvents(sid string, base time.Time) []core.Event {
 	b.add("updinv", tr, api, core.KindDBWrite, "UPDATE inventory SET stock = stock - $1 WHERE sku = $2", "api", 31, 35, chain(
 		tx("tx_01"), req(m{"args": []any{2, "SKU-APPLE-1"}}),
 		mut(core.Mutation{Store: "postgres", Entity: "inventory", PK: m{"sku": "SKU-APPLE-1"}, Op: "update", Source: "sdk",
-			Before: pj(m{"sku": "SKU-APPLE-1", "stock": 40, "reserved": 3}),
-			After:  pj(m{"sku": "SKU-APPLE-1", "stock": 38, "reserved": 3}),
-			Diff:   []core.FieldChange{{Field: "stock", Old: 40, New: 38}}})))
+			Before: pj(m{"sku": "SKU-APPLE-1", "stock": 40, "reserved": 3, "supplier_token": core.RedactedValue}),
+			After:  pj(m{"sku": "SKU-APPLE-1", "stock": 38, "reserved": 3, "supplier_token": core.RedactedValue}),
+			// A masked column that changed: both sides read the same, and the row says so.
+			Diff: []core.FieldChange{{Field: "stock", Old: 40, New: 38},
+				{Field: "supplier_token", Old: core.RedactedValue, New: core.RedactedValue}}})))
 	b.add("updinv2", tr, api, core.KindDBWrite, "UPDATE inventory SET stock = stock - $1 WHERE sku = $2", "api", 35, 39, chain(
 		tx("tx_01"), req(m{"args": []any{1, "SKU-MILK-2"}}),
 		mut(core.Mutation{Store: "postgres", Entity: "inventory", PK: m{"sku": "SKU-MILK-2"}, Op: "update", Source: "sdk",
