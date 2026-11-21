@@ -84,14 +84,17 @@ func (f *fakeDB) RawCalls() []call {
 func (f *fakeDB) Calls() []call {
 	var out []call
 	for _, c := range f.RawCalls() {
-		switch {
-		case c.SQL == "BEGIN READ ONLY", c.SQL == "ROLLBACK", strings.Contains(c.SQL, "SAVEPOINT ts_capture"),
-			strings.Contains(c.SQL, "set_config('statement_timeout'"):
-			continue
+		if !isFence(c.SQL) {
+			out = append(out, c)
 		}
-		out = append(out, c)
 	}
 	return out
+}
+
+// isFence reports whether q is a statement of the Postgres capture fence.
+func isFence(q string) bool {
+	return strings.HasPrefix(q, "BEGIN READ ONLY") || q == "ROLLBACK" || strings.Contains(q, "SAVEPOINT ts_capture") ||
+		strings.HasPrefix(q, "SET LOCAL statement_timeout")
 }
 
 func (f *fakeDB) answer(q string, args []driver.Value) result {

@@ -136,19 +136,21 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 	if _, err := db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2"); err != nil {
 		t.Fatal(err)
 	}
-	// Every statement the driver saw, in order, exactly as before the
-	// untraced fast path existed: both captures (before and after image) are
-	// fenced with a savepoint inside the application's transaction.
+	// Every statement the driver saw, in order: both captures (before and
+	// after image) are fenced with a savepoint inside the application's
+	// transaction, as if the BEGIN had been traced.
 	want := []string{
 		"BEGIN",
 		"SAVEPOINT ts_capture",
-		"SELECT current_setting('statement_timeout'), set_config('statement_timeout', '500', true)",
+		"SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id = 2 LIMIT 51",
+		"ROLLBACK TO SAVEPOINT ts_capture",
 		"RELEASE SAVEPOINT ts_capture",
 		"UPDATE t SET a = 1 WHERE id = 2",
 		"SAVEPOINT ts_capture",
-		"SELECT current_setting('statement_timeout'), set_config('statement_timeout', '500', true)",
+		"SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id IN ($1)",
+		"ROLLBACK TO SAVEPOINT ts_capture",
 		"RELEASE SAVEPOINT ts_capture",
 	}
 	if got := sqls(f.RawCalls()); got != strings.Join(want, "\n")+"\n" {

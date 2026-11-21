@@ -201,7 +201,7 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 		t.Fatalf("COMMIT must succeed: %v", err)
 	}
 	calls := f.RawCalls()
-	want := []string{"SAVEPOINT ts_capture", "SELECT current_setting('statement_timeout'),", "SELECT *", "ROLLBACK TO", "RELEASE SAVEPOINT", "UPDATE t"}
+	want := []string{"SAVEPOINT ts_capture", "SET LOCAL statement_timeout", "SELECT *", "ROLLBACK TO", "RELEASE SAVEPOINT", "UPDATE t"}
 	for i, w := range want {
 		if !strings.HasPrefix(calls[i].SQL, strings.Fields(w)[0]) {
 			t.Fatalf("call %d = %q, want prefix %q\n%s", i, calls[i].SQL, w, sqls(calls))
@@ -214,13 +214,13 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 	}
 }
 
-func TestCaptureInPGTxSuccessReleasesAndRestoresTimeout(t *testing.T) {
+// A capture that worked closes its savepoint by rolling it back too: that is
+// what reverts the capture's statement_timeout (see
+// TestPGFactRollbackToSavepointRevertsSetLocal for the real server).
+func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 	_, ctx := setup(t)
 	f := &fakeDB{handler: func(q string, a []driver.Value) result {
-		switch {
-		case strings.HasPrefix(q, "SELECT current_setting"):
-			return result{cols: []string{"current_setting", "set_config"}, rows: [][]driver.Value{{"0", "500"}}}
-		case strings.HasPrefix(q, "SELECT * FROM"):
+		if strings.HasPrefix(q, "SELECT * FROM") {
 			return result{cols: []string{"id", "v"}, rows: [][]driver.Value{{int64(2), "x"}}}
 		}
 		return result{affected: 1}
@@ -235,10 +235,16 @@ func TestCaptureInPGTxSuccessReleasesAndRestoresTimeout(t *testing.T) {
 	for _, c := range f.RawCalls() {
 		got = append(got, c.SQL)
 	}
-	if !strings.HasPrefix(got[0], "SAVEPOINT ts_capture") || !strings.Contains(got[1], "set_config('statement_timeout', '500', true)") ||
-		!strings.HasPrefix(got[2], "SELECT * FROM") || got[3] != "SELECT set_config('statement_timeout', '0', true)" ||
-		got[4] != "RELEASE SAVEPOINT ts_capture" || !strings.HasPrefix(got[5], "DELETE") {
-		t.Fatalf("sequence:\n%s", strings.Join(got, "\n"))
+	want := []string{
+		"SAVEPOINT ts_capture",
+		"SET LOCAL statement_timeout = 500",
+		"SELECT * FROM t WHERE id = $1 LIMIT 51",
+		"ROLLBACK TO SAVEPOINT ts_capture",
+		"RELEASE SAVEPOINT ts_capture",
+		"DELETE FROM t WHERE id = $1",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("sequence:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

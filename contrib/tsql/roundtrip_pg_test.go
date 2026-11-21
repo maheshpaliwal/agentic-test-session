@@ -69,12 +69,16 @@ type rtCall struct {
 // where Postgres rejects a text holding more than one statement.
 type rtDriver struct {
 	legacy bool
+	hook   func(via, q string) // called before a statement is forwarded
 
 	mu    sync.Mutex
 	calls []rtCall
 }
 
 func (d *rtDriver) add(via, q string) {
+	if d.hook != nil {
+		d.hook(via, q)
+	}
 	d.mu.Lock()
 	d.calls = append(d.calls, rtCall{via, q})
 	d.mu.Unlock()

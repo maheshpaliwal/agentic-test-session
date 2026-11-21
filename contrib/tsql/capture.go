@@ -36,9 +36,12 @@ const serverGrace = 200 * time.Millisecond
 // capture runs a read-only capture query on the application's own connection
 // without being able to hurt it:
 //   - on Postgres it runs in SAVEPOINT ts_capture inside the app's transaction
-//     (rolled back on any error, so the app's transaction is never aborted),
 //     or in its own read-only transaction when the app is in autocommit, with
-//     a transaction-local statement_timeout that is restored afterwards;
+//     a statement_timeout set (SET LOCAL) inside that fence. The fence is
+//     always closed by rolling it back, after a capture that worked as after
+//     one that failed: that ends an aborted subtransaction, so the app's
+//     transaction is never aborted, and it reverts the timeout to whatever
+//     the application had, so the old value is neither read nor restored;
 //   - inside a SERIALIZABLE transaction nothing runs (extra reads could cause
 //     serialization failures);
 //   - the time spent never exceeds the capture timeout, nor more than a
@@ -83,58 +86,43 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 	// any error aborts an open transaction, so the capture is fenced with a
 	// SAVEPOINT (inside the app's tx) or its own read-only transaction (when
 	// the app is in autocommit), and bounded server-side by statement_timeout.
-	begin, abortSQL, endSQL := "SAVEPOINT ts_capture", []string{"ROLLBACK TO SAVEPOINT ts_capture", "RELEASE SAVEPOINT ts_capture"}, []string{"RELEASE SAVEPOINT ts_capture"}
+	begin, closeSQL := fenceSavepoint, []string{fenceRollbackTo, fenceRelease}
 	if !inTx {
-		begin, abortSQL, endSQL = "BEGIN READ ONLY", []string{"ROLLBACK"}, []string{"ROLLBACK"}
+		begin, closeSQL = fenceBegin, []string{fenceRollback}
 	}
+	timeout := fmt.Sprintf("SET LOCAL statement_timeout = %d", max(eff.Milliseconds(), 1))
 	if _, err := c.execInner(cctx, begin, nil); err != nil {
 		return nil, classify(err, cctx)
 	}
 	clean, ccancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer ccancel()
-	run := func(stmts []string) error {
-		var first error
-		for _, s := range stmts {
-			if _, err := c.execInner(clean, s, nil); err != nil && first == nil {
-				first = err
-			}
+	closeFence := func() {
+		for _, s := range closeSQL {
+			c.execInner(clean, s, nil)
 		}
-		return first
 	}
-	ms := max(eff.Milliseconds(), 1)
-	prev := ""
-	_, rs, err := c.queryAll(cctx, fmt.Sprintf("SELECT current_setting('statement_timeout'), set_config('statement_timeout', '%d', true)", ms), nil, 1)
+	if _, err := c.execInner(cctx, timeout, nil); err != nil {
+		st = classify(err, cctx)
+		closeFence()
+		return nil, st
+	}
+	out, err := c.fetchImgs(cctx, q, vals, limit, pkCols)
+	st = classify(err, cctx)
+	closeFence()
 	if err != nil {
-		run(abortSQL)
-		return nil, classify(err, cctx)
-	}
-	if inTx && len(rs) == 1 && len(rs[0]) > 0 {
-		switch v := rs[0][0].(type) {
-		case string:
-			prev = v
-		case []byte:
-			prev = string(v)
-		}
-		if !simpleSetting(prev) {
-			prev = ""
-		}
-	}
-	out, err = c.fetchImgs(cctx, q, vals, limit, pkCols)
-	if err != nil {
-		run(abortSQL)
-		return nil, classify(err, cctx)
-	}
-	if prev != "" {
-		if _, _, err := c.queryAll(clean, fmt.Sprintf("SELECT set_config('statement_timeout', '%s', true)", prev), nil, 1); err != nil {
-			run(abortSQL)
-			return out, capOK
-		}
-	}
-	if err := run(endSQL); err != nil {
-		run(abortSQL)
+		return nil, st
 	}
 	return out, capOK
 }
+
+// The statements of the Postgres capture fence.
+const (
+	fenceSavepoint  = "SAVEPOINT ts_capture"
+	fenceRollbackTo = "ROLLBACK TO SAVEPOINT ts_capture"
+	fenceRelease    = "RELEASE SAVEPOINT ts_capture"
+	fenceBegin      = "BEGIN READ ONLY"
+	fenceRollback   = "ROLLBACK"
+)
 
 // mysqlTimeoutHint adds a server-side MAX_EXECUTION_TIME optimizer hint to a
 // capture SELECT (ignored as a comment by servers that do not know it).
@@ -144,18 +132,6 @@ func mysqlTimeoutHint(q string, d time.Duration) string {
 		return fmt.Sprintf("SELECT /*+ MAX_EXECUTION_TIME(%d) */ %s", max(d.Milliseconds(), 1), q[len(p):])
 	}
 	return q
-}
-
-func simpleSetting(s string) bool {
-	if s == "" || len(s) > 32 {
-		return false
-	}
-	for _, r := range s {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
-			return false
-		}
-	}
-	return true
 }
 
 func classify(err error, cctx context.Context) capStatus {
