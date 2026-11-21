@@ -24,9 +24,19 @@ func (c *cli) start(ctx context.Context, args []string) error {
 	}
 	opts.Bindings = binds.list
 	warnJWT(c.stderr, opts.Bindings)
+	// A name can be given to any number of sessions and then stands for the newest: say so once, here, where
+	// the earlier session stops being reachable by it. A failed lookup is not a reason to refuse the start.
+	var earlier *client.Info
+	if opts.Name != "" {
+		earlier, _ = latestNamed(ctx, c.opts, opts.Name)
+	}
 	s, err := client.Start(ctx, opts)
 	if err != nil {
 		return err
+	}
+	if earlier != nil {
+		fmt.Fprintf(c.stderr, "tracectl: note: an earlier session is also named %q (%s, %s); the name now stands for the new session, name the earlier one by its id\n",
+			opts.Name, earlier.ID, earlier.State)
 	}
 	if *idOnly {
 		_, err = fmt.Fprintln(c.stdout, s.ID)

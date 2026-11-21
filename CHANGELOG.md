@@ -257,6 +257,9 @@ Rolling back:
 
 ### Changed
 
+- `tracectl start --name X` notes on standard error when an earlier session is also named X, with its id and
+  state: the name stands for the new session from then on. An id that neither the control plane nor the
+  collector knows is reported as "no session with id ..." before the HTTP status.
 - `tracectl digest` of a running session says `recording: not yet known (the session is still running)` and
   carries `"recording": "unknown"`; it said `complete`, also while a service could not deliver its events.
 - `tracectl list --state` accepts a state in any case and refuses a word that is not a state, naming the six; it

@@ -68,9 +68,13 @@ func resolve(ctx context.Context, o client.Options, ref string) (*client.Session
 			// has never seen: fall back only when it really holds events, or
 			// a mistyped id would read as an empty, passing session.
 			d := client.Detached(o, ref)
-			if sum, serr := d.Summary(ctx); serr == nil && sum.EventCount > 0 {
+			sum, serr := d.Summary(ctx)
+			if serr == nil && sum.EventCount > 0 {
 				fmt.Fprintf(os.Stderr, "tracectl: the control plane no longer knows %s; reading what the collector holds\n", ref)
 				return d, nil
+			}
+			if serr == nil {
+				return nil, fmt.Errorf("no session with id %q: the control plane does not know it and the collector holds no events for it (tracectl list shows the sessions): %w", ref, err)
 			}
 		}
 		return s, err
