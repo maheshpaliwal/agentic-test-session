@@ -89,6 +89,10 @@ Prefer the variables for connection strings: flag values show up in the process 
 | `--cp` | `TSESSION_CONTROLPLANE_URL` | `http://127.0.0.1:7070` |
 | `--collector` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` |
 
+`tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
+command only. Nothing reads it by itself: the command sends it as the `x-tsession-id` header (or uses a binding
+or `--mode exclusive`, which need no id).
+
 `TSESSION_ARTIFACT_DIR` makes `sdk/client/tsessiontest` save the session of a failed test into that directory;
 use an absolute path.
 

@@ -33,6 +33,21 @@ session lifecycle (control plane):
   watch-docker [--docker BIN]   start/stop sessions from containers labelled tsession.id=<name>
                                 (optional label tsession.bind=header:x-user-id=u_1,jwt:sub=u_1)
 
+record a command (control plane and collector):
+  run [start's session flags, except --id-only] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
+      [--report FILE [--format markdown|junit]] [--timeout D] -- <command> [args...]
+                                start a session, run the command with the session id in $TSESSION_ID, stop
+                                the session, wait for the seal (at most --timeout, default 2m) and print the
+                                summary. The command is not run through a shell. Its stdin, stdout and stderr
+                                pass through; tracectl prints to stderr only and writes the report to FILE.
+                                The session is stopped and sealed also when the command fails.
+                                SIGINT and SIGTERM are passed on to the command; a second signal, once the
+                                command has exited, stops waiting for the seal.
+                                exit status, first that applies: the command's own if it failed (128+n if
+                                signal n killed it; 127 not found and 126 not runnable, no session started);
+                                1 the session could not be stopped, sealed or read; 3 a --fail-on-* check
+                                failed; 0. Bad usage of run exits 2.
+
 session results (collector):
   summary <id|name> [--json] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
                                 counts, failures and flags; the --fail-on flags exit 3 for CI gates
@@ -60,7 +75,7 @@ session results (collector):
   version                       print the tracectl version
 
 exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
-             3 a --fail-on-* check failed
+             3 a --fail-on-* check failed; run: see above
 
 --cp defaults to $TSESSION_CONTROLPLANE_URL or http://127.0.0.1:7070
 --collector defaults to $TSESSION_COLLECTOR_URL or http://127.0.0.1:7071`
@@ -77,6 +92,7 @@ func (e checkError) Error() string { return e.msg }
 // cli carries what every command needs.
 type cli struct {
 	opts   client.Options
+	stdin  io.Reader // read by the command of run only
 	stdout io.Writer
 	stderr io.Writer
 }
@@ -85,6 +101,7 @@ type cli struct {
 // arguments after the command name.
 var commands = map[string]func(*cli, context.Context, []string) error{
 	"start":        (*cli).start,
+	"run":          (*cli).runCommand,
 	"rename":       (*cli).rename,
 	"stop":         (*cli).stop,
 	"abort":        (*cli).abort,
@@ -138,14 +155,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	c := &cli{opts: client.Options{BaseURL: *cp, CollectorURL: *col, InitiatedBy: "api"}, stdout: stdout, stderr: stderr}
+	c := &cli{opts: client.Options{BaseURL: *cp, CollectorURL: *col, InitiatedBy: "api"}, stdin: os.Stdin, stdout: stdout, stderr: stderr}
 	err := cmd(c, ctx, rest)
 	var ce checkError
+	var ee exitError
 	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, flag.ErrHelp):
 		return 0
+	case errors.As(err, &ee):
+		if ee.msg != "" {
+			fmt.Fprintln(stderr, "tracectl:", ee.msg)
+		}
+		return ee.code
 	case errors.As(err, &ce):
 		fmt.Fprintln(stderr, "tracectl:", err)
 		return exitCheckFailed

@@ -107,7 +107,7 @@ tracectl list --limit 20                     # the newest sessions
 ```
 
 Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
-`3` a `--fail-on-*` check failed.
+`3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
 
 ## Go tests and CI
 
@@ -127,6 +127,13 @@ Stopping a session waits for it to go quiet (3s by default), so each such test t
 `Trace`).
 
 ```bash
+# one line: start a session, run the tests with its id in $TSESSION_ID, stop, wait for the seal, print the summary
+tracectl run --name my-run --fail-on-error --fail-on-incomplete --fail-on-empty --report tsession.md -- ./run-e2e.sh
+# Exit status: the command's own if it failed (128+n if killed by signal n); else 1 if the session could not be
+# stopped, sealed or read; else 3 if a gate failed; else 0. The session is stopped and sealed either way.
+# stdout is the command's: tracectl prints to stderr and writes the report (replacing FILE; --format junit for XML).
+
+# or step by step, on a session that has been stopped
 # gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included), or no events at all
 tracectl report my-run --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
 tracectl report my-run --format junit -o tsession-junit.xml
