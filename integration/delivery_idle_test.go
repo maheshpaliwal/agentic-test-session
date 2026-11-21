@@ -47,7 +47,7 @@ func newFreezer(t *testing.T, target string) *freezer {
 		panic(err)
 	}
 	f := &freezer{l: l}
-	t.Cleanup(func() { f.frozen.Store(false); l.Close() })
+	t.Cleanup(f.close)
 	go func() {
 		for {
 			c, err := l.Accept()
@@ -86,12 +86,18 @@ func newFreezer(t *testing.T, target string) *freezer {
 
 func (f *freezer) url() string { return "http://" + f.l.Addr().String() }
 
+// close lets go of what the freezer holds: its listener, and (unfrozen) the
+// connections, which end with their peers. A scenario that makes one per
+// session closes it with the session, so the listeners do not pile up until
+// the test ends.
+func (f *freezer) close() { f.frozen.Store(false); f.l.Close() }
+
 // heard waits until a delivery report of a service has reached the control
 // plane: the service sends one when it has opened the stream.
 func (e *deliveryEnv) heard(service string) {
 	e.t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		subs, err := client.Subscribers(e.t.Context(), client.Options{BaseURL: e.cpURL})
+		subs, err := client.Subscribers(e.t.Context(), client.Options{BaseURL: e.cpURL, HTTPClient: deliveryHTTP})
 		if err == nil && slices.ContainsFunc(subs, func(s client.Subscriber) bool { return s.Service == service && !s.LastDeliveryReport.IsZero() }) {
 			return
 		}
@@ -176,6 +182,7 @@ func TestDelivery_HalfOpenStreamOfAnIdleInstanceDoesNotFailSessions(t *testing.T
 	runs := repeat(t, "half-open", deliveryRuns(), 8, func(int) deliveryRun {
 		svc := fmt.Sprintf("idle-%d", svcSeq.Add(1))
 		fz := newFreezer(t, strings.TrimPrefix(e.cpURL, "http://"))
+		defer fz.close()
 		idle := e.startSvc(svc, svcOpts{cp: fz.url()})
 		defer idle.kill()
 		e.heard(svc)
@@ -185,7 +192,7 @@ func TestDelivery_HalfOpenStreamOfAnIdleInstanceDoesNotFailSessions(t *testing.T
 		}
 		fz.frozen.Store(true)
 		r := e.finish(s, n)
-		if subs, err := client.Subscribers(t.Context(), client.Options{BaseURL: e.cpURL}); err != nil ||
+		if subs, err := client.Subscribers(t.Context(), client.Options{BaseURL: e.cpURL, HTTPClient: deliveryHTTP}); err != nil ||
 			!slices.ContainsFunc(subs, func(sub client.Subscriber) bool { return sub.Service == svc }) {
 			r.err = fmt.Errorf("test setup: the control plane no longer lists %s as connected (%v)", svc, err)
 		}

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,5 +207,43 @@ func TestEntityUncertaintyDecodes(t *testing.T) {
 	}
 	if ents[0].Uncertain != 2 || ents[1].Uncertain != 0 {
 		panic(fmt.Sprintf("entities: %+v", ents))
+	}
+}
+
+// An answer is read to its end before it is closed, so the connection is
+// kept: a caller that polls (StopAndWait, tracectl wait) or pages through
+// events does not open one per request. The end of the body arrives after
+// the JSON value here, as it does for an answer sent in chunks.
+func TestCallsKeepTheirConnection(t *testing.T) {
+	var opened atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/summary") {
+			http.Error(w, `{"error":"`+strings.Repeat("no ", 2000)+`"}`, http.StatusInternalServerError)
+			return
+		}
+		b, _ := json.Marshal(client.EventPage{Events: make([]core.Event, 200), Sealed: true})
+		_, _ = w.Write(b)
+		w.(http.Flusher).Flush()
+		time.Sleep(2 * time.Millisecond)
+		_, _ = w.Write([]byte("\n"))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+	s := client.Detached(client.Options{BaseURL: srv.URL, CollectorURL: srv.URL, HTTPClient: &http.Client{Transport: &http.Transport{}}}, "ts_1")
+	for range 30 {
+		if _, err := s.EventsPage(context.Background(), 1, 0); err != nil {
+			panic(err)
+		}
+		if _, err := s.Summary(context.Background()); err == nil {
+			panic("the summary answers 500")
+		}
+	}
+	if n := opened.Load(); n > 2 {
+		panic(fmt.Sprintf("%d connections for 60 requests in a row, want one", n))
 	}
 }

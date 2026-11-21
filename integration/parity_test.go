@@ -818,6 +818,14 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 			}
 			wantCode, want, wantErr := tracectlAt(t, tracectl, f.live, args...)
 			code, got, gotErr := tracectlAt(t, tracectl, file, args...)
+			// Before the output is read: a tracectl that could not reach the
+			// services prints nothing to stdout, and what went wrong is on
+			// stderr. (A run under load failed here with "printed no session
+			// document: EOF" and nothing else; the cause was on the stderr this
+			// did not show.)
+			if (wantCode != 0 && wantCode != 3) || (code != 0 && code != 3) {
+				panic(fmt.Sprintf("tracectl %v: exit %d on the session, %d on the file\n--- session\n%s%s\n--- file\n%s%s", args, wantCode, code, want, wantErr, got, gotErr))
+			}
 			if args[0] == "status" && len(args) == 2 {
 				// The session document, less what a file does not hold.
 				want, got = statusDoc(t, want), statusDoc(t, got)

@@ -511,7 +511,15 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 	if err != nil {
 		return nil, scrubURL(err)
 	}
-	defer resp.Body.Close()
+	// Read to its end before it is closed: the transport keeps a connection
+	// only then. A decoder stops at the end of the JSON value, before the
+	// newline that follows it and the last chunk of an answer sent in chunks
+	// (a session with many delivery reports, a page of events), so a caller
+	// that polls opened a connection per request.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+	}()
 	if resp.StatusCode/100 != 2 {
 		var e struct {
 			Error              string   `json:"error"`
@@ -536,7 +544,6 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 		return nil, &StatusError{Method: method, Path: path, Code: resp.StatusCode, Status: resp.Status, Message: e.Error}
 	}
 	if out == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
 		return resp.Header, nil
 	}
 	return resp.Header, json.NewDecoder(resp.Body).Decode(out)

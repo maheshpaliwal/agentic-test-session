@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -149,7 +150,7 @@ func (a *svcApp) kill() {
 func (e *deliveryEnv) connected(service string) {
 	e.t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		subs, err := client.Subscribers(context.Background(), client.Options{BaseURL: e.cpURL})
+		subs, err := client.Subscribers(context.Background(), client.Options{BaseURL: e.cpURL, HTTPClient: deliveryHTTP})
 		if err == nil && slices.ContainsFunc(subs, func(s client.Subscriber) bool { return s.Service == service }) {
 			return
 		}
@@ -188,6 +189,7 @@ func (a *svcApp) burst(s *client.Session, n int) error {
 	if err != nil {
 		return err
 	}
+	_, _ = io.Copy(io.Discard, resp.Body) // read to the end: the connection is kept
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("POST /burst: %s", resp.Status)

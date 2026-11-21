@@ -89,7 +89,11 @@ func (f *forgeEnv) stream(service, instance string) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, f.in.cpSrv.URL+"/v1/active/stream", nil)
 	req.Header.Set(core.HeaderService, service)
 	req.Header.Set(core.HeaderDeliveryInstance, instance)
-	resp, err := (&http.Client{Transport: &http.Transport{}}).Do(req)
+	// The stream is one connection for as long as the test runs; it is closed
+	// with the test (cancel), and its transport keeps none.
+	tr := &http.Transport{DisableKeepAlives: true}
+	f.t.Cleanup(tr.CloseIdleConnections)
+	resp, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil {
 		panic(err)
 	}

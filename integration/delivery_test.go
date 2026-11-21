@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -138,6 +139,8 @@ func newDeliveryBase(t *testing.T) *deliveryEnv {
 		gateSrv.Close()
 		colSrv.Close()
 		col.Close()
+		// The connections to servers that are gone now: give their ports back.
+		deliveryHTTP.CloseIdleConnections()
 	})
 	e.colURL, e.gateURL, e.cpURL = colSrv.URL, gateSrv.URL, cpSrv.URL
 	return e
@@ -173,7 +176,7 @@ func (e *deliveryEnv) startVia(bin, service, addr, collectorURL, downstream, cpU
 
 // session starts a session and waits until both services were told of it.
 func (e *deliveryEnv) session(ctx context.Context, name string) (*client.Session, error) {
-	s, err := client.Start(ctx, client.Options{BaseURL: e.cpURL, CollectorURL: e.colURL, Name: name,
+	s, err := client.Start(ctx, client.Options{BaseURL: e.cpURL, CollectorURL: e.colURL, Name: name, HTTPClient: deliveryHTTP,
 		QuiesceSeconds: 1, PollInterval: 50 * time.Millisecond})
 	if err != nil {
 		return nil, err
@@ -200,10 +203,11 @@ func (e *deliveryEnv) request(ctx context.Context, s *client.Session) error {
 		return err
 	}
 	s.Inject(req.Header)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := deliveryHTTP.Do(req)
 	if err != nil {
 		return err
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("POST /work: %s", resp.Status)
