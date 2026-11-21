@@ -36,7 +36,9 @@ name by the SDK, like everything recorded).
    that differ only in a literal show as `40x`, which is how an N+1 looks. Such a line carries the normalised
    name, the first and last `seq`, and the total and longest duration; the lines below it are those of the
    first of the run. A span on a failed branch is never merged.
-5. **Omitted**: what was left out to fit the budget, each with the commands that print it.
+5. **Omitted**: what was left out to fit the budget, each with the commands that print it. That includes the
+   verdict's own text: a reason that was shortened, and the unconfirmed instances beyond the first four, are
+   counted here (`tracectl status <id>` prints them whole).
 6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`).
 
 The output for the same recorded session is the same, byte for byte: entities are sorted by the number of their
@@ -94,7 +96,7 @@ Lists are never `null`.
 | `failures` | list | in `seq` order, see below |
 | `mutations` | list | one object per changed entity, see below |
 | `tree` | list | the lines of the call tree in pre-order, see below |
-| `omitted` | list | `section` (`counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out |
+| `omitted` | list | `section` (`verdict`, `counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out. `verdict`: how many of `incomplete_reasons` and `delivery_unconfirmed` are shortened or not listed |
 | `drill_down` | list | `command`, `prints` |
 | `max_bytes` | number | the budget this digest was made for |
 

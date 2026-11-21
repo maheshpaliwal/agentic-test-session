@@ -70,7 +70,7 @@ Prefer the variables for connection strings: flag values show up in the process 
 | `--default-ttl` | `TSESSION_CP_DEFAULT_TTL` | `3600` | Default session time limit, in seconds. |
 | `--allowed-hosts` | `TSESSION_CP_ALLOWED_HOSTS` | loopback only | Extra Host values accepted. |
 | `--allowed-origins` | `TSESSION_CP_ALLOWED_ORIGINS` | none | Browser origins allowed to call the API. |
-| `--delivery-grace` | `TSESSION_CP_DELIVERY_GRACE` | `10s` | How long a drain waits for a service instance that still owes the collector events and gets nowhere (it delivers nothing for any session, and the collector receives nothing from it), and for the delivery report of a connected instance, before the session is sealed incomplete (see "Delivery accounting" in PROTOCOL.md). An instance that is working through a backlog is waited for up to `max_drain_seconds`. Keep it above the SDK's request timeout plus retry interval (3s with the defaults). `0` turns the check off: reports are still stored and shown, and no session is marked incomplete because of them. |
+| `--delivery-grace` | `TSESSION_CP_DELIVERY_GRACE` | `10s` | How long a drain waits for a service instance that still owes the collector events and gets nowhere (it delivers nothing for any session, and the collector receives nothing from it), and for the delivery report of a connected instance whose events of the session the collector has, counted from its last sign of life, before the session is sealed incomplete (see "Delivery accounting" in PROTOCOL.md). A connected instance that took no part is never waited for. An instance that is working through a backlog is waited for up to `max_drain_seconds`. A connected instance of which no report has arrived a tenth of it (1s) after it connected is named in `delivery_unconfirmed`. Keep it above the SDK's request timeout plus retry interval (3s with the defaults). `0` turns the check off: reports are still stored and shown, and no session is marked incomplete because of them. |
 
 ## Dashboard (`cmd/dashboard`)
 
@@ -89,6 +89,18 @@ Prefer the variables for connection strings: flag values show up in the process 
 |---|---|---|
 | `--cp` | `TSESSION_CONTROLPLANE_URL` | `http://127.0.0.1:7070` |
 | `--collector` | `TSESSION_COLLECTOR_URL` | `http://127.0.0.1:7071` |
+
+The gates of `tracectl summary`, `report`, `digest` and `run` exit 3 when they fail:
+
+| Flag | Fails when |
+|---|---|
+| `--fail-on-error` | the session recorded failed events. |
+| `--fail-on-incomplete` | the session is incomplete: dropped or quarantined events, orphaned async work, a failed seal, a drain that timed out, or events a service recorded that did not reach the collector (`incomplete_reasons`). |
+| `--fail-on-empty` | the session recorded no events. |
+| `--fail-on-unconfirmed` | the control plane could not tell whether every event of every service instance reached the collector (`delivery_unconfirmed`): the strict form of the delivery check, like `tsessiontest.RequireDeliveryConfirmed`. For environments where every connected service is yours; in a large shared one a single service whose delivery reports are blocked fails every run. See "Which gate" in PROTOCOL.md. |
+
+The gates give an export opened with `dashboard -open` the exit status they give the live session: the export
+carries the session's verdict (see "Export file" in PROTOCOL.md).
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
 command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or
