@@ -616,7 +616,9 @@ func TestReporterFallsBackToOneReportPerRequest(t *testing.T) {
 	pass()           // asks for the batch endpoint: 404
 	eventually(t, "a stream that does not announce reports", func() bool {
 		s := cp.streams()
-		return len(s) == 2 && s[1] == "" && sub.streaming.Load()
+		// connects: the new stream has delivered its first set, which is when
+		// the reporter starts over (streaming is set a moment before).
+		return len(s) == 2 && s[1] == "" && sub.streaming.Load() && sub.connects.Load() == 2
 	})
 	pass() // asks again on the new stream
 	if posts, hellos, _ := cp.seen(); posts != 2 || hellos != 0 {

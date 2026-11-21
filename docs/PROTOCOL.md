@@ -225,8 +225,8 @@ the session leaves the active set.
   period: `delivery_heartbeat_ms` of the active set, 5s when the control plane does not say. The first is sent
   when a session begins after none. A batch with reports counts as one, so a process that reports that often
   sends none; a process that follows no session, or that polls, sends none. A control plane that has not heard
-  from an instance that follows it and announced reports (`X-Tsession-Delivery-Instance`) for two periods knows
-  that something refuses its reports, from the start or since.
+  from an instance that follows it and announced reports (`X-Tsession-Delivery-Instance`) for two periods lists
+  it as unheard (see the verdict for what that costs a session).
 - **Without the stream** (the SDK polls `GET /v1/active`) it learns of a drain late or not at all, so its reports
   do not wait: the first is sent at once, a change at most once a second.
 - **Failures.** No answer, `5xx`, and any `4xx` but those below (what a proxy in between answers when it refuses
@@ -235,7 +235,19 @@ the session leaves the active set.
   but every 250ms while the report of a draining session waits, so that an outage of the endpoint that ends
   within the drain's grace costs no session its report. The outage is logged once, at the first refusal or the
   second failure in a row, with the control plane's URL without credentials and the status, never the body; at
-  most one outage and its recovery per minute.
+  most one outage and its recovery per minute. A refused request (`4xx`) is not sent again while the active set
+  names no session: it is tried when a session begins, and once on every stream that is opened.
+- **Reports that keep failing.** When its reports have failed for two heartbeat periods (the control plane's
+  grace; it asks once more when that time is up) on a stream on which they arrived before, the SDK opens the
+  stream anew. To the control plane it is then a connection of which nothing has ever arrived, which every
+  session names (see **unheard** below); an instance that was heard of and is merely silent is not named. On
+  the new stream it asks at once, whatever its pause has grown to, so an outage that is just over names
+  nothing. It does this once per outage: a stream on which no report ever arrived is left alone. A time
+  without a session in which nothing was tried does not count as time in which the reports failed; the
+  failures before it do. Two costs, both for a session the instance took part in whose drain is under way at
+  that moment: the new connection is a sign of life, so the drain waits for the instance's report for one more
+  grace (drain rule 2); and for the milliseconds between the two streams the instance is not connected, so a
+  drain that ends in them does not look at it.
 - **Older control planes.** A control plane that takes reports says so in the active set (`delivery_reports`,
   see `GET /v1/active`). From one that does not say so, `404`/`405` to the batch means that it does not know the
   endpoint: the SDK sends one report per request to `POST /v1/sessions/{id}/delivery` (at most 32 per 250ms) and
@@ -283,7 +295,8 @@ instance's own word does not condemn it and does not acquit it:
 | otherwise `R.dropped > 0` | `incomplete`, with a reason |
 | otherwise (`have < R.recorded`) | `incomplete`, with a reason, whether `R` is `final` or the instance went silent |
 | no report for the session, `have > 0`, the instance follows the stream, announced that it reports, had the grace (drain rule 2) and is still connected | `incomplete`, with the reason `the collector has N events from <service>/<instance>, which did not report how many it recorded`: it took part and its report did not arrive, so nothing says whether what the collector has is all it recorded (see "Incomplete with nothing missing" below) |
-| no report for the session, `have = 0` | nothing, with one exception: an instance that follows the stream, announced that it reports, and is **unheard** (see below) is `delivery_unconfirmed`. Something refuses its reports, and whether it took part cannot be known |
+| no report for the session, `have = 0` (or no count for the instance) | nothing, with one exception: an instance that follows the stream, announced that it reports, and of which **nothing has arrived since it connected** (see **unheard** below) is `delivery_unconfirmed`. Something refuses its reports, and whether it took part cannot be known. One that was heard of on its connection and is silent now is not named |
+| no report for the session, `have > 0`, the instance is unheard, and the drain ended (timed out) before it had the grace of drain rule 2 | `delivery_unconfirmed`: the collector has `have` events from it, and whether that is all it recorded is unknown |
 | `have = R.recorded`, not `final`, `R.dropped = 0`, and the instance follows the stream and is unheard | `delivery_unconfirmed`: its last report was in order, and nothing has arrived of it since; whether it recorded more cannot be known |
 | the collector has events from an instance that never reported and does not announce reports (an older SDK), or that is no longer connected | nothing |
 | a report answered `full` (`409` from the per-session endpoint), because the session already stores the reports of 256 instances | the same as for a stored report, by every line above: the control plane keeps the last report of up to 1024 such instances for the verdict (replaced by later ones, waited for in the drain, held against the collector's count) without storing it with the session, so it is not in `delivery`. Of the instances beyond those nothing is kept: one `delivery_unconfirmed` line, "more than 1280 instances reported; the reports of the ones beyond that are not accounted for", and `incomplete` when one of their reports said `dropped > 0`, or was `final` with `buffered > 0` |
@@ -292,9 +305,23 @@ An instance that follows the stream and announced that it reports is **unheard**
 it for too long, neither a report for any session nor a heartbeat: none at all since it connected, a tenth of
 the grace (1s) ago or longer; or none for the grace (10s, two heartbeat periods), in all of which the control
 plane had a session. Without a session an instance sends no heartbeat, so its silence counts from the moment
-there is one. The second case is an instance whose reports arrived at first and are refused since: asked once
-per connection ("has it ever been heard of"), it was never named, and with a wrong collector URL its sessions
-were complete.
+there is one. The grace of the second case counts from the last report or heartbeat that **arrived**, not from
+the moment the instance stopped: a healthy instance's last word is up to a heartbeat period (5s) old, so an
+instance that is frozen, or whose reports fail, for little more than half the grace (6s) can be unheard at
+the end of it. `GET /v1/subscribers` and `tracectl doctor` show both cases (`delivery_unheard`).
+
+What it costs a session differs:
+
+- **Never heard of on its connection**: named under `delivery_unconfirmed` of every session that ends
+  meanwhile, whether it took part or not (the table above). This is an instance whose reports are refused
+  from the start, and one whose reports failed for the grace and that opened its stream anew (see
+  "Reports that keep failing").
+- **Heard of, and silent since**: named only in a session something ties it to, a report of it for the session
+  or events of it at the collector (the table above). In a session it has neither a report nor events for, it
+  says nothing: such an instance is frozen, or its report endpoint is down for a moment, far more often than
+  it is cut off, and naming it put a line into 15 to 84 of 200 sessions of a shared environment in which one
+  idle instance of several froze for 8 to 20 seconds, or the report endpoint was down for 6. The price is the
+  limit "cut off from the control plane altogether" below.
 
 **Incomplete with nothing missing.** Two cases end `incomplete` although the collector may have every event,
 and stay that way by decision, because the control plane cannot know that nothing is missing without the
@@ -302,13 +329,14 @@ report:
 
 - an instance that took part, all of whose events arrived, and whose reports are refused on the way (a proxy
   answering `403` to the POST);
-- an instance that took part, delivered everything, and was frozen for longer than the grace (stopped in a
-  debugger, a suspended container, a host that lost its network without the connection closing) before its
-  report for the session arrived.
+- an instance that took part, delivered everything, and was frozen (stopped in a debugger, a suspended
+  container, a host that lost its network without the connection closing) from before its first report for
+  the session arrived until the grace of drain rule 2 was over: ten seconds after the stop, at the earliest.
 
 The reason says exactly what is known: `the collector has N events from <service>/<instance>, which did not
 report how many it recorded`. The instance's log names the refusal in the first case. An instance in either
-state that took no part costs a session nothing but, at most, a line under `delivery_unconfirmed`.
+state that took no part costs a session nothing but, when its reports are refused, a line under
+`delivery_unconfirmed`.
 
 Without a collector count for an instance that reported, its word is all there is, and a word alone never makes a
 session complete: `dropped > 0`, or `final` with `buffered > 0`, is `incomplete`; everything else that recorded
@@ -365,13 +393,26 @@ whoever can reach the control plane can make a session unconfirmed (see the limi
 - A service whose events reach no collector and whose reports reach no control plane (a wrong collector URL
   behind a proxy that refuses the reports, from the start or from some moment on): `delivery_unconfirmed` while
   it stays connected, as above, and only the strict gate fails. Three cases in which nothing is known: the
-  session ends less than the grace after the last request of the service that arrived, or after the control
-  plane's first session following a time without any began (its silence is not long enough yet); the service
-  polls instead of following the stream; the service is not connected when the session ends.
-- An instance that took part and then cannot run or cannot be reached for longer than the grace before its
-  report for the session arrived: `incomplete` although the collector may have all its events (see "Incomplete
-  with nothing missing"). An instance in that state that took no part is named in `delivery_unconfirmed` of
-  the sessions that end while it has been silent for the grace or longer, and costs them nothing else.
+  reports began to fail in the middle, and the session ends before the SDK has seen them fail for the grace,
+  opened its stream anew, and been connected for a tenth of the grace (about 12s of failing requests with the
+  defaults; a time without a session, in which nothing is tried, does not count); the service polls instead
+  of following the stream; the service is not connected when the session ends.
+- A process that is cut off from the control plane altogether after its first word arrived, its reports and
+  its stream (a half-open connection, a partition that drops packets without closing anything), or that is
+  frozen: it cannot open its stream anew, so it stays "heard of, and silent since", and a session of which it
+  left neither a report nor events at the collector does not name it. If it recorded for that session (a wrong
+  collector URL as well, or frozen holding the events), the session is complete and wrong. This is accepted:
+  the same state without the loss, an idle instance that is frozen or behind a dead connection, is far more
+  common, and used to be named in every session. `delivery_unheard` of `GET /v1/subscribers` and
+  `tracectl doctor` still show it.
+- An instance that took part and then cannot run or cannot be reached. If no report of it for the session had
+  arrived, and it stays that way until the grace of drain rule 2 is over (ten seconds after the stop at the
+  earliest), the session is `incomplete` although the collector may have all its events (see "Incomplete with
+  nothing missing"). If a report of it had arrived that was in order and not `final`, the session is
+  `delivery_unconfirmed` when nothing has arrived of the instance for the grace, **counted from its last report
+  or heartbeat that arrived**: that word is up to 5s old when the instance stops, so six seconds of silence on
+  its side can be enough, not ten. The same six seconds under a session that ends less than the grace after the
+  control plane's first session following a time without any began are not seen.
 - The verdict is about delivery to the collector, not about what the collector did with the events.
 
 **What a caller without credentials can do.** Nothing here is authenticated, like stop, abort and kill: whoever
@@ -379,7 +420,9 @@ can reach the control plane (see hardening below: loopback or an allowed Host, n
 can post reports and open the stream, and whoever can reach the collector's ingest can send events under any
 name. The collector's `/v1/internal/` endpoints (drain-status, instance-counts, seal, delete) answer loopback and
 `--internal-allow` peers only. Each line below is pinned by `TestDeliveryForgery` (integration); that a report
-for another session holds a drain as a new connection does, by `TestDrainSilentParticipant` (controlplane):
+for another session holds a drain as a new connection does, by `TestDrainSilentParticipant` (controlplane); the
+two lines about taking a line out of `delivery_unconfirmed`, by `TestDeliveryUnconfirmedLinesACallerCanRemove`
+(controlplane):
 
 | A caller that can reach | can | cannot |
 |---|---|---|
@@ -387,10 +430,11 @@ for another session holds a drain as a new connection does, by `TestDrainSilentP
 | the control plane | **make a session complete that is incomplete for an instance whose own reports do not arrive** (it took part, the collector has some of its events, something refuses its reports): one `final` report in its name that names as many events as the collector has. The report and the count agree, and nothing says that the instance recorded more | |
 | the control plane | hold a drain up to `max_drain_seconds`, by reporting a rising `delivered` or `delivered_total` for an instance that owes events (the session then ends `incomplete`, timed out) | hold a drain by opening the stream and announcing reports: an instance without events at the collector is not waited for |
 | the control plane | put a line into `delivery_unconfirmed` of every session, by following the stream with `X-Tsession-Delivery-Instance` and never reporting, and so fail every run that uses the strict gate | fail a session that way with the default gate |
-| the control plane | take a line out of `delivery_unconfirmed`: a request in the name of a connected instance whose own reports do not arrive, once per grace, makes it look like one that is merely idle | hide a shortfall, or turn it into `delivery_unconfirmed`, by filling the 256 instances of a session before the real ones report: a report answered `full` is judged like a stored one, `final` or not |
+| the control plane | take a line out of `delivery_unconfirmed`: one request in the name of a connected instance whose own reports do not arrive makes it one that was heard of on its connection, which is not named where it left neither a report nor events | hide a shortfall, or turn it into `delivery_unconfirmed`, by filling the 256 instances of a session before the real ones report: a report answered `full` is judged like a stored one, `final` or not |
+| the control plane | take the line "the collector has M events, more than the N of the instance's last report" out of `delivery_unconfirmed`: a `final` report in the instance's name with the same `recorded` as its last one (and no lower `delivered` or `dropped`) is not stale and makes the kept report `final`, and `have >= recorded` with `final` is complete. The instance recorded after its last report and stopped reporting (killed, say), and nothing says so any more | |
 | the control plane | with 1280 reports of made-up instances (as many requests), keep the report of an instance that reports for the first time after them from being judged. The session then says "more than 1280 instances reported" under `delivery_unconfirmed`, where it would be `incomplete` for an instance that is killed after a report that was not `final` and held events. (A report that names dropped events, or is `final` and holds some, makes the session `incomplete` all the same; and an instance on the stream with events at the collector is `incomplete` as one that did not report) | touch a finished session: reports are `closed` once the drain stops looking |
 | the collector's ingest | **make an incomplete session complete**: events sent in the name (`service`, `instance`) of an instance that lost its own make the collector's count match the instance's report. A count cannot tell forged events from real ones | |
-| the collector's ingest and the control plane's stream | make a session `incomplete` and hold its drain: events in the name of an instance it announces on the stream and never reports for. The drain is held for the grace; and up to `max_drain_seconds` when the caller opens a new stream before it closes the old one, or posts a report for any other session in that name, more often than the grace is long (each is a sign of life; a request without reports is not) | |
+| the collector's ingest and the control plane's stream | make a session `incomplete` and hold its drain: events in the name of an instance it announces on the stream and never reports for. The drain is held for the grace; and up to `max_drain_seconds` when the caller opens a new stream in that name, before or after it closes the old one, or posts a report for any other session in that name, more often than the grace is long (each is a sign of life; a request without reports is not) | |
 | the collector's ingest | crowd the collector's list of instances (more than 512 per session): the control plane then asks by name | make the control plane miss an instance that reported or is connected that way |
 
 A report is at most 4 KiB, a batch 256 reports, and a session keeps the reports of at most 1024 instances beside

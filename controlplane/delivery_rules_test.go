@@ -701,23 +701,66 @@ func TestActiveSetSaysThatReportsAreTaken(t *testing.T) {
 // while a session runs, so a grace without a word names it.
 func TestDeliveryUnheardIsJudgedByTheTimeSinceTheLastWord(t *testing.T) {
 	silence := testGrace + testGrace/4
-	t.Run("heard once, then nothing for the grace: unconfirmed, not waited for", func(t *testing.T) {
+	// The fourth review: an instance that was heard of and is silent now, of
+	// which the session has no report and the collector no events, is frozen
+	// or idle behind an endpoint that is down for a moment far more often than
+	// it is cut off. Named in every session that ended meanwhile, it put a line
+	// into 15 to 84 of 200 sessions it took no part in. The list of followers
+	// still marks it.
+	t.Run("heard once, then nothing for the grace, and nothing ties it to the session: not named", func(t *testing.T) {
+		for _, counting := range []bool{true, false} { // a collector that counts per instance, and one that does not
+			e := newDeliveryEnv(t, testGrace, nil)
+			if counting {
+				e.col.counting()
+			}
+			defer follow(e.m, "orders-api", "o-1")()
+			hello(t, e.m, "orders-api", "o-1")
+			time.Sleep(silence)
+			if subs := e.m.Subscribers(); len(subs) != 1 || !subs[0].DeliveryUnheard {
+				panic(fmt.Sprintf("the list of followers does not mark it: %+v", subs))
+			}
+			s, took := e.stop()
+			wantComplete(t, s)
+			if took >= testGrace/2 {
+				panic(fmt.Sprintf("the drain waited %v for it", took))
+			}
+		}
+	})
+	// What an SDK whose reports have failed for the grace does: it opens its
+	// stream anew. On the new connection nothing of it has ever arrived, and
+	// that is named, in every session.
+	t.Run("the same instance on a new connection, never heard of: unconfirmed", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		e.col.counting()
-		defer follow(e.m, "orders-api", "o-1")()
+		leave := follow(e.m, "orders-api", "o-1")
 		hello(t, e.m, "orders-api", "o-1")
 		time.Sleep(silence)
-		if subs := e.m.Subscribers(); len(subs) != 1 || !subs[0].DeliveryUnheard {
-			panic(fmt.Sprintf("the list of followers does not mark it: %+v", subs))
-		}
+		leave()
+		defer follow(e.m, "orders-api", "o-1")()
+		time.Sleep(testGrace/10 + testGrace/20)
 		s, took := e.stop()
 		if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 ||
-			!strings.HasPrefix(s.DeliveryUnconfirmed[0], "service orders-api (instance o-1): it follows the control plane, but neither a delivery report nor a heartbeat of it has arrived for ") ||
-			!strings.HasSuffix(s.DeliveryUnconfirmed[0], "(its log says why); the collector has no events from it for this session, so whether it recorded any is unknown") {
+			s.DeliveryUnconfirmed[0] != "service orders-api (instance o-1): it follows the control plane, but no delivery report of it has arrived since it connected (its log says why); the collector has no events from it for this session, so whether it recorded any is unknown" {
 			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 		if took >= testGrace/2 {
 			panic(fmt.Sprintf("the drain waited %v for it", took))
+		}
+	})
+	// The collector has its events, and the drain ran out before the instance
+	// had the grace that makes the session incomplete for it (the next case):
+	// its events tie it to the session, so its silence is said.
+	t.Run("the collector has its events and the drain timed out: unconfirmed", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, func(r *StartRequest) { r.MaxDrainSeconds = 10 }) // 100ms, a quarter of the grace
+		e.col.counting().has("orders-api", "o-1", 3)
+		defer follow(e.m, "orders-api", "o-1")()
+		hello(t, e.m, "orders-api", "o-1")
+		time.Sleep(silence)
+		s, _ := e.stop()
+		if !s.DrainTimedOut || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 ||
+			!strings.HasPrefix(s.DeliveryUnconfirmed[0], "service orders-api (instance o-1): it follows the control plane, but neither a delivery report nor a heartbeat of it has arrived for ") ||
+			!strings.HasSuffix(s.DeliveryUnconfirmed[0], "(its log says why); the collector has 3 events from it, so whether that is all it recorded is unknown") {
+			panic(fmt.Sprintf("timed_out=%v reasons=%q unconfirmed=%q", s.DrainTimedOut, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 	})
 	t.Run("the collector has its events: incomplete", func(t *testing.T) {
