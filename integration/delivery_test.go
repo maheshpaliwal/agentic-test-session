@@ -30,15 +30,48 @@ type ingestGate struct {
 	next  http.Handler
 	down  atomic.Bool
 	delay atomic.Int64 // nanoseconds, before the collector sees the request
+	// lo and hi, when hi is set, delay every request by a time between them.
+	lo, hi atomic.Int64
+	// faults are what is wrong for the services that reach the collector
+	// through the path /g/<id>/ only (see fault).
+	faults sync.Map
+}
+
+// gateFault is what is wrong on the way from one service to the collector.
+type gateFault struct {
+	down   atomic.Bool
+	status atomic.Int32 // answer every request with this status
+}
+
+// fault returns the faults of the services configured with path /g/<id>.
+func (g *ingestGate) fault(id string) *gateFault {
+	f, _ := g.faults.LoadOrStore(id, &gateFault{})
+	return f.(*gateFault)
 }
 
 func (g *ingestGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if rest, ok := strings.CutPrefix(r.URL.Path, "/g/"); ok {
+		id, path, _ := strings.Cut(rest, "/")
+		r.URL.Path = "/" + path
+		f := g.fault(id)
+		if f.down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		if code := f.status.Load(); code != 0 {
+			http.Error(w, "refused", int(code))
+			return
+		}
+	}
 	if g.down.Load() {
 		http.Error(w, "down", http.StatusServiceUnavailable)
 		return
 	}
 	if d := time.Duration(g.delay.Load()); d > 0 {
 		time.Sleep(d + time.Duration(rand.Int64N(int64(d)/4+1)))
+	}
+	if lo, hi := g.lo.Load(), g.hi.Load(); hi > 0 {
+		time.Sleep(time.Duration(lo + rand.Int64N(hi-lo+1)))
 	}
 	g.next.ServeHTTP(w, r)
 }
@@ -56,6 +89,7 @@ type deliveryEnv struct {
 	cpURL    string
 	orders   string // address of orders-api
 	tracectl string
+	app      string // the deliveryapp binary
 	procs    []*proc
 }
 
@@ -64,12 +98,27 @@ type deliveryEnv struct {
 // the right one.
 func newDeliveryEnv(t *testing.T, ordersCollector string) *deliveryEnv {
 	t.Helper()
+	e := newDeliveryBase(t)
+	inventory := freeAddr(t)
+	e.orders = freeAddr(t)
+	e.start(e.app, "inventory", inventory, e.gateURL, "")
+	if ordersCollector == "" {
+		ordersCollector = e.gateURL
+	}
+	e.start(e.app, "orders-api", e.orders, ordersCollector, "http://"+inventory)
+	return e
+}
+
+// newDeliveryBase starts the collector, its gate and the control plane, and
+// builds the binaries. It starts no service.
+func newDeliveryBase(t *testing.T) *deliveryEnv {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("builds and runs binaries")
 	}
 	dir := t.TempDir()
 	app := buildBinary(t, dir, "deliveryapp", "integration", "./cmd/deliveryapp")
-	e := &deliveryEnv{t: t, tracectl: buildBinary(t, dir, "tracectl", ".", "./cmd/tracectl")}
+	e := &deliveryEnv{t: t, app: app, tracectl: buildBinary(t, dir, "tracectl", ".", "./cmd/tracectl")}
 
 	col := collector.New(store.NewMem(), collector.Config{Window: 100 * time.Millisecond})
 	colSrv := httptest.NewServer(col.Handler()) // 127.0.0.1
@@ -91,23 +140,21 @@ func newDeliveryEnv(t *testing.T, ordersCollector string) *deliveryEnv {
 		col.Close()
 	})
 	e.colURL, e.gateURL, e.cpURL = colSrv.URL, gateSrv.URL, cpSrv.URL
-
-	inventory := freeAddr(t)
-	e.orders = freeAddr(t)
-	e.start(app, "inventory", inventory, e.gateURL, "")
-	if ordersCollector == "" {
-		ordersCollector = e.gateURL
-	}
-	e.start(app, "orders-api", e.orders, ordersCollector, "http://"+inventory)
 	return e
 }
 
 func (e *deliveryEnv) start(bin, service, addr, collectorURL, downstream string) {
 	e.t.Helper()
+	e.startVia(bin, service, addr, collectorURL, downstream, e.cpURL)
+}
+
+// startVia is start for a service that reaches the control plane at cpURL.
+func (e *deliveryEnv) startVia(bin, service, addr, collectorURL, downstream, cpURL string) *proc {
+	e.t.Helper()
 	p := &proc{name: service, cmd: exec.Command(bin), out: &bytes.Buffer{}}
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	p.cmd.Env = append(os.Environ(), "TSESSION_ENABLED=true", "TSESSION_SERVICE="+service,
-		"TSESSION_CONTROLPLANE_URL="+e.cpURL, "TSESSION_COLLECTOR_URL="+collectorURL,
+		"TSESSION_CONTROLPLANE_URL="+cpURL, "TSESSION_COLLECTOR_URL="+collectorURL,
 		"DELIVERYAPP_LISTEN="+addr, "DELIVERYAPP_DOWNSTREAM_URL="+downstream)
 	if err := p.cmd.Start(); err != nil {
 		e.t.Fatalf("start %s: %v", service, err)
@@ -121,6 +168,7 @@ func (e *deliveryEnv) start(bin, service, addr, collectorURL, downstream string)
 	})
 	waitHealthy(e.t, p, addr)
 	e.procs = append(e.procs, p)
+	return p
 }
 
 // session starts a session and waits until both services were told of it.

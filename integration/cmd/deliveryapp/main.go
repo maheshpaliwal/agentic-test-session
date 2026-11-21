@@ -10,10 +10,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	_ "github.com/maheshpaliwal/agentic-test-session/sdk/autoinit"
 
+	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/thttp"
 )
 
@@ -42,6 +44,16 @@ func main() {
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+		}
+		_, _ = io.WriteString(w, "done\n")
+	})
+	// POST /burst?n=N records N more events in the request's session, for the
+	// tests that need a session with many events (N+1 with the request's own).
+	mux.HandleFunc("POST /burst", func(w http.ResponseWriter, r *http.Request) {
+		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+		for range min(max(n, 0), 100000) {
+			_, sp := core.Begin(r.Context(), core.KindCacheRead, "burst")
+			sp.End()
 		}
 		_, _ = io.WriteString(w, "done\n")
 	})
