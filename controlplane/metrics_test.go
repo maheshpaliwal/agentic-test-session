@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,19 +19,19 @@ func TestMetricsEndpoint(t *testing.T) {
 		t.Helper()
 		resp, err := http.Get(srv.URL + "/metrics")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET /metrics: %d", resp.StatusCode)
+			panic(fmt.Sprintf("GET /metrics: %d", resp.StatusCode))
 		}
 		return string(b)
 	}
 
 	if got := scrape(); !strings.Contains(got, `tsession_controlplane_sessions{state="ACTIVE"} 0`) ||
 		!strings.Contains(got, `tsession_build_info{service="controlplane",`) {
-		t.Fatalf("idle scrape:\n%s", got)
+		panic(fmt.Sprintf("idle scrape:\n%s", got))
 	}
 	a, _ := m.Start(StartRequest{})
 	b, _ := m.Start(StartRequest{QuiesceSeconds: 1})
@@ -40,7 +41,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	m.Stop(b.ID)
 	waitState(t, m, b.ID, StateSealed)
 	if err := m.Delete(context.Background(), a.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m.SetKill(true)
 	_, cancel := m.Subscribe()

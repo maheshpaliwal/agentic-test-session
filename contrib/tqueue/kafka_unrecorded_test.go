@@ -35,7 +35,7 @@ func TestKafkaBatchUnderAWrappedWriterKeepsItsContext(t *testing.T) {
 		pm := !outerBatch
 		if err := ProduceMessagesOpts(ctx, wrapped{w}, KafkaOptions{PerMessageSpans: &pm},
 			kafka.Message{Topic: "orders", Value: []byte(`{"id":1}`)}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		pub := lastPub(t, rec)
 		h := hdrs(w.got[0])
@@ -43,7 +43,7 @@ func TestKafkaBatchUnderAWrappedWriterKeepsItsContext(t *testing.T) {
 			t.Errorf("outerBatch=%v: traceparent = %q, want %q", outerBatch, h[core.KeyTraceparent], tpFor(pub))
 		}
 		if err := ConsumeMessage(context.Background(), w.got[0], noop); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		st := byKind(rec.Events(), core.KindWorkerStart)
 		if len(st) != 1 || st[0].ParentID != pub.SpanID || st[0].TraceID != pub.TraceID {
@@ -66,7 +66,7 @@ func TestKafkaBatchWritesNothingWhenThePublishIsNotRecorded(t *testing.T) {
 	w := &fakeKafka{}
 	f := false
 	if err := ProduceMessagesOpts(ctx, w, KafkaOptions{PerMessageSpans: &f}, kafka.Message{Topic: "orders", Value: []byte(`1`)}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if len(w.got[0].Headers) != 0 {
 		t.Errorf("untraced message got headers: %q", hdrs(w.got[0]))

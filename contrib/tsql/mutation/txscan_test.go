@@ -1,6 +1,9 @@
 package mutation
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // MayControlTx may answer maybe for a text Parse finds no transaction control
 // in, but never no for one it does.
@@ -18,7 +21,7 @@ func FuzzMayControlTx(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		for _, d := range []Dialect{Postgres, MySQL} {
 			if tx := Parse(s, d).Tx; tx != TxNone && !MayControlTx(s, d) {
-				t.Fatalf("dialect %d: scan missed transaction control %d in %q", d, tx, s)
+				panic(fmt.Sprintf("dialect %d: scan missed transaction control %d in %q", d, tx, s))
 			}
 		}
 	})
@@ -27,6 +30,6 @@ func FuzzMayControlTx(f *testing.F) {
 func TestMayControlTxDoesNotAllocate(t *testing.T) {
 	q := "/* app */ INSERT INTO t (note) VALUES ('a; b'), ('c; d'); -- done"
 	if n := testing.AllocsPerRun(100, func() { MayControlTx(q, Postgres) }); n != 0 {
-		t.Fatalf("%v allocations", n)
+		panic(fmt.Sprintf("%v allocations", n))
 	}
 }

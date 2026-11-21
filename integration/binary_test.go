@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -29,7 +30,7 @@ func TestE2E_ExampleAppBinary(t *testing.T) {
 
 	bin := filepath.Join(t.TempDir(), "exampleapp")
 	if out, err := exec.Command("go", "build", "-o", bin, "./cmd/exampleapp").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
+		panic(fmt.Sprintf("build: %v\n%s", err, out))
 	}
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := ln.Addr().String()
@@ -42,7 +43,7 @@ func TestE2E_ExampleAppBinary(t *testing.T) {
 		"EXAMPLEAPP_REDIS_ADDR="+redisAddr, "EXAMPLEAPP_NAMESPACE="+ns)
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Signal(os.Interrupt); _, _ = cmd.Process.Wait() })
 	ready := make(chan struct{})
@@ -58,7 +59,7 @@ func TestE2E_ExampleAppBinary(t *testing.T) {
 	select {
 	case <-ready:
 	case <-time.After(30 * time.Second):
-		t.Fatal("exampleapp did not start")
+		panic("exampleapp did not start")
 	}
 	base := "http://" + addr
 
@@ -66,14 +67,14 @@ func TestE2E_ExampleAppBinary(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond) // subscriber lives in the other process; let it see the session
 	code, raw := doReq(t, "POST", base+"/orders", orderBody{SKU: "widget", Qty: 1, Customer: "bin-cust", Jobs: []string{"flaky_job"}}, s.Header())
 	if code != 201 {
-		t.Fatalf("POST /orders %d %s", code, raw)
+		panic(fmt.Sprintf("POST /orders %d %s", code, raw))
 	}
 	// the binary's exporter is in another process: stop() is what drains; no local Flush.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	info, err := s.StopAndWait(ctx)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs := col.events(t, s.ID)
 	t.Logf("incomplete=%v\n%s", info.Incomplete, fmtSeq(evs))
@@ -102,7 +103,7 @@ func TestE2E_ExampleAppBinary(t *testing.T) {
 		argv := append([]string{"--cp", in.cpSrv.URL, "--collector", in.colSrv.URL, "digest", s.ID}, args...)
 		out, err := exec.Command(tracectl, argv...).Output()
 		if err != nil {
-			t.Fatalf("tracectl digest %v: %v\n%s", args, err, out)
+			panic(fmt.Sprintf("tracectl digest %v: %v\n%s", args, err, out))
 		}
 		return string(out)
 	}

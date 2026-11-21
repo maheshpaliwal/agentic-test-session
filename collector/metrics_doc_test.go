@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -36,15 +37,15 @@ func documentedMetrics(t *testing.T, service string) map[string]metricDoc {
 	t.Helper()
 	b, err := os.ReadFile("../docs/CONFIG.md")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	_, section, ok := strings.Cut(string(b), "\n## Metrics\n")
 	if !ok {
-		t.Fatal(`docs/CONFIG.md has no "## Metrics" section`)
+		panic(`docs/CONFIG.md has no "## Metrics" section`)
 	}
 	_, table, ok := strings.Cut(section, "\n### "+service+"\n")
 	if !ok {
-		t.Fatalf(`the Metrics section of docs/CONFIG.md has no "### %s" table`, service)
+		panic(fmt.Sprintf(`the Metrics section of docs/CONFIG.md has no "### %s" table`, service))
 	}
 	table, _, _ = strings.Cut(table, "\n#") // up to the next heading
 	out := map[string]metricDoc{}
@@ -70,11 +71,11 @@ func TestMetricsAreDocumented(t *testing.T) {
 	c, _ := newC(t, 0, "")
 	var b strings.Builder
 	if _, err := c.tel.reg.WriteTo(&b); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	registered, documented := registeredMetrics(b.String()), documentedMetrics(t, "Collector")
 	if len(registered) == 0 {
-		t.Fatal("no metric is registered")
+		panic("no metric is registered")
 	}
 	for name, r := range registered {
 		d, ok := documented[name]

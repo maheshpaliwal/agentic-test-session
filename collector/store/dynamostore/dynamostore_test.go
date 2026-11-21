@@ -36,7 +36,7 @@ func backends() []backend {
 		t.Helper()
 		s, err := newStore(context.Background(), newFakeDB(), Config{CreateTable: true})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		return s
 	}}}
@@ -52,7 +52,7 @@ func backends() []backend {
 				Region:    region, Endpoint: ep, CreateTable: true,
 			})
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			t.Cleanup(func() {
 				s.db.(*dynamodb.Client).DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &s.table}) //nolint:errcheck
@@ -133,16 +133,16 @@ func TestConcurrentSameSeq(t *testing.T) {
 			close(start)
 			wg.Wait()
 			if wins.Load() != 1 || conflicts.Load() != writers-1 {
-				t.Fatalf("round %d: wins=%d conflicts=%d", round, wins.Load(), conflicts.Load())
+				panic(fmt.Sprintf("round %d: wins=%d conflicts=%d", round, wins.Load(), conflicts.Load()))
 			}
 		}
 		got, err := s.Events(ctx, "race", 0, 0)
 		if err != nil || len(got) != 3 {
-			t.Fatalf("events=%d err=%v", len(got), err)
+			panic(fmt.Sprintf("events=%d err=%v", len(got), err))
 		}
 		for i, e := range got {
 			if e.Seq != uint64(i+1) {
-				t.Fatalf("gap at %d: seq %d", i, e.Seq)
+				panic(fmt.Sprintf("gap at %d: seq %d", i, e.Seq))
 			}
 		}
 	})
@@ -152,26 +152,26 @@ func TestSeqContinuity(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		if err := s.AppendEvents(ctx, "c", run("c", 2, 1)); !errors.Is(err, store.ErrSeqConflict) {
-			t.Fatalf("first seq must be 1: %v", err)
+			panic(fmt.Sprintf("first seq must be 1: %v", err))
 		}
 		if err := s.AppendEvents(ctx, "c", run("c", 1, 3)); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := s.AppendEvents(ctx, "c", run("c", 3, 1)); !errors.Is(err, store.ErrSeqConflict) {
-			t.Fatalf("replayed seq: %v", err)
+			panic(fmt.Sprintf("replayed seq: %v", err))
 		}
 		gap := []core.Event{ev("c", 4), ev("c", 6)}
 		if err := s.AppendEvents(ctx, "c", gap); !errors.Is(err, store.ErrSeqConflict) {
-			t.Fatalf("gap inside batch: %v", err)
+			panic(fmt.Sprintf("gap inside batch: %v", err))
 		}
 		if h, _ := s.Head(ctx, "c"); h != 3 {
-			t.Fatalf("head %d after rejected batches", h)
+			panic(fmt.Sprintf("head %d after rejected batches", h))
 		}
 		if err := s.AppendEvents(ctx, "c", nil); err != nil {
-			t.Fatalf("empty append: %v", err)
+			panic(fmt.Sprintf("empty append: %v", err))
 		}
 		if err := s.AppendEvents(ctx, "c", run("c", 4, 2)); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	})
 }
@@ -181,7 +181,7 @@ func TestBatchCrossesTransactionLimits(t *testing.T) {
 		ctx := context.Background()
 		// 250 events > 100 actions per transaction.
 		if err := s.AppendEvents(ctx, "big", run("big", 1, 250)); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		// Byte-bound split: 12 events of ~700KB gzip-resistant data (~4 items
 		// each) exceed the 4MB transaction size.
@@ -190,26 +190,26 @@ func TestBatchCrossesTransactionLimits(t *testing.T) {
 			evs = append(evs, bigEvent("big", uint64(251+i), 700*1024))
 		}
 		if err := s.AppendEvents(ctx, "big", evs); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if h, _ := s.Head(ctx, "big"); h != 262 {
-			t.Fatalf("head %d", h)
+			panic(fmt.Sprintf("head %d", h))
 		}
 		got, err := s.Events(ctx, "big", 0, 0)
 		if err != nil || len(got) != 262 {
-			t.Fatalf("events=%d err=%v", len(got), err)
+			panic(fmt.Sprintf("events=%d err=%v", len(got), err))
 		}
 		for i, e := range got {
 			if e.Seq != uint64(i+1) {
-				t.Fatalf("order: index %d has seq %d", i, e.Seq)
+				panic(fmt.Sprintf("order: index %d has seq %d", i, e.Seq))
 			}
 		}
 		if string(got[261].Req.Inline) != string(evs[11].Req.Inline) {
-			t.Fatal("payload mismatch")
+			panic("payload mismatch")
 		}
 		l, _ := s.ListSessions(ctx)
 		if len(l) != 1 || l[0].EventCount != 262 || l[0].FirstNs != 1 {
-			t.Fatalf("list %+v", l)
+			panic(fmt.Sprintf("list %+v", l))
 		}
 	})
 }
@@ -220,28 +220,28 @@ func TestLargeEventChunking(t *testing.T) {
 		small := ev("m", 1)
 		huge := bigEvent("m", 2, 3<<20) // 3MB of JSON, ~2.3MB gzipped, 9+ items
 		if err := s.AppendEvents(ctx, "m", []core.Event{small, huge, ev("m", 3)}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		got, err := s.Events(ctx, "m", 0, 0)
 		if err != nil || len(got) != 3 {
-			t.Fatalf("events=%d err=%v", len(got), err)
+			panic(fmt.Sprintf("events=%d err=%v", len(got), err))
 		}
 		if string(got[1].Req.Inline) != string(huge.Req.Inline) || got[2].Seq != 3 {
-			t.Fatal("3MB event did not round trip")
+			panic("3MB event did not round trip")
 		}
 		// from_seq/limit landing on a chunked event.
 		got, _ = s.Events(ctx, "m", 2, 1)
 		if len(got) != 1 || got[0].Seq != 2 || string(got[0].Req.Inline) != string(huge.Req.Inline) {
-			t.Fatalf("limit 1 from 2: %d events", len(got))
+			panic(fmt.Sprintf("limit 1 from 2: %d events", len(got)))
 		}
 		// Beyond the hard maximum: a clear error and nothing written.
 		over := bigEvent("m", 5, 5<<20)
 		err = s.AppendEvents(ctx, "m", []core.Event{ev("m", 4), over})
 		if err == nil || !strings.Contains(err.Error(), "too large") {
-			t.Fatalf("oversized event: %v", err)
+			panic(fmt.Sprintf("oversized event: %v", err))
 		}
 		if h, _ := s.Head(ctx, "m"); h != 3 {
-			t.Fatalf("head %d after rejected batch", h)
+			panic(fmt.Sprintf("head %d after rejected batch", h))
 		}
 	})
 }
@@ -252,7 +252,7 @@ func TestPaginationFromSeqLimit(t *testing.T) {
 		const n = 1200
 		for from := uint64(1); from <= n; from += 100 {
 			if err := s.AppendEvents(ctx, "p", run("p", from, 100)); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		for _, tc := range []struct {
@@ -265,16 +265,16 @@ func TestPaginationFromSeqLimit(t *testing.T) {
 		} {
 			got, err := s.Events(ctx, "p", tc.from, tc.limit)
 			if err != nil || len(got) != tc.ln {
-				t.Fatalf("from=%d limit=%d: got %d err=%v", tc.from, tc.limit, len(got), err)
+				panic(fmt.Sprintf("from=%d limit=%d: got %d err=%v", tc.from, tc.limit, len(got), err))
 			}
 			for i, e := range got {
 				if e.Seq != uint64(tc.first+i) {
-					t.Fatalf("from=%d limit=%d: index %d seq %d", tc.from, tc.limit, i, e.Seq)
+					panic(fmt.Sprintf("from=%d limit=%d: index %d seq %d", tc.from, tc.limit, i, e.Seq))
 				}
 			}
 		}
 		if got, err := s.Events(ctx, "nobody", 0, 0); err != nil || len(got) != 0 {
-			t.Fatalf("unknown session: %v %v", got, err)
+			panic(fmt.Sprintf("unknown session: %v %v", got, err))
 		}
 	})
 }
@@ -291,11 +291,11 @@ func TestTxOutcomesSticky(t *testing.T) {
 		bad.Err = "boom"
 		evs := []core.Event{mk(1, core.KindDBTxRollbck, "a"), mk(2, core.KindDBTxCommit, "a"), bad, mk(4, core.KindDBTxCommit, "b"), mk(5, core.KindDBWrite, "c")}
 		if err := s.AppendEvents(ctx, "t", evs); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		o, err := s.TxOutcomes(ctx, "t")
 		if err != nil || len(o) != 2 || o["a"] || !o["b"] {
-			t.Fatalf("outcomes %v %v", o, err)
+			panic(fmt.Sprintf("outcomes %v %v", o, err))
 		}
 	})
 }
@@ -307,39 +307,39 @@ func TestSealAndListSessions(t *testing.T) {
 			e := run(id, 1, 2)
 			e[0].StartNs, e[1].EndNs = 50, 90
 			if err := s.AppendEvents(ctx, id, e); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		if si, err := s.GetSeal(ctx, "a"); si != nil || err != nil {
-			t.Fatalf("unsealed: %v %v", si, err)
+			panic(fmt.Sprintf("unsealed: %v %v", si, err))
 		}
 		at := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
 		want := store.SealInfo{Incomplete: true, Orphaned: []string{"x", "y"}, BundleURI: "u", SealedAt: at, Quarantined: 2}
 		for i := 0; i < 2; i++ { // idempotent
 			if err := s.PutSeal(ctx, "a", want); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			si, err := s.GetSeal(ctx, "a")
 			if err != nil || si == nil || !si.Incomplete || si.BundleURI != "u" || len(si.Orphaned) != 2 || si.Quarantined != 2 || !si.SealedAt.Equal(at) {
-				t.Fatalf("seal %+v %v", si, err)
+				panic(fmt.Sprintf("seal %+v %v", si, err))
 			}
 		}
 		if err := s.PutSeal(ctx, "a", store.SealInfo{BundleURI: "v", SealedAt: at}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if si, _ := s.GetSeal(ctx, "a"); si.BundleURI != "v" || si.Incomplete || len(si.Orphaned) != 0 {
-			t.Fatalf("overwrite %+v", si)
+			panic(fmt.Sprintf("overwrite %+v", si))
 		}
 		if err := s.PutSeal(ctx, "ghost", want); err != nil { // sealed with no events
-			t.Fatal(err)
+			panic(err)
 		}
 		l, err := s.ListSessions(ctx)
 		if err != nil || len(l) != 2 {
-			t.Fatalf("list %+v %v", l, err)
+			panic(fmt.Sprintf("list %+v %v", l, err))
 		}
 		if l[0] != (store.SessionInfo{ID: "a", EventCount: 2, FirstNs: 2, LastNs: 90, Sealed: true}) ||
 			l[1] != (store.SessionInfo{ID: "b", EventCount: 2, FirstNs: 2, LastNs: 90}) {
-			t.Fatalf("list %+v", l)
+			panic(fmt.Sprintf("list %+v", l))
 		}
 	})
 }
@@ -349,17 +349,17 @@ func TestContextAndClose(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		if err := s.AppendEvents(ctx, "x", run("x", 1, 1)); err == nil {
-			t.Fatal("cancelled context must fail")
+			panic("cancelled context must fail")
 		}
 		if _, err := s.Events(ctx, "x", 0, 0); err == nil {
-			t.Fatal("cancelled context must fail")
+			panic("cancelled context must fail")
 		}
 		if err := s.AppendEvents(context.Background(), "", run("", 1, 1)); err == nil {
-			t.Fatal("empty session id must fail")
+			panic("empty session id must fail")
 		}
 		for range 2 { // repeatable
 			if err := s.Close(); err != nil {
-				t.Fatalf("Close must be a no-op: %v", err)
+				panic(fmt.Sprintf("Close must be a no-op: %v", err))
 			}
 		}
 	})
@@ -369,13 +369,13 @@ func TestEnsureTable(t *testing.T) {
 	ctx := context.Background()
 	f := newFakeDB()
 	if _, err := newStore(ctx, f, Config{TableName: "t"}); err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("missing table without CreateTable: %v", err)
+		panic(fmt.Sprintf("missing table without CreateTable: %v", err))
 	}
 	if _, err := newStore(ctx, f, Config{TableName: "t", CreateTable: true}); err != nil || f.creates != 1 {
-		t.Fatalf("create: %v creates=%d", err, f.creates)
+		panic(fmt.Sprintf("create: %v creates=%d", err, f.creates))
 	}
 	if _, err := newStore(ctx, f, Config{TableName: "t", CreateTable: true}); err != nil || f.creates != 1 {
-		t.Fatalf("existing table: %v creates=%d", err, f.creates)
+		panic(fmt.Sprintf("existing table: %v creates=%d", err, f.creates))
 	}
 }
 
@@ -384,18 +384,18 @@ func TestEncodeEventScalars(t *testing.T) {
 	e.Kind, e.TxID, e.Err = core.KindDBTxCommit, "tx1", "failed"
 	enc, err := encodeEvent("s", &e)
 	if err != nil || len(enc.items) != 1 {
-		t.Fatalf("%v %d", err, len(enc.items))
+		panic(fmt.Sprintf("%v %d", err, len(enc.items)))
 	}
 	it := enc.items[0]
 	if getS(it, aSK) != "E#00000000000000000007" || getS(it, aKind) != "db.tx.commit" || getS(it, aTxID) != "tx1" ||
 		getS(it, aService) != "svc" || getI(it, aStartNs) != 7 || getI(it, aEndNs) != 8 {
-		t.Fatalf("item %v", it)
+		panic(fmt.Sprintf("item %v", it))
 	}
 	if v, ok := it[aTxEff]; !ok || fmt.Sprint(v) == "" {
-		t.Fatal("tx_eff missing")
+		panic("tx_eff missing")
 	}
 	if !(contSK(7, 1) > eventSK(7) && contSK(7, 1) < eventSK(8) && contSK(7, 12) < eventSK(8)) {
-		t.Fatal("sort key order")
+		panic("sort key order")
 	}
 }
 
@@ -407,24 +407,24 @@ func TestDeleteSessionPagesAndRetries(t *testing.T) {
 	db.unprocessed = 3
 	s, err := newStore(ctx, db, Config{CreateTable: true})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	const sid, keep = "ts_del", "ts_keep"
 	// 60 small events plus one chunked event: well over one page (7) and one batch (25).
 	if err := s.AppendEvents(ctx, sid, run(sid, 1, 60)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := s.AppendEvents(ctx, sid, []core.Event{bigEvent(sid, 61, 700*1024)}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := s.PutSeal(ctx, sid, store.SealInfo{SealedAt: time.Now()}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := s.AppendEvents(ctx, keep, run(keep, 1, 3)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := s.DeleteSession(ctx, sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	db.mu.Lock()
 	for k := range db.items {
@@ -435,15 +435,15 @@ func TestDeleteSessionPagesAndRetries(t *testing.T) {
 	calls := db.batchCalls
 	db.mu.Unlock()
 	if calls < 4 {
-		t.Fatalf("expected several BatchWriteItem calls (chunking + retries), got %d", calls)
+		panic(fmt.Sprintf("expected several BatchWriteItem calls (chunking + retries), got %d", calls))
 	}
 	if evs, err := s.Events(ctx, keep, 0, 0); err != nil || len(evs) != 3 {
-		t.Fatalf("unrelated session damaged: %d %v", len(evs), err)
+		panic(fmt.Sprintf("unrelated session damaged: %d %v", len(evs), err))
 	}
 	// A cancelled context stops the delete instead of spinning.
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if err := s.DeleteSession(cctx, keep); err == nil {
-		t.Fatal("expected an error from a cancelled delete")
+		panic("expected an error from a cancelled delete")
 	}
 }

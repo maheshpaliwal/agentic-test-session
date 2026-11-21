@@ -33,7 +33,7 @@ func benchRoundTrip(b *testing.B, traced bool) {
 		req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 		resp, err := cl.Do(req)
 		if err != nil {
-			b.Fatal(err)
+			panic(err)
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()

@@ -39,6 +39,31 @@ const (
 // running, or a binding is held by another active session (error text carries the conflicting id).
 var ErrConflict = errors.New("tsession: conflicts with a running session")
 
+// StatusError is the error of a request the service answered with a status
+// that is not 2xx. Callers that act on the status (a 404 for a session the
+// control plane no longer knows, an endpoint an older service lacks) read
+// Code through errors.As or StatusCode instead of the text.
+type StatusError struct {
+	Method, Path string
+	Code         int    // the HTTP status code
+	Status       string // the status line, "404 Not Found"
+	Message      string // the service's own message
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("tsession: %s %s: %s: %s", e.Method, e.Path, e.Status, e.Message)
+}
+
+// StatusCode returns the HTTP status of err if it is, or wraps, a
+// StatusError, and 0 otherwise.
+func StatusCode(err error) int {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code
+	}
+	return 0
+}
+
 // Options configure Start. Zero values use control-plane defaults.
 type Options struct {
 	BaseURL string // default $TSESSION_CONTROLPLANE_URL or DefaultURL
@@ -508,7 +533,7 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 		if resp.StatusCode == http.StatusConflict && method == http.MethodPost && path == "/v1/sessions" {
 			return nil, fmt.Errorf("%w: %s", ErrConflict, e.Error)
 		}
-		return nil, fmt.Errorf("tsession: %s %s: %s: %s", method, path, resp.Status, e.Error)
+		return nil, &StatusError{Method: method, Path: path, Code: resp.StatusCode, Status: resp.Status, Message: e.Error}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
@@ -583,7 +608,7 @@ func (s *Session) WaitPropagated(ctx context.Context) (int, error) {
 			switch {
 			case ctx.Err() != nil:
 				return connected, ctx.Err()
-			case strings.Contains(err.Error(), ": 404 "):
+			case StatusCode(err) == http.StatusNotFound:
 				return 0, nil
 			}
 			return connected, err

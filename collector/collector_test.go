@@ -45,12 +45,12 @@ func post(t *testing.T, url string, evs ...core.Event) IngestResult {
 	t.Helper()
 	resp, err := http.Post(url+"/v1/ingest", ctProto, bytes.NewReader(protoBody(t, evs...)))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	var r IngestResult
 	if resp.StatusCode != 200 {
-		t.Fatalf("status %d", resp.StatusCode)
+		panic(fmt.Sprintf("status %d", resp.StatusCode))
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
@@ -60,14 +60,14 @@ func get(t *testing.T, url string, out any) {
 	t.Helper()
 	resp, err := http.Get(url)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("GET %s: %d", url, resp.StatusCode)
+		panic(fmt.Sprintf("GET %s: %d", url, resp.StatusCode))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -75,7 +75,7 @@ func events(t *testing.T, c *Collector) []core.Event {
 	t.Helper()
 	evs, err := c.st.Events(context.Background(), sid, 0, 0)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return evs
 }
@@ -86,15 +86,15 @@ func TestOutOfOrderSorted(t *testing.T) {
 	post(t, srv.URL, ev("c", core.KindAPIIn, 30, 3), ev("a", core.KindAPIIn, 10, 1))
 	post(t, srv.URL, ev("b", core.KindAPIIn, 20, 2))
 	if _, err := c.seq.Flush(context.Background(), sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	got := events(t, c)
 	if len(got) != 3 {
-		t.Fatalf("got %d events", len(got))
+		panic(fmt.Sprintf("got %d events", len(got)))
 	}
 	for i, want := range []string{"a", "b", "c"} {
 		if got[i].SpanID != want || got[i].Seq != uint64(i+1) {
-			t.Fatalf("pos %d: span=%s seq=%d", i, got[i].SpanID, got[i].Seq)
+			panic(fmt.Sprintf("pos %d: span=%s seq=%d", i, got[i].SpanID, got[i].Seq))
 		}
 	}
 }
@@ -104,10 +104,10 @@ func TestTieBreakByService(t *testing.T) {
 	a, b := ev("a", core.KindAPIIn, 5, 9), ev("b", core.KindAPIIn, 5, 1)
 	a.Service, b.Service = "alpha", "beta"
 	if _, err := c.Ingest(context.Background(), "", []core.Event{b, a}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got := events(t, c); got[0].SpanID != "a" {
-		t.Fatalf("service tiebreak failed: %v", got[0].SpanID)
+		panic(fmt.Sprintf("service tiebreak failed: %v", got[0].SpanID))
 	}
 }
 
@@ -115,18 +115,18 @@ func TestDuplicateIngestIgnored(t *testing.T) {
 	c, srv := newC(t, 0, "")
 	e := ev("a", core.KindAPIIn, 1, 1)
 	if r := post(t, srv.URL, e, e); r.Accepted != 1 || r.Duplicates != 1 {
-		t.Fatalf("first: %+v", r)
+		panic(fmt.Sprintf("first: %+v", r))
 	}
 	if r := post(t, srv.URL, e); r.Accepted != 0 || r.Duplicates != 1 {
-		t.Fatalf("second: %+v", r)
+		panic(fmt.Sprintf("second: %+v", r))
 	}
 	if n := len(events(t, c)); n != 1 {
-		t.Fatalf("stored %d", n)
+		panic(fmt.Sprintf("stored %d", n))
 	}
 	// dedupe survives a sequencer restart (state reloaded from the store)
 	c.seq.evictAll()
 	if r := post(t, srv.URL, e); r.Duplicates != 1 {
-		t.Fatalf("after restart: %+v", r)
+		panic(fmt.Sprintf("after restart: %+v", r))
 	}
 }
 
@@ -147,15 +147,15 @@ func TestGaplessSeqConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	if _, err := c.seq.Flush(context.Background(), sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	got := events(t, c)
 	if len(got) != workers*per {
-		t.Fatalf("got %d", len(got))
+		panic(fmt.Sprintf("got %d", len(got)))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("gap at %d: seq %d", i, e.Seq)
+			panic(fmt.Sprintf("gap at %d: seq %d", i, e.Seq))
 		}
 	}
 }
@@ -166,21 +166,21 @@ func TestLedgerAndOrphans(t *testing.T) {
 	var ds DrainStatus
 	get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 	if ds.Pending != 2 || ds.EventCount != 2 {
-		t.Fatalf("drain %+v", ds)
+		panic(fmt.Sprintf("drain %+v", ds))
 	}
 	w := ev("w1", core.KindWorkerEnd, 3, 3)
 	w.LinkIDs = []string{"pub1"}
 	post(t, srv.URL, w)
 	get(t, srv.URL+"/v1/internal/sessions/"+sid+"/drain-status", &ds)
 	if ds.Pending != 1 {
-		t.Fatalf("drain %+v", ds)
+		panic(fmt.Sprintf("drain %+v", ds))
 	}
 	res, err := c.Seal(context.Background(), sid)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if !res.Incomplete || len(res.Orphaned) != 1 || res.Orphaned[0] != "pub2" {
-		t.Fatalf("seal %+v", res)
+		panic(fmt.Sprintf("seal %+v", res))
 	}
 	var out struct {
 		Events []core.Event `json:"events"`
@@ -188,7 +188,7 @@ func TestLedgerAndOrphans(t *testing.T) {
 	}
 	get(t, srv.URL+"/v1/sessions/"+sid+"/events", &out)
 	if !out.Sealed || len(out.Events[1].Flags) != 1 || out.Events[1].Flags[0] != "orphaned" {
-		t.Fatalf("orphan flag missing: %+v", out)
+		panic(fmt.Sprintf("orphan flag missing: %+v", out))
 	}
 }
 
@@ -200,7 +200,7 @@ func TestWorkerBeforePublisher(t *testing.T) {
 	_, _ = c.Ingest(context.Background(), "", []core.Event{ev("pub1", core.KindQueuePub, 2, 2)})
 	res, _ := c.Seal(context.Background(), sid)
 	if res.Incomplete || len(res.Orphaned) != 0 {
-		t.Fatalf("%+v", res)
+		panic(fmt.Sprintf("%+v", res))
 	}
 }
 
@@ -233,19 +233,19 @@ func TestTxEffective(t *testing.T) {
 	}
 	m := eff()
 	if m["w1"] != "true" || m["w2"] != "false" || m["f"] != "true" || m["w3"] != "nil" {
-		t.Fatalf("live: %v", m)
+		panic(fmt.Sprintf("live: %v", m))
 	}
 	if _, err := c.Seal(context.Background(), sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if m = eff(); m["w3"] != "false" {
-		t.Fatalf("sealed: %v", m)
+		panic(fmt.Sprintf("sealed: %v", m))
 	}
 	// stored events are untouched
 	for _, e := range events(t, c) {
 		for _, mu := range e.Mutations {
 			if mu.Effective != nil {
-				t.Fatal("store was mutated")
+				panic("store was mutated")
 			}
 		}
 	}
@@ -255,7 +255,7 @@ func mustView(t *testing.T, c *Collector) []core.Event {
 	t.Helper()
 	v, err := c.viewOf(context.Background(), sid)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return v.evs
 }
@@ -277,18 +277,18 @@ func TestTraceTreeWithLinkedWorker(t *testing.T) {
 	var tr Trace
 	get(t, srv.URL+"/v1/sessions/"+sid+"/trace", &tr)
 	if len(tr.Roots) != 1 || tr.Roots[0].Event.SpanID != "api" {
-		t.Fatalf("roots: %+v", tr.Roots)
+		panic(fmt.Sprintf("roots: %+v", tr.Roots))
 	}
 	kids := tr.Roots[0].Children
 	if len(kids) != 2 || kids[0].Event.SpanID != "db" || kids[1].Event.SpanID != "pub" {
-		t.Fatalf("children: %+v", kids)
+		panic(fmt.Sprintf("children: %+v", kids))
 	}
 	pubN := kids[1]
 	if len(pubN.Children) != 0 || len(pubN.Linked) != 1 || pubN.Linked[0].Event.SpanID != "ws" {
-		t.Fatalf("pub node: children=%d linked=%d", len(pubN.Children), len(pubN.Linked))
+		panic(fmt.Sprintf("pub node: children=%d linked=%d", len(pubN.Children), len(pubN.Linked)))
 	}
 	if ch := pubN.Linked[0].Children; len(ch) != 1 || ch[0].Event.SpanID != "we" {
-		t.Fatalf("worker nesting: %+v", ch)
+		panic(fmt.Sprintf("worker nesting: %+v", ch))
 	}
 }
 
@@ -306,22 +306,22 @@ func TestEntitiesAndSummary(t *testing.T) {
 	var ents []Entity
 	get(t, srv.URL+"/v1/sessions/"+sid+"/entities", &ents)
 	if len(ents) != 1 || ents[0].MutationCount != 2 || ents[0].PK != `{"id":42}` {
-		t.Fatalf("%+v", ents)
+		panic(fmt.Sprintf("%+v", ents))
 	}
 	var h EntityHistory
 	get(t, srv.URL+"/v1/sessions/"+sid+"/entities/postgres/orders/42", &h)
 	if len(h.Mutations) != 2 || h.Mutations[0].Seq != 1 || h.Mutations[1].Op != "update" || len(h.Mutations[1].Diff) != 1 {
-		t.Fatalf("%+v", h)
+		panic(fmt.Sprintf("%+v", h))
 	}
 	var s Summary
 	get(t, srv.URL+"/v1/sessions/"+sid+"/summary", &s)
 	if s.EventCount != 2 || s.ByKind["db.write"] != 2 || s.Mutations["postgres"]["orders"] != 2 || len(s.Failures) != 1 {
-		t.Fatalf("%+v", s)
+		panic(fmt.Sprintf("%+v", s))
 	}
 	var list []store.SessionInfo
 	get(t, srv.URL+"/v1/sessions", &list)
 	if len(list) != 1 || list[0].ID != sid || list[0].EventCount != 2 {
-		t.Fatalf("%+v", list)
+		panic(fmt.Sprintf("%+v", list))
 	}
 }
 
@@ -331,34 +331,34 @@ func TestSealBundleHash(t *testing.T) {
 	post(t, srv.URL, ev("b", core.KindAPIIn, 2, 2), ev("a", core.KindAPIIn, 1, 1))
 	resp, err := http.Post(srv.URL+"/v1/internal/sessions/"+sid+"/seal", "application/json", nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var res SealResult
 	_ = json.NewDecoder(resp.Body).Decode(&res)
 	resp.Body.Close()
 	if res.Incomplete || res.Orphaned == nil || !strings.HasPrefix(res.BundleURI, "file://") {
-		t.Fatalf("%+v", res)
+		panic(fmt.Sprintf("%+v", res))
 	}
 	bdir := strings.TrimPrefix(res.BundleURI, "file://")
 	data, err := os.ReadFile(filepath.Join(bdir, "events.ndjson"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var man Manifest
 	mb, _ := os.ReadFile(filepath.Join(bdir, "manifest.json"))
 	if err := json.Unmarshal(mb, &man); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	sum := sha256.Sum256(data)
 	if man.Files[0].SHA256 != hex.EncodeToString(sum[:]) || man.EventCount != 2 || bytes.Count(data, []byte("\n")) != 2 {
-		t.Fatalf("manifest mismatch: %+v", man)
+		panic(fmt.Sprintf("manifest mismatch: %+v", man))
 	}
 	if !strings.Contains(strings.SplitN(string(data), "\n", 2)[0], `"span_id":"a"`) {
-		t.Fatal("bundle not in seq order")
+		panic("bundle not in seq order")
 	}
 	// idempotent
 	if r2, _ := c.Seal(context.Background(), sid); r2.BundleURI != res.BundleURI {
-		t.Fatalf("re-seal differs: %+v", r2)
+		panic(fmt.Sprintf("re-seal differs: %+v", r2))
 	}
 }
 
@@ -376,28 +376,28 @@ func TestIngestLimitsAndValidation(t *testing.T) {
 	big.Name = strings.Repeat("a", 1000)
 	code, r := postRaw(protoBody(t, ev("a", core.KindAPIIn, 1, 1), big, ev("b", core.KindAPIIn, 2, 2)))
 	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_message"] != 1 {
-		t.Fatalf("oversize: %d %+v", code, r)
+		panic(fmt.Sprintf("oversize: %d %+v", code, r))
 	}
 	// oversize last message
 	code, r = postRaw(protoBody(t, ev("c", core.KindAPIIn, 3, 3), big))
 	if code != 200 || r.Accepted != 1 || r.RejectedReasons["oversize_message"] != 1 {
-		t.Fatalf("oversize tail: %d %+v", code, r)
+		panic(fmt.Sprintf("oversize tail: %d %+v", code, r))
 	}
 	// whole body limit still 413
 	if code, _ = postRaw(bytes.Repeat([]byte{1, 0}, 4000)); code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("big body: %d", code)
+		panic(fmt.Sprintf("big body: %d", code))
 	}
 	bad := ev("y", core.KindAPIIn, 1, 1)
 	bad.SessionID = "../etc"
 	code, r = postRaw(append(protoBody(t, bad), 3, 0x07, 0x07, 0x07)) // second message is well-framed, not protobuf
 	if code != 200 || r.Accepted != 0 || r.Rejected != 2 || r.RejectedReasons["invalid_session_id"] != 1 || r.RejectedReasons["invalid_proto"] != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 }
 
 func TestDefaults(t *testing.T) {
 	d := DefaultConfig()
 	if d.Window != 500*time.Millisecond || d.MaxMessageBytes != 4<<20 || d.IdleEvict != 5*time.Minute {
-		t.Fatalf("%+v", d)
+		panic(fmt.Sprintf("%+v", d))
 	}
 }

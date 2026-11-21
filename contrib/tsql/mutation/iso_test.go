@@ -1,6 +1,7 @@
 package mutation
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -113,7 +114,7 @@ func FuzzIsolationScan(f *testing.F) {
 				continue
 			}
 			if !containsFold(s, "isolation") {
-				t.Fatalf("dialect %d: %q sets a level without the word", d, s)
+				panic(fmt.Sprintf("dialect %d: %q sets a level without the word", d, s))
 			}
 		}
 	})
@@ -135,10 +136,10 @@ func containsFold(s, word string) bool {
 func TestMentionsIsolationDoesNotAllocate(t *testing.T) {
 	q := "/* app */ INSERT INTO t (note) VALUES ('a; b'), ('c; d'); -- done"
 	if MentionsIsolation(q) {
-		t.Fatal("found the word")
+		panic("found the word")
 	}
 	if n := testing.AllocsPerRun(100, func() { MentionsIsolation(q) }); n != 0 {
-		t.Fatalf("%v allocations", n)
+		panic(fmt.Sprintf("%v allocations", n))
 	}
 }
 

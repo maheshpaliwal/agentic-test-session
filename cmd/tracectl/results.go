@@ -271,7 +271,9 @@ func printEntities(w io.Writer, ents []client.Entity) {
 		if pk == "{}" || pk == "" { // "{}" is still the value to pass to "history"
 			pk = "{} " + unknownKey
 		}
-		line := fmt.Sprintf("%-10s %-28s %-30s %d mutation(s)", e.Store, clip(e.Entity, 28), clip(pk, 30), e.MutationCount)
+		// The key is printed whole: it is what "history" takes, and a masked
+		// Redis key ("session:#1f2e3d4c5b6a") is useless when cut.
+		line := fmt.Sprintf("%-10s %-28s %-30s %d mutation(s)", e.Store, clip(e.Entity, 28), pk, e.MutationCount)
 		if e.Uncertain > 0 { // the key or row image of that many is incomplete: "history" shows the flags
 			line += fmt.Sprintf(", %d uncertain", e.Uncertain)
 		}

@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -145,7 +146,7 @@ func (e *partialEnv) stored(sid string) (n int, ordered bool, dropped uint64) {
 	e.t.Helper()
 	evs, err := e.st.Store.Events(context.Background(), sid, 1, 0)
 	if err != nil {
-		e.t.Fatal(err)
+		panic(err)
 	}
 	seen, last := map[uint64]bool{}, uint64(0)
 	ordered = true
@@ -221,14 +222,14 @@ func TestFailingSessionDoesNotStarveOthers(t *testing.T) {
 		env.exact(sid, false)
 	}
 	if n, _, _ := env.stored("ts_bad"); n != 0 {
-		t.Fatalf("%d events of the failing session were stored", n)
+		panic(fmt.Sprintf("%d events of the failing session were stored", n))
 	}
 
 	// Once its partition is back the failing session is delivered too: what
 	// the ring still holds in order, the rest reported as dropped.
 	env.st.fail("ts_bad", false)
 	if !env.exp.Flush(30 * time.Second) {
-		t.Fatal("Flush did not empty the ring after the session recovered")
+		panic("Flush did not empty the ring after the session recovered")
 	}
 	env.settle("ts_bad")
 	env.exact("ts_bad", true)
@@ -247,13 +248,13 @@ func TestStoreOutageLosesNothing(t *testing.T) {
 		env.record("ts_old")
 	}
 	if !env.exp.Flush(5 * time.Second) {
-		t.Fatal("warm-up flush failed")
+		panic("warm-up flush failed")
 	}
 	env.st.down.Store(true)
 	high := env.run([]string{"ts_new"}, []string{"ts_old"})
 	env.st.down.Store(false)
 	if !env.exp.Flush(30 * time.Second) {
-		t.Fatal("Flush did not empty the ring after the store came back")
+		panic("Flush did not empty the ring after the store came back")
 	}
 	env.settle("ts_new", "ts_old")
 	t.Logf("ring high-water %d during a %ds store outage", high, env.secs)

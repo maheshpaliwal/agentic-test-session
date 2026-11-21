@@ -48,6 +48,6 @@ func TestCloseIsBoundedWithRequestStuckInStore(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		close(h.release)
 		<-closed
-		t.Fatal("Close still blocked 3s after it began with ShutdownTimeout=100ms")
+		panic("Close still blocked 3s after it began with ShutdownTimeout=100ms")
 	}
 }

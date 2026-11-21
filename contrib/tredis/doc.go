@@ -162,6 +162,22 @@
 //     ("session:abcdefgh");
 //   - an e-mail address or a phone number as a segment ("user:<address>");
 //   - a secret name in the middle of a '/' path ("cache/session/<token>");
+//   - a name joined to its secret by something other than ':' and the
+//     separators the rule knows ("session|<token>", "session%3A<token>",
+//     "app.session.<token>"), and a name that is not ASCII;
+//   - a secret stored under a name that says nothing ("note"): a value is
+//     masked only under a sensitive name, as "key=value" with one, as a
+//     bearer token, or when it is a JSON Web Token on its own;
+//   - the text of a script (EVAL, FUNCTION LOAD), which is recorded as
+//     written, with any key or secret that is typed into it, and what a
+//     script returns after reading a sensitive field of a key whose name
+//     says nothing;
+//   - numbers about a sensitive value: its length (STRLEN, HSTRLEN) and its
+//     bits (GETBIT, BITCOUNT).
+//
+// So a recording can still hold a credential. Treat an export as test data
+// that may contain secrets, and keep real credentials out of the
+// environments you record.
 //
 // and they mask segments that hold no secret: the 42 of "auth:user:42", the
 // address of "rate:session:10.0.0.1". List the keys of the first kind with
@@ -208,7 +224,12 @@
 // "tokens:<user>"; or matching a WithRedactKeys glob) has its values masked
 // in arguments, replies and images, and so has a hash or stream field with a
 // sensitive name; other values are scrubbed for JSON fields, key=value pairs
-// and bearer tokens with sensitive names. On top of that:
+// and bearer tokens with sensitive names. The names that only mark a key's
+// secret PART (session, sess, sid) do not make its value sensitive: under
+// "session:<token>" the token is masked and the stored value is recorded as
+// it is, since a session's content is ordinary application data as often as
+// not. Where it is not, list the key: WithRedactKeys("session:*"). On top of
+// that:
 //
 //   - Replies. HVALS has no field names to tell which values are sensitive
 //     and learning them would cost a round trip, so its values are always

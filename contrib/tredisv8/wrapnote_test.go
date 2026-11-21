@@ -2,6 +2,7 @@ package tredisv8
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -31,10 +32,10 @@ func TestWrapBeforeStartIsNoted(t *testing.T) {
 	}
 	rec, ctx := start(t)
 	if err := c.Set(ctx, "k", "v", 0).Err(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("%d events from a client wrapped before the start: the note would be wrong", n)
+		panic(fmt.Sprintf("%d events from a client wrapped before the start: the note would be wrong", n))
 	}
 }
 
@@ -47,10 +48,10 @@ func TestHookBeforeStartRecords(t *testing.T) {
 	}
 	rec, ctx := start(t)
 	if err := c.Set(ctx, "k", "v", 0).Err(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if n := len(rec.Events()); n != 1 {
-		t.Fatalf("%d events from a hook installed before the start, want 1", n)
+		panic(fmt.Sprintf("%d events from a hook installed before the start, want 1", n))
 	}
 }
 

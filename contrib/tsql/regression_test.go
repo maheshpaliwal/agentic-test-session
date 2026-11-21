@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func drain(t *testing.T, rows interface {
 }, err error) {
 	t.Helper()
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for rows.Next() {
 	}
@@ -52,16 +53,16 @@ func TestCaptureLeavesCallerDeadline(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	if _, err := db.ExecContext(dctx, "DELETE FROM t WHERE id = $1", 1); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if d := time.Since(start); d > 600*time.Millisecond {
-		t.Fatalf("capture used %v of an 800ms deadline", d)
+		panic(fmt.Sprintf("capture used %v of an 800ms deadline", d))
 	}
 	if dctx.Err() != nil {
-		t.Fatal("caller deadline exhausted by capture")
+		panic("caller deadline exhausted by capture")
 	}
 	if e := byKind(rec.Events(), core.KindDBWrite)[0]; !hasFlag(e, "image_timeout") || len(e.Mutations) != 1 {
-		t.Fatalf("flags %v mutations %d", e.Flags, len(e.Mutations))
+		panic(fmt.Sprintf("flags %v mutations %d", e.Flags, len(e.Mutations)))
 	}
 }
 
@@ -73,14 +74,14 @@ func TestCaptureSkippedWhenDeadlineIsTight(t *testing.T) {
 	dctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
 	defer cancel()
 	if _, err := db.ExecContext(dctx, "DELETE FROM t WHERE id = $1", 1); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if s := sqls(f.RawCalls()); s != "DELETE FROM t WHERE id = $1\n" {
-		t.Fatalf("capture ran despite a tight deadline:\n%s", s)
+		panic(fmt.Sprintf("capture ran despite a tight deadline:\n%s", s))
 	}
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	if !hasFlag(e, "image_skipped:deadline") || e.Attrs["image_skip_reason"] != "deadline" || len(e.Mutations) != 1 {
-		t.Fatalf("flags %v attrs %v", e.Flags, e.Attrs)
+		panic(fmt.Sprintf("flags %v attrs %v", e.Flags, e.Attrs))
 	}
 }
 
@@ -96,10 +97,10 @@ func TestAliasedSensitiveColumnIsMasked(t *testing.T) {
 		e := byKind(rec.Events(), core.KindDBRead)[0]
 		mustNotLeak(t, e, "hunter2")
 		if s := string(e.Reads[0].Sample.Inline); !strings.Contains(s, `"id":1`) || !strings.Contains(s, `"p":"[REDACTED]"`) {
-			t.Fatalf("sample %s", s)
+			panic(fmt.Sprintf("sample %s", s))
 		}
 		if hasFlag(e, "rows_redacted_conservatively") {
-			t.Fatalf("only the aliased column needs masking: %v", e.Flags)
+			panic(fmt.Sprintf("only the aliased column needs masking: %v", e.Flags))
 		}
 	})
 	t.Run("alias through subquery", func(t *testing.T) {
@@ -123,7 +124,7 @@ func TestAliasedSensitiveColumnIsMasked(t *testing.T) {
 		e := byKind(rec.Events(), core.KindDBRead)[0]
 		mustNotLeak(t, e, "HUNTER2")
 		if !hasFlag(e, "rows_redacted_conservatively") {
-			t.Fatalf("flags %v", e.Flags)
+			panic(fmt.Sprintf("flags %v", e.Flags))
 		}
 	})
 	t.Run("sensitive column only in WHERE keeps the sample", func(t *testing.T) {
@@ -136,7 +137,7 @@ func TestAliasedSensitiveColumnIsMasked(t *testing.T) {
 		drain(t, rows, err)
 		e := byKind(rec.Events(), core.KindDBRead)[0]
 		if s := string(e.Reads[0].Sample.Inline); s != `[{"id":1,"n":3}]` {
-			t.Fatalf("sample %s", s)
+			panic(fmt.Sprintf("sample %s", s))
 		}
 	})
 	t.Run("alias in RETURNING", func(t *testing.T) {
@@ -153,7 +154,7 @@ func TestAliasedSensitiveColumnIsMasked(t *testing.T) {
 		e := byKind(rec.Events(), core.KindDBWrite)[0]
 		mustNotLeak(t, e, "SECRETKEY")
 		if len(e.Mutations) != 1 {
-			t.Fatalf("mutations %d", len(e.Mutations))
+			panic(fmt.Sprintf("mutations %d", len(e.Mutations)))
 		}
 	})
 }
@@ -174,25 +175,25 @@ func TestErrorTextIsRedacted(t *testing.T) {
 	db := open(t, f, "mysql", tsql.WithImages(false))
 	_, err := db.ExecContext(ctx, "INSERT INTO users (id, api_token) VALUES (?, ?)", 1, "tok_live_abc123")
 	if err == nil || !strings.Contains(err.Error(), "tok_live_abc123") {
-		t.Fatalf("the application must still get the original error, got %v", err)
+		panic(fmt.Sprintf("the application must still get the original error, got %v", err))
 	}
 	db.ExecContext(ctx, "UPDATE users SET token = ? WHERE id = ?", "tok_live_abc123", 1)
 	if _, err := db.QueryContext(ctx, "SELECT * FROM missing"); err == nil {
-		t.Fatal("expected error")
+		panic("expected error")
 	}
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	for _, e := range ws {
 		mustNotLeak(t, e, "tok_live_abc123")
 		if !strings.Contains(e.Err, core.RedactedValue) {
-			t.Fatalf("err %q", e.Err)
+			panic(fmt.Sprintf("err %q", e.Err))
 		}
 	}
 	if !strings.Contains(ws[0].Err, "Error 1062 (23000): Duplicate entry") {
-		t.Fatalf("error lost its shape: %q", ws[0].Err)
+		panic(fmt.Sprintf("error lost its shape: %q", ws[0].Err))
 	}
 	// nothing sensitive in the statement: the message is kept verbatim
 	if e := byKind(rec.Events(), core.KindDBRead)[0]; e.Err != "Error 1146 (42S02): Table 'db.missing' doesn't exist" {
-		t.Fatalf("err %q", e.Err)
+		panic(fmt.Sprintf("err %q", e.Err))
 	}
 }
 
@@ -208,10 +209,10 @@ func TestWriteCTEOuterRowsAreNotImages(t *testing.T) {
 	drain(t, rows, err)
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	if len(e.Mutations) != 1 {
-		t.Fatalf("mutations %d", len(e.Mutations))
+		panic(fmt.Sprintf("mutations %d", len(e.Mutations)))
 	}
 	if m := e.Mutations[0]; m.Op != "update" || !m.After.IsZero() || len(m.Diff) != 0 {
-		t.Fatalf("outer query row recorded as an image: after=%s diff=%v", m.After.Inline, m.Diff)
+		panic(fmt.Sprintf("outer query row recorded as an image: after=%s diff=%v", m.After.Inline, m.Diff))
 	}
 }
 
@@ -229,7 +230,7 @@ func TestReturningBeyondMaxRowsIsFlagged(t *testing.T) {
 	drain(t, rows, err)
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	if len(e.Mutations) != 50 || !hasFlag(e, "mutations_truncated") {
-		t.Fatalf("mutations=%d flags=%v", len(e.Mutations), e.Flags)
+		panic(fmt.Sprintf("mutations=%d flags=%v", len(e.Mutations), e.Flags))
 	}
 }
 
@@ -237,14 +238,14 @@ func TestTruncateEveryListedTable(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, &fakeDB{}, "postgres")
 	if _, err := db.ExecContext(ctx, "TRUNCATE TABLE a, public.b"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var got []string
 	for _, m := range byKind(rec.Events(), core.KindDBWrite)[0].Mutations {
 		got = append(got, m.Op+":"+m.Entity)
 	}
 	if strings.Join(got, ",") != "truncate:a,truncate:b" {
-		t.Fatalf("mutations %v", got)
+		panic(fmt.Sprintf("mutations %v", got))
 	}
 }
 
@@ -267,17 +268,17 @@ func TestDiffOfTruncatedValuesIsFlagged(t *testing.T) {
 	}}
 	db := open(t, f, "postgres")
 	if _, err := db.ExecContext(ctx, "UPDATE docs SET body = $1 WHERE id = $2", long+"NEW", 1); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := db.ExecContext(ctx, "UPDATE orders SET status = $1 WHERE id = $2", "x", 1); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	if !hasFlag(ws[0], "diff_truncated") {
-		t.Fatalf("flags %v", ws[0].Flags)
+		panic(fmt.Sprintf("flags %v", ws[0].Flags))
 	}
 	if hasFlag(ws[1], "diff_truncated") {
-		t.Fatalf("short values flagged: %v", ws[1].Flags)
+		panic(fmt.Sprintf("short values flagged: %v", ws[1].Flags))
 	}
 }
 
@@ -309,19 +310,19 @@ func TestRawTxControlVariants(t *testing.T) {
 			db.SetMaxOpenConns(1)
 			for _, s := range c.stmts {
 				if _, err := db.ExecContext(ctx, s); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			}
 			f.mu.Lock()
 			f.calls = nil
 			f.mu.Unlock()
 			if _, err := db.ExecContext(ctx, update); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			s := sqls(f.RawCalls())
 			savepoint, own := strings.Contains(s, "SAVEPOINT ts_capture"), strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED")
 			if savepoint != c.inTx || own == c.inTx {
-				t.Fatalf("inTx=%v but capture ran:\n%s", c.inTx, s)
+				panic(fmt.Sprintf("inTx=%v but capture ran:\n%s", c.inTx, s))
 			}
 		})
 	}
@@ -332,33 +333,33 @@ func TestUnwrap(t *testing.T) {
 	f := &fakeDB{}
 	db := open(t, f, "postgres")
 	if got := tsql.UnwrapDriver(db.Driver()); got != driver.Driver(f) {
-		t.Fatalf("UnwrapDriver = %T", got)
+		panic(fmt.Sprintf("UnwrapDriver = %T", got))
 	}
 	if got := tsql.UnwrapDriver(f); got != driver.Driver(f) {
-		t.Fatalf("unwrapped driver changed: %T", got)
+		panic(fmt.Sprintf("unwrapped driver changed: %T", got))
 	}
 	c, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer c.Close()
 	err = c.Raw(func(dc any) error {
 		if _, ok := dc.(*fakeConn); ok {
-			t.Fatal("expected a wrapped connection")
+			panic("expected a wrapped connection")
 		}
 		inner, ok := tsql.UnwrapConn(dc).(*fakeConn)
 		if !ok {
-			t.Fatalf("UnwrapConn = %T", tsql.UnwrapConn(dc))
+			panic(fmt.Sprintf("UnwrapConn = %T", tsql.UnwrapConn(dc)))
 		}
 		if tsql.UnwrapConn(inner) != driver.Conn(inner) {
-			t.Fatal("an unwrapped connection must be returned as is")
+			panic("an unwrapped connection must be returned as is")
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if tsql.UnwrapConn("not a conn") != nil {
-		t.Fatal("non-conn must yield nil")
+		panic("non-conn must yield nil")
 	}
 }

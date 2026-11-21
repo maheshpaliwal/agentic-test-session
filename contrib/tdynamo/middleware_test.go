@@ -3,6 +3,7 @@ package tdynamo
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -64,22 +65,22 @@ func TestPutItemInjectsAndStrips(t *testing.T) {
 	in := &dynamodb.PutItemInput{TableName: aws.String("t"), Item: map[string]types.AttributeValue{"id": s("1"), "v": n("2")}}
 	out, err := c.PutItem(ctx, in)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if in.ReturnValues != "" || out.Attributes != nil {
-		t.Fatal("caller input/response must be unchanged")
+		panic("caller input/response must be unchanged")
 	}
 	if !strings.Contains(st.reqs[0], `"ReturnValues":"ALL_OLD"`) {
-		t.Fatalf("not injected: %s", st.reqs[0])
+		panic(fmt.Sprintf("not injected: %s", st.reqs[0]))
 	}
 	ev := rec.Events()
 	if len(ev) != 1 || ev[0].Kind != core.KindDBWrite || ev[0].Name != "PutItem t" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	m := ev[0].Mutations[0]
 	if m.Store != "dynamodb" || m.Entity != "t" || m.Op != "update" || m.PK["id"] != "1" ||
 		!strings.Contains(string(m.Before.Inline), `"v":1`) || !strings.Contains(string(m.After.Inline), `"v":2`) {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 }
 
@@ -88,14 +89,14 @@ func TestCallerReturnValuesRespected(t *testing.T) {
 	out, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String("t"),
 		Key: map[string]types.AttributeValue{"id": s("1")}, ReturnValues: types.ReturnValueAllOld})
 	if err != nil || out.Attributes == nil {
-		t.Fatal("caller asked for ALL_OLD and must receive it", err)
+		panic(fmt.Sprint("caller asked for ALL_OLD and must receive it", err))
 	}
 	if strings.Count(st.reqs[0], "ReturnValues") != 1 {
-		t.Fatal(st.reqs[0])
+		panic(st.reqs[0])
 	}
 	m := rec.Events()[0].Mutations[0]
 	if m.Op != "delete" || m.PK["id"] != "1" || m.Before.IsZero() {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 }
 
@@ -105,14 +106,14 @@ func TestUpdateItemAllNewAndOld(t *testing.T) {
 		UpdateExpression: aws.String("SET v = :v"), ExpressionAttributeValues: map[string]types.AttributeValue{":v": n("9")}}
 	out, err := c.UpdateItem(ctx, in)
 	if err != nil || out.Attributes != nil {
-		t.Fatal(err, out.Attributes)
+		panic(fmt.Sprint(err, out.Attributes))
 	}
 	if !strings.Contains(st.reqs[0], `"ALL_NEW"`) {
-		t.Fatal(st.reqs[0])
+		panic(st.reqs[0])
 	}
 	m := rec.Events()[0].Mutations[0]
 	if !strings.Contains(string(m.After.Inline), `"v":9`) || !m.Before.IsZero() || m.PK["id"] != "1" {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 }
 
@@ -129,24 +130,24 @@ func TestReadsAndSchemaLearning(t *testing.T) {
 		return `{"Count":2,"ScannedCount":2,"Items":[{"id":{"S":"a"}},{"id":{"S":"b"}}]}`
 	})
 	if _, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("t")}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("t"), Key: map[string]types.AttributeValue{"id": s("1")}})
 	c.Query(ctx, &dynamodb.QueryInput{TableName: aws.String("t"), KeyConditionExpression: aws.String("id = :i")})
 	c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"), Item: map[string]types.AttributeValue{"id": s("z")}})
 	ev := rec.Events()
 	if len(ev) != 3 { // DescribeTable is not traced
-		t.Fatalf("events=%d", len(ev))
+		panic(fmt.Sprintf("events=%d", len(ev)))
 	}
 	if ev[0].Kind != core.KindDBRead || ev[0].Reads[0].RowCount != 1 {
-		t.Fatalf("%+v", ev[0])
+		panic(fmt.Sprintf("%+v", ev[0]))
 	}
 	if q := ev[1].Reads[0]; q.RowCount != 2 || len(q.PKs) != 2 {
-		t.Fatalf("%+v", q)
+		panic(fmt.Sprintf("%+v", q))
 	}
 	m := ev[2].Mutations[0]
 	if m.Op != "insert" || m.PK["id"] != "z" {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 }
 
@@ -159,16 +160,16 @@ func TestBatchWriteAndErrorAndNoSession(t *testing.T) {
 		{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{"id": s("2")}}},
 	}}})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := rec.Events()[0]
 	if len(e.Mutations) != 1 || e.Mutations[0].Op != "put" || e.Mutations[0].PK["id"] != "1" || len(e.Flags) != 1 {
-		t.Fatalf("%+v", e)
+		panic(fmt.Sprintf("%+v", e))
 	}
 	// no session in ctx: no events, input left alone
 	c.PutItem(context.Background(), &dynamodb.PutItemInput{TableName: aws.String("t")})
 	if len(rec.Events()) != 1 {
-		t.Fatal("unexpected event without session")
+		panic("unexpected event without session")
 	}
 }
 
@@ -176,7 +177,7 @@ func TestMiddlewareIdempotent(t *testing.T) {
 	c, st, rec, ctx := setup(t, func(string) string { return `{}` })
 	_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"), Item: map[string]types.AttributeValue{"id": s("1")}}, WithTracing())
 	if err != nil || len(rec.Events()) != 1 || len(st.reqs) != 1 {
-		t.Fatalf("events=%d err=%v", len(rec.Events()), err)
+		panic(fmt.Sprintf("events=%d err=%v", len(rec.Events()), err))
 	}
 }
 
@@ -190,7 +191,7 @@ func TestPlaceholdersResolvedAndRedacted(t *testing.T) {
 		ExpressionAttributeValues: map[string]types.AttributeValue{":pw": s("hunter2-secret"), ":nm": s("bob"), ":t2": s("tok-123")},
 	})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"), Item: map[string]types.AttributeValue{
 		"id": s("2"), "password": s("pw-item-1"), "profile": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"token": s("tok-nested")}}}})
@@ -239,7 +240,7 @@ func TestInjectedReturnValuesStrippedEvenIfFinishPanics(t *testing.T) {
 	} {
 		attrs, err := call()
 		if err != nil || attrs != nil {
-			t.Fatalf("injected attributes leaked after finish panic: %v %v", attrs, err)
+			panic(fmt.Sprintf("injected attributes leaked after finish panic: %v %v", attrs, err))
 		}
 	}
 	_ = rec

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ func TestResyncKeepsHeldEventsDeduplicated(t *testing.T) {
 	ingest(t, c, ev("x", core.KindDBRead, 10, 1))
 	waitStored(t, st, 1, 2*time.Second)
 	if err := st.DeleteSession(ctx, sid); err != nil { // another writer deleted the session
-		t.Fatal(err)
+		panic(err)
 	}
 	ingest(t, c, ev("a", core.KindDBRead, 100, 2))
 	time.Sleep(150 * time.Millisecond)
@@ -25,13 +26,13 @@ func TestResyncKeepsHeldEventsDeduplicated(t *testing.T) {
 	waitStored(t, st, 1, 2*time.Second)              // a flushed alone (conflict -> resync)
 	res, err := c.Ingest(ctx, "i1", []core.Event{b}) // the exporter resends b
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := c.seq.Flush(ctx, sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	spans := storedSpans(t, st)
 	if res.Duplicates != 1 || len(spans) != 2 {
-		t.Fatalf("resend: %+v; stored %v (want duplicates=1 and [a b])", res, spans)
+		panic(fmt.Sprintf("resend: %+v; stored %v (want duplicates=1 and [a b])", res, spans))
 	}
 }

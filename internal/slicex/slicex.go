@@ -31,27 +31,6 @@ func Map[E, R any](s []E, fn func(E) R) []R {
 	return out
 }
 
-// FilterMap applies fn to every element of s and keeps the results for which fn reports true.
-// The result is nil when nothing is kept.
-func FilterMap[E, R any](s []E, fn func(E) (R, bool)) []R {
-	var out []R
-	for _, v := range s {
-		if r, ok := fn(v); ok {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// ToMap indexes s by key. When two elements share a key the later one wins.
-func ToMap[E any, K comparable](s []E, key func(E) K) map[K]E {
-	out := make(map[K]E, len(s))
-	for _, v := range s {
-		out[key(v)] = v
-	}
-	return out
-}
-
 // SortBy sorts s in place, ascending by key. The sort is not stable.
 func SortBy[S ~[]E, E any, K cmp.Ordered](s S, key func(E) K) {
 	slices.SortFunc(s, func(a, b E) int { return cmp.Compare(key(a), key(b)) })

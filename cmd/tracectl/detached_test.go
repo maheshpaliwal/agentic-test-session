@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,17 +14,17 @@ func TestResultsOfASessionTheControlPlaneForgot(t *testing.T) {
 	env := newResultsEnv(t)
 	code, out, e := env.tc("summary", "ts_forgotten0001")
 	if code != 0 || !strings.Contains(out, "events     4 over 50ms") {
-		t.Fatalf("summary by id of a forgotten session: %d %s\n%s", code, e, out)
+		panic(fmt.Sprintf("summary by id of a forgotten session: %d %s\n%s", code, e, out))
 	}
 	if code, out, _ := env.tc("events", "ts_forgotten0001", "--limit", "1"); code != 0 || !strings.Contains(out, "1 of 4 events") {
-		t.Fatalf("events: %d\n%s", code, out)
+		panic(fmt.Sprintf("events: %d\n%s", code, out))
 	}
 	// Whether its seal failed is not known any more, so that gate cannot pass.
 	if code, _, e := env.tc("summary", "ts_forgotten0001", "--fail-on-incomplete"); code != exitCheckFailed || !strings.Contains(e, "no longer knows") {
-		t.Fatalf("--fail-on-incomplete on a forgotten session: %d %s", code, e)
+		panic(fmt.Sprintf("--fail-on-incomplete on a forgotten session: %d %s", code, e))
 	}
 	if code, _, e := env.tc("report", "ts_forgotten0001", "--fail-on-incomplete"); code != exitCheckFailed || !strings.Contains(e, "no longer knows") {
-		t.Fatalf("report --fail-on-incomplete on a forgotten session: %d %s", code, e)
+		panic(fmt.Sprintf("report --fail-on-incomplete on a forgotten session: %d %s", code, e))
 	}
 	// The collector answers for any id, with nothing: a mistyped id must stay an error, not
 	// read as an empty session that passes every gate.
@@ -32,16 +33,16 @@ func TestResultsOfASessionTheControlPlaneForgot(t *testing.T) {
 	for _, args := range [][]string{{"summary", "ts_typo0001", "--fail-on-error", "--fail-on-incomplete"}, {"events", "ts_typo0001"},
 		{"report", "ts_typo0001", "--fail-on-error"}, {"export", "ts_typo0001"}} {
 		if code, out, e := env.tc(args...); code != 1 || !strings.Contains(e, "404") {
-			t.Fatalf("%v with an unknown id: exit %d\n%s\n%s", args, code, out, e)
+			panic(fmt.Sprintf("%v with an unknown id: exit %d\n%s\n%s", args, code, out, e))
 		}
 	}
 	env.sum = held
 	// A name cannot be resolved without the control plane, and lifecycle commands still need it.
 	if code, _, e := env.tc("summary", "no-such-name"); code != 1 || !strings.Contains(e, "no session named") {
-		t.Fatalf("unknown name: %d %s", code, e)
+		panic(fmt.Sprintf("unknown name: %d %s", code, e))
 	}
 	if code, _, _ := env.tc("stop", "ts_forgotten0001"); code == 0 {
-		t.Fatal("stop of a session the control plane does not know must fail")
+		panic("stop of a session the control plane does not know must fail")
 	}
 }
 
@@ -52,7 +53,7 @@ func TestEmptySessionReferenceIsRefused(t *testing.T) {
 	env.tc("start", "--name", "run-1")
 	for _, cmd := range []string{"summary", "stop", "delete", "status"} {
 		if code, _, e := env.tc(cmd, ""); code != 1 || !strings.Contains(e, "a session id or name is required") {
-			t.Fatalf("%s with an empty reference: %d %s", cmd, code, e)
+			panic(fmt.Sprintf("%s with an empty reference: %d %s", cmd, code, e))
 		}
 	}
 }
@@ -62,9 +63,9 @@ func TestStartIDOnly(t *testing.T) {
 	env := newResultsEnv(t)
 	code, out, e := env.tc("start", "--name", "run-1", "--id-only")
 	if code != 0 || e != "" || !strings.HasPrefix(out, "ts_") || strings.Count(out, "\n") != 1 || strings.ContainsAny(out, "{ \"") {
-		t.Fatalf("start --id-only: %d %q %q", code, out, e)
+		panic(fmt.Sprintf("start --id-only: %d %q %q", code, out, e))
 	}
 	if code, _, e := env.tc("status", strings.TrimSpace(out)); code != 0 {
-		t.Fatalf("the printed id does not resolve: %d %s", code, e)
+		panic(fmt.Sprintf("the printed id does not resolve: %d %s", code, e))
 	}
 }

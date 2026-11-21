@@ -3,6 +3,7 @@ package tsql_test
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestTxControlOutsideSessionIsTracked(t *testing.T) {
 				db := open(t, f, "postgres")
 				conn, err := db.Conn(context.Background())
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				defer conn.Close()
 				for i, s := range c.stmts {
@@ -90,22 +91,22 @@ func TestTxControlOutsideSessionIsTracked(t *testing.T) {
 						}
 					}
 					if err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 				}
 				if n := len(rec.Events()); n != 0 {
-					t.Fatalf("statements outside a session recorded %d events", n)
+					panic(fmt.Sprintf("statements outside a session recorded %d events", n))
 				}
 				f.mu.Lock()
 				f.calls = nil
 				f.mu.Unlock()
 				if _, err := conn.ExecContext(sessCtx, update); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				s := sqls(f.RawCalls())
 				savepoint, own := strings.Contains(s, "SAVEPOINT ts_capture"), strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED")
 				if savepoint != c.inTx || own == c.inTx {
-					t.Fatalf("inTx=%v but capture ran:\n%s", c.inTx, s)
+					panic(fmt.Sprintf("inTx=%v but capture ran:\n%s", c.inTx, s))
 				}
 			})
 		}
@@ -128,13 +129,13 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 	bg := context.Background()
 
 	if _, err := db.ExecContext(bg, "BEGIN"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("BEGIN outside a session recorded %d events", n)
+		panic(fmt.Sprintf("BEGIN outside a session recorded %d events", n))
 	}
 	if _, err := db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	// Every statement the driver saw, in order: both captures (before and
 	// after image) are fenced with a savepoint inside the application's
@@ -151,29 +152,29 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 	}
 	if got := sqls(f.RawCalls()); got != strings.Join(want, "\n")+"\n" {
-		t.Fatalf("driver saw:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+		panic(fmt.Sprintf("driver saw:\n%s\nwant:\n%s", got, strings.Join(want, "\n")))
 	}
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	if len(ws) != 1 || len(ws[0].Mutations) != 1 || hasFlag(ws[0], "image_skipped") || hasFlag(ws[0], "image_failed") {
-		t.Fatalf("write events: %+v", ws)
+		panic(fmt.Sprintf("write events: %+v", ws))
 	}
 	if m := ws[0].Mutations[0]; m.Op != "update" || jsonMap(t, m.Before)["a"] != float64(0) {
-		t.Fatalf("mutation %+v", m)
+		panic(fmt.Sprintf("mutation %+v", m))
 	}
 
 	f.mu.Lock()
 	f.calls = nil
 	f.mu.Unlock()
 	if _, err := db.ExecContext(bg, "COMMIT"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") || strings.Contains(s, "SAVEPOINT ts_capture") {
-		t.Fatalf("after COMMIT capture runs in its own read-only tx:\n%s", s)
+		panic(fmt.Sprintf("after COMMIT capture runs in its own read-only tx:\n%s", s))
 	}
 	if n := len(rec.Events()); n != 2 {
-		t.Fatalf("events = %d, want the two UPDATE spans only", n)
+		panic(fmt.Sprintf("events = %d, want the two UPDATE spans only", n))
 	}
 }

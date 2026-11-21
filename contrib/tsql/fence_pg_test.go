@@ -24,12 +24,12 @@ func rtRawConn(t *testing.T) *sql.Conn {
 	t.Helper()
 	db, err := sql.Open("pgx", rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { db.Close() })
 	c, err := db.Conn(context.Background())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
@@ -44,7 +44,7 @@ func rtShow(t *testing.T, q rtQueryer, query string) string {
 	t.Helper()
 	var s sql.NullString
 	if err := q.QueryRowContext(context.Background(), query).Scan(&s); err != nil {
-		t.Fatalf("%s: %v", query, err)
+		panic(fmt.Sprintf("%s: %v", query, err))
 	}
 	if !s.Valid {
 		return "NULL"
@@ -56,7 +56,7 @@ func rtMustExec(t *testing.T, q rtQueryer, stmts ...string) {
 	t.Helper()
 	for _, s := range stmts {
 		if _, err := q.ExecContext(context.Background(), s); err != nil {
-			t.Fatalf("%s: %v", s, err)
+			panic(fmt.Sprintf("%s: %v", s, err))
 		}
 	}
 }
@@ -82,20 +82,20 @@ func TestPGFactRollbackToSavepointRevertsSetLocal(t *testing.T) {
 				rtMustExec(t, c, "SET LOCAL statement_timeout = '3s'")
 			}
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != app.want {
-				t.Fatalf("before: %q", got)
+				panic(fmt.Sprintf("before: %q", got))
 			}
 			rtMustExec(t, c, "SAVEPOINT ts_capture", "SET LOCAL statement_timeout = 500")
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != "500ms" {
-				t.Fatalf("inside: %q", got)
+				panic(fmt.Sprintf("inside: %q", got))
 			}
 			rtMustExec(t, c, "ROLLBACK TO SAVEPOINT ts_capture", "RELEASE SAVEPOINT ts_capture")
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != app.want {
-				t.Fatalf("after ROLLBACK TO + RELEASE: %q, want %q", got, app.want)
+				panic(fmt.Sprintf("after ROLLBACK TO + RELEASE: %q, want %q", got, app.want))
 			}
 			// The contrast: RELEASE without the rollback keeps the capture's value.
 			rtMustExec(t, c, "SAVEPOINT ts_capture", "SET LOCAL statement_timeout = 500", "RELEASE SAVEPOINT ts_capture")
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != "500ms" {
-				t.Fatalf("after RELEASE only: %q, want the leaked 500ms", got)
+				panic(fmt.Sprintf("after RELEASE only: %q, want the leaked 500ms", got))
 			}
 			rtMustExec(t, c, "ROLLBACK")
 		})
@@ -118,36 +118,36 @@ func TestPGFactMultiStatementFence(t *testing.T) {
 	// inside a transaction
 	rtMustExec(t, c, "BEGIN", "SAVEPOINT ts_capture; SET LOCAL statement_timeout = 100")
 	if got := rtShow(t, c, "SHOW statement_timeout"); got != "100ms" {
-		t.Fatalf("inside: %q", got)
+		panic(fmt.Sprintf("inside: %q", got))
 	}
 	start := time.Now()
 	if err := sleep(); err == nil || !strings.Contains(err.Error(), "57014") {
-		t.Fatalf("pg_sleep under the fence: %v, want a statement timeout", err)
+		panic(fmt.Sprintf("pg_sleep under the fence: %v, want a statement timeout", err))
 	}
 	if d := time.Since(start); d > 400*time.Millisecond {
-		t.Fatalf("timeout fired after %v", d)
+		panic(fmt.Sprintf("timeout fired after %v", d))
 	}
 	// the failed SELECT aborted the subtransaction only
 	rtMustExec(t, c, "ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture")
 	if got := rtShow(t, c, "SHOW statement_timeout"); got != "0" {
-		t.Fatalf("after: %q", got)
+		panic(fmt.Sprintf("after: %q", got))
 	}
 	if _, err := c.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ts_capture"); err == nil {
-		t.Fatal("the savepoint must be gone")
+		panic("the savepoint must be gone")
 	}
 	rtMustExec(t, c, "ROLLBACK")
 
 	// autocommit
 	rtMustExec(t, c, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 100")
 	if err := sleep(); err == nil || !strings.Contains(err.Error(), "57014") {
-		t.Fatalf("pg_sleep under the fence: %v, want a statement timeout", err)
+		panic(fmt.Sprintf("pg_sleep under the fence: %v, want a statement timeout", err))
 	}
 	rtMustExec(t, c, "ROLLBACK")
 	if got := rtShow(t, c, "SHOW statement_timeout"); got != "0" {
-		t.Fatalf("after: %q", got)
+		panic(fmt.Sprintf("after: %q", got))
 	}
 	if got := rtShow(t, c, "SHOW transaction_read_only"); got != "off" {
-		t.Fatalf("read only after: %q", got)
+		panic(fmt.Sprintf("read only after: %q", got))
 	}
 }
 
@@ -164,13 +164,13 @@ func TestPGFactTimeoutSetInsideTheStatementIsNotInForce(t *testing.T) {
 	err := c.QueryRowContext(ctx,
 		"WITH ts AS MATERIALIZED (SELECT set_config('statement_timeout', '100', true) AS v) SELECT pg_sleep($1)::text FROM ts", 0.5).Scan(&v)
 	if err != nil {
-		t.Fatalf("expected the sleep to finish (the timeout is not in force): %v", err)
+		panic(fmt.Sprintf("expected the sleep to finish (the timeout is not in force): %v", err))
 	}
 	if d := time.Since(start); d < 450*time.Millisecond {
-		t.Fatalf("slept only %v", d)
+		panic(fmt.Sprintf("slept only %v", d))
 	}
 	if got := rtShow(t, c, "SHOW statement_timeout"); got != "100ms" {
-		t.Fatalf("the setting applies only from the next statement on: %q", got)
+		panic(fmt.Sprintf("the setting applies only from the next statement on: %q", got))
 	}
 	rtMustExec(t, c, "ROLLBACK")
 }
@@ -185,10 +185,10 @@ func TestPGFactMultiStatementNeedsSimpleProtocol(t *testing.T) {
 	ctx := context.Background()
 	rtMustExec(t, c, "BEGIN")
 	if _, err := c.PrepareContext(ctx, "SAVEPOINT ts_capture; SET LOCAL statement_timeout = 100"); err == nil || !strings.Contains(err.Error(), "42601") {
-		t.Fatalf("prepare of two statements: %v, want a syntax error", err)
+		panic(fmt.Sprintf("prepare of two statements: %v, want a syntax error", err))
 	}
 	if _, err := c.ExecContext(ctx, "SELECT 1"); err == nil || !strings.Contains(err.Error(), "25P02") {
-		t.Fatalf("the transaction should be aborted: %v", err)
+		panic(fmt.Sprintf("the transaction should be aborted: %v", err))
 	}
 	rtMustExec(t, c, "ROLLBACK")
 }
@@ -203,12 +203,12 @@ func TestPGFactOneFenceCannotCoverTheApplicationStatement(t *testing.T) {
 	ctx := context.Background()
 	rtMustExec(t, c, "BEGIN", "SAVEPOINT ts_capture; SET LOCAL statement_timeout = 100")
 	if _, err := c.ExecContext(ctx, "UPDATE tsql_fact SET v = 'b' WHERE id = 1 AND (SELECT pg_sleep(0.3)) IS NOT NULL"); err == nil || !strings.Contains(err.Error(), "57014") {
-		t.Fatalf("a slow application statement inside the fence: %v, want it cut by the capture timeout", err)
+		panic(fmt.Sprintf("a slow application statement inside the fence: %v, want it cut by the capture timeout", err))
 	}
 	rtMustExec(t, c, "ROLLBACK TO SAVEPOINT ts_capture", "UPDATE tsql_fact SET v = 'b' WHERE id = 1",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture")
 	if got := rtShow(t, c, "SELECT v FROM tsql_fact WHERE id = 1"); got != "a" {
-		t.Fatalf("v = %q: closing the fence must have undone the application's write", got)
+		panic(fmt.Sprintf("v = %q: closing the fence must have undone the application's write", got))
 	}
 	rtMustExec(t, c, "ROLLBACK")
 }
@@ -242,7 +242,7 @@ func rtFenceScript(t *testing.T, db *sql.DB, sctx context.Context, iso sql.Isola
 
 	tx, err := db.BeginTx(sctx, &sql.TxOptions{Isolation: iso})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	rtMustExec(t, tx, "SET LOCAL statement_timeout = '7s'", "SAVEPOINT app_sp")
 	see("start", tx)
@@ -269,7 +269,7 @@ func rtFenceScript(t *testing.T, db *sql.DB, sctx context.Context, iso sql.Isola
 	see("after rollback to app_sp", tx)
 	step("update again", "UPDATE tsql_fence SET v = $1 WHERE id = $2", "z", 2)
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	obs = append(obs, "after commit: "+rtTxState(t, db))
 	return obs
@@ -298,26 +298,26 @@ func TestPGFenceLeavesTransactionStateUntouched(t *testing.T) {
 				want, none := run(false)
 				got, evs := run(true)
 				if len(none) != 0 {
-					t.Fatalf("untraced run recorded %d events", len(none))
+					panic(fmt.Sprintf("untraced run recorded %d events", len(none)))
 				}
 				if strings.Join(got, "\n") != strings.Join(want, "\n") {
-					t.Fatalf("traced run observed:\n%s\n\nuntraced run observed:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+					panic(fmt.Sprintf("traced run observed:\n%s\n\nuntraced run observed:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n")))
 				}
 				t.Logf("observed (traced == untraced):\n%s", strings.Join(got, "\n"))
 				// the captures did run: images where expected, the timeout flagged
 				if len(evs) != 6 {
-					t.Fatalf("write events: %d", len(evs))
+					panic(fmt.Sprintf("write events: %d", len(evs)))
 				}
 				up, slow := evs[1], evs[3]
 				if len(up.Mutations) != 1 || jsonMap(t, up.Mutations[0].Before)["v"] != "a" || jsonMap(t, up.Mutations[0].After)["v"] != "x" {
-					t.Fatalf("update images: %+v flags %v", up.Mutations, up.Flags)
+					panic(fmt.Sprintf("update images: %+v flags %v", up.Mutations, up.Flags))
 				}
 				if !hasFlag(slow, "image_timeout") {
-					t.Fatalf("slow update flags %v", slow.Flags)
+					panic(fmt.Sprintf("slow update flags %v", slow.Flags))
 				}
 				for _, e := range evs {
 					if e.Err != "" || hasFlag(e, "image_failed") || hasFlag(e, "after_failed") {
-						t.Fatalf("event %q: err %q flags %v", e.Name, e.Err, e.Flags)
+						panic(fmt.Sprintf("event %q: err %q flags %v", e.Name, e.Err, e.Flags))
 					}
 				}
 			})
@@ -340,27 +340,27 @@ func TestPGFenceFirstCaptureOnConnectionFails(t *testing.T) {
 			db := rtOpen(t, d, tsql.WithCaptureTimeout(100*time.Millisecond))
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if _, err := tx.ExecContext(ctx, "UPDATE tsql_fence SET v = 'y' WHERE id = 2 AND (SELECT pg_sleep(0.3)) IS NOT NULL"); err != nil {
-				t.Fatalf("application statement after a failed capture: %v", err)
+				panic(fmt.Sprintf("application statement after a failed capture: %v", err))
 			}
 			t.Logf("driver saw:\n%s", strings.Join(rtSQLs(d.take()), "\n"))
 			if got := rtShow(t, tx, "SHOW statement_timeout"); got != "0" {
-				t.Fatalf("statement_timeout = %q", got)
+				panic(fmt.Sprintf("statement_timeout = %q", got))
 			}
 			if _, err := tx.ExecContext(ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "x", 1); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if err := tx.Commit(); err != nil {
-				t.Fatalf("COMMIT: %v", err)
+				panic(fmt.Sprintf("COMMIT: %v", err))
 			}
 			if got := rtShow(t, db, "SELECT string_agg(id || '=' || v, ',' ORDER BY id) FROM tsql_fence"); got != "1=x,2=y" {
-				t.Fatalf("committed rows: %s", got)
+				panic(fmt.Sprintf("committed rows: %s", got))
 			}
 			evs := byKind(rec.Events(), core.KindDBWrite)
 			if len(evs) != 2 || !hasFlag(evs[0], "image_timeout") || len(evs[1].Mutations) != 1 || jsonMap(t, evs[1].Mutations[0].After)["v"] != "x" {
-				t.Fatalf("events: %+v", evs)
+				panic(fmt.Sprintf("events: %+v", evs))
 			}
 		})
 	}
@@ -380,39 +380,39 @@ func TestPGFenceInAbortedTransactionSendsNothingMore(t *testing.T) {
 			bg := context.Background()
 			if warm { // a capture in autocommit shows this connection accepts two statements in one text
 				if _, err := db.ExecContext(ctx, "UPDATE tsql_fence SET v = v WHERE id = $1", 2); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			}
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer tx.Rollback()                       // a failed assertion must not leave the table locked for the cleanup
 			rtMustExec(t, tx, "SAVEPOINT ts_capture") // the application's own, same name
 			if _, err := tx.ExecContext(bg, "SELECT 1/0"); err == nil {
-				t.Fatal("expected an error")
+				panic("expected an error")
 			}
 			d.take()
 			_, err = tx.ExecContext(ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "x", 1)
 			if err == nil || !strings.Contains(err.Error(), "25P02") {
-				t.Fatalf("application statement in an aborted transaction: %v", err)
+				panic(fmt.Sprintf("application statement in an aborted transaction: %v", err))
 			}
 			calls := rtSQLs(d.take())
 			if len(calls) != 2 || !strings.HasPrefix(calls[0], "exec: SAVEPOINT ts_capture") || !strings.HasPrefix(calls[1], "exec: UPDATE") {
-				t.Fatalf("driver saw:\n%s", strings.Join(calls, "\n"))
+				panic(fmt.Sprintf("driver saw:\n%s", strings.Join(calls, "\n")))
 			}
 			if _, err := tx.ExecContext(bg, "SELECT 1"); err == nil || !strings.Contains(err.Error(), "25P02") {
-				t.Fatalf("the transaction must still be aborted: %v", err)
+				panic(fmt.Sprintf("the transaction must still be aborted: %v", err))
 			}
 			if err := tx.Rollback(); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			ws := byKind(rec.Events(), core.KindDBWrite)
 			if e := ws[len(ws)-1]; !hasFlag(e, "image_failed") || e.Err == "" {
-				t.Fatalf("flags %v err %q", e.Flags, e.Err)
+				panic(fmt.Sprintf("flags %v err %q", e.Flags, e.Err))
 			}
 			if got := rtShow(t, db, "SELECT v FROM tsql_fence WHERE id = 1"); got != "a" {
-				t.Fatalf("v = %q", got)
+				panic(fmt.Sprintf("v = %q", got))
 			}
 		})
 	}
@@ -425,16 +425,16 @@ func TestPGFenceCancelledCaptureLeavesConnectionClean(t *testing.T) {
 	clean := func(t *testing.T, db *sql.DB) {
 		t.Helper()
 		if got := rtShow(t, db, "SHOW statement_timeout"); got != "0" {
-			t.Fatalf("statement_timeout = %q", got)
+			panic(fmt.Sprintf("statement_timeout = %q", got))
 		}
 		if got := rtShow(t, db, "SHOW transaction_read_only"); got != "off" {
-			t.Fatalf("transaction_read_only = %q", got)
+			panic(fmt.Sprintf("transaction_read_only = %q", got))
 		}
 		if _, err := db.ExecContext(context.Background(), "SAVEPOINT outside_tx"); err == nil || !strings.Contains(err.Error(), "25P01") {
-			t.Fatalf("a transaction is still open on the connection (SAVEPOINT: %v)", err)
+			panic(fmt.Sprintf("a transaction is still open on the connection (SAVEPOINT: %v)", err))
 		}
 		if _, err := db.ExecContext(context.Background(), "UPDATE tsql_fence SET v = v WHERE id = 1"); err != nil {
-			t.Fatalf("connection not usable for a write: %v", err)
+			panic(fmt.Sprintf("connection not usable for a write: %v", err))
 		}
 	}
 
@@ -462,12 +462,12 @@ func TestPGFenceCancelledCaptureLeavesConnectionClean(t *testing.T) {
 		}
 		_, err := db.ExecContext(cctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "x", 1)
 		if err == nil {
-			t.Fatal("the application's statement ran with a cancelled context")
+			panic("the application's statement ran with a cancelled context")
 		}
 		d.hook = nil
 		t.Logf("driver saw:\n%s", strings.Join(rtSQLs(d.take()), "\n"))
 		if state != "idle" {
-			t.Fatalf("backend state when the application's statement arrived: %q, want idle (no transaction left open)", state)
+			panic(fmt.Sprintf("backend state when the application's statement arrived: %q, want idle (no transaction left open)", state))
 		}
 		clean(t, db)
 	})
@@ -483,10 +483,10 @@ func TestPGFenceCancelledCaptureLeavesConnectionClean(t *testing.T) {
 		start := time.Now()
 		_, err := db.ExecContext(cctx, "UPDATE tsql_fence SET v = 'x' WHERE id = 1 AND (SELECT pg_sleep(3)) IS NOT NULL")
 		if err == nil {
-			t.Fatal("the application's statement ran with a cancelled context")
+			panic("the application's statement ran with a cancelled context")
 		}
 		if d := time.Since(start); d > 2*time.Second {
-			t.Fatalf("the capture outlived the cancellation: %v", d)
+			panic(fmt.Sprintf("the capture outlived the cancellation: %v", d))
 		}
 		clean(t, db)
 	})
@@ -497,13 +497,13 @@ func TestPGFenceCancelledCaptureLeavesConnectionClean(t *testing.T) {
 		db := rtOpen(t, &rtDriver{}, tsql.WithCaptureTimeout(100*time.Millisecond))
 		pid := rtShow(t, db, "SELECT pg_backend_pid()::text")
 		if _, err := db.ExecContext(ctx, "UPDATE tsql_fence SET v = 'q' WHERE id = 2 AND (SELECT pg_sleep(0.4)) IS NOT NULL"); err != nil {
-			t.Fatalf("the application's statement must not be cut by the capture timeout: %v", err)
+			panic(fmt.Sprintf("the application's statement must not be cut by the capture timeout: %v", err))
 		}
 		if e := byKind(rec.Events(), core.KindDBWrite)[0]; !hasFlag(e, "image_timeout") {
-			t.Fatalf("flags %v", e.Flags)
+			panic(fmt.Sprintf("flags %v", e.Flags))
 		}
 		if got := rtShow(t, db, "SELECT pg_backend_pid()::text"); got != pid {
-			t.Fatalf("connection replaced (%s -> %s)", pid, got)
+			panic(fmt.Sprintf("connection replaced (%s -> %s)", pid, got))
 		}
 		clean(t, db)
 	})
@@ -523,34 +523,34 @@ func TestPGFenceLeavesAnUntrackedAbortedTransactionAlone(t *testing.T) {
 			db := rtOpen(t, d)
 			c, err := db.Conn(bg)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer c.Close()
 			defer c.ExecContext(bg, "ROLLBACK")
 			if warm {
 				if _, err := c.ExecContext(ctx, "UPDATE tsql_fence SET v = v WHERE id = $1", 2); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			}
 			if _, err := c.ExecContext(bg, "BEGIN; SELECT 1/0"); err == nil {
-				t.Fatal("expected an error")
+				panic("expected an error")
 			}
 			d.take()
 			_, err = c.ExecContext(ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "leak", 1)
 			calls := rtSQLs(d.take())
 			if err == nil || !strings.Contains(err.Error(), "25P02") {
-				t.Fatalf("the write must fail as it does untraced, got %v; driver saw:\n%s", err, strings.Join(calls, "\n"))
+				panic(fmt.Sprintf("the write must fail as it does untraced, got %v; driver saw:\n%s", err, strings.Join(calls, "\n")))
 			}
 			for _, call := range calls {
 				if strings.HasPrefix(call, "exec: ROLLBACK") {
-					t.Fatalf("the fence ended the application's transaction; driver saw:\n%s", strings.Join(calls, "\n"))
+					panic(fmt.Sprintf("the fence ended the application's transaction; driver saw:\n%s", strings.Join(calls, "\n")))
 				}
 			}
 			if _, err := c.ExecContext(bg, "ROLLBACK"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if got := rtShow(t, c, "SELECT v FROM tsql_fence WHERE id = 1"); got != "a" {
-				t.Fatalf("v = %q: the write was committed", got)
+				panic(fmt.Sprintf("v = %q: the write was committed", got))
 			}
 		})
 	}
@@ -568,7 +568,7 @@ func TestPGFenceClosesAfterASlowCapture(t *testing.T) {
 			db := rtOpen(t, &rtDriver{}, tsql.WithCaptureTimeout(3*time.Second))
 			c, err := db.Conn(bg)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer c.Close()
 			defer c.ExecContext(bg, "ROLLBACK")
@@ -577,17 +577,17 @@ func TestPGFenceClosesAfterASlowCapture(t *testing.T) {
 			}
 			before := rtShow(t, c, "SHOW statement_timeout")
 			if _, err := c.ExecContext(ctx, "UPDATE tsql_fence SET v = 'x' WHERE id = 1 AND (SELECT pg_sleep(1.2)) IS NOT NULL"); err != nil {
-				t.Fatalf("application statement: %v", err)
+				panic(fmt.Sprintf("application statement: %v", err))
 			}
 			if got := rtShow(t, c, "SHOW statement_timeout"); got != before {
-				t.Fatalf("statement_timeout is %s after the statement, was %s", got, before)
+				panic(fmt.Sprintf("statement_timeout is %s after the statement, was %s", got, before))
 			}
 			if got := rtShow(t, c, "SHOW transaction_read_only"); got != "off" {
-				t.Fatalf("transaction_read_only = %s", got)
+				panic(fmt.Sprintf("transaction_read_only = %s", got))
 			}
 			if inTx {
 				if _, err := c.ExecContext(bg, "ROLLBACK TO SAVEPOINT ts_capture"); err == nil {
-					t.Fatal("the fence's savepoint is still there")
+					panic("the fence's savepoint is still there")
 				}
 			}
 		})

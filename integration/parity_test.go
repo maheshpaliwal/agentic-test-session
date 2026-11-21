@@ -56,7 +56,7 @@ func fetch(t *testing.T, base, path string) reply {
 	t.Helper()
 	resp, err := plain.Get(base + path)
 	if err != nil {
-		t.Fatalf("GET %s%s: %v", base, path, err)
+		panic(fmt.Sprintf("GET %s%s: %v", base, path, err))
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -216,11 +216,11 @@ func ingest(t *testing.T, colURL string, evs []core.Event) {
 	t.Helper()
 	body, err := tsessionproto.Encode(evs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp, err := plain.Post(colURL+"/v1/ingest", tsessionproto.ContentType, bytes.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -228,7 +228,7 @@ func ingest(t *testing.T, colURL string, evs []core.Event) {
 		Accepted int `json:"accepted"`
 	}
 	if resp.StatusCode != 200 || json.Unmarshal(b, &res) != nil || res.Accepted != len(evs) {
-		t.Fatalf("ingest of %d events: %d %s", len(evs), resp.StatusCode, b)
+		panic(fmt.Sprintf("ingest of %d events: %d %s", len(evs), resp.StatusCode, b))
 	}
 }
 
@@ -353,7 +353,7 @@ func newLiveFixture(t *testing.T) *liveFixture {
 		s, err := client.Start(ctx, client.Options{BaseURL: in.cpSrv.URL, CollectorURL: in.colSrv.URL, Name: name, InitiatedBy: "api",
 			TTLSeconds: 600, QuiesceSeconds: 3, MaxDrainSeconds: 15, PollInterval: 50 * time.Millisecond})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		var evs []core.Event
 		switch i {
@@ -368,16 +368,16 @@ func newLiveFixture(t *testing.T) *liveFixture {
 		ingest(t, in.colSrv.URL, evs)
 		stored(t, in.colSrv.URL, s.ID, len(evs))
 		if info, err := s.StopAndWait(ctx); err != nil || info.State != "SEALED" {
-			t.Fatalf("stop %s: %+v %v", name, info, err)
+			panic(fmt.Sprintf("stop %s: %+v %v", name, info, err))
 		}
 		// The opened session is named after its file.
 		file := filepath.Join(dir, name+".ndjson")
 		out, err := os.Create(file)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if n, err := s.Export(ctx, out); err != nil || n != len(evs) {
-			t.Fatalf("export %s: %d events, %v", name, n, err)
+			panic(fmt.Sprintf("export %s: %d events, %v", name, n, err))
 		}
 		out.Close()
 		f.ids, f.files = append(f.ids, s.ID), append(f.files, file)
@@ -452,7 +452,7 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 	f := newLiveFixture(t)
 	h, err := dashboard.New(dashboard.Config{Open: f.files})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -526,7 +526,7 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 		for i, be := range []backend{f.live, file} {
 			s, err := client.Attach(ctx, client.Options{BaseURL: be.cp, CollectorURL: be.col}, id)
 			if err != nil {
-				t.Fatalf("attach to %s on %s: %v", id, be.name, err)
+				panic(fmt.Sprintf("attach to %s on %s: %v", id, be.name, err))
 			}
 			sum, err1 := s.Summary(ctx)
 			evs, err2 := s.Events(ctx)
@@ -534,7 +534,7 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 			tr, err4 := s.Trace(ctx)
 			muts, err5 := s.Mutations(ctx, client.MutationFilter{ExcludeRolledBack: true})
 			if err := cmpErr(err1, err2, err3, err4, err5); err != nil {
-				t.Fatalf("client on %s: %v", be.name, err)
+				panic(fmt.Sprintf("client on %s: %v", be.name, err))
 			}
 			b, _ := json.Marshal([]any{sum, evs, ents, tr, muts, s.Info().State, s.Info().Incomplete, s.Info().DroppedEvents})
 			got[i] = string(b)
@@ -573,17 +573,17 @@ func TestDemoAnswersLikeTheCollector(t *testing.T) {
 		var sess controlplane.Session
 		b, _ := json.Marshal(fetch(t, demo.cp, "/v1/sessions/"+id).Body)
 		if err := json.Unmarshal(b, &sess); err != nil || sess.ID != id {
-			t.Fatalf("demo session %s: %v %s", id, err, b)
+			panic(fmt.Sprintf("demo session %s: %v %s", id, err, b))
 		}
 		evs := d.Recorded(id)
 		if len(evs) < 10 {
-			t.Fatalf("%s: %d events", id, len(evs))
+			panic(fmt.Sprintf("%s: %d events", id, len(evs)))
 		}
 		ingest(t, in.colSrv.URL, evs)
 		stored(t, in.colSrv.URL, id, len(evs))
 		if sess.State == controlplane.StateSealed {
 			if _, err := in.col.Seal(context.Background(), id); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		sameCollector(t, live, demo, id)
@@ -597,7 +597,7 @@ func TestDemoAnswersLikeTheCollector(t *testing.T) {
 	s, err := client.Start(ctx, client.Options{BaseURL: in.cpSrv.URL, Name: "shape", QuiesceSeconds: 1, MaxDrainSeconds: 5, PollInterval: 50 * time.Millisecond,
 		Bindings: []client.Binding{client.BindHeader("x-device-id", "dev_1")}})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	keys := func(be backend, id string) string {
 		m, _ := fetch(t, be.cp, "/v1/sessions/"+id).Body.(map[string]any)
@@ -612,7 +612,7 @@ func TestDemoAnswersLikeTheCollector(t *testing.T) {
 		t.Errorf("a running session\n the control plane: %s\n the demo:          %s", a, b)
 	}
 	if _, err := s.StopAndWait(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	// The demo's sealed session has a bundle; the mem store writes none, and
 	// the real one lost its bindings' liveness, not the field.
@@ -653,7 +653,7 @@ func tracectlAt(t *testing.T, bin string, be backend, args ...string) (int, stri
 	cmd.Env = append(os.Environ(), "TSESSION_CONTROLPLANE_URL=", "TSESSION_COLLECTOR_URL=")
 	err := cmd.Run()
 	if _, exited := err.(*exec.ExitError); err != nil && !exited {
-		t.Fatalf("tracectl %v: %v", args, err)
+		panic(fmt.Sprintf("tracectl %v: %v", args, err))
 	}
 	return cmd.ProcessState.ExitCode(), out.String(), errb.String()
 }
@@ -666,10 +666,10 @@ func startDashboard(t *testing.T, bin string, args ...string) backend {
 	cmd.Env = append(os.Environ(), "TSESSION_DASHBOARD_ADDR=", "TSESSION_DASHBOARD_DEMO=")
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	found := make(chan backend, 1)
@@ -686,8 +686,8 @@ func startDashboard(t *testing.T, bin string, args ...string) backend {
 	case be := <-found:
 		return be
 	case <-time.After(20 * time.Second):
-		t.Fatalf("dashboard %v did not print the tracectl flags", args)
-		return backend{}
+		panic(fmt.Sprintf("dashboard %v did not print the tracectl flags", args))
+
 	}
 }
 
@@ -723,12 +723,12 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 	for i, id := range f.ids {
 		file := filepath.Join(dir, f.names[i]+".ndjson")
 		if code, _, errOut := tracectlAt(t, tracectl, f.live, "export", id, "-o", file); code != 0 {
-			t.Fatalf("tracectl export: %d %s", code, errOut)
+			panic(fmt.Sprintf("tracectl export: %d %s", code, errOut))
 		}
 		a, _ := os.ReadFile(file)
 		b, _ := os.ReadFile(f.files[i])
 		if len(a) == 0 || !bytes.Equal(a, b) {
-			t.Fatalf("tracectl export of %s differs from client.Export", id)
+			panic(fmt.Sprintf("tracectl export of %s differs from client.Export", id))
 		}
 		open = append(open, "-open", file)
 	}
@@ -739,7 +739,7 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 		_, out, _ := tracectlAt(t, tracectl, f.live, "entities", id, "--json")
 		var ents []client.Entity
 		if err := json.Unmarshal([]byte(out), &ents); err != nil || len(ents) == 0 {
-			t.Fatalf("entities of %s: %v %s", id, err, out)
+			panic(fmt.Sprintf("entities of %s: %v %s", id, err, out))
 		}
 		e := ents[len(ents)-1]
 		for _, args := range [][]string{
@@ -768,7 +768,7 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 				want, got = statusDoc(t, want), statusDoc(t, got)
 			}
 			if strings.TrimSpace(want) == "" || (wantCode != 0 && wantCode != 3) {
-				t.Fatalf("tracectl %v on the live session: exit %d\n%s%s", args, wantCode, want, wantErr)
+				panic(fmt.Sprintf("tracectl %v on the live session: exit %d\n%s%s", args, wantCode, want, wantErr))
 			}
 			if code != wantCode || got != want || gotErr != wantErr {
 				t.Errorf("tracectl %v: exit %d on the file, %d on the session\n--- file\n%s%s\n--- session\n%s%s", args, code, wantCode, got, gotErr, want, wantErr)

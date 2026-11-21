@@ -74,18 +74,18 @@ func nodes(n ...*client.TraceNode) []*client.TraceNode { return n }
 func parseJUnit(t *testing.T, out string) junitSuite {
 	t.Helper()
 	if !strings.HasPrefix(out, xml.Header) {
-		t.Fatalf("no XML header:\n%s", out)
+		panic(fmt.Sprintf("no XML header:\n%s", out))
 	}
 	var doc junitSuites
 	if err := xml.Unmarshal([]byte(out), &doc); err != nil {
-		t.Fatalf("JUnit output is not well-formed: %v\n%s", err, out)
+		panic(fmt.Sprintf("JUnit output is not well-formed: %v\n%s", err, out))
 	}
 	if len(doc.Suites) != 1 {
-		t.Fatalf("want one test suite, got %d", len(doc.Suites))
+		panic(fmt.Sprintf("want one test suite, got %d", len(doc.Suites)))
 	}
 	s := doc.Suites[0]
 	if doc.Tests != s.Tests || doc.Failures != s.Failures || s.Tests != len(s.Cases) {
-		t.Fatalf("counts disagree: suites %d/%d, suite %d/%d, %d cases", doc.Tests, doc.Failures, s.Tests, s.Failures, len(s.Cases))
+		panic(fmt.Sprintf("counts disagree: suites %d/%d, suite %d/%d, %d cases", doc.Tests, doc.Failures, s.Tests, s.Failures, len(s.Cases)))
 	}
 	return s
 }
@@ -117,8 +117,8 @@ func mdRow(t *testing.T, out, first string) []string {
 			return mdCells(line)
 		}
 	}
-	t.Fatalf("no table row starting with %q in:\n%s", first, out)
-	return nil
+	panic(fmt.Sprintf("no table row starting with %q in:\n%s", first, out))
+
 }
 
 // failingEnv is two requests and a health check: POST /orders publishes a
@@ -161,7 +161,7 @@ func TestReportClean(t *testing.T) {
 
 	code, out, e := env.tc("report", reportID, "--fail-on-error", "--fail-on-incomplete")
 	if code != 0 || e != "" {
-		t.Fatalf("clean markdown report: %d %s", code, e)
+		panic(fmt.Sprintf("clean markdown report: %d %s", code, e))
 	}
 	for _, want := range []string{
 		"## tsession report: checkout (`ts_r1`)\n",
@@ -182,17 +182,17 @@ func TestReportClean(t *testing.T) {
 
 	code, out, e = env.tc("report", "--format", "junit", reportID, "--fail-on-error", "--fail-on-incomplete")
 	if code != 0 || e != "" {
-		t.Fatalf("clean junit report: %d %s", code, e)
+		panic(fmt.Sprintf("clean junit report: %d %s", code, e))
 	}
 	s := parseJUnit(t, out)
 	if s.Name != "checkout" || s.Tests != 1 || s.Failures != 0 || s.Time != "0.050" || s.SystemOut != "" {
-		t.Fatalf("suite: %+v", s)
+		panic(fmt.Sprintf("suite: %+v", s))
 	}
 	if tc := s.Cases[0]; tc.Name != "POST /orders" || tc.Classname != "api" || tc.Time != "0.050" || tc.Failure != nil {
-		t.Fatalf("case: %+v", tc)
+		panic(fmt.Sprintf("case: %+v", tc))
 	}
 	if len(s.Properties) == 0 || s.Properties[0] != (junitProperty{Name: "session_id", Value: reportID}) {
-		t.Fatalf("properties: %+v", s.Properties)
+		panic(fmt.Sprintf("properties: %+v", s.Properties))
 	}
 }
 
@@ -200,7 +200,7 @@ func TestReportFailuresMarkdown(t *testing.T) {
 	env := failingEnv(t)
 	code, out, e := env.tc("report", reportID)
 	if code != 0 || e != "" {
-		t.Fatalf("a report without gates lists failures and exits 0: %d %s", code, e)
+		panic(fmt.Sprintf("a report without gates lists failures and exits 0: %d %s", code, e))
 	}
 	if !strings.Contains(out, "**Failed**: 3 failed events.\n") {
 		t.Errorf("verdict:\n%s", out)
@@ -230,10 +230,10 @@ func TestReportFailuresMarkdown(t *testing.T) {
 
 	code, out, e = env.tc("report", reportID, "--fail-on-error", "--fail-on-incomplete")
 	if code != exitCheckFailed || e != "tracectl: check failed: 3 failed event(s)\n" || !strings.Contains(out, "### Failures") {
-		t.Fatalf("--fail-on-error: %d %q\n%s", code, e, out)
+		panic(fmt.Sprintf("--fail-on-error: %d %q\n%s", code, e, out))
 	}
 	if code, _, e := env.tc("report", reportID, "--fail-on-incomplete"); code != 0 {
-		t.Fatalf("a complete session passes --fail-on-incomplete: %d %s", code, e)
+		panic(fmt.Sprintf("a complete session passes --fail-on-incomplete: %d %s", code, e))
 	}
 }
 
@@ -241,11 +241,11 @@ func TestReportFailuresJUnit(t *testing.T) {
 	env := failingEnv(t)
 	code, out, e := env.tc("report", reportID, "--format", "junit", "--fail-on-error")
 	if code != exitCheckFailed || !strings.Contains(e, "3 failed event(s)") {
-		t.Fatalf("junit --fail-on-error: %d %s", code, e)
+		panic(fmt.Sprintf("junit --fail-on-error: %d %s", code, e))
 	}
 	s := parseJUnit(t, out)
 	if s.Tests != 3 || s.Failures != 2 {
-		t.Fatalf("suite: %+v", s)
+		panic(fmt.Sprintf("suite: %+v", s))
 	}
 	post, get, health := s.Cases[0], s.Cases[1], s.Cases[2]
 	if post.Name != "POST /orders" || post.Classname != "api" || post.Failure == nil ||
@@ -270,7 +270,7 @@ func TestReportByName(t *testing.T) {
 
 	code, out, e := env.tc("report", "run-1", "--fail-on-error")
 	if code != exitCheckFailed || !strings.Contains(e, "1 failed event(s)") {
-		t.Fatalf("report by name: %d %s", code, e)
+		panic(fmt.Sprintf("report by name: %d %s", code, e))
 	}
 	if !strings.Contains(out, "**Failed**: 1 failed event. The session is still ACTIVE, so this report can change.") {
 		t.Errorf("verdict:\n%s", out)
@@ -292,7 +292,7 @@ func TestReportIncomplete(t *testing.T) {
 
 	code, out, e := env.tc("report", reportID, "--fail-on-error", "--fail-on-incomplete")
 	if code != exitCheckFailed || e != "tracectl: check failed: session is incomplete\n" {
-		t.Fatalf("--fail-on-incomplete: %d %q", code, e)
+		panic(fmt.Sprintf("--fail-on-incomplete: %d %q", code, e))
 	}
 	bullets := []string{
 		"- 3 event(s) were dropped by the SDKs before they reached the collector.",
@@ -306,13 +306,13 @@ func TestReportIncomplete(t *testing.T) {
 		t.Errorf("incomplete report:\n%s", out)
 	}
 	if code, _, e := env.tc("report", reportID, "--fail-on-error"); code != 0 {
-		t.Fatalf("no failed events, so --fail-on-error passes: %d %s", code, e)
+		panic(fmt.Sprintf("no failed events, so --fail-on-error passes: %d %s", code, e))
 	}
 
 	_, out, _ = env.tc("report", reportID, "--format", "junit")
 	s := parseJUnit(t, out)
 	if s.Tests != 2 || s.Failures != 1 || s.Cases[0].Failure != nil {
-		t.Fatalf("suite: %+v", s)
+		panic(fmt.Sprintf("suite: %+v", s))
 	}
 	last := s.Cases[1]
 	if last.Name != "session complete" || last.Classname != "tsession" || last.Failure == nil || last.Failure.Type != "incomplete" ||
@@ -408,7 +408,7 @@ func TestReportHostileText(t *testing.T) {
 
 	code, out, e := env.tc("report", reportID)
 	if code != 0 {
-		t.Fatalf("report: %d %s", code, e)
+		panic(fmt.Sprintf("report: %d %s", code, e))
 	}
 	// Every line is one the report wrote: a heading, a table row of the right
 	// width, a bullet or a plain sentence. Hostile text opened none of them.
@@ -447,11 +447,11 @@ func TestReportHostileText(t *testing.T) {
 
 	code, out, e = env.tc("report", reportID, "--format", "junit")
 	if code != 0 {
-		t.Fatalf("junit: %d %s", code, e)
+		panic(fmt.Sprintf("junit: %d %s", code, e))
 	}
 	s := parseJUnit(t, out)
 	if s.Tests != 3 || s.Failures != 3 {
-		t.Fatalf("suite: %+v", s)
+		panic(fmt.Sprintf("suite: %+v", s))
 	}
 	// Text survives the round trip, on one line, minus what XML cannot hold.
 	flat := "x | y | | --- | `code` <script>alert(1)</script> [l](http://evil.example) \uFFFD\uFFFD]0;t\uFFFD ]]> &amp; \"q\" 'a' \\"
@@ -497,7 +497,7 @@ func TestReportCaps(t *testing.T) {
 	_, out, _ = env.tc("report", reportID, "--format", "junit")
 	s := parseJUnit(t, out)
 	if s.Tests != junitMaxCases || s.Failures != 61 {
-		t.Fatalf("suite: %d tests, %d failures", s.Tests, s.Failures)
+		panic(fmt.Sprintf("suite: %d tests, %d failures", s.Tests, s.Failures))
 	}
 	// The failed root past the cap is kept ahead of passing ones.
 	if s.Cases[60].Name != fmt.Sprintf("GET /items/%d", n) || s.Cases[60].Failure == nil || s.Cases[61].Name != "GET /items/61" {
@@ -530,32 +530,32 @@ func TestReportOutputFile(t *testing.T) {
 	env := failingEnv(t)
 	file := filepath.Join(t.TempDir(), "report.xml")
 	if err := os.WriteFile(file, []byte(strings.Repeat("stale ", 10000)), 0o644); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	code, out, e := env.tc("report", reportID, "-o", file, "--format", "junit", "--fail-on-error")
 	if code != exitCheckFailed || out != "" || !strings.Contains(e, "wrote junit report to "+file) || !strings.Contains(e, "check failed") {
-		t.Fatalf("the report is written before the gate fails: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("the report is written before the gate fails: %d %q %s", code, out, e))
 	}
 	b, err := os.ReadFile(file)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if s := parseJUnit(t, string(b)); s.Failures != 2 || strings.Contains(string(b), "stale") {
-		t.Fatalf("file was not replaced by the report: %+v", s)
+		panic(fmt.Sprintf("file was not replaced by the report: %+v", s))
 	}
 
 	file = filepath.Join(t.TempDir(), "report.md")
 	if code, out, e := env.tc("report", "-o", file, reportID); code != 0 || out != "" || !strings.Contains(e, "wrote markdown report") {
-		t.Fatalf("-o: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("-o: %d %q %s", code, out, e))
 	}
 	if b, _ := os.ReadFile(file); !strings.HasPrefix(string(b), "## tsession report: checkout") {
-		t.Fatalf("markdown file: %q", b)
+		panic(fmt.Sprintf("markdown file: %q", b))
 	}
 	if fi, _ := os.Stat(file); fi.Mode().Perm() != 0o644 {
-		t.Fatalf("report file mode %v, want 0644", fi.Mode().Perm())
+		panic(fmt.Sprintf("report file mode %v, want 0644", fi.Mode().Perm()))
 	}
 	if code, _, e := env.tc("report", reportID, "-o", filepath.Join(t.TempDir(), "missing", "r.md")); code != 1 || e == "" {
-		t.Fatalf("unwritable -o: %d %s", code, e)
+		panic(fmt.Sprintf("unwritable -o: %d %s", code, e))
 	}
 }
 
@@ -588,13 +588,13 @@ func TestReportEmptySession(t *testing.T) {
 	env := newReportEnv(t)
 	code, out, e := env.tc("report", reportID, "--fail-on-error", "--fail-on-incomplete")
 	if code != 0 || e != "" {
-		t.Fatalf("an empty session fails no gate unless --fail-on-empty is given: %d %s", code, e)
+		panic(fmt.Sprintf("an empty session fails no gate unless --fail-on-empty is given: %d %s", code, e))
 	}
 	if strings.Contains(out, "**Passed**") || !strings.Contains(out, "**Empty**: the session recorded no events") {
-		t.Fatalf("headline of an empty session:\n%s", out)
+		panic(fmt.Sprintf("headline of an empty session:\n%s", out))
 	}
 	code, out, e = env.tc("report", reportID, "--fail-on-empty")
 	if code != 3 || !strings.Contains(e, "recorded no events") || strings.Contains(out, "**Passed**") {
-		t.Fatalf("--fail-on-empty: %d %q\n%s", code, e, out)
+		panic(fmt.Sprintf("--fail-on-empty: %d %q\n%s", code, e, out))
 	}
 }

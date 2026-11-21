@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func fenceRecorded(t *testing.T, rec *core.MemRecorder) string {
 			F []string
 		}{e.Mutations, e.Flags})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		out = append(out, string(b))
 	}
@@ -46,7 +47,7 @@ func fenceRecorded(t *testing.T, rec *core.MemRecorder) string {
 func fenceWant(t *testing.T, f *fakeDB, want ...string) {
 	t.Helper()
 	if got := sqls(f.RawCalls()); got != strings.Join(want, "\n")+"\n" {
-		t.Fatalf("driver saw:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+		panic(fmt.Sprintf("driver saw:\n%s\nwant:\n%s", got, strings.Join(want, "\n")))
 	}
 }
 
@@ -57,7 +58,7 @@ func TestCaptureFenceAutocommitSequence(t *testing.T) {
 	f := fenceFake(&fakeDB{})
 	db := open(t, f, "postgres", noPKLookup) // the lookup has its own fence tests
 	if _, err := db.ExecContext(ctx, fenceUpdate); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	fenceWant(t, f,
 		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500",
@@ -90,12 +91,12 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 		}
 		for range 2 {
 			if _, err := ex.ExecContext(ctx, fenceUpdate); err != nil {
-				t.Fatalf("application statement: %v", err)
+				panic(fmt.Sprintf("application statement: %v", err))
 			}
 		}
 		if inTx {
 			if err := tx.Commit(); err != nil {
-				t.Fatalf("COMMIT: %v", err)
+				panic(fmt.Sprintf("COMMIT: %v", err))
 			}
 		}
 		return f, fenceRecorded(t, rec)
@@ -117,7 +118,7 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 		first = append(first, one[3:]...)
 		fenceWant(t, f, append(first, one...)...)
 		if _, want := run(t, false, true); got != want {
-			t.Fatalf("recorded:\n%s\nwith multi-statement support:\n%s", got, want)
+			panic(fmt.Sprintf("recorded:\n%s\nwith multi-statement support:\n%s", got, want))
 		}
 	})
 	t.Run("autocommit", func(t *testing.T) {
@@ -132,7 +133,7 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 		first := append([]string{"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500", "ROLLBACK"}, one...)
 		fenceWant(t, f, append(first, one...)...)
 		if _, want := run(t, false, false); got != want {
-			t.Fatalf("recorded:\n%s\nwith multi-statement support:\n%s", got, want)
+			panic(fmt.Sprintf("recorded:\n%s\nwith multi-statement support:\n%s", got, want))
 		}
 	})
 }
@@ -154,19 +155,19 @@ func TestCaptureFenceSendsNothingAfterRefusalInAbortedTx(t *testing.T) {
 	db := open(t, f, "postgres")
 	db.SetMaxOpenConns(1)
 	if _, err := db.ExecContext(ctx, fenceUpdate); err != nil { // the connection now takes two statements in one text
-		t.Fatal(err)
+		panic(err)
 	}
 	tx, _ := db.BeginTx(ctx, nil)
 	f.mu.Lock()
 	f.calls, aborted = nil, true
 	f.mu.Unlock()
 	if _, err := tx.ExecContext(ctx, fenceUpdate); err == nil {
-		t.Fatal("the application's statement must fail")
+		panic("the application's statement must fail")
 	}
 	fenceWant(t, f, "SAVEPOINT ts_capture; "+isoAsk, fenceUpdate)
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	if e := ws[len(ws)-1]; !hasFlag(e, "image_failed") {
-		t.Fatalf("flags %v", e.Flags)
+		panic(fmt.Sprintf("flags %v", e.Flags))
 	}
 }
 
@@ -189,17 +190,17 @@ func TestCaptureFenceClosesAfterFailedOpenInTx(t *testing.T) {
 	db := open(t, f, "postgres")
 	db.SetMaxOpenConns(1)
 	if _, err := db.ExecContext(ctx, fenceUpdate); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	tx, _ := db.BeginTx(ctx, nil)
 	f.mu.Lock()
 	f.calls, fail = nil, true
 	f.mu.Unlock()
 	if _, err := tx.ExecContext(ctx, fenceUpdate); err != nil {
-		t.Fatalf("application statement after a failed capture: %v", err)
+		panic(fmt.Sprintf("application statement after a failed capture: %v", err))
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatalf("COMMIT: %v", err)
+		panic(fmt.Sprintf("COMMIT: %v", err))
 	}
 	fenceWant(t, f,
 		"SAVEPOINT ts_capture; "+isoAsk,

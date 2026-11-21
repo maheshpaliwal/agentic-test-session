@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,14 +70,14 @@ func TestBindingTwoUsersConcurrentIsolated(t *testing.T) {
 	}
 	wg.Wait()
 	if wrong.Load() != 0 {
-		t.Fatalf("%d crossover", wrong.Load())
+		panic(fmt.Sprintf("%d crossover", wrong.Load()))
 	}
 	count := map[string]int{}
 	for _, e := range rec.Events() {
 		count[e.SessionID]++
 	}
 	if count["sA"] != n || count["sB"] != n || len(count) != 2 {
-		t.Fatalf("%v", count)
+		panic(fmt.Sprintf("%v", count))
 	}
 }
 
@@ -100,20 +101,20 @@ func TestBindingSourcesAndBoundByAttr(t *testing.T) {
 	do(func(r *http.Request) { r.URL.RawQuery = "uid=q1" })
 	do(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok(`{"sub":"j1"}`)) })
 	if strings.Join(seen, ",") != "h,c,q,j" {
-		t.Fatalf("%v", seen)
+		panic(fmt.Sprintf("%v", seen))
 	}
 	want := map[string]string{"h": "header:x-dev", "c": "cookie:uid", "q": "query:uid", "j": "jwt_claim:sub"}
 	for _, e := range rec.Events() {
 		if e.Attrs["bound_by"] != want[e.SessionID] {
-			t.Fatalf("%s: %v", e.SessionID, e.Attrs)
+			panic(fmt.Sprintf("%s: %v", e.SessionID, e.Attrs))
 		}
 		for _, v := range e.Attrs {
 			if v == "j1" || v == "c1" || v == "q1" || v == "d1" {
-				t.Fatal("binding value leaked into attrs")
+				panic("binding value leaked into attrs")
 			}
 		}
 		if strings.Contains(string(e.Req.Inline), "eyJ") && !strings.Contains(string(e.Req.Inline), "REDACTED") {
-			t.Fatalf("raw JWT recorded: %s", e.Req.Inline)
+			panic(fmt.Sprintf("raw JWT recorded: %s", e.Req.Inline))
 		}
 	}
 }
@@ -135,7 +136,7 @@ func TestBindingNoAttrAndJWTEdgeCases(t *testing.T) {
 		}
 		h.ServeHTTP(httptest.NewRecorder(), r)
 		if n := len(rec.Events()); n != 0 {
-			t.Fatalf("%s: traced (%d events)", name, n)
+			panic(fmt.Sprintf("%s: traced (%d events)", name, n))
 		}
 	}
 	// alg:none with garbage signature is accepted: signature is not verified.
@@ -143,7 +144,7 @@ func TestBindingNoAttrAndJWTEdgeCases(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+tok(`{"sub":"u1"}`))
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	if evs := rec.Events(); len(evs) != 1 || evs[0].SessionID != "j" {
-		t.Fatalf("%+v", evs)
+		panic(fmt.Sprintf("%+v", evs))
 	}
 }
 
@@ -159,7 +160,7 @@ func TestBindingHeaderBeatsBinding(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	evs := rec.Events()
 	if len(evs) != 1 || evs[0].SessionID != "hdr" || evs[0].Attrs["bound_by"] != "" {
-		t.Fatalf("%+v", evs)
+		panic(fmt.Sprintf("%+v", evs))
 	}
 }
 
@@ -180,16 +181,16 @@ func TestBindingAfterStopUntracedInflightContinues(t *testing.T) {
 	r.Header.Set("X-User-Id", "u1")
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	if len(rec.Events()) != 1 {
-		t.Fatalf("post-stop request attributed: %d", len(rec.Events()))
+		panic(fmt.Sprintf("post-stop request attributed: %d", len(rec.Events())))
 	}
 	// in-flight work with the stamped context still records.
 	_, sp := core.Begin(ctxIn, core.KindWorkerStart, "w")
 	if sp == nil {
-		t.Fatal("in-flight work must continue into the session")
+		panic("in-flight work must continue into the session")
 	}
 	sp.End()
 	if len(rec.Events()) != 2 {
-		t.Fatalf("%d", len(rec.Events()))
+		panic(fmt.Sprintf("%d", len(rec.Events())))
 	}
 }
 
@@ -211,7 +212,7 @@ func TestDownstreamWithoutBindingConfigJoinsViaPropagation(t *testing.T) {
 	front.ServeHTTP(httptest.NewRecorder(), r)
 	evs := rec.Events()
 	if len(evs) != 2 {
-		t.Fatalf("%+v", evs)
+		panic(fmt.Sprintf("%+v", evs))
 	}
 	var outer, inner core.Event
 	for _, e := range evs {
@@ -222,10 +223,10 @@ func TestDownstreamWithoutBindingConfigJoinsViaPropagation(t *testing.T) {
 		}
 	}
 	if inner.SessionID != "b" || inner.TraceID != outer.TraceID || inner.ParentID != outer.SpanID {
-		t.Fatalf("downstream did not join: outer=%+v inner=%+v", outer, inner)
+		panic(fmt.Sprintf("downstream did not join: outer=%+v inner=%+v", outer, inner))
 	}
 	if inner.Attrs["bound_by"] != "" {
-		t.Fatal("downstream must not claim binding")
+		panic("downstream must not claim binding")
 	}
 }
 
@@ -274,23 +275,23 @@ func TestBoundValueNeverRecorded(t *testing.T) {
 
 	evs := rec.Events()
 	if len(evs) < 4 {
-		t.Fatalf("events=%d", len(evs))
+		panic(fmt.Sprintf("events=%d", len(evs)))
 	}
 	var out int
 	for _, e := range evs {
 		b, _ := json.Marshal(e)
 		if strings.Contains(string(b), "u_secret_") {
-			t.Fatalf("bound value leaked: %s", b)
+			panic(fmt.Sprintf("bound value leaked: %s", b))
 		}
 		if e.Kind == core.KindAPIOut {
 			out++
 		}
 	}
 	if out == 0 {
-		t.Fatal("no api.out recorded")
+		panic("no api.out recorded")
 	}
 	if !strings.Contains(string(mustJSON(evs[0])), "keep=1") {
-		t.Fatalf("non-bound query param lost")
+		panic("non-bound query param lost")
 	}
 }
 
@@ -323,11 +324,11 @@ func TestBindPriorityHTTP(t *testing.T) {
 	}
 	if len(in) != 2 || in[0].SessionID != "sU" || in[0].Attrs["bound_by"] != "header:x-user-id" ||
 		in[1].SessionID != "sN" || in[1].Attrs["bound_fallback"] != "true" {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 	for _, e := range evs {
 		if strings.Contains(string(mustJSON(e)), "u_prio_") {
-			t.Fatalf("priority value leaked: %s", mustJSON(e))
+			panic(fmt.Sprintf("priority value leaked: %s", mustJSON(e)))
 		}
 	}
 }

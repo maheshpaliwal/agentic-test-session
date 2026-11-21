@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ func dashTC(t *testing.T, cfg dashboard.Config) func(args ...string) (int, strin
 	t.Helper()
 	h, err := dashboard.New(cfg)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -60,7 +61,7 @@ func TestReadCommandsWorkOnTheDemo(t *testing.T) {
 		dec := json.NewDecoder(strings.NewReader(out))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&sum); err != nil {
-			t.Fatalf("summary of %s: %v\n%s", id, err, out)
+			panic(fmt.Sprintf("summary of %s: %v\n%s", id, err, out))
 		}
 		if sum.Sealed != sealed || sum.EventCount != 32 || len(sum.Failures) != 10 || sum.Failures[0].Err == "" || sum.Mutations["postgres"]["orders"] != 2 {
 			t.Errorf("summary of %s: %s", id, out)
@@ -108,7 +109,7 @@ func TestReadCommandsWorkOnAnExportedFile(t *testing.T) {
 	// session and the two print the same.
 	file := filepath.Join(t.TempDir(), "checkout happy path + failures.ndjson")
 	if code, _, errOut := demo("export", id, "-o", file); code != 0 {
-		t.Fatalf("export: %d %s", code, errOut)
+		panic(fmt.Sprintf("export: %d %s", code, errOut))
 	}
 	off := dashTC(t, dashboard.Config{Open: []string{file}})
 
@@ -128,7 +129,7 @@ func TestReadCommandsWorkOnAnExportedFile(t *testing.T) {
 		wantCode, want, _ := demo(args...)
 		code, got, errOut := off(args...)
 		if strings.TrimSpace(want) == "" {
-			t.Fatalf("tracectl %s prints nothing for the session itself", name)
+			panic(fmt.Sprintf("tracectl %s prints nothing for the session itself", name))
 		}
 		if code != wantCode || got != want {
 			t.Errorf("tracectl %s on the file: exit %d (session: %d) %s\n--- file\n%s\n--- session\n%s", name, code, wantCode, errOut, got, want)

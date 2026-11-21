@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
@@ -46,27 +47,27 @@ func TestProtocol_FailedCommitAndRetryPending(t *testing.T) {
 		t.Helper()
 		body, err := tsessionproto.Encode(evs)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		req, _ := http.NewRequest("POST", in.colSrv.URL+"/v1/ingest", bytes.NewReader(body))
 		req.Header.Set("Content-Type", tsessionproto.ContentType)
 		req.Header.Set("X-TSession-Instance", "synthetic-1")
 		resp, err := plain.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer resp.Body.Close()
 		var r collector.IngestResult
 		_ = json.NewDecoder(resp.Body).Decode(&r)
 		if resp.StatusCode != 200 || r.Accepted != len(evs) || r.Rejected != 0 {
-			t.Fatalf("ingest: %d %+v (want %d accepted)", resp.StatusCode, r, len(evs))
+			panic(fmt.Sprintf("ingest: %d %+v (want %d accepted)", resp.StatusCode, r, len(evs)))
 		}
 	}
 	effective := func(pk string) *bool {
 		t.Helper()
 		h := col.history(t, s.ID, "mongo", "carts", url.PathEscape(`{"_id":"`+pk+`"}`))
 		if len(h.Mutations) != 1 {
-			t.Fatalf("history %s: %+v", pk, h)
+			panic(fmt.Sprintf("history %s: %+v", pk, h))
 		}
 		return h.Mutations[0].Effective
 	}
@@ -106,7 +107,7 @@ func TestProtocol_FailedCommitAndRetryPending(t *testing.T) {
 		t.Errorf("tx without outcome: effective=%v (must not be false before seal)", *got)
 	}
 	if sm := col.summary(t, s.ID); sm.PendingAsync != 2 {
-		t.Fatalf("pending_async=%d ids=%v, want 2: retry_pending worker.end must not close the ledger", sm.PendingAsync, sm.PendingIDs)
+		panic(fmt.Sprintf("pending_async=%d ids=%v, want 2: retry_pending worker.end must not close the ledger", sm.PendingAsync, sm.PendingIDs))
 	}
 
 	// final outcome for P1 closes it; P2 stays open
@@ -119,7 +120,7 @@ func TestProtocol_FailedCommitAndRetryPending(t *testing.T) {
 	// seal: P2 is orphaned AND listed as retry_pending; session incomplete
 	resp, err := plain.Post(in.colSrv.URL+"/v1/internal/sessions/"+s.ID+"/seal", "application/json", nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var sr collector.SealResult
 	_ = json.NewDecoder(resp.Body).Decode(&sr)

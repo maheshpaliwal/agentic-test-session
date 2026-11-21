@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,24 +42,24 @@ func TestLifecycle(t *testing.T) {
 	o := client.Options{BaseURL: setup(t), Name: "t1", Mode: "exclusive", QuiesceSeconds: 1, PollInterval: 5 * time.Millisecond}
 	s, err := client.Start(ctx, o)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if s.Info().State != "ACTIVE" || s.Info().InitiatedBy != "client" {
-		t.Fatalf("%+v", s.Info())
+		panic(fmt.Sprintf("%+v", s.Info()))
 	}
 	if _, err := client.Start(ctx, o); !errors.Is(err, client.ErrConflict) {
-		t.Fatalf("want conflict, got %v", err)
+		panic(fmt.Sprintf("want conflict, got %v", err))
 	}
 
 	h := s.Header()
 	if h.Get(core.KeySession) != s.ID {
-		t.Fatal("missing session header")
+		panic("missing session header")
 	}
 	if sc, ok := core.ExtractSpanContext(core.HTTPHeaderCarrier(h)); !ok || len(sc.TraceID) != 32 || len(sc.SpanID) != 16 || sc.HLC == 0 {
-		t.Fatalf("bad propagation headers: %v", h)
+		panic(fmt.Sprintf("bad propagation headers: %v", h))
 	}
 	if tp := h.Get(core.KeyTraceparent); tp == "" || h.Get(core.KeyTSessionTraceparent) != tp+";"+h.Get(core.KeyHLC) {
-		t.Fatalf("want traceparent, and %s holding it and the clock: %v", core.KeyTSessionTraceparent, h)
+		panic(fmt.Sprintf("want traceparent, and %s holding it and the clock: %v", core.KeyTSessionTraceparent, h))
 	}
 	// A traceparent from the test's own tracing is kept; injecting again
 	// replaces only what the client wrote.
@@ -67,16 +68,16 @@ func TestLifecycle(t *testing.T) {
 	h2.Set(core.KeyTraceparent, appTP)
 	s.Inject(h2)
 	if h2.Get(core.KeyTraceparent) != appTP || h2.Get(core.KeyTSessionTraceparent) == "" {
-		t.Fatalf("caller's traceparent not kept: %v", h2)
+		panic(fmt.Sprintf("caller's traceparent not kept: %v", h2))
 	}
 	s.Inject(h)
 	if tp := h.Get(core.KeyTraceparent); h.Get(core.KeyTSessionTraceparent) != tp+";"+h.Get(core.KeyHLC) {
-		t.Fatalf("second Inject left a stale traceparent: %v", h)
+		panic(fmt.Sprintf("second Inject left a stale traceparent: %v", h))
 	}
 
 	info, err := s.StopAndWait(ctx)
 	if err != nil || info.State != "SEALED" || info.BundleURI != "mem://b" {
-		t.Fatalf("%+v %v", info, err)
+		panic(fmt.Sprintf("%+v %v", info, err))
 	}
 }
 
@@ -84,7 +85,7 @@ func TestTransportAndAbort(t *testing.T) {
 	ctx := context.Background()
 	s, err := client.Start(ctx, client.Options{BaseURL: setup(t)})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,20 +95,20 @@ func TestTransportAndAbort(t *testing.T) {
 	hc := &http.Client{Transport: s.Transport(nil)}
 	resp, err := hc.Get(srv.URL)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if got != s.ID {
-		t.Fatalf("got %q", got)
+		panic(fmt.Sprintf("got %q", got))
 	}
 	if _, err := s.Abort(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := s.Wait(ctx); err == nil {
-		t.Fatal("Wait on aborted session should error")
+		panic("Wait on aborted session should error")
 	}
 	if _, err := client.Attach(ctx, client.Options{BaseURL: setup(t)}, "ts_missing"); err == nil {
-		t.Fatal("attach to missing should fail")
+		panic("attach to missing should fail")
 	}
 }
 
@@ -130,24 +131,24 @@ func TestStartSendsBindingsAndConflict(t *testing.T) {
 	o := client.Options{BaseURL: srv.URL, Bindings: []client.Binding{client.BindHeader("x-user-id", "u1"), client.BindJWT("sub", "u1")}}
 	s, err := client.Start(context.Background(), o)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if len(got.Bindings) != 2 || got.Bindings[1].Source != "jwt_claim" || len(s.Info().Bindings) != 2 || s.Info().Bindings[0].Value != "u1" {
-		t.Fatalf("%+v %+v", got, s.Info())
+		panic(fmt.Sprintf("%+v %+v", got, s.Info()))
 	}
 	if _, err := client.Start(context.Background(), o); !errors.Is(err, client.ErrConflict) || !strings.Contains(err.Error(), "ts_1") {
-		t.Fatalf("%v", err)
+		panic(fmt.Sprintf("%v", err))
 	}
 }
 
 func TestParseBinding(t *testing.T) {
 	b, err := client.ParseBinding("jwt:sub=u=1")
 	if err != nil || b != (client.Binding{Source: "jwt_claim", Name: "sub", Value: "u=1"}) {
-		t.Fatal(b, err)
+		panic(fmt.Sprint(b, err))
 	}
 	for _, bad := range []string{"", "header", "header:x", "bogus:a=b", "header:=v", "header:a="} {
 		if _, err := client.ParseBinding(bad); err == nil {
-			t.Fatalf("%q accepted", bad)
+			panic(fmt.Sprintf("%q accepted", bad))
 		}
 	}
 }
@@ -160,34 +161,34 @@ func TestRenameAndAutoName(t *testing.T) {
 		Bindings: []client.Binding{client.BindHeader("X-USER-ID", "act_bind_9")}}
 	s, err := client.Start(ctx, o)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if i := s.Info(); !i.NameAuto || i.Name != "x-user-id=act_bind_9" {
-		t.Fatalf("%+v", i)
+		panic(fmt.Sprintf("%+v", i))
 	}
 	info, err := s.Rename(ctx, "run {bind}  ")
 	if err != nil || info.Name != "run act_bind_9" || info.NameAuto || s.Info().Name != info.Name {
-		t.Fatalf("%+v %v", info, err)
+		panic(fmt.Sprintf("%+v %v", info, err))
 	}
 	if _, err := s.Rename(ctx, "   "); err == nil || !strings.Contains(err.Error(), "400") {
-		t.Fatalf("want 400, got %v", err)
+		panic(fmt.Sprintf("want 400, got %v", err))
 	}
 	if _, err := s.StopAndWait(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	// rename a SEALED session
 	if info, err := s.Rename(ctx, "sealed label"); err != nil || info.State != "SEALED" || info.Name != "sealed label" {
-		t.Fatalf("%+v %v", info, err)
+		panic(fmt.Sprintf("%+v %v", info, err))
 	}
 	ghost, _ := client.Attach(ctx, client.Options{BaseURL: base}, s.ID)
 	ghost.ID = "ts_missing"
 	if _, err := ghost.Rename(ctx, "x"); err == nil || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("want 404, got %v", err)
+		panic(fmt.Sprintf("want 404, got %v", err))
 	}
 	// no bindings: initiated_by + time
 	s2, err := client.Start(ctx, client.Options{BaseURL: base, InitiatedBy: "tester"})
 	if err != nil || !s2.Info().NameAuto || !strings.HasPrefix(s2.Info().Name, "tester ") {
-		t.Fatalf("%+v %v", s2.Info(), err)
+		panic(fmt.Sprintf("%+v %v", s2.Info(), err))
 	}
 }
 
@@ -197,31 +198,31 @@ func TestKillSwitch(t *testing.T) {
 	o := client.Options{BaseURL: setup(t)}
 	s, err := client.Start(ctx, o)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if on, err := client.KillSwitch(ctx, o); err != nil || on {
-		t.Fatalf("a new control plane: on=%v %v", on, err)
+		panic(fmt.Sprintf("a new control plane: on=%v %v", on, err))
 	}
 	for _, want := range []bool{true, true, false} { // setting it twice is not an error
 		if err := client.SetKill(ctx, o, want); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if on, err := client.KillSwitch(ctx, o); err != nil || on != want {
-			t.Fatalf("after SetKill(%v): on=%v %v", want, on, err)
+			panic(fmt.Sprintf("after SetKill(%v): on=%v %v", want, on, err))
 		}
 	}
 	// The switch stops recording, not the session.
 	if info, err := s.Get(ctx); err != nil || info.State != "ACTIVE" {
-		t.Fatalf("%+v %v", info, err)
+		panic(fmt.Sprintf("%+v %v", info, err))
 	}
 
 	// Errors carry the control plane's status.
 	down := httptest.NewServer(http.NotFoundHandler())
 	defer down.Close()
 	if err := client.SetKill(ctx, client.Options{BaseURL: down.URL}, true); err == nil || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("SetKill against a server without the endpoint: %v", err)
+		panic(fmt.Sprintf("SetKill against a server without the endpoint: %v", err))
 	}
 	if on, err := client.KillSwitch(ctx, client.Options{BaseURL: down.URL}); err == nil || on {
-		t.Fatalf("KillSwitch against a server without the endpoint: on=%v %v", on, err)
+		panic(fmt.Sprintf("KillSwitch against a server without the endpoint: on=%v %v", on, err))
 	}
 }

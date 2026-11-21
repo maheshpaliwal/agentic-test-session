@@ -8,6 +8,7 @@ package tsql_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ func TestFenceSavepointNameIsRandomPerConnection(t *testing.T) {
 	for range 3 {
 		c, err := db.Conn(ctx)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		conns = append(conns, c) // held, so that every one is a connection of its own
 		isoExec(t, ctx, c, "BEGIN", fenceUpdate, fenceUpdate, "COMMIT")
@@ -43,11 +44,11 @@ func TestFenceSavepointNameIsRandomPerConnection(t *testing.T) {
 		f.rawSQL = nil
 		f.mu.Unlock()
 		if len(seen) != 1 {
-			t.Fatalf("one connection used the savepoint names %v", seen)
+			panic(fmt.Sprintf("one connection used the savepoint names %v", seen))
 		}
 		for n := range seen {
 			if !regexp.MustCompile(`^ts_capture_[0-9a-f]{16}$`).MatchString(n) {
-				t.Fatalf("savepoint name %q", n)
+				panic(fmt.Sprintf("savepoint name %q", n))
 			}
 			names[n]++
 		}
@@ -56,7 +57,7 @@ func TestFenceSavepointNameIsRandomPerConnection(t *testing.T) {
 		c.Close()
 	}
 	if len(names) != 3 {
-		t.Fatalf("three connections used the names %v", names)
+		panic(fmt.Sprintf("three connections used the names %v", names))
 	}
 }
 
@@ -94,11 +95,11 @@ func TestFenceThatNeverOpenedTouchesNothing(t *testing.T) {
 			db := open(t, f, "postgres", noPKLookup, tsql.WithCaptureTimeout(20*time.Millisecond))
 			db.SetMaxOpenConns(1)
 			if _, err := db.ExecContext(ctx, fenceUpdate); err != nil { // the connection now takes two statements in one text
-				t.Fatal(err)
+				panic(err)
 			}
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if appSavepoint {
 				isoExec(t, bg, tx, "SAVEPOINT ts_capture")
@@ -108,7 +109,7 @@ func TestFenceThatNeverOpenedTouchesNothing(t *testing.T) {
 			take()
 			fenceOpenNeverSent(f)
 			if _, err := tx.ExecContext(ctx, fenceUpdate); err != nil {
-				t.Fatalf("the application's statement after a fence that did not open: %v", err)
+				panic(fmt.Sprintf("the application's statement after a fence that did not open: %v", err))
 			}
 			got := take()
 			want := []string{
@@ -117,17 +118,17 @@ func TestFenceThatNeverOpenedTouchesNothing(t *testing.T) {
 				"SAVEPOINT ts_capture; " + strings.Replace(isoAsk, "'500'", "'20'", 1), "SELECT * FROM t WHERE id IN ($1)", "ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 			}
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
-				t.Fatalf("driver saw:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+				panic(fmt.Sprintf("driver saw:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n")))
 			}
 			if appSavepoint {
 				// the application's savepoint is still there, and still its own
 				if _, err := tx.ExecContext(bg, "ROLLBACK TO SAVEPOINT ts_capture"); err != nil {
-					t.Fatalf("the application's ROLLBACK TO its savepoint: %v", err)
+					panic(fmt.Sprintf("the application's ROLLBACK TO its savepoint: %v", err))
 				}
 				isoExec(t, bg, tx, "RELEASE SAVEPOINT ts_capture")
 			}
 			if err := tx.Commit(); err != nil {
-				t.Fatalf("COMMIT: %v", err)
+				panic(fmt.Sprintf("COMMIT: %v", err))
 			}
 		})
 	}

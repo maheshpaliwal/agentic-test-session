@@ -4,6 +4,7 @@ package tsql_test
 // TSESSION_TEST_PG_DSN; skipped otherwise).
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestPGBinaryKeysAreToldApart(t *testing.T) {
 	rec, ctx := setup(t)
 	db, err := tsql.Open("pgx", rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	for _, s := range []struct {
@@ -38,12 +39,12 @@ func TestPGBinaryKeysAreToldApart(t *testing.T) {
 		{"DELETE FROM tsql_bin WHERE id = $1", []any{k1}},
 	} {
 		if _, err := db.ExecContext(ctx, s.q, s.args...); err != nil {
-			t.Fatalf("%s: %v", s.q, err)
+			panic(fmt.Sprintf("%s: %v", s.q, err))
 		}
 	}
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	if len(ws) != 4 {
-		t.Fatalf("%d write events", len(ws))
+		panic(fmt.Sprintf("%d write events", len(ws)))
 	}
 	var got [][]any
 	for _, e := range ws {
@@ -67,21 +68,21 @@ func TestPGBinaryKeysAreToldApart(t *testing.T) {
 	// bytes that are text are shown as the text they are
 	want := [][]any{{`\xfffe0001`, `\xfffe0002`}, {"abc"}, {`\xfffe0003`}, {`\xfffe0001`}}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("keys recorded %v, want %v", got, want)
+		panic(fmt.Sprintf("keys recorded %v, want %v", got, want))
 	}
 
 	// Without images the key is the bind argument's: the same form.
 	rec, ctx = setup(t)
 	plain, err := tsql.Open("pgx", rtDSN(t), tsql.WithImages(false), tsql.WithPKColumns("tsql_bin", "id"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer plain.Close()
 	if _, err := plain.ExecContext(ctx, "UPDATE tsql_bin SET v = 'y' WHERE id = $1", k3); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if m := lastWrite(t, rec).Mutations; len(m) != 1 || m[0].PK["id"] != `\xfffe0003` {
-		t.Fatalf("key from the argument: %+v", m)
+		panic(fmt.Sprintf("key from the argument: %+v", m))
 	}
 }
 
@@ -101,7 +102,7 @@ func TestPGUUIDKeyHasOneForm(t *testing.T) {
 			rec, ctx := setup(t)
 			db, err := tsql.Open("pgx", rtDSN(t), opts...)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer db.Close()
 			for _, s := range []struct {
@@ -115,11 +116,11 @@ func TestPGUUIDKeyHasOneForm(t *testing.T) {
 				{"DELETE FROM tsql_uuid WHERE id = $1", []any{pgtype.UUID{Bytes: raw, Valid: true}}},
 			} {
 				if _, err := db.ExecContext(ctx, s.q, s.args...); err != nil {
-					t.Fatalf("%s: %v", s.q, err)
+					panic(fmt.Sprintf("%s: %v", s.q, err))
 				}
 				e := lastWrite(t, rec)
 				if len(e.Mutations) != 1 || e.Mutations[0].PK["id"] != text || hasFlag(e, "after_failed") || hasFlag(e, "image_failed") {
-					t.Fatalf("%s (%T): mutations %+v flags %v", s.q, s.args[0], e.Mutations, e.Flags)
+					panic(fmt.Sprintf("%s (%T): mutations %+v flags %v", s.q, s.args[0], e.Mutations, e.Flags))
 				}
 			}
 		})

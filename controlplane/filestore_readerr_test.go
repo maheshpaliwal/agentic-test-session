@@ -41,20 +41,20 @@ func damageArchive(t *testing.T, fs *FileStore, size int64) (repair func()) {
 	t.Helper()
 	old, err := os.ReadFile(fs.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := os.Truncate(fs.archivePath(), size); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return func() {
 		t.Helper()
 		fh, err := os.OpenFile(fs.archivePath(), os.O_WRONLY, 0)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer fh.Close()
 		if _, err := fh.WriteAt(old, 0); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 }
@@ -68,7 +68,7 @@ func TestFileStoreReadErrorsAreReported(t *testing.T) {
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	uncached(fs)
 	var ss []Session
@@ -82,7 +82,7 @@ func TestFileStoreReadErrorsAreReported(t *testing.T) {
 	}
 	wantStore(t, "before", fs, ss)
 	if n := fs.ReadErrors(); n != 0 || logs.String() != "" {
-		t.Fatalf("read errors before the damage: %d, log %q", n, logs.String())
+		panic(fmt.Sprintf("read errors before the damage: %d, log %q", n, logs.String()))
 	}
 
 	// The file ends in the middle of the line of s2.
@@ -90,57 +90,57 @@ func TestFileStoreReadErrorsAreReported(t *testing.T) {
 	for i, s := range ss {
 		got, ok, err := fs.GetErr(s.ID)
 		if readable := i < 2; ok != readable || (err == nil) != readable || ok && got.Name != s.Name {
-			t.Fatalf("GetErr %s: %+v %v %v", s.ID, got, ok, err)
+			panic(fmt.Sprintf("GetErr %s: %+v %v %v", s.ID, got, ok, err))
 		}
 		if _, ok := fs.Get(s.ID); ok != (i < 2) {
-			t.Fatalf("Get %s: %v", s.ID, ok)
+			panic(fmt.Sprintf("Get %s: %v", s.ID, ok))
 		}
 	}
 	if _, ok, err := fs.GetErr("ts_nope"); ok || err != nil {
-		t.Fatalf("GetErr of an unknown id: %v %v, want no session and no error", ok, err)
+		panic(fmt.Sprintf("GetErr of an unknown id: %v %v, want no session and no error", ok, err))
 	}
 	if n := fs.ReadErrors(); n != 4 { // s2 and s3, through GetErr and through Get
-		t.Fatalf("read errors after four failed gets: %d", n)
+		panic(fmt.Sprintf("read errors after four failed gets: %d", n))
 	}
 	if l := logs.String(); !strings.Contains(l, ss[2].ID) || !strings.Contains(l, ss[3].ID) || !strings.Contains(l, "level=ERROR") {
-		t.Fatalf("failed gets not logged:\n%s", l)
+		panic(fmt.Sprintf("failed gets not logged:\n%s", l))
 	}
 
 	wantSameSessions(t, "list", fs.List(), ss[:2])
 	if n := fs.ReadErrors(); n != 6 {
-		t.Fatalf("read errors after a list that left out two sessions: %d, want 6", n)
+		panic(fmt.Sprintf("read errors after a list that left out two sessions: %d, want 6", n))
 	}
 	if l := logs.String(); !strings.Contains(l, "missing from a list") || !strings.Contains(l, "sessions=2") {
-		t.Fatalf("incomplete list not logged:\n%s", l)
+		panic(fmt.Sprintf("incomplete list not logged:\n%s", l))
 	}
 	if got := fs.ListPending(); len(got) != 0 { // reads the line of s3 only
-		t.Fatalf("list pending: %+v", got)
+		panic(fmt.Sprintf("list pending: %+v", got))
 	}
 	if got := fs.ListState(StateAborted); len(got) != 2 { // reads s0, s1, s2
-		t.Fatalf("list state: %+v", got)
+		panic(fmt.Sprintf("list state: %+v", got))
 	}
 	if n := fs.ReadErrors(); n != 8 {
-		t.Fatalf("read errors after ListPending and ListState: %d, want 8", n)
+		panic(fmt.Sprintf("read errors after ListPending and ListState: %d, want 8", n))
 	}
 
 	// Once the file is whole again, so are the answers; nothing more is counted.
 	repair()
 	wantStore(t, "repaired", fs, ss)
 	if n := fs.ReadErrors(); n != 8 {
-		t.Fatalf("read errors after the repair: %d, want 8", n)
+		panic(fmt.Sprintf("read errors after the repair: %d, want 8", n))
 	}
 
 	// The file cannot be read at all (its handle is gone).
 	if err := fs.ar.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, s := range ss {
 		if _, ok, err := fs.GetErr(s.ID); ok || err == nil {
-			t.Fatalf("GetErr %s from an unreadable archive: %v %v", s.ID, ok, err)
+			panic(fmt.Sprintf("GetErr %s from an unreadable archive: %v %v", s.ID, ok, err))
 		}
 	}
 	if got := fs.List(); len(got) != 0 || fs.ReadErrors() != 16 {
-		t.Fatalf("list from an unreadable archive: %d sessions, %d read errors, want 0 and 16", len(got), fs.ReadErrors())
+		panic(fmt.Sprintf("list from an unreadable archive: %d sessions, %d read errors, want 0 and 16", len(got), fs.ReadErrors()))
 	}
 }
 
@@ -153,7 +153,7 @@ func TestManagerTellsUnreadableFromUnknown(t *testing.T) {
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	uncached(fs)
 	fin := archiveSession(0, "finished", StateAborted)
@@ -170,43 +170,43 @@ func TestManagerTellsUnreadableFromUnknown(t *testing.T) {
 
 	damageArchive(t, fs, 10)
 	if _, err := m.Rename(fin.ID, "new name"); !errors.Is(err, ErrStore) {
-		t.Fatalf("rename of an unreadable session: %v, want ErrStore", err)
+		panic(fmt.Sprintf("rename of an unreadable session: %v, want ErrStore", err))
 	}
 	if _, err := m.Stop(fin.ID); !errors.Is(err, ErrStore) {
-		t.Fatalf("stop of an unreadable session: %v, want ErrStore", err)
+		panic(fmt.Sprintf("stop of an unreadable session: %v, want ErrStore", err))
 	}
 	if _, err := m.Abort(fin.ID); !errors.Is(err, ErrStore) {
-		t.Fatalf("abort of an unreadable session: %v, want ErrStore", err)
+		panic(fmt.Sprintf("abort of an unreadable session: %v, want ErrStore", err))
 	}
 	for _, r := range [][3]string{
 		{"GET", "/v1/sessions/" + fin.ID, ""},
 		{"PATCH", "/v1/sessions/" + fin.ID, `{"name":"x"}`},
 	} {
 		if code := status(r[0], r[1], r[2]); code != http.StatusInternalServerError {
-			t.Fatalf("%s of an unreadable session: %d, want 500", r[0], code)
+			panic(fmt.Sprintf("%s of an unreadable session: %d, want 500", r[0], code))
 		}
 	}
 	if code := status("DELETE", "/v1/sessions/ts_nope", ""); code != http.StatusNotFound {
-		t.Fatalf("delete of an unknown session: %d, want 404", code)
+		panic(fmt.Sprintf("delete of an unknown session: %d, want 404", code))
 	}
 	if code := status("GET", "/v1/sessions/ts_nope", ""); code != http.StatusNotFound {
-		t.Fatalf("get of an unknown session: %d, want 404", code)
+		panic(fmt.Sprintf("get of an unknown session: %d, want 404", code))
 	}
 	want := fmt.Sprintf("tsession_controlplane_store_read_errors_total %d\n", fs.ReadErrors())
 	if fs.ReadErrors() == 0 || !strings.Contains(scrapeMetrics(t, m), want) {
-		t.Fatalf("metrics do not have %q:\n%s", want, scrapeMetrics(t, m))
+		panic(fmt.Sprintf("metrics do not have %q:\n%s", want, scrapeMetrics(t, m)))
 	}
 
 	// It can still be deleted, here and in the collector: an archived session
 	// is finished, and refusing would leave it undeletable.
 	if code := status("DELETE", "/v1/sessions/"+fin.ID, ""); code != http.StatusOK {
-		t.Fatalf("delete of an unreadable session: %d, want 200", code)
+		panic(fmt.Sprintf("delete of an unreadable session: %d, want 200", code))
 	}
 	if calls := c.callLog(); len(calls) != 1 || calls[0] != "delete" {
-		t.Fatalf("collector calls: %v", calls)
+		panic(fmt.Sprintf("collector calls: %v", calls))
 	}
 	if _, ok, err := fs.GetErr(fin.ID); ok || err != nil {
-		t.Fatalf("deleted session: %v %v", ok, err)
+		panic(fmt.Sprintf("deleted session: %v %v", ok, err))
 	}
 }
 
@@ -218,7 +218,7 @@ func TestManagerLogsUnreadableSessionsAtStart(t *testing.T) {
 	fs, err := NewFileStore(path, WithStoreLogger(storeLogs.logger()))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	pend := archiveSession(1, "seal pending", StateSealed)
 	pend.SealPending, pend.EndedAt = true, time.Now().UTC()
@@ -229,17 +229,17 @@ func TestManagerLogsUnreadableSessionsAtStart(t *testing.T) {
 	healthy := NewManager(Config{Store: fs, Collector: newFlaky(), Logger: logs.logger()})
 	healthy.Close()
 	if pendingCount(healthy) != 1 || strings.Contains(logs.String(), "could not be read") {
-		t.Fatalf("readable store: %d pending seals, log:\n%s", pendingCount(healthy), logs.String())
+		panic(fmt.Sprintf("readable store: %d pending seals, log:\n%s", pendingCount(healthy), logs.String()))
 	}
 
 	damageArchive(t, fs, 10)
 	m := NewManager(Config{Store: fs, Collector: newFlaky(), Logger: logs.logger()})
 	m.Close()
 	if l := logs.String(); !strings.Contains(l, "level=ERROR") || !strings.Contains(l, "could not be read at startup") || !strings.Contains(l, "sessions=1") {
-		t.Fatalf("manager started on an unreadable archive without an error in its log:\n%s", l)
+		panic(fmt.Sprintf("manager started on an unreadable archive without an error in its log:\n%s", l))
 	}
 	if !strings.Contains(storeLogs.String(), pend.ID) {
-		t.Fatalf("the store's log does not name the session:\n%s", storeLogs.String())
+		panic(fmt.Sprintf("the store's log does not name the session:\n%s", storeLogs.String()))
 	}
 }
 
@@ -251,7 +251,7 @@ func TestSealRetrySurvivesUnreadableSession(t *testing.T) {
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	pend := archiveSession(1, "seal pending", StateSealed)
 	pend.SealPending, pend.Incomplete, pend.SealError, pend.BundleURI = true, true, "seal failed", ""
@@ -267,7 +267,7 @@ func TestSealRetrySurvivesUnreadableSession(t *testing.T) {
 	})
 	waitSeals(t, c, 0)
 	if pendingCount(m) != 1 {
-		t.Fatalf("%d pending seals after the start, want 1", pendingCount(m))
+		panic(fmt.Sprintf("%d pending seals after the start, want 1", pendingCount(m)))
 	}
 
 	repair := damageArchive(t, fs, 10)
@@ -275,18 +275,18 @@ func TestSealRetrySurvivesUnreadableSession(t *testing.T) {
 	// Seals succeed now and their result cannot be stored.
 	waitSeals(t, c, c.seals.Load()+2)
 	if pendingCount(m) != 1 {
-		t.Fatalf("the pending seal was dropped while its session could not be read (%d pending)", pendingCount(m))
+		panic(fmt.Sprintf("the pending seal was dropped while its session could not be read (%d pending)", pendingCount(m)))
 	}
 	if !strings.Contains(logs.String(), "seal retry: session could not be read") {
-		t.Fatalf("not logged:\n%s", logs.String())
+		panic(fmt.Sprintf("not logged:\n%s", logs.String()))
 	}
 
 	repair()
 	got := waitSession(t, m, pend.ID, "sealed on retry", func(s Session) bool { return !s.SealPending })
 	if got.BundleURI != c.res.BundleURI || got.SealError != "" || got.State != StateSealed {
-		t.Fatalf("after the repair: %+v", got)
+		panic(fmt.Sprintf("after the repair: %+v", got))
 	}
 	if pendingCount(m) != 0 {
-		t.Fatalf("%d pending seals left", pendingCount(m))
+		panic(fmt.Sprintf("%d pending seals left", pendingCount(m)))
 	}
 }

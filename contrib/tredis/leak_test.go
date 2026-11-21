@@ -3,6 +3,7 @@ package tredis
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func since(t *testing.T, rec *core.MemRecorder, n int, what string) string {
 	t.Helper()
 	b, err := json.Marshal(rec.Events()[n:])
 	if err != nil {
-		t.Fatalf("%s: the events are not JSON: %v", what, err)
+		panic(fmt.Sprintf("%s: the events are not JSON: %v", what, err))
 	}
 	if strings.Contains(string(b), leakMark) {
 		t.Errorf("%s records the secret: %s", what, b)
@@ -153,7 +154,7 @@ func TestSetGetReplyIsAValue(t *testing.T) {
 		c.Set(bg, "password:alice", leakMark, 0)
 		c.Set(bg, "user:9", `{"password":"`+leakMark+`","name":"ann"}`, 0)
 		if old, err := c.SetArgs(ctx, "password:alice", "new", redis.SetArgs{Get: true}).Result(); err != nil || old != leakMark {
-			t.Fatalf("the application got %q, %v", old, err)
+			panic(fmt.Sprintf("the application got %q, %v", old, err))
 		}
 		c.SetArgs(ctx, "user:9", "x", redis.SetArgs{Get: true})
 		c.Set(ctx, "user:9", "y", 0)
@@ -258,7 +259,7 @@ func TestHashFieldNamesAreMasked(t *testing.T) {
 		evs := rec.Events()
 		m := evs[1].Mutations[0]
 		if len(m.Diff) != 1 || !strings.HasPrefix(m.Diff[0].Field, "token:#") {
-			t.Fatalf("diff %+v", m.Diff)
+			panic(fmt.Sprintf("diff %+v", m.Diff))
 		}
 		shown := `"` + m.Diff[0].Field + `"`
 		for what, got := range map[string]string{
@@ -285,5 +286,86 @@ func TestValueMovedFromASensitiveKeyIsNotRead(t *testing.T) {
 		if len(ms) != 2 || string(ms[1].After.Inline) != `"[REDACTED]"` || len(ms[0].After.Inline) != 0 {
 			t.Errorf("%+v", ms)
 		}
+	})
+}
+
+// A value stored through encoding.BinaryMarshaler is recorded as it was
+// sent, so that a sensitive field in it is masked; it used to be recorded as
+// Go prints the struct, password and all.
+type leakUser struct{ Name, Password string }
+
+func (u *leakUser) MarshalBinary() ([]byte, error) { return json.Marshal(u) }
+
+func TestMarshaledValueIsRecordedAsSent(t *testing.T) {
+	servers(t, func(t *testing.T, addr string) {
+		c, rec, ctx := setupAt(t, addr)
+		n := len(rec.Events())
+		if err := c.Set(ctx, "user:1", &leakUser{Name: "ann", Password: leakMark}, 0).Err(); err != nil {
+			panic(err)
+		}
+		if got := since(t, rec, n, "SET of a marshaled struct"); !strings.Contains(got, "ann") {
+			t.Errorf("the value is not recorded as sent: %s", got)
+		}
+	})
+}
+
+// Leaks an independent review found outside what the leak property test
+// generates.
+func TestLeaksFoundByReview(t *testing.T) {
+	servers(t, func(t *testing.T, addr string) {
+		c, rec, ctx := setupAt(t, addr)
+		bg := context.Background()
+		c.ZAdd(bg, "user:1:tokens", redis.Z{Score: 1, Member: leakMark + "-member"})
+		c.RPush(bg, "user:1:token", leakMark+"-elem")
+		c.XAdd(bg, &redis.XAddArgs{Stream: "tokens:user:1", Values: []string{"f", leakMark + "-entry"}})
+		c.HSet(bg, "user:1", "otp", 493817)
+		c.Set(bg, "password:alice", leakMark+"-pw", 0)
+		long := leakToken + strings.Repeat("Qz9", 400) // 1.2 KB after the name
+		for what, run := range map[string]func(){
+			// values of sensitive keys read by commands the table does not know
+			"ZUNION of a sensitive key":        func() { c.Do(ctx, "zunion", "1", "user:1:tokens") },
+			"ZINTER of a sensitive key":        func() { c.Do(ctx, "zinter", "1", "user:1:tokens") },
+			"SORT_RO of a sensitive key":       func() { c.Do(ctx, "sort_ro", "user:1:token", "alpha") },
+			"XREAD of a sensitive stream":      func() { c.Do(ctx, "xread", "count", "1", "streams", "tokens:user:1", "0") },
+			"XREADGROUP of a sensitive stream": func() { c.Do(ctx, "xreadgroup", "group", "g", "c", "streams", "tokens:user:1", "0") },
+			// a secret name with a digit in it: the name was hashed and the secret kept
+			"oauth2_token:<secret>": func() { c.Set(ctx, "oauth2_token:"+leakToken, "v", 0) },
+			"token2:<secret>":       func() { c.Set(ctx, "token2:"+leakToken, "v", 0) },
+			"api_key_v2:<secret>":   func() { c.Set(ctx, "api_key_v2:"+leakToken, "v", 0) },
+			// session names as frameworks compose them
+			"PHPREDIS_SESSION:<secret>":        func() { c.Set(ctx, "PHPREDIS_SESSION:"+leakToken, "v", 0) },
+			"redisson:tomcat_session:<secret>": func() { c.Set(ctx, "redisson:tomcat_session:"+leakToken, "v", 0) },
+			"myapp.session:<secret>":           func() { c.Set(ctx, "myapp.session:"+leakToken, "v", 0) },
+			"user_sid:<secret>":                func() { c.Set(ctx, "user_sid:"+leakToken, "v", 0) },
+			// a long secret outside key position
+			"hash field token:<1.2 KB>": func() { c.HSet(ctx, "user:2", "token:"+long, "v") },
+			"member session:<1.2 KB>":   func() { c.SAdd(ctx, "user:2:sessions", "session:"+long) },
+			"KEYS session:<1.2 KB>*":    func() { c.Keys(ctx, "session:"+long+"*") },
+			// a counter under a sensitive field name
+			"HINCRBY on a sensitive field": func() { c.HIncrBy(ctx, "user:1", "otp", 0) },
+			// a credential set through CONFIG
+			"CONFIG SET of a key password": func() { c.Do(ctx, "config", "set", "tls-key-file-pass", leakMark) },
+		} {
+			n := len(rec.Events())
+			run()
+			got := since(t, rec, n, what)
+			if what == "HINCRBY on a sensitive field" && strings.Contains(got, "493817") {
+				t.Errorf("%s records the stored number: %s", what, got)
+			}
+		}
+
+		// A transaction typed by hand on one connection: the replies of the
+		// queued reads arrive with EXEC.
+		rc, ok := c.(*redis.Client)
+		if !ok {
+			panic(fmt.Sprintf("test setup: the client is a %T", c))
+		}
+		cn := rc.Conn()
+		defer cn.Close()
+		n := len(rec.Events())
+		cn.Do(ctx, "multi")
+		cn.Do(ctx, "get", "password:alice")
+		cn.Do(ctx, "exec")
+		since(t, rec, n, "EXEC of a raw MULTI")
 	})
 }

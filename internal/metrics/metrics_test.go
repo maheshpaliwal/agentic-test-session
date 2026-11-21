@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"math"
 	"net/http/httptest"
 	"strings"
@@ -27,7 +28,7 @@ func TestExposition(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain; version=0.0.4") {
-		t.Fatalf("content type %q", ct)
+		panic(fmt.Sprintf("content type %q", ct))
 	}
 	want := `# HELP a_rejected_total Rejected, by reason.
 # TYPE a_rejected_total counter
@@ -45,10 +46,10 @@ d_by_state{state="ACTIVE"} 2.5
 d_by_state{state="DRAINING"} 1
 `
 	if got := rec.Body.String(); got != want {
-		t.Fatalf("exposition mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
+		panic(fmt.Sprintf("exposition mismatch\n--- got ---\n%s--- want ---\n%s", got, want))
 	}
 	if c.Value() != 5 {
-		t.Fatalf("value %d", c.Value())
+		panic(fmt.Sprintf("value %d", c.Value()))
 	}
 }
 
@@ -103,14 +104,14 @@ func TestConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 	if c.Value() != 8000 {
-		t.Fatalf("lost increments: %d", c.Value())
+		panic(fmt.Sprintf("lost increments: %d", c.Value()))
 	}
 	var sum uint64
 	for _, k := range []string{"a", "b", "c", "d"} {
 		sum += v.With(k).Value()
 	}
 	if sum != 8000 {
-		t.Fatalf("vec lost increments: %d", sum)
+		panic(fmt.Sprintf("vec lost increments: %d", sum))
 	}
 }
 
@@ -120,10 +121,10 @@ func TestCounterFunc(t *testing.T) {
 	r.CounterFunc("x_read_errors_total", "Reads that failed.", func() float64 { n += 2; return n })
 	var b strings.Builder
 	if _, err := r.WriteTo(&b); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	want := "# HELP x_read_errors_total Reads that failed.\n# TYPE x_read_errors_total counter\nx_read_errors_total 2\n"
 	if b.String() != want {
-		t.Fatalf("got:\n%s\nwant:\n%s", b.String(), want)
+		panic(fmt.Sprintf("got:\n%s\nwant:\n%s", b.String(), want))
 	}
 }

@@ -18,7 +18,7 @@ func listIDs(t *testing.T, base, path string) (*http.Response, []string) {
 	t.Helper()
 	r, b := get(t, base, path)
 	if r.StatusCode != 200 {
-		t.Fatalf("GET %s: %d %s", path, r.StatusCode, b)
+		panic(fmt.Sprintf("GET %s: %d %s", path, r.StatusCode, b))
 	}
 	var ss []Session
 	decode(t, b, &ss)
@@ -40,10 +40,10 @@ func TestDemoListPaging(t *testing.T) {
 	// them, and no paging headers.
 	r, ids := listIDs(t, s.URL, base)
 	if want := []string{"ts_demo0003", "ts_demo0001", "ts_demo0005", "ts_demo0004", "ts_demo0002"}; !slices.Equal(ids, want) {
-		t.Fatalf("unpaged list: %v, want %v", ids, want)
+		panic(fmt.Sprintf("unpaged list: %v, want %v", ids, want))
 	}
 	if r.Header.Get(headerNext) != "" || r.Header.Get(headerTotal) != "" {
-		t.Fatalf("unpaged list has paging headers: %v", r.Header)
+		panic(fmt.Sprintf("unpaged list has paging headers: %v", r.Header))
 	}
 
 	// With a limit: newest first by creation time, a cursor while there is more.
@@ -55,7 +55,7 @@ func TestDemoListPaging(t *testing.T) {
 		for page := 0; page < 20; page++ {
 			r, ids := listIDs(t, s.URL, q)
 			if r.Header.Get(headerTotal) != wantTotal {
-				t.Fatalf("%s: total %q, want %q", q, r.Header.Get(headerTotal), wantTotal)
+				panic(fmt.Sprintf("%s: total %q, want %q", q, r.Header.Get(headerTotal), wantTotal))
 			}
 			got = append(got, ids...)
 			next := r.Header.Get(headerNext)
@@ -63,12 +63,12 @@ func TestDemoListPaging(t *testing.T) {
 				return got
 			}
 			if len(ids) != limit {
-				t.Fatalf("%s: %d sessions and a next page", q, len(ids))
+				panic(fmt.Sprintf("%s: %d sessions and a next page", q, len(ids)))
 			}
 			q = fmt.Sprintf("%s?limit=%d%s&before=%s", base, limit, query, url.QueryEscape(next))
 		}
-		t.Fatalf("paging %s does not end", query)
-		return nil
+		panic(fmt.Sprintf("paging %s does not end", query))
+
 	}
 	for _, limit := range []int{1, 2, 3, 5, 200} {
 		if got := walk("", limit, "5"); !slices.Equal(got, byAge) {
@@ -92,7 +92,7 @@ func TestDemoListPaging(t *testing.T) {
 	for i := range 3 {
 		resp, err := http.Post(s.URL+base, "application/json", strings.NewReader(fmt.Sprintf(`{"name":"new %d"}`, i)))
 		if err != nil || resp.StatusCode != 201 {
-			t.Fatalf("start: %v %v", resp, err)
+			panic(fmt.Sprintf("start: %v %v", resp, err))
 		}
 		resp.Body.Close()
 	}
@@ -129,7 +129,7 @@ func TestProxyPagesTheControlPlaneList(t *testing.T) {
 	t.Cleanup(cp.Close)
 	h, err := New(Config{ControlPlaneURL: cp.URL, CollectorURL: cp.URL})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	d := httptest.NewServer(h)
 	t.Cleanup(d.Close)
@@ -137,18 +137,18 @@ func TestProxyPagesTheControlPlaneList(t *testing.T) {
 	r, ids := listIDs(t, d.URL, "/api/cp/v1/sessions?limit=3")
 	next := r.Header.Get(controlplane.HeaderNext)
 	if !slices.Equal(ids, []string{"ts_proxy06", "ts_proxy05", "ts_proxy04"}) || next == "" || r.Header.Get(controlplane.HeaderTotal) != "7" {
-		t.Fatalf("first page: %v, next %q, total %q", ids, next, r.Header.Get(controlplane.HeaderTotal))
+		panic(fmt.Sprintf("first page: %v, next %q, total %q", ids, next, r.Header.Get(controlplane.HeaderTotal)))
 	}
 	r, ids = listIDs(t, d.URL, "/api/cp/v1/sessions?limit=3&before="+url.QueryEscape(next))
 	if !slices.Equal(ids, []string{"ts_proxy03", "ts_proxy02", "ts_proxy01"}) || r.Header.Get(controlplane.HeaderNext) == "" {
-		t.Fatalf("second page: %v, next %q", ids, r.Header.Get(controlplane.HeaderNext))
+		panic(fmt.Sprintf("second page: %v, next %q", ids, r.Header.Get(controlplane.HeaderNext)))
 	}
 	r, ids = listIDs(t, d.URL, "/api/cp/v1/sessions?limit=2&state=SEALED&name="+url.QueryEscape("odd & even"))
 	if !slices.Equal(ids, []string{"ts_proxy05", "ts_proxy03"}) || r.Header.Get(controlplane.HeaderTotal) != "3" {
-		t.Fatalf("by name: %v, total %q", ids, r.Header.Get(controlplane.HeaderTotal))
+		panic(fmt.Sprintf("by name: %v, total %q", ids, r.Header.Get(controlplane.HeaderTotal)))
 	}
 	if r, b := get(t, d.URL, "/api/cp/v1/sessions?limit=0"); r.StatusCode != 400 {
-		t.Fatalf("limit=0 through the proxy: %d %s", r.StatusCode, b)
+		panic(fmt.Sprintf("limit=0 through the proxy: %d %s", r.StatusCode, b))
 	}
 }
 
@@ -162,11 +162,11 @@ func TestProxyPassesTheUnreadableHeader(t *testing.T) {
 	t.Cleanup(cp.Close)
 	h, err := New(Config{ControlPlaneURL: cp.URL, CollectorURL: cp.URL})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	d := httptest.NewServer(h)
 	t.Cleanup(d.Close)
 	if r, _ := get(t, d.URL, "/api/cp/v1/sessions?limit=200"); r.Header.Get(controlplane.HeaderUnreadable) != "3" {
-		t.Fatalf("headers through the proxy: %v", r.Header)
+		panic(fmt.Sprintf("headers through the proxy: %v", r.Header))
 	}
 }

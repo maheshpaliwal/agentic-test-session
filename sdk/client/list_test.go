@@ -32,7 +32,7 @@ func listServer(t *testing.T, n int, old bool) string {
 			s.State, s.EndedAt = controlplane.StateActive, time.Time{}
 		}
 		if err := st.Put(s); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	m := controlplane.NewManager(controlplane.Config{Store: st})
@@ -60,7 +60,7 @@ func TestListPage(t *testing.T) {
 
 	all, err := client.List(ctx, o, "")
 	if err != nil || len(all) != n+1 || all[0].ID != "ts_list0000" || all[n].ID != "ts_list0025" {
-		t.Fatalf("List: %d sessions, err %v", len(all), err)
+		panic(fmt.Sprintf("List: %d sessions, err %v", len(all), err))
 	}
 	// Paging returns the same sessions, newest first, each once.
 	walk := func(lo client.ListOptions) []string {
@@ -69,10 +69,10 @@ func TestListPage(t *testing.T) {
 		for {
 			page, next, err := client.ListPage(ctx, o, lo)
 			if err != nil {
-				t.Fatalf("ListPage %+v: %v", lo, err)
+				panic(fmt.Sprintf("ListPage %+v: %v", lo, err))
 			}
 			if len(page) > lo.Limit || (next != "" && len(page) != lo.Limit) {
-				t.Fatalf("ListPage %+v: %d sessions, next %q", lo, len(page), next)
+				panic(fmt.Sprintf("ListPage %+v: %d sessions, next %q", lo, len(page), next))
 			}
 			for _, i := range page {
 				ids = append(ids, i.ID)
@@ -129,10 +129,10 @@ func TestListPageAgainstAnOlderControlPlane(t *testing.T) {
 	o := client.Options{BaseURL: listServer(t, 25, true)}
 	page, next, err := client.ListPage(ctx, o, client.ListOptions{Name: "nightly", Limit: 5})
 	if err != nil || next != "" || len(page) != 26 || page[0].ID != "ts_list0000" || page[1].Name == "nightly" {
-		t.Fatalf("%d sessions, next %q, err %v", len(page), next, err)
+		panic(fmt.Sprintf("%d sessions, next %q, err %v", len(page), next, err))
 	}
 	page, next, err = client.ListPage(ctx, o, client.ListOptions{State: "ACTIVE", Limit: 5})
 	if err != nil || next != "" || len(page) != 1 {
-		t.Fatalf("by state: %d sessions, next %q, err %v", len(page), next, err)
+		panic(fmt.Sprintf("by state: %d sessions, next %q, err %v", len(page), next, err))
 	}
 }

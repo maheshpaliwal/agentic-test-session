@@ -45,6 +45,10 @@ Before deploying:
   `ResourceExhausted`, `Canceled`) are no longer failed events: a session whose only "failures" were such calls
   now passes `--fail-on-error` and `RequireNoFailures`. Assert on the attribute `grpc.code` if a test relied on
   them failing.
+- `sdk/client/tsessiontest` panics where it called `t.Fatalf` (a session that cannot be started or stopped, a
+  failed `RequireMutation`, `RequireNoMutation` or `Ambient`): the message is the same, but a panic ends the
+  whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped.
+  `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -96,6 +100,8 @@ Rolling back:
 
 ### Added
 
+- `client.StatusError` and `client.StatusCode(err)`: the error of a request the service answered with a non-2xx
+  status now carries the code, so callers no longer match its text (it reads the same as before).
 - **Redis writes carry a diff** when before-images are on (`tredis.WithBeforeImage`): the value of a string,
   per field of a hash, per member of a sorted set, `added`/`removed` for a set, by index for a list. It adds no
   round trips. Collections beyond the image cap get a partial diff or none, flagged `diff_truncated`; a diff
@@ -110,7 +116,12 @@ Rolling back:
   but can be guessed for short tokens, `KeyMaskOff` nothing; `WithMaskKeys` adds patterns. Which names count as
   secret is a heuristic (all-lower-case tokens, e-mail addresses and phone numbers as key parts are not
   caught): the list for your environment is a decision for whoever owns its data policy. A test puts a random
-  secret into random commands and checks that no part of it reaches a recorded event.
+  secret into random commands and checks that no part of it reaches a recorded event. An independent review
+  then found nine leaks outside what that test generates (a value stored through `BinaryMarshaler`, sensitive
+  keys read through `XREAD` and commands missing from the table, the replies of a hand-typed `MULTI`/`EXEC`,
+  names such as `oauth2_token:` and `PHPREDIS_SESSION:`, names longer than 1 KB); eight are fixed and pinned by
+  tests, and the package doc lists what is still recorded as written (script source among it). A recording can
+  still hold a credential: treat exports as test data that may contain secrets.
 - `tracectl start --id-only` prints just the session id, for scripts; `tracectl doctor --require-services N`
   exits 3 with fewer connected SDK instances (a CI preflight).
 - **`tracectl digest <id|name>`**: a whole session in one bounded answer for an AI agent or a person: the
@@ -122,6 +133,8 @@ Rolling back:
   output, not a model's judgement of what the text says.
   Failures that did the same thing in the same place are listed once with a count, so 300 requests failing
   the same way take one line, not the whole budget.
+  The call tree merges them the same way, keeps apart calls that ended differently (a gRPC `NotFound` is not
+  folded into the `OK` calls next to it) and shows a call's status code and an event's flags on its line.
 - **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
   entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
   `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;
@@ -192,6 +205,8 @@ Rolling back:
 
 ### Changed
 
+- The dashboard binary panics on a start-up error (a refused listen address, an unreadable `-open` file) where
+  it called `log.Fatalf`: the message is the same, followed by a stack trace, and the exit status is 2, not 1.
 - **gRPC failures follow the HTTP rule.** A call is a failed event when its status says the callee failed
   (`Unknown`, `DeadlineExceeded`, `Unimplemented`, `Internal`, `Unavailable`, `DataLoss`), as an HTTP 5xx is;
   the other statuses are recorded in `grpc.code` and `grpc.message` and are not failures, as an HTTP 4xx is
@@ -257,7 +272,8 @@ Rolling back:
   `PUBLISH` no longer records a changed key; `GETSET` on a new key is a mutation; a command queued by a raw
   `MULTI` is not. Members of a sorted set that redact alike are kept apart, and infinite scores are recorded.
 - Every wrapper that records nothing when created before the SDK starts now says so (`tredis.Wrap`,
-  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`); only `thttp.Handler` did.
+  `tredisv8.Wrap`, the `tgrpc` interceptors, `thttp.Transport`, `tsql.Open`, `tsql.OpenDB`, `tsql.WrapDriver`,
+  `tmongo.Apply`, `tdynamo.Apply`); only `thttp.Handler` did.
 - `tsql`: `DO`, `CALL` and `EXECUTE` were recorded as reads. They are writes whose row changes tsql cannot
   see, recorded as `db.write` with the new flag `effects_unknown` and no mutations.
 - An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record
@@ -378,6 +394,8 @@ Rolling back:
 
 ### Internal
 
+- No code calls `Fatal` or `Fatalf`: program code and all tests panic with the same message. A failing
+  assertion therefore stops its package's test binary at once; the other packages still run.
 - `internal/slicex`, `internal/mapx`, `internal/set`; hand-written loops and `sort.Slice` calls replaced by them
   or by the standard `slices` / `maps` / `cmp` packages.
 - The go-redis v8 and v9 wrappers share one implementation (`internal/redisx.Tracer`).

@@ -3,6 +3,7 @@ package tredis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/redis/go-redis/v9"
@@ -15,7 +16,7 @@ import (
 func wantTx(t *testing.T, evs []core.Event, from int, outcome string, names ...string) {
 	t.Helper()
 	if len(evs) < from+len(names) {
-		t.Fatalf("%d events, want %d from #%d on", len(evs), len(names), from)
+		panic(fmt.Sprintf("%d events, want %d from #%d on", len(evs), len(names), from))
 	}
 	evs = evs[from : from+len(names)]
 	for i, e := range evs {
@@ -39,7 +40,7 @@ func TestTransactionIsMarked(t *testing.T) {
 			p.Incr(ctx, "tx:n")
 			return nil
 		}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		evs := rec.Events()
 		wantTx(t, evs, 0, "committed", "SET tx:a", "INCR tx:n")
@@ -89,10 +90,10 @@ func TestAbortedTransactionRecordsNoMutation(t *testing.T) {
 			return err
 		}, "tx:w")
 		if !errors.Is(err, redis.TxFailedErr) {
-			t.Fatalf("err=%v, want TxFailedErr", err)
+			panic(fmt.Sprintf("err=%v, want TxFailedErr", err))
 		}
 		if v := other.Get(bg, "tx:w").Val(); v != "changed" {
-			t.Fatalf("the transaction ran: tx:w=%q", v)
+			panic(fmt.Sprintf("the transaction ran: tx:w=%q", v))
 		}
 		evs := rec.Events()
 		if evs[0].Name != "WATCH tx:w" || evs[0].Kind != core.KindCacheRead {
@@ -116,7 +117,7 @@ func TestRefusedTransaction(t *testing.T) {
 			p.Do(ctx, "NOSUCHCOMMAND", "x") // refused when queued: EXEC answers EXECABORT
 			return nil
 		}); err == nil {
-			t.Fatal("want an error")
+			panic("want an error")
 		}
 		for _, e := range rec.Events() {
 			if e.Attrs["transaction_outcome"] != "failed" || len(e.Mutations) != 0 {
@@ -132,14 +133,14 @@ func TestPublishIsNotAMutation(t *testing.T) {
 		ch := &countHook{}
 		c.AddHook(ch)
 		if err := c.Publish(ctx, "walk-chan", `{"id":1}`).Err(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if n := ch.n.Load(); n != 1 {
 			t.Errorf("round trips=%d: the channel was read as a key", n)
 		}
 		evs := rec.Events()
 		if len(evs) != 1 {
-			t.Fatalf("events=%d", len(evs))
+			panic(fmt.Sprintf("events=%d", len(evs)))
 		}
 		e := evs[0]
 		if e.Kind != core.KindCacheWrite || e.Name != "PUBLISH walk-chan" || len(e.Mutations) != 0 {

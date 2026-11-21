@@ -73,7 +73,7 @@ func (in *infra) startRuntime(t *testing.T, service string) {
 	t.Helper()
 	if err := runtime.Start(runtime.Config{Service: service, ControlPlaneURL: in.cpSrv.URL,
 		CollectorURL: in.colSrv.URL, PatchDefaultTransport: true}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(runtime.Stop)
 }
@@ -84,7 +84,7 @@ func (in *infra) start(t *testing.T, mode string) *client.Session {
 	s, err := client.Start(context.Background(), client.Options{BaseURL: in.cpSrv.URL, Mode: mode, Name: "it",
 		TTLSeconds: 600, QuiesceSeconds: 8, MaxDrainSeconds: 100, PollInterval: 100 * time.Millisecond})
 	if err != nil {
-		t.Fatalf("start session: %v", err)
+		panic(fmt.Sprintf("start session: %v", err))
 	}
 	return s
 }
@@ -107,7 +107,7 @@ func waitFor(t *testing.T, d time.Duration, what string, f func() bool) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting for: %s", what)
+	panic(fmt.Sprintf("timeout waiting for: %s", what))
 }
 
 func (in *infra) seal(t *testing.T, s *client.Session) client.Info {
@@ -117,7 +117,7 @@ func (in *infra) seal(t *testing.T, s *client.Session) client.Info {
 	defer cancel()
 	info, err := s.StopAndWait(ctx)
 	if err != nil {
-		t.Fatalf("stop/wait: %v (info=%+v)", err, info)
+		panic(fmt.Sprintf("stop/wait: %v (info=%+v)", err, info))
 	}
 	return info
 }
@@ -130,15 +130,15 @@ func (c colAPI) get(t *testing.T, path string, out any) {
 	t.Helper()
 	resp, err := plain.Get(c.base + path)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		t.Fatalf("GET %s: %d %s", path, resp.StatusCode, b)
+		panic(fmt.Sprintf("GET %s: %d %s", path, resp.StatusCode, b))
 	}
 	if err := json.Unmarshal(b, out); err != nil {
-		t.Fatalf("GET %s: %v: %s", path, err, b)
+		panic(fmt.Sprintf("GET %s: %v: %s", path, err, b))
 	}
 }
 
@@ -239,7 +239,7 @@ func doReq(t *testing.T, method, u string, body any, hdr http.Header) (int, []by
 	}
 	resp, err := plain.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -259,7 +259,7 @@ func newApp(t *testing.T, appDSN, redisAddr, ns string) *appEnv {
 	t.Helper()
 	a, err := app.New(app.Config{PGDSN: appDSN, RedisAddr: redisAddr, Namespace: ns, Workers: 3})
 	if err != nil {
-		t.Fatalf("app.New: %v", err)
+		panic(fmt.Sprintf("app.New: %v", err))
 	}
 	srv := httptest.NewServer(a.Handler())
 	t.Cleanup(func() { srv.Close(); a.Close() })
@@ -282,15 +282,15 @@ func schemaSetup(t *testing.T, dsn string, names ...string) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer pool.Close()
 	for _, n := range names {
 		if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+n+" CASCADE"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if _, err := pool.Exec(ctx, "CREATE SCHEMA "+n); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	t.Cleanup(func() {

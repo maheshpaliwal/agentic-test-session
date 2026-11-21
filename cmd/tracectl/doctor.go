@@ -44,7 +44,7 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		switch {
 		case err == nil:
 			rep.Subscribers = append(rep.Subscribers, subs...)
-		case strings.Contains(err.Error(), ": 404 "): // the status as the client reports it, not any "404" in the text
+		case client.StatusCode(err) == http.StatusNotFound:
 			rep.Notes = append(rep.Notes, "this control plane is too old to list connected services")
 		default:
 			rep.Notes = append(rep.Notes, "listing connected services failed: "+err.Error())

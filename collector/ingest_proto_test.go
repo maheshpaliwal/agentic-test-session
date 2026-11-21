@@ -3,6 +3,7 @@ package collector
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -20,14 +21,14 @@ func rawPost(t *testing.T, url, ct string, body []byte) (int, IngestResult) {
 	t.Helper()
 	resp, err := http.Post(url+"/v1/ingest", ct, bytes.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	var r IngestResult
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == 200 {
 		if err := json.Unmarshal(b, &r); err != nil {
-			t.Fatalf("response %q: %v", b, err)
+			panic(fmt.Sprintf("response %q: %v", b, err))
 		}
 	}
 	return resp.StatusCode, r
@@ -37,7 +38,7 @@ func protoBody(t *testing.T, evs ...core.Event) []byte {
 	t.Helper()
 	b, err := tsessionproto.Encode(evs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return b
 }
@@ -48,7 +49,7 @@ func TestProtoIngestAcceptedAndStored(t *testing.T) {
 	in.Mutations = []core.Mutation{{Store: "postgres", Entity: "t", Op: "insert", PK: map[string]any{"id": 1}}}
 	code, r := rawPost(t, srv.URL, ctProto+"; charset=binary", protoBody(t, in, ev("b", core.KindAPIIn, 2, 2)))
 	if code != 200 || r.Accepted != 2 || r.Duplicates != 0 || r.Rejected != 0 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 	var out struct {
 		Events []core.Event `json:"events"`
@@ -58,7 +59,7 @@ func TestProtoIngestAcceptedAndStored(t *testing.T) {
 		get(t, srv.URL+"/v1/sessions/"+sid+"/events", &out)
 	}
 	if len(out.Events) != 2 || out.Events[0].SpanID != "a" || out.Events[0].Mutations[0].PK["id"] != 1.0 {
-		t.Fatalf("%+v", out.Events)
+		panic(fmt.Sprintf("%+v", out.Events))
 	}
 }
 
@@ -68,7 +69,7 @@ func TestProtoIdempotent(t *testing.T) {
 	_, r1 := rawPost(t, srv.URL, ctProto, body)
 	_, r2 := rawPost(t, srv.URL, ctProto, body)
 	if r1.Accepted != 1 || r2.Accepted != 0 || r2.Duplicates != 1 {
-		t.Fatalf("first=%+v second=%+v", r1, r2)
+		panic(fmt.Sprintf("first=%+v second=%+v", r1, r2))
 	}
 }
 
@@ -81,7 +82,7 @@ func TestProtoOversizeMessageRejectedAlone(t *testing.T) {
 	big.Name = strings.Repeat("x", 5000)
 	code, r := rawPost(t, srv.URL, ctProto, protoBody(t, ev("a", core.KindAPIIn, 1, 1), big, ev("c", core.KindAPIIn, 3, 3)))
 	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["oversize_message"] != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 }
 
@@ -96,7 +97,7 @@ func TestProtoUndecodableMessageAndBadSession(t *testing.T) {
 	body = append(body, protoBody(t, ev("b", core.KindAPIIn, 2, 2))...)
 	code, r := rawPost(t, srv.URL, ctProto, body)
 	if code != 200 || r.Accepted != 2 || r.Rejected != 3 || r.RejectedReasons["invalid_proto"] != 2 || r.RejectedReasons["invalid_session_id"] != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 }
 
@@ -107,21 +108,21 @@ func TestProtoGarbageTailKeepsDecodedEvents(t *testing.T) {
 	body = append(body, protoBody(t, ev("never", core.KindAPIIn, 3, 3))...)
 	code, r := rawPost(t, srv.URL, ctProto, body)
 	if code != 200 || r.Accepted != 2 || r.Rejected != 1 || r.RejectedReasons["invalid_proto"] != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 	// truncated final message
 	whole := protoBody(t, ev("c", core.KindAPIIn, 4, 4), ev("d", core.KindAPIIn, 5, 5))
 	code, r = rawPost(t, srv.URL, ctProto, whole[:len(whole)-4])
 	if code != 200 || r.Accepted != 1 || r.RejectedReasons["invalid_proto"] != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 	// pure garbage and an empty body
 	code, r = rawPost(t, srv.URL, ctProto, []byte("\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xffgarbage"))
 	if code != 200 || r.Accepted != 0 || r.RejectedReasons["invalid_proto"] != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 	if code, r = rawPost(t, srv.URL, ctProto, nil); code != 200 || r.Accepted != 0 || r.Rejected != 0 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 }
 
@@ -135,13 +136,13 @@ func TestProtoBodyLimit413(t *testing.T) {
 		evs = append(evs, ev("s", core.KindAPIIn, uint64(i+1), uint64(i+1)))
 	}
 	if code, _ := rawPost(t, srv.URL, ctProto, protoBody(t, evs...)); code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status %d", code)
+		panic(fmt.Sprintf("status %d", code))
 	}
 	// a single oversize message that also exceeds the body cap while being skipped
 	big := ev("big", core.KindAPIIn, 1, 1)
 	big.Name = strings.Repeat("x", 5000)
 	if code, _ := rawPost(t, srv.URL, ctProto, protoBody(t, big)); code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status %d", code)
+		panic(fmt.Sprintf("status %d", code))
 	}
 }
 
@@ -171,7 +172,7 @@ func TestIngestRequiresProtobufContentType(t *testing.T) {
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		var e struct {
 			Error string `json:"error"`
@@ -184,7 +185,7 @@ func TestIngestRequiresProtobufContentType(t *testing.T) {
 	}
 	// parameters on the right type are fine
 	if code, r := rawPost(t, srv.URL, ctProto+"; charset=binary", good); code != 200 || r.Accepted != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 }
 
@@ -194,7 +195,7 @@ func TestProtoNULStripped(t *testing.T) {
 	e.Name = "a\x00b"
 	e.Req = core.PayloadRef{Inline: json.RawMessage(`{"k":"x\u0000y"}`)}
 	if code, r := rawPost(t, srv.URL, ctProto, protoBody(t, e)); code != 200 || r.Accepted != 1 {
-		t.Fatalf("%d %+v", code, r)
+		panic(fmt.Sprintf("%d %+v", code, r))
 	}
 	var out struct {
 		Events []core.Event `json:"events"`
@@ -204,7 +205,7 @@ func TestProtoNULStripped(t *testing.T) {
 		get(t, srv.URL+"/v1/sessions/"+sid+"/events", &out)
 	}
 	if len(out.Events) != 1 || out.Events[0].Name != "a�b" || string(out.Events[0].Req.Inline) != `{"k":"x`+"�"+`y"}` {
-		t.Fatalf("%+v", out.Events)
+		panic(fmt.Sprintf("%+v", out.Events))
 	}
 }
 
@@ -226,7 +227,7 @@ func TestExporterProtobufEndToEnd(t *testing.T) {
 		rec.Record(e)
 	}
 	if !x.Flush(5 * time.Second) {
-		t.Fatal("flush timeout")
+		panic("flush timeout")
 	}
 	x.Close(time.Second)
 	var out struct {
@@ -237,12 +238,12 @@ func TestExporterProtobufEndToEnd(t *testing.T) {
 		get(t, srv.URL+"/v1/sessions/"+sid+"/events?limit=1000", &out)
 	}
 	if len(out.Events) != n {
-		t.Fatalf("stored %d of %d", len(out.Events), n)
+		panic(fmt.Sprintf("stored %d of %d", len(out.Events), n))
 	}
 	if out.Events[0].Mutations[0].Store != "postgres" || out.Events[0].Instance != "i1" {
-		t.Fatalf("%+v", out.Events[0])
+		panic(fmt.Sprintf("%+v", out.Events[0]))
 	}
 	if st := rec.Len(); st != 0 {
-		t.Fatalf("recorder not drained: %d", st)
+		panic(fmt.Sprintf("recorder not drained: %d", st))
 	}
 }

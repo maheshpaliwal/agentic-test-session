@@ -20,7 +20,7 @@ func diffOf(t *testing.T, rec *core.MemRecorder) []string {
 	t.Helper()
 	evs := rec.Events()
 	if len(evs) == 0 || len(evs[len(evs)-1].Mutations) != 1 {
-		t.Fatalf("want one mutation on the last event: %+v", evs)
+		panic(fmt.Sprintf("want one mutation on the last event: %+v", evs))
 	}
 	side := func(v any) string {
 		if v == nil {
@@ -108,7 +108,7 @@ func TestDiffAddsNoRoundTrips(t *testing.T) {
 		c.HSet(ctx, "user:1", "plan", "pro")
 		wantDiff(t, rec, "hash", `plan: "free" -> "pro"`)
 		if n := ch.n.Load(); n != 5 { // HSET, and TYPE + HSCAN before and after it
-			t.Fatalf("round trips=%d, want 5", n)
+			panic(fmt.Sprintf("round trips=%d, want 5", n))
 		}
 	})
 }
@@ -166,7 +166,7 @@ func TestDiffIsBounded(t *testing.T) {
 		c.Set(ctx, "doc:1", long, 0)
 		m := rec.Events()[0].Mutations[0]
 		if s, _ := m.Diff[0].New.(string); len(s) > 300 || !strings.HasSuffix(s, "more bytes)") {
-			t.Fatalf("value of %d bytes in the diff: %.80s", len(s), s)
+			panic(fmt.Sprintf("value of %d bytes in the diff: %.80s", len(s), s))
 		}
 		var fields []any
 		for i := range 200 {
@@ -175,7 +175,7 @@ func TestDiffIsBounded(t *testing.T) {
 		c.HSet(ctx, "doc:2", fields...)
 		e := rec.Events()[1]
 		if n := len(e.Mutations[0].Diff); n != 50 || !slices.Contains(e.Flags, "diff_truncated") {
-			t.Fatalf("%d changes, flags %v", n, e.Flags)
+			panic(fmt.Sprintf("%d changes, flags %v", n, e.Flags))
 		}
 	})
 }
@@ -206,7 +206,7 @@ func TestDiffInPipeline(t *testing.T) {
 			p.Set(ctx, "user:2", "x", 0)
 			return nil
 		}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		evs := rec.Events()
 		if d := evs[0].Mutations[0].Diff; len(d) != 1 || d[0].Field != "plan" || d[0].Old != "free" || d[0].New != "pro" {

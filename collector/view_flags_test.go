@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 	var old core.Event
 	if err := json.Unmarshal([]byte(`{"session_id":"s","seq":2,"span_id":"b","service":"api","kind":"db.write",
 		"mutations":[{"store":"postgres","entity":"stock","op":"update","pk":{"sku":"w"}}]}`), &old); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs := []core.Event{
 		{Seq: 1, SpanID: "a", Service: "api", Kind: core.KindDBWrite, Flags: []string{"pk_not_unique", "after_unavailable"}, Mutations: stock(map[string]any{"sku": "w"})},
@@ -37,7 +38,7 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 
 	h := History(evs, "postgres", "stock", `{"sku":"w"}`)
 	if len(h.Mutations) != 4 {
-		t.Fatalf("history: %+v", h)
+		panic(fmt.Sprintf("history: %+v", h))
 	}
 	for i, want := range []string{"pk_not_unique,after_unavailable", "", "image_skipped:deadline", "redacted"} {
 		if got := strings.Join(h.Mutations[i].Flags, ","); got != want {
@@ -46,20 +47,20 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 	}
 	b, err := json.Marshal(h)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	// Optional on the wire: an entry without flags has the shape it always had.
 	if got := strings.Count(string(b), `"flags"`); got != 3 {
-		t.Fatalf("%d entries carry flags, want 3: %s", got, b)
+		panic(fmt.Sprintf("%d entries carry flags, want 3: %s", got, b))
 	}
 	var wire struct {
 		Mutations []map[string]json.RawMessage `json:"mutations"`
 	}
 	if err := json.Unmarshal(b, &wire); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, has := wire.Mutations[1]["flags"]; has || string(wire.Mutations[0]["flags"]) != `["pk_not_unique","after_unavailable"]` {
-		t.Fatalf("wire shape: %s", b)
+		panic(fmt.Sprintf("wire shape: %s", b))
 	}
 
 	want := map[string][2]int{ // key -> mutations, uncertain
@@ -67,7 +68,7 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 	}
 	ents := ListEntities(evs)
 	if len(ents) != len(want) {
-		t.Fatalf("entities: %+v", ents)
+		panic(fmt.Sprintf("entities: %+v", ents))
 	}
 	for _, e := range ents {
 		if w := want[e.PK]; e.MutationCount != w[0] || e.Uncertain != w[1] {
@@ -76,7 +77,7 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 	}
 	b, _ = json.Marshal(ents)
 	if got := strings.Count(string(b), `"uncertain"`); got != 4 {
-		t.Fatalf("%d entities carry uncertain, want 4 (omitted when zero): %s", got, b)
+		panic(fmt.Sprintf("%d entities carry uncertain, want 4 (omitted when zero): %s", got, b))
 	}
 }
 
@@ -85,7 +86,7 @@ func TestHistoryAndEntitiesCarryUncertainty(t *testing.T) {
 func TestHistoryBareNumericKey(t *testing.T) {
 	var e core.Event
 	if err := json.Unmarshal([]byte(`{"seq":1,"mutations":[{"store":"postgres","entity":"orders","op":"insert","pk":{"id":1000000}}]}`), &e); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, pk := range []string{"1000000", `{"id":1000000}`, "1e+06"} {
 		if h := History([]core.Event{e}, "postgres", "orders", pk); len(h.Mutations) != 1 || h.PK != `{"id":1000000}` {

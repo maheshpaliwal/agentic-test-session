@@ -70,56 +70,56 @@ func TestResultsAPI(t *testing.T) {
 	cp := setup(t)
 	started, err := client.Start(ctx, client.Options{BaseURL: cp})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	const n = 10003 // one full page plus a short one
 	col, paths := fakeResults(t, started.ID, n)
 	s, err := client.Attach(ctx, client.Options{BaseURL: cp, CollectorURL: col.URL + "/"}, started.ID)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	evs, err := s.Events(ctx)
 	if err != nil || len(evs) != n || evs[0].Seq != 1 || evs[n-1].Seq != n {
-		t.Fatalf("events: %d %v", len(evs), err)
+		panic(fmt.Sprintf("events: %d %v", len(evs), err))
 	}
 	if len(*paths) != 2 || !strings.Contains((*paths)[1], "from_seq=10001") {
-		t.Fatalf("paging requests: %v", *paths)
+		panic(fmt.Sprintf("paging requests: %v", *paths))
 	}
 	page, err := s.EventsPage(ctx, 5, 2)
 	if err != nil || len(page.Events) != 2 || page.Events[0].Seq != 5 || page.NextSeq != 7 || !page.Sealed {
-		t.Fatalf("page: %+v %v", page, err)
+		panic(fmt.Sprintf("page: %+v %v", page, err))
 	}
 
 	sum, err := s.Summary(ctx)
 	if err != nil || sum.EventCount != n || len(sum.Failures) != 1 || sum.Failures[0].Err != "boom" || sum.Mutations["postgres"]["orders"] != 3 {
-		t.Fatalf("summary: %+v %v", sum, err)
+		panic(fmt.Sprintf("summary: %+v %v", sum, err))
 	}
 	ents, err := s.Entities(ctx)
 	if err != nil || len(ents) != 1 || ents[0].PK != `{"id":42}` {
-		t.Fatalf("entities: %+v %v", ents, err)
+		panic(fmt.Sprintf("entities: %+v %v", ents, err))
 	}
 	// Keys with slashes, spaces and JSON punctuation must survive the path.
 	*paths = nil
 	h, err := s.History(ctx, "redis", "user:1/cart", `{"id":"a b/c"}`)
 	if err != nil || h.Entity != "user:1/cart" || h.PK != `{"id":"a b/c"}` {
-		t.Fatalf("history: %+v %v (%v)", h, err, *paths)
+		panic(fmt.Sprintf("history: %+v %v (%v)", h, err, *paths))
 	}
 	if len(h.Mutations) != 1 || h.Mutations[0].Effective == nil || *h.Mutations[0].Effective {
-		t.Fatalf("effective flag lost: %+v", h.Mutations)
+		panic(fmt.Sprintf("effective flag lost: %+v", h.Mutations))
 	}
 	// A collector that predates the flags sends none: nothing is uncertain.
 	if h.Mutations[0].Flags != nil || h.Mutations[0].Uncertain() || ents[0].Uncertain != 0 {
-		t.Fatalf("old shape: %+v %+v", h.Mutations[0], ents[0])
+		panic(fmt.Sprintf("old shape: %+v %+v", h.Mutations[0], ents[0]))
 	}
 	// The unknown key is "{}" on the wire; an empty one is not a route of the collector.
 	*paths = nil
 	if h, err = s.History(ctx, "postgres", "orders", ""); err != nil || h.PK != "{}" || !strings.HasSuffix((*paths)[0], "/orders/%7B%7D") {
-		t.Fatalf("history of the unknown key: %+v %v (%v)", h, err, *paths)
+		panic(fmt.Sprintf("history of the unknown key: %+v %v (%v)", h, err, *paths))
 	}
 	tr, err := s.Trace(ctx)
 	if err != nil || len(tr.Roots) != 1 || tr.Roots[0].Children[0].Event.SpanID != "kid" {
-		t.Fatalf("trace: %+v %v", tr, err)
+		panic(fmt.Sprintf("trace: %+v %v", tr, err))
 	}
 }
 
@@ -134,10 +134,10 @@ func TestResultsErrorsCarryServerMessage(t *testing.T) {
 	started, _ := client.Start(ctx, client.Options{BaseURL: cp})
 	s, _ := client.Attach(ctx, client.Options{BaseURL: cp, CollectorURL: col.URL}, started.ID)
 	if _, err := s.Summary(ctx); err == nil || !strings.Contains(err.Error(), "store unavailable") {
-		t.Fatalf("want the server's message, got %v", err)
+		panic(fmt.Sprintf("want the server's message, got %v", err))
 	}
 	if _, err := s.Events(ctx); err == nil {
-		t.Fatal("Events swallowed the error")
+		panic("Events swallowed the error")
 	}
 }
 
@@ -165,22 +165,22 @@ func TestDelete(t *testing.T) {
 
 	s, err := client.Start(ctx, client.Options{BaseURL: cp.URL, QuiesceSeconds: 1, PollInterval: 5 * time.Millisecond})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := s.Delete(ctx); err == nil || !strings.Contains(err.Error(), "ACTIVE") {
-		t.Fatalf("deleting a running session must fail with its state, got %v", err)
+		panic(fmt.Sprintf("deleting a running session must fail with its state, got %v", err))
 	}
 	if _, err := s.StopAndWait(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := s.Delete(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if len(deleted) != 1 || !strings.HasSuffix(deleted[0], "/"+s.ID) {
-		t.Fatalf("collector delete calls: %v", deleted)
+		panic(fmt.Sprintf("collector delete calls: %v", deleted))
 	}
 	if _, err := client.Attach(ctx, client.Options{BaseURL: cp.URL}, s.ID); err == nil {
-		t.Fatal("deleted session still attachable")
+		panic("deleted session still attachable")
 	}
 }
 
@@ -192,18 +192,18 @@ func TestEntityUncertaintyDecodes(t *testing.T) {
 		{"seq":1,"op":"update","flags":["pk_not_unique","after_unavailable"]},
 		{"seq":2,"op":"update","flags":["redacted"]},
 		{"seq":3,"op":"update","some_later_field":true}]}`), &h); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if len(h.Mutations) != 3 || !h.Mutations[0].Uncertain() || h.Mutations[1].Uncertain() || h.Mutations[2].Uncertain() ||
 		len(h.Mutations[0].Flags) != 2 || len(h.Mutations[1].Flags) != 1 {
-		t.Fatalf("history: %+v", h)
+		panic(fmt.Sprintf("history: %+v", h))
 	}
 	var ents []client.Entity
 	if err := json.Unmarshal([]byte(`[{"store":"postgres","entity":"stock","pk":"{}","mutation_count":3,"uncertain":2},
 		{"store":"postgres","entity":"orders","pk":"{\"id\":1}","mutation_count":1}]`), &ents); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if ents[0].Uncertain != 2 || ents[1].Uncertain != 0 {
-		t.Fatalf("entities: %+v", ents)
+		panic(fmt.Sprintf("entities: %+v", ents))
 	}
 }

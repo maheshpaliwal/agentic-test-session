@@ -30,7 +30,7 @@ func benchOpen(b *testing.B, f *fakeDB, opts ...tsql.Option) *sql.DB {
 	sql.Register(name, f)
 	db, err := tsql.Open(name, "dsn", opts...)
 	if err != nil {
-		b.Fatal(err)
+		panic(err)
 	}
 	db.SetMaxOpenConns(1)
 	b.Cleanup(func() { db.Close() })
@@ -84,13 +84,13 @@ func BenchmarkTSQL(b *testing.B) {
 				if c.query {
 					rows, err := db.QueryContext(ctx, c.stmt, c.args...)
 					if err != nil {
-						b.Fatal(err)
+						panic(err)
 					}
 					for rows.Next() {
 					}
 					rows.Close()
 				} else if _, err := db.ExecContext(ctx, c.stmt, c.args...); err != nil {
-					b.Fatal(err)
+					panic(err)
 				}
 			}
 			run() // warm up connection

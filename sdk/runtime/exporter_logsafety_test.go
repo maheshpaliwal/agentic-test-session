@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -55,12 +56,12 @@ func TestExporterLogIsSafeAndBounded(t *testing.T) {
 	}
 	logged := out.String()
 	if n.Load() < 20 {
-		t.Fatalf("test setup: only %d requests reached the collector", n.Load())
+		panic(fmt.Sprintf("test setup: only %d requests reached the collector", n.Load()))
 	}
 	if strings.Contains(logged, "s3cr3tpw") || strings.Contains(logged, "tok_abc") {
-		t.Fatalf("credentials in the log:\n%s", logged)
+		panic(fmt.Sprintf("credentials in the log:\n%s", logged))
 	}
 	if lines := strings.Count(logged, "tsession:"); lines > 2 {
-		t.Fatalf("%d log lines for a flapping collector within one minute, want at most one outage and one recovery:\n%s", lines, logged)
+		panic(fmt.Sprintf("%d log lines for a flapping collector within one minute, want at most one outage and one recovery:\n%s", lines, logged))
 	}
 }

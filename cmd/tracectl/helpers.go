@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -60,7 +61,7 @@ func resolve(ctx context.Context, o client.Options, ref string) (*client.Session
 	}
 	if strings.HasPrefix(ref, "ts_") {
 		s, err := client.Attach(ctx, o, ref)
-		if err != nil && strings.Contains(err.Error(), ": 404 ") {
+		if client.StatusCode(err) == http.StatusNotFound {
 			// The control plane forgets finished sessions (retention, restart)
 			// while the collector may still hold their events: read those.
 			// The collector answers for any id, with zero events for one it

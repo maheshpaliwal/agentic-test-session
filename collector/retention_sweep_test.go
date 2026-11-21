@@ -99,13 +99,13 @@ func seedSession(t testing.TB, st store.Store, id string, lastNs int64, sealedAt
 	e := core.Event{SessionID: id, SpanID: "s", Instance: "i", LocalSeq: 1, Seq: 1, Kind: core.KindAPIIn, Service: "svc",
 		EndHLC: 1, StartNs: lastNs, EndNs: lastNs}
 	if err := st.AppendEvents(ctx, id, []core.Event{e}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if sealedAt.IsZero() {
 		return
 	}
 	if err := st.PutSeal(ctx, id, store.SealInfo{SealedAt: sealedAt}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -125,7 +125,7 @@ func sessionIDs(t testing.TB, st store.Store) []string {
 	t.Helper()
 	l, err := st.ListSessions(context.Background())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ids := make([]string, len(l))
 	for i := range l {
@@ -156,11 +156,11 @@ func TestRetentionSweepCost(t *testing.T) {
 		c := sweepCollector(t, listOnly{spy})
 		n, err := c.PurgeExpired(context.Background(), now)
 		if err != nil || n != due {
-			t.Fatalf("purged %d, err %v", n, err)
+			panic(fmt.Sprintf("purged %d, err %v", n, err))
 		}
 		t.Logf("ListSessions %d (%d sessions), GetSeal %d", spy.lists.Load(), spy.listed.Load(), spy.seals.Load())
 		if spy.lists.Load() != 1 || spy.listed.Load() != total || spy.seals.Load() < total {
-			t.Fatalf("a store without ListExpired is read whole: lists %d, sessions %d, seals %d", spy.lists.Load(), spy.listed.Load(), spy.seals.Load())
+			panic(fmt.Sprintf("a store without ListExpired is read whole: lists %d, sessions %d, seals %d", spy.lists.Load(), spy.listed.Load(), spy.seals.Load()))
 		}
 	})
 
@@ -169,22 +169,22 @@ func TestRetentionSweepCost(t *testing.T) {
 		c := sweepCollector(t, spy)
 		n, err := c.PurgeExpired(context.Background(), now)
 		if err != nil || n != due {
-			t.Fatalf("purged %d, err %v", n, err)
+			panic(fmt.Sprintf("purged %d, err %v", n, err))
 		}
 		t.Logf("ListSessions %d, ListExpired %d (%d sessions), GetSeal %d", spy.lists.Load(), spy.pages.Load(), spy.candidates.Load(), spy.seals.Load())
 		if spy.lists.Load() != 0 || spy.pages.Load() != 1 || spy.candidates.Load() != due {
-			t.Fatalf("lists %d, pages %d, candidates %d: want only the %d due sessions read", spy.lists.Load(), spy.pages.Load(), spy.candidates.Load(), due)
+			panic(fmt.Sprintf("lists %d, pages %d, candidates %d: want only the %d due sessions read", spy.lists.Load(), spy.pages.Load(), spy.candidates.Load(), due))
 		}
 		if got := spy.seals.Load(); got != due {
-			t.Fatalf("%d GetSeal calls for %d due sessions", got, due)
+			panic(fmt.Sprintf("%d GetSeal calls for %d due sessions", got, due))
 		}
 		// With nothing due, a sweep is one empty page.
 		spy.reset()
 		if n, err := c.PurgeExpired(context.Background(), now); err != nil || n != 0 {
-			t.Fatalf("purged %d, err %v", n, err)
+			panic(fmt.Sprintf("purged %d, err %v", n, err))
 		}
 		if spy.pages.Load() != 1 || spy.candidates.Load() != 0 || spy.seals.Load() != 0 || spy.lists.Load() != 0 {
-			t.Fatalf("idle sweep: pages %d, candidates %d, seals %d, lists %d", spy.pages.Load(), spy.candidates.Load(), spy.seals.Load(), spy.lists.Load())
+			panic(fmt.Sprintf("idle sweep: pages %d, candidates %d, seals %d, lists %d", spy.pages.Load(), spy.candidates.Load(), spy.seals.Load(), spy.lists.Load()))
 		}
 	})
 }
@@ -217,23 +217,23 @@ func TestRetentionSweepDeletesExactlyDue(t *testing.T) {
 			e := ev("a", core.KindAPIIn, 1, 1)
 			e.SessionID, e.EndNs = "keep_live", stale
 			if _, err := c.Ingest(context.Background(), "", []core.Event{e}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			keep = append(keep, "keep_live")
 			slices.Sort(keep)
 
 			n, err := c.PurgeExpired(context.Background(), now)
 			if err != nil || n != 3*retentionPage+7+20 {
-				t.Fatalf("purged %d, err %v", n, err)
+				panic(fmt.Sprintf("purged %d, err %v", n, err))
 			}
 			if got := sessionIDs(t, spy.Store); !slices.Equal(got, keep) {
-				t.Fatalf("survivors %v, want %v", got, keep)
+				panic(fmt.Sprintf("survivors %v, want %v", got, keep))
 			}
 			if lister && (spy.lists.Load() != 0 || spy.pages.Load() < 4) {
-				t.Fatalf("lists %d, pages %d", spy.lists.Load(), spy.pages.Load())
+				panic(fmt.Sprintf("lists %d, pages %d", spy.lists.Load(), spy.pages.Load()))
 			}
 			if n, err := c.PurgeExpired(context.Background(), now); err != nil || n != 0 {
-				t.Fatalf("second sweep purged %d, err %v", n, err)
+				panic(fmt.Sprintf("second sweep purged %d, err %v", n, err))
 			}
 		})
 	}
@@ -272,15 +272,15 @@ func TestRetentionBacklogDrainsOverTicks(t *testing.T) {
 		n, _ := c.PurgeExpired(ctx, now)
 		cancel()
 		if got := spy.deletes.Load(); got > perTick {
-			t.Fatalf("tick %d: %d deletes after the sweep was cut off at %d", ticks, got, perTick)
+			panic(fmt.Sprintf("tick %d: %d deletes after the sweep was cut off at %d", ticks, got, perTick))
 		}
 		deleted += n
 	}
 	if got := sessionIDs(t, spy.Store); !slices.Equal(got, want) {
-		t.Fatalf("after %d ticks %d sessions are left, want the %d undeletable ones and keep", ticks, len(got), stuck)
+		panic(fmt.Sprintf("after %d ticks %d sessions are left, want the %d undeletable ones and keep", ticks, len(got), stuck))
 	}
 	if deleted != due-stuck {
-		t.Fatalf("deleted %d, want %d", deleted, due-stuck)
+		panic(fmt.Sprintf("deleted %d, want %d", deleted, due-stuck))
 	}
 	t.Logf("backlog of %d (%d undeletable) drained in %d ticks of %d deletes", due, stuck, ticks, perTick)
 
@@ -291,11 +291,11 @@ func TestRetentionBacklogDrainsOverTicks(t *testing.T) {
 	spy.mu.Unlock()
 	for range 2 { // the first may start mid-way and stop at the end
 		if _, err := c.PurgeExpired(context.Background(), now); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	if got := sessionIDs(t, spy.Store); !slices.Equal(got, []string{"keep"}) {
-		t.Fatalf("left after the store recovered: %v", got)
+		panic(fmt.Sprintf("left after the store recovered: %v", got))
 	}
 }
 
@@ -317,10 +317,10 @@ func TestRetentionSweepFailingStore(t *testing.T) {
 
 	spy.listErr = errors.New("store down")
 	if n, err := sweep(); n != 0 || !errors.Is(err, spy.listErr) {
-		t.Fatalf("purged %d, err %v", n, err)
+		panic(fmt.Sprintf("purged %d, err %v", n, err))
 	}
 	if spy.pages.Load() != 1 || spy.deletes.Load() != 0 {
-		t.Fatalf("failing list: %d list calls, %d deletes", spy.pages.Load(), spy.deletes.Load())
+		panic(fmt.Sprintf("failing list: %d list calls, %d deletes", spy.pages.Load(), spy.deletes.Load()))
 	}
 	spy.listErr = nil
 
@@ -333,13 +333,13 @@ func TestRetentionSweepFailingStore(t *testing.T) {
 		return l, nil
 	}
 	if n, err := sweep(); n != 0 || err == nil {
-		t.Fatalf("purged %d, err %v", n, err)
+		panic(fmt.Sprintf("purged %d, err %v", n, err))
 	}
 	if spy.pages.Load() > 2 || spy.deletes.Load() != 0 {
-		t.Fatalf("store ignoring the cursor: %d list calls, %d deletes", spy.pages.Load(), spy.deletes.Load())
+		panic(fmt.Sprintf("store ignoring the cursor: %d list calls, %d deletes", spy.pages.Load(), spy.deletes.Load()))
 	}
 	if got := sessionIDs(t, spy.Store); !slices.Equal(got, all) {
-		t.Fatalf("%d sessions left of %d", len(got), len(all))
+		panic(fmt.Sprintf("%d sessions left of %d", len(got), len(all)))
 	}
 
 	// A store that returns sessions that are not due: only the due ones go.
@@ -353,12 +353,12 @@ func TestRetentionSweepFailingStore(t *testing.T) {
 	for range 2 {
 		n, err := sweep()
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		purged += n
 	}
 	if purged != 2*retentionPage {
-		t.Fatalf("purged %d, want %d", purged, 2*retentionPage)
+		panic(fmt.Sprintf("purged %d, want %d", purged, 2*retentionPage))
 	}
 	left := map[string]bool{}
 	for _, id := range sessionIDs(t, spy.Store) {
@@ -368,7 +368,7 @@ func TestRetentionSweepFailingStore(t *testing.T) {
 		delete(left, fmt.Sprintf("keep_%04d", i))
 	}
 	if len(left) != 0 || len(sessionIDs(t, spy.Store)) != 2*retentionPage {
-		t.Fatalf("wrong sessions survived: %v", slices.Collect(maps.Keys(left)))
+		panic(fmt.Sprintf("wrong sessions survived: %v", slices.Collect(maps.Keys(left))))
 	}
 }
 
@@ -385,7 +385,7 @@ func TestRetentionSweepWrapsAfterResuming(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	spy.cancel = cancel
 	if n, _ := c.PurgeExpired(ctx, now); n != 10 {
-		t.Fatalf("test setup: the first sweep should stop after 10 deletes, deleted %d", n)
+		panic(fmt.Sprintf("test setup: the first sweep should stop after 10 deletes, deleted %d", n))
 	}
 	spy.mu.Lock()
 	spy.maxDel = 0
@@ -395,6 +395,6 @@ func TestRetentionSweepWrapsAfterResuming(t *testing.T) {
 	}
 	n, err := c.PurgeExpired(context.Background(), now)
 	if left := sessionIDs(t, spy.Store); err != nil || n != 50 || len(left) != 0 {
-		t.Fatalf("a full sweep after a cut-short one deleted %d and left %v (%v), want 50 and none", n, left, err)
+		panic(fmt.Sprintf("a full sweep after a cut-short one deleted %d and left %v (%v), want 50 and none", n, left, err))
 	}
 }

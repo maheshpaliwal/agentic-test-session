@@ -24,7 +24,7 @@ func eventually(t *testing.T, what string, f func() bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting for %s", what)
+	panic(fmt.Sprintf("timeout waiting for %s", what))
 }
 
 type fakeCollector struct {
@@ -72,13 +72,13 @@ func TestRingOverflowEmitsDropEvent(t *testing.T) {
 		}
 	}
 	if kept != 4 || dropped != 2 || counts["ts_a"] != "6" || counts["ts_b"] != "1" {
-		t.Fatalf("kept=%d dropped=%d counts=%v", kept, dropped, counts)
+		panic(fmt.Sprintf("kept=%d dropped=%d counts=%v", kept, dropped, counts))
 	}
 	if out[0].SpanID != "0" {
-		t.Fatal("FIFO order broken")
+		panic("FIFO order broken")
 	}
 	if len(r.Drain(10)) != 0 {
-		t.Fatal("drop counters not reset")
+		panic("drop counters not reset")
 	}
 }
 
@@ -94,7 +94,7 @@ func TestRecorderNeverBlocks(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Record blocked")
+		panic("Record blocked")
 	}
 }
 
@@ -111,15 +111,15 @@ func TestExporterBatchingAndRetry(t *testing.T) {
 		r.Record(core.Event{SessionID: "s", LocalSeq: uint64(i + 1)})
 	}
 	if !x.Flush(3 * time.Second) {
-		t.Fatal("flush timeout")
+		panic("flush timeout")
 	}
 	x.Close(time.Second)
 	evs, posts := fc.snapshot()
 	if len(evs) != 25 || posts != 3 {
-		t.Fatalf("events=%d posts=%d", len(evs), posts)
+		panic(fmt.Sprintf("events=%d posts=%d", len(evs), posts))
 	}
 	if !strings.HasPrefix(fc.inst, "inst-1-") || fc.inst != core.GetConfig().Instance {
-		t.Fatalf("instance header %q", fc.inst)
+		panic(fmt.Sprintf("instance header %q", fc.inst))
 	}
 }
 
@@ -134,13 +134,13 @@ func TestExporterCollectorDownDoesNotBlock(t *testing.T) {
 		r.Record(core.Event{SessionID: "s"})
 	}
 	if time.Since(start) > time.Second {
-		t.Fatal("Record slowed by dead collector")
+		panic("Record slowed by dead collector")
 	}
 	time.Sleep(100 * time.Millisecond)
 	cs := time.Now()
 	x.Close(time.Second)
 	if time.Since(cs) > 3*time.Second {
-		t.Fatal("Close took too long")
+		panic("Close took too long")
 	}
 }
 
@@ -222,17 +222,17 @@ func TestSubscriberUpdatesKillAndReconnect(t *testing.T) {
 
 	eventually(t, "initial", func() bool { return s.IsActive("ts_1") })
 	if s.IsActive("ts_2") {
-		t.Fatal("ts_2 active")
+		panic("ts_2 active")
 	}
 	cp.set(`{"active":["ts_2"],"exclusive":"ts_2","kill":false}`)
 	eventually(t, "update", func() bool { return s.IsActive("ts_2") && !s.IsActive("ts_1") })
 	if id, ok := s.Exclusive(); !ok || id != "ts_2" {
-		t.Fatal("exclusive")
+		panic("exclusive")
 	}
 	cp.set(`{"active":["ts_2"],"exclusive":"ts_2","kill":true}`)
 	eventually(t, "kill", func() bool { return !s.IsActive("ts_2") })
 	if _, ok := s.Exclusive(); ok {
-		t.Fatal("exclusive during kill")
+		panic("exclusive during kill")
 	}
 
 	// drop the stream, change state while disconnected, expect reconnect
@@ -266,11 +266,11 @@ func TestEndToEnd(t *testing.T) {
 
 	if err := Start(Config{Service: "orders", Instance: "i-1", ControlPlaneURL: cps.URL, CollectorURL: col.URL,
 		Exporter: ExporterConfig{FlushInterval: 20 * time.Millisecond}}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer Stop()
 	if err := Start(Config{}); err != ErrStarted {
-		t.Fatalf("second start: %v", err)
+		panic(fmt.Sprintf("second start: %v", err))
 	}
 	eventually(t, "active set", func() bool { return core.Enabled() && ActiveRecorder() != nil })
 
@@ -289,11 +289,11 @@ func TestEndToEnd(t *testing.T) {
 	h2 := http.Header{}
 	h2.Set(core.KeySession, "ts_other")
 	if _, s := core.BeginIngress(context.Background(), core.KindAPIIn, "x", core.HTTPHeaderCarrier(h2)); s != nil {
-		t.Fatal("inactive session traced")
+		panic("inactive session traced")
 	}
 
 	if !Flush(3 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	evs, _ := fc.snapshot()
 	var got []string
@@ -302,14 +302,14 @@ func TestEndToEnd(t *testing.T) {
 			got = append(got, e.Name)
 		}
 		if e.Service != "orders" || !strings.HasPrefix(e.Instance, "i-1-") {
-			t.Fatalf("bad identity %+v", e)
+			panic(fmt.Sprintf("bad identity %+v", e))
 		}
 		if e.Name == "INSERT" && (!e.Req.Redacted || strings.Contains(string(e.Req.Inline), `"p"`)) {
-			t.Fatalf("not redacted: %+v", e.Req)
+			panic(fmt.Sprintf("not redacted: %+v", e.Req))
 		}
 	}
 	if len(got) != 2 || got[0] != "INSERT" || got[1] != "GET /orders" {
-		t.Fatalf("events %v", got)
+		panic(fmt.Sprintf("events %v", got))
 	}
 }
 
@@ -327,11 +327,11 @@ func TestTransportInjectsAndIsIdempotent(t *testing.T) {
 	orig := http.DefaultTransport
 	cfg := Config{Service: "s", ControlPlaneURL: cps.URL, CollectorURL: "http://127.0.0.1:1", PatchDefaultTransport: true}
 	if err := Start(cfg); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	patched := http.DefaultTransport
 	if _, ok := patched.(*Transport); !ok {
-		t.Fatal("not patched")
+		panic("not patched")
 	}
 	core.SetRecorder(nil)
 	mem := &core.MemRecorder{}
@@ -350,12 +350,12 @@ func TestTransportInjectsAndIsIdempotent(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", backend.URL+"/x", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	root.End()
 	if gotSess.Load() != "ts_t" {
-		t.Fatalf("session header not injected: %v", gotSess.Load())
+		panic(fmt.Sprintf("session header not injected: %v", gotSess.Load()))
 	}
 	var out *core.Event
 	for _, e := range mem.Events() {
@@ -365,11 +365,11 @@ func TestTransportInjectsAndIsIdempotent(t *testing.T) {
 		}
 	}
 	if out == nil || out.Attrs["http.status"] != "201" {
-		t.Fatalf("api.out missing: %+v", out)
+		panic(fmt.Sprintf("api.out missing: %+v", out))
 	}
 	Stop()
 	if http.DefaultTransport != orig {
-		t.Fatal("transport not restored")
+		panic("transport not restored")
 	}
 }
 
@@ -385,28 +385,28 @@ func TestSubscriberBindings(t *testing.T) {
 	defer s.Close()
 	eventually(t, "initial", func() bool { return s.IsActive("ts_1") })
 	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); ok || len(s.BindingKeys()) != 0 {
-		t.Fatal("no bindings field must mean no matches / no keys")
+		panic("no bindings field must mean no matches / no keys")
 	}
 	cp.set(`{"active":["ts_1","ts_2"],"kill":false,"bindings":[{"session_id":"ts_1","source":"header","name":"X-User-Id","value":"u1"},{"session_id":"ts_2","source":"jwt_claim","name":"sub","value":"u2"}]}`)
 	eventually(t, "bindings", func() bool { return len(s.BindingKeys()) == 2 })
 	if id, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); !ok || id != "ts_1" {
-		t.Fatal(id, ok)
+		panic(fmt.Sprint(id, ok))
 	}
 	if id, k, ok := s.MatchAttrsKey(testAttrs{"jwt_claim:sub": "u2"}); !ok || id != "ts_2" || k.String() != "jwt_claim:sub" {
-		t.Fatal(id, k, ok)
+		panic(fmt.Sprint(id, k, ok))
 	}
 	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "other"}); ok {
-		t.Fatal("unknown value matched")
+		panic("unknown value matched")
 	}
 	cp.set(`{"active":["ts_1","ts_2"],"kill":true,"bindings":[{"session_id":"ts_1","source":"header","name":"x-user-id","value":"u1"}]}`)
 	eventually(t, "kill", func() bool { return !s.IsActive("ts_1") })
 	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); ok || len(s.BindingKeys()) != 0 {
-		t.Fatal("kill switch must disable bindings")
+		panic("kill switch must disable bindings")
 	}
 	cp.set(`{"active":["ts_2"],"kill":false,"bindings":[{"session_id":"ts_2","source":"jwt_claim","name":"sub","value":"u2"}]}`)
 	eventually(t, "stopped", func() bool { return !s.IsActive("ts_1") && len(s.BindingKeys()) == 1 })
 	if _, ok := s.MatchAttrs(testAttrs{"header:x-user-id": "u1"}); ok {
-		t.Fatal("stopped session's binding must not match")
+		panic("stopped session's binding must not match")
 	}
 }
 
@@ -432,20 +432,20 @@ func TestSubscriberPriorityAmbiguityStats(t *testing.T) {
 	both := testAttrs{"header:x-user-id": "1", "header:name": "bob"}
 	before := GetStats().BindingAmbiguous
 	if m := s.MatchAttrsDetail(both); m.OK || !m.Ambiguous {
-		t.Fatalf("expected ambiguous: %+v", m)
+		panic(fmt.Sprintf("expected ambiguous: %+v", m))
 	}
 	if GetStats().BindingAmbiguous != before+1 {
-		t.Fatal("stats counter")
+		panic("stats counter")
 	}
 	core.SetBindPriority(core.ParseBindPriority("header:x-user-id,header:name"))
 	defer core.SetBindPriority(nil)
 	if m := s.MatchAttrsDetail(both); !m.OK || m.SessionID != "ts_1" || m.Fallback {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 	if m := s.MatchAttrsDetail(testAttrs{"header:x-user-id": "9", "header:name": "bob"}); m.OK || m.Ambiguous {
-		t.Fatalf("unbound priority key must not fall through: %+v", m)
+		panic(fmt.Sprintf("unbound priority key must not fall through: %+v", m))
 	}
 	if m := s.MatchAttrsDetail(testAttrs{"header:name": "bob"}); !m.OK || m.SessionID != "ts_2" || !m.Fallback {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 }

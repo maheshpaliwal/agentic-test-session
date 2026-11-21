@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -84,7 +85,7 @@ func TestKeyValueIsBoundedStableAndInjective(t *testing.T) {
 	for i, k := range keys {
 		s, ok := keyValue(k).(string)
 		if !ok {
-			t.Fatalf("key %d: %#v", i, keyValue(k))
+			panic(fmt.Sprintf("key %d: %#v", i, keyValue(k)))
 		}
 		if j, dup := seen[s]; dup {
 			t.Errorf("keys %d and %d are both shown as %.60q", j, i, s)

@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -102,18 +103,22 @@ func TestShowKeyDefaultRules(t *testing.T) {
 func TestShowText(t *testing.T) {
 	flat := &Redactor{KeyMask: KeyMaskFlat}
 	for s, want := range map[string]string{
-		"session:Ab3dE9xYz":               "session:" + masked,
-		"v":                               "v",
-		"the session: Ab3dE9xYz":          "the session: Ab3dE9xYz", // free text is for the value redaction
-		`{"session":"Ab3dE9xYz"}`:         `{"session":"Ab3dE9xYz"}`,
-		`["session:Ab3dE9xYz"]`:           `["session:Ab3dE9xYz"]`,
-		"{session}:Ab3dE9xYz":             "{session}:" + masked, // a hash tag, not JSON
-		"":                                "",
-		strings.Repeat("session:A1", 200): strings.Repeat("session:A1", 200),
+		"session:Ab3dE9xYz":       "session:" + masked,
+		"v":                       "v",
+		"the session: Ab3dE9xYz":  "the session: Ab3dE9xYz", // free text is for the value redaction
+		`{"session":"Ab3dE9xYz"}`: `{"session":"Ab3dE9xYz"}`,
+		`["session:Ab3dE9xYz"]`:   `["session:Ab3dE9xYz"]`,
+		"{session}:Ab3dE9xYz":     "{session}:" + masked, // a hash tag, not JSON
+		"":                        "",
 	} {
 		if got := flat.ShowText("s1", s); got != want {
 			t.Errorf("%q recorded as %q, want %q", s, got, want)
 		}
+	}
+	// Length is no reason to leave a name alone: a token can be kilobytes long.
+	long := "session:" + strings.Repeat("Ab3dE9xYz", 300)
+	if got := flat.ShowText("s1", long); got != "session:"+masked {
+		t.Errorf("a 2.7 KB token after a secret name is recorded as %.60q", got)
 	}
 }
 
@@ -175,7 +180,7 @@ func TestShowKeyHash(t *testing.T) {
 	h := &Redactor{}
 	a := h.ShowKey("s1", "session:tok_SECRET123")
 	if !strings.HasPrefix(a, "session:#") || len(a) != len("session:#")+keyHashLen || strings.Contains(a, "SECRET") {
-		t.Fatalf("recorded as %q", a)
+		panic(fmt.Sprintf("recorded as %q", a))
 	}
 	if again := h.ShowKey("s1", "session:tok_SECRET123"); again != a {
 		t.Errorf("one key reads %q and %q within a session", a, again)
@@ -220,7 +225,7 @@ func TestKeyMaskHashIsNotKeyedByTheSession(t *testing.T) {
 	// It is this, and nothing an event carries can stand in for the key.
 	key := processKey()
 	if len(key) != 32 || bytes.Equal(key, make([]byte, 32)) {
-		t.Fatalf("process key %x", key)
+		panic(fmt.Sprintf("process key %x", key))
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte("s1\x00" + seg))

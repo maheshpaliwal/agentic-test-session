@@ -13,6 +13,9 @@ import (
 // sql.Open.
 func Open(driverName, dsn string, opts ...Option) (*sql.DB, error) {
 	db, err := sql.Open(driverName, dsn)
+	if err == nil && !core.Enabled() {
+		core.NoteWrapWhileDisabled("tsql.Open") // the handle stays untraced when the SDK starts later
+	}
 	if err != nil || !core.Enabled() {
 		return db, err
 	}
@@ -36,6 +39,7 @@ func Open(driverName, dsn string, opts ...Option) (*sql.DB, error) {
 // OpenDB is a drop-in replacement for sql.OpenDB.
 func OpenDB(c driver.Connector, opts ...Option) *sql.DB {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tsql.OpenDB")
 		return sql.OpenDB(c)
 	}
 	if _, ok := c.(*wrapConnector); ok {
@@ -56,6 +60,9 @@ func Register(name string, d driver.Driver) {
 // WrapDriver returns d with tracing; d itself when the SDK is disabled or d
 // is already wrapped.
 func WrapDriver(d driver.Driver, opts ...Option) driver.Driver {
+	if d != nil && !core.Enabled() {
+		core.NoteWrapWhileDisabled("tsql.WrapDriver")
+	}
 	if d == nil || !core.Enabled() {
 		return d
 	}

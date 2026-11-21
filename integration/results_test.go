@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,42 +33,42 @@ func TestE2E_ClientResultsAndDelete(t *testing.T) {
 	s, err := client.Start(ctx, client.Options{BaseURL: in.cpSrv.URL, CollectorURL: in.colSrv.URL, Name: "results",
 		TTLSeconds: 600, QuiesceSeconds: 8, MaxDrainSeconds: 100, PollInterval: 100 * time.Millisecond})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	waitActive(t, s.ID)
 	code, order := ae.createOrder(t, s.Header(), orderBody{SKU: "widget", Qty: 1, Customer: "results-it"})
 	if code != 201 || order.ID == 0 {
-		t.Fatalf("POST /orders: %d %+v", code, order)
+		panic(fmt.Sprintf("POST /orders: %d %+v", code, order))
 	}
 	runtime.Flush(3 * time.Second)
 	if _, err := s.StopAndWait(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	sum, err := s.Summary(ctx)
 	if err != nil || !sum.Sealed || sum.EventCount == 0 || sum.SessionID != s.ID {
-		t.Fatalf("summary: %+v %v", sum, err)
+		panic(fmt.Sprintf("summary: %+v %v", sum, err))
 	}
 	if sum.ByKind["api.in"] == 0 || sum.ByKind["db.write"] == 0 || sum.Mutations["postgres"]["orders"] == 0 {
-		t.Fatalf("summary misses the order write: %+v", sum)
+		panic(fmt.Sprintf("summary misses the order write: %+v", sum))
 	}
 	evs, err := s.Events(ctx)
 	if err != nil || len(evs) != sum.EventCount {
-		t.Fatalf("events: %d (summary says %d) %v", len(evs), sum.EventCount, err)
+		panic(fmt.Sprintf("events: %d (summary says %d) %v", len(evs), sum.EventCount, err))
 	}
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("event %d has seq %d", i, e.Seq)
+			panic(fmt.Sprintf("event %d has seq %d", i, e.Seq))
 		}
 	}
 	page, err := s.EventsPage(ctx, 2, 3)
 	if err != nil || len(page.Events) != min(3, len(evs)-1) || page.Events[0].Seq != 2 || !page.Sealed {
-		t.Fatalf("page: %+v %v", page, err)
+		panic(fmt.Sprintf("page: %+v %v", page, err))
 	}
 
 	ents, err := s.Entities(ctx)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var orderPK string
 	for _, e := range ents {
@@ -76,20 +77,20 @@ func TestE2E_ClientResultsAndDelete(t *testing.T) {
 		}
 	}
 	if orderPK == "" {
-		t.Fatalf("orders row not among the entities: %+v", ents)
+		panic(fmt.Sprintf("orders row not among the entities: %+v", ents))
 	}
 	for _, pk := range []string{orderPK, strconv.FormatInt(order.ID, 10)} { // canonical JSON and bare value
 		h, err := s.History(ctx, "postgres", "orders", pk)
 		if err != nil || len(h.Mutations) == 0 {
-			t.Fatalf("history(%q): %+v %v", pk, h, err)
+			panic(fmt.Sprintf("history(%q): %+v %v", pk, h, err))
 		}
 		if m := h.Mutations[0]; m.Op != "insert" || m.Effective == nil || !*m.Effective {
-			t.Fatalf("first mutation of the order: %+v", m)
+			panic(fmt.Sprintf("first mutation of the order: %+v", m))
 		}
 	}
 	tr, err := s.Trace(ctx)
 	if err != nil || len(tr.Roots) == 0 || tr.SessionID != s.ID {
-		t.Fatalf("trace: %+v %v", tr, err)
+		panic(fmt.Sprintf("trace: %+v %v", tr, err))
 	}
 	found := false
 	for _, r := range tr.Roots {
@@ -98,24 +99,24 @@ func TestE2E_ClientResultsAndDelete(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("no api.in root with children in the trace")
+		panic("no api.in root with children in the trace")
 	}
 
 	// Delete: gone from the collector and from the control plane.
 	if err := s.Delete(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	col := colAPI{in.colSrv.URL}
 	for _, si := range col.sessions(t) {
 		if si.ID == s.ID {
-			t.Fatalf("collector still lists the deleted session: %+v", si)
+			panic(fmt.Sprintf("collector still lists the deleted session: %+v", si))
 		}
 	}
 	if evs := col.events(t, s.ID); len(evs) != 0 {
-		t.Fatalf("%d events survived the delete", len(evs))
+		panic(fmt.Sprintf("%d events survived the delete", len(evs)))
 	}
 	if _, err := s.Get(ctx); err == nil {
-		t.Fatal("control plane still knows the deleted session")
+		panic("control plane still knows the deleted session")
 	}
 }
 
@@ -137,7 +138,7 @@ func TestClientTypesMatchCollector(t *testing.T) {
 	} {
 		b, err := json.Marshal(pair[0])
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()

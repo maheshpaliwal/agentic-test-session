@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,11 +30,11 @@ func TestAfterImageUnavailableIsSaidPlainly(t *testing.T) {
 				"db.write\n       after image unavailable: the new values were not captured\n",
 			} {
 				if !strings.Contains(got, want) {
-					t.Fatalf("missing %q in:\n%s", want, got)
+					panic(fmt.Sprintf("missing %q in:\n%s", want, got))
 				}
 			}
 			if strings.Contains(got, "∅") || strings.Contains(got, "null") {
-				t.Fatalf("output still shows values going to nothing:\n%s", got)
+				panic(fmt.Sprintf("output still shows values going to nothing:\n%s", got))
 			}
 		})
 	}
@@ -42,7 +43,7 @@ func TestAfterImageUnavailableIsSaidPlainly(t *testing.T) {
 	printEntities(&out, []client.Entity{{Store: "postgres", Entity: "stock", PK: "{}", MutationCount: 2},
 		{Store: "postgres", Entity: "stock", PK: `{"sku":"widget"}`, MutationCount: 1}})
 	if got := out.String(); !strings.Contains(got, "{} (key unknown)") || !strings.Contains(got, `{"sku":"widget"}`) {
-		t.Fatalf("entities:\n%s", got)
+		panic(fmt.Sprintf("entities:\n%s", got))
 	}
 }
 
@@ -58,6 +59,6 @@ func TestDiffStillPrintedWhereItMeansSomething(t *testing.T) {
 	}})
 	got := out.String()
 	if !strings.Contains(got, `sku: "widget" -> ∅`) || !strings.Contains(got, "qty: 10 -> 9") || strings.Contains(got, "unavailable") {
-		t.Fatalf("output:\n%s", got)
+		panic(fmt.Sprintf("output:\n%s", got))
 	}
 }

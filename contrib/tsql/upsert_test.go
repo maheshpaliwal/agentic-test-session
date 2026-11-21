@@ -144,11 +144,11 @@ func TestUpsertInsertPath(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, upFake(stockTable(), 1), "postgres")
 	if _, err := db.ExecContext(ctx, stockUpsert, "gadget", 5, "Gadget"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	m := e.Mutations[0]
 	upCheck(t, m, "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
@@ -163,11 +163,11 @@ func TestUpsertUpdatePath(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, upFake(stockTable(), 1), "postgres")
 	if _, err := db.ExecContext(ctx, stockUpsert, "widget", 7, "ignored"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	m := e.Mutations[0]
 	upCheck(t, m, "update", true, "qty:10->7")
@@ -195,24 +195,24 @@ func TestUpsertDoNothing(t *testing.T) {
 	}
 	db := open(t, f, "postgres")
 	if _, err := db.ExecContext(ctx, stmt, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if e := lastWrite(t, rec); len(e.Mutations) != 0 || core.HasUncertainFlag(e.Flags) {
-		t.Fatalf("a row that was left alone: mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("a row that was left alone: mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	if calls := f.Calls(); len(calls) != 1 {
-		t.Fatalf("calls:\n%s", sqls(calls))
+		panic(fmt.Sprintf("calls:\n%s", sqls(calls)))
 	}
 	if _, err := db.ExecContext(ctx, stmt, "gadget", 5, "Gadget"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	upCheck(t, e.Mutations[0], "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
 	if calls := f.Calls(); len(calls) != 3 || !strings.HasPrefix(calls[2].SQL, "SELECT") {
-		t.Fatalf("calls, want the statement and one read after it:\n%s", sqls(calls))
+		panic(fmt.Sprintf("calls, want the statement and one read after it:\n%s", sqls(calls)))
 	}
 }
 
@@ -225,11 +225,11 @@ func TestUpsertMultiRowMix(t *testing.T) {
 	_, err := db.ExecContext(ctx, "INSERT INTO stock (sku, qty, name) VALUES ($1, $2, $3), ($4, $5, $6), ($7, $8, $9) ON CONFLICT (sku) DO UPDATE SET qty = EXCLUDED.qty",
 		"widget", 7, "x", "gadget", 5, "Gadget", "bolt", 4, "y")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if core.HasUncertainFlag(e.Flags) || len(e.Mutations) != 3 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	got := map[any]core.Mutation{}
 	for _, m := range e.Mutations {
@@ -272,22 +272,22 @@ func TestUpsertConflictTargetNotPrimaryKey(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, usersFake(usersTable()), "postgres")
 	if _, err := db.ExecContext(ctx, usersUpsert, "a@example.com", "Anna"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	upCheck(t, e.Mutations[0], "update", true, "name:Ann->Anna")
 	if !reflect.DeepEqual(e.Mutations[0].PK, map[string]any{"id": int64(7)}) {
 		t.Errorf("pk %v, want the row's id", e.Mutations[0].PK)
 	}
 	if _, err := db.ExecContext(ctx, usersUpsert, "b@example.com", "Bob"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e = lastWrite(t, rec)
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	upCheck(t, e.Mutations[0], "upsert", false, "email:<nil>->b@example.com id:<nil>->8 name:<nil>->Bob")
 	if !reflect.DeepEqual(e.Mutations[0].PK, map[string]any{"id": int64(8)}) {
@@ -300,7 +300,7 @@ func TestUpsertConflictTargetNotPrimaryKey(t *testing.T) {
 func upUnknown(t *testing.T, e core.Event) {
 	t.Helper()
 	if len(e.Mutations) == 0 {
-		t.Fatalf("no mutation (flags %v)", e.Flags)
+		panic(fmt.Sprintf("no mutation (flags %v)", e.Flags))
 	}
 	for _, m := range e.Mutations {
 		if m.Op != "upsert" || !m.Before.IsZero() || len(m.Diff) != 0 {
@@ -329,7 +329,7 @@ func TestUpsertOutcomeUnknown(t *testing.T) {
 			f := upFake(stockTable(), 1)
 			db := open(t, f, "postgres")
 			if _, err := db.ExecContext(ctx, tc.stmt, "widget", 7, "x"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			upUnknown(t, lastWrite(t, rec))
 			for _, c := range f.Calls() {
@@ -348,16 +348,16 @@ func TestUpsertSerializable(t *testing.T) {
 	db := open(t, f, "postgres", noPKLookup, tsql.WithPKColumns("stock", "sku"))
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, stockUpsert, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	upUnknown(t, e)
 	if !hasFlag(e, "image_skipped:serializable") || len(f.RawCalls()) != 1 {
-		t.Fatalf("flags %v, driver saw:\n%s", e.Flags, sqls(f.RawCalls()))
+		panic(fmt.Sprintf("flags %v, driver saw:\n%s", e.Flags, sqls(f.RawCalls())))
 	}
 }
 
@@ -369,11 +369,11 @@ func TestUpsertRedactsBothImages(t *testing.T) {
 	_, err := db.ExecContext(ctx, "INSERT INTO accounts (id, password, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET password = EXCLUDED.password, name = EXCLUDED.name",
 		1, "new-secret", "Anna")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 1 {
-		t.Fatalf("mutations %+v", e.Mutations)
+		panic(fmt.Sprintf("mutations %+v", e.Mutations))
 	}
 	m := e.Mutations[0]
 	upCheck(t, m, "update", true, fmt.Sprintf("name:Ann->Anna password:%v->%v", core.RedactedValue, core.RedactedValue))
@@ -392,21 +392,21 @@ func TestUpsertSendsNothingWhenNotCapturing(t *testing.T) {
 	f := upFake(stockTable(), 1)
 	db := open(t, f, "postgres")
 	if _, err := db.Exec(stockUpsert, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got := f.RawCalls(); len(got) != 1 || len(rec.Events()) != 0 {
-		t.Fatalf("outside a session: %d events, driver saw:\n%s", len(rec.Events()), sqls(got))
+		panic(fmt.Sprintf("outside a session: %d events, driver saw:\n%s", len(rec.Events()), sqls(got)))
 	}
 	f = upFake(stockTable(), 1)
 	db = open(t, f, "postgres", tsql.WithImages(false))
 	if _, err := db.ExecContext(ctx, stockUpsert, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if got := f.RawCalls(); len(got) != 1 || len(e.Mutations) != 1 {
-		t.Fatalf("images off: mutations %+v, driver saw:\n%s", e.Mutations, sqls(got))
+		panic(fmt.Sprintf("images off: mutations %+v, driver saw:\n%s", e.Mutations, sqls(got)))
 	}
 	if m := e.Mutations[0]; m.Op != "upsert" || !m.Before.IsZero() || !m.After.IsZero() || len(m.Diff) != 0 {
-		t.Fatalf("images off: %+v", m)
+		panic(fmt.Sprintf("images off: %+v", m))
 	}
 }

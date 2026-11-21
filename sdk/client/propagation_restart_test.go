@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -17,7 +18,7 @@ func waitSubs(t *testing.T, m *controlplane.Manager, n int) {
 	d := time.Now().Add(5 * time.Second)
 	for len(m.Subscribers()) != n {
 		if time.Now().After(d) {
-			t.Fatalf("subs=%d want %d", len(m.Subscribers()), n)
+			panic(fmt.Sprintf("subs=%d want %d", len(m.Subscribers()), n))
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -38,7 +39,7 @@ func TestWaitPropagatedSurvivesControlPlaneRestart(t *testing.T) {
 	for i := 0; i < 5; i++ { // generation 5
 		var err error
 		if s, err = client.Start(ctx, opts); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	m2 := controlplane.NewManager(controlplane.Config{})
@@ -70,11 +71,11 @@ func TestWaitPropagatedSurvivesControlPlaneRestart(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if _, err := client.Start(ctx, opts); err != nil { // new session on the restarted plane
-		t.Fatal(err)
+		panic(err)
 	}
 	<-done
 	t.Logf("subscribers after restart: %+v, active gen=%d", m2.Subscribers(), m2.Active().Generation)
 	if werr != nil {
-		t.Fatalf("WaitPropagated never finished after a control-plane restart: n=%d err=%v", n, werr)
+		panic(fmt.Sprintf("WaitPropagated never finished after a control-plane restart: n=%d err=%v", n, werr))
 	}
 }

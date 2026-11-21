@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,17 +23,17 @@ func TestAttachEnv(t *testing.T) {
 
 	t.Setenv(client.SessionEnv, "")
 	if _, err := client.AttachEnv(ctx, o); !errors.Is(err, client.ErrNoSessionEnv) {
-		t.Fatalf("variable not set: %v", err)
+		panic(fmt.Sprintf("variable not set: %v", err))
 	}
 	t.Setenv(client.SessionEnv, "ts_nobody")
 	if _, err := client.AttachEnv(ctx, o); err == nil || errors.Is(err, client.ErrNoSessionEnv) ||
 		!strings.Contains(err.Error(), `"ts_nobody" named by TSESSION_ID`) || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("unknown session: %v", err)
+		panic(fmt.Sprintf("unknown session: %v", err))
 	}
 
 	outer, err := client.Start(ctx, client.Options{BaseURL: o.BaseURL, Name: "outer", QuiesceSeconds: 1, PollInterval: o.PollInterval})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Setenv(client.SessionEnv, outer.ID)
 	// Where the services are comes from the environment too, as tracectl run
@@ -40,7 +41,7 @@ func TestAttachEnv(t *testing.T) {
 	t.Setenv("TSESSION_CONTROLPLANE_URL", o.BaseURL)
 	s, err := client.AttachEnv(ctx, client.Options{Name: "ignored", Mode: "exclusive"})
 	if err != nil || s.ID != outer.ID || s.Info().Name != "outer" || s.Info().Mode != "header" {
-		t.Fatalf("attached: %+v %v", s, err)
+		panic(fmt.Sprintf("attached: %+v %v", s, err))
 	}
 
 	// The handle tags requests with the ambient session.
@@ -49,22 +50,22 @@ func TestAttachEnv(t *testing.T) {
 	defer svc.Close()
 	resp, err := (&http.Client{Transport: s.Transport(nil)}).Get(svc.URL)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if got := <-headers; got.Get(core.KeySession) != outer.ID || got.Get(core.KeyTSessionTraceparent) == "" {
-		t.Fatalf("request not tagged: %v", got)
+		panic(fmt.Sprintf("request not tagged: %v", got))
 	}
 
 	// Attaching changes nothing about the session, and a session that has
 	// ended is refused: it would record nothing.
 	if info, err := outer.Get(ctx); err != nil || info.State != "ACTIVE" {
-		t.Fatalf("after AttachEnv: %+v %v", info, err)
+		panic(fmt.Sprintf("after AttachEnv: %+v %v", info, err))
 	}
 	if _, err := outer.StopAndWait(ctx); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := client.AttachEnv(ctx, o); err == nil || !strings.Contains(err.Error(), "is SEALED, not ACTIVE") {
-		t.Fatalf("sealed session: %v", err)
+		panic(fmt.Sprintf("sealed session: %v", err))
 	}
 }

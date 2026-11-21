@@ -2,6 +2,7 @@ package tkafkaconfluent
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -44,10 +45,10 @@ func assertWorker(t *testing.T, rec *core.MemRecorder, pub core.Event) {
 		}
 	}
 	if w == nil {
-		t.Fatal("no worker.start")
+		panic("no worker.start")
 	}
 	if w.ParentID != pub.SpanID || w.TraceID != pub.TraceID {
-		t.Fatalf("worker parent %q trace %q, want publish span %q trace %q", w.ParentID, w.TraceID, pub.SpanID, pub.TraceID)
+		panic(fmt.Sprintf("worker parent %q trace %q, want publish span %q trace %q", w.ParentID, w.TraceID, pub.SpanID, pub.TraceID))
 	}
 }
 
@@ -57,17 +58,17 @@ func TestProduceKeepsApplicationTraceparent(t *testing.T) {
 	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("orders")}, Value: []byte(`{}`),
 		Headers: []kafka.Header{{Key: "traceparent", Value: []byte(appTP)}}}
 	if err := Produce(ctx, p, msg, nil); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	sent, pub := p.got[0], pubs(rec)[0]
 	if v, n := hdr(sent.Headers, "traceparent"); n != 1 || v != appTP {
-		t.Fatalf("application traceparent is now %q (%d headers)", v, n)
+		panic(fmt.Sprintf("application traceparent is now %q (%d headers)", v, n))
 	}
 	if v, n := hdr(sent.Headers, core.KeyTSessionTraceparent); n != 1 || v != ownFor(pub, sent.Headers) {
-		t.Fatalf("%s = %q, want %q", core.KeyTSessionTraceparent, v, ownFor(pub, sent.Headers))
+		panic(fmt.Sprintf("%s = %q, want %q", core.KeyTSessionTraceparent, v, ownFor(pub, sent.Headers)))
 	}
 	if err := Consume(context.Background(), sent, func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	assertWorker(t, rec, pub)
 }
@@ -79,14 +80,14 @@ func TestProduceLeavesEmptyApplicationTraceparent(t *testing.T) {
 	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("orders")}, Value: []byte(`{}`),
 		Headers: []kafka.Header{{Key: "traceparent"}}}
 	if err := Produce(ctx, p, msg, nil); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	sent := p.got[0]
 	if v, n := hdr(sent.Headers, "traceparent"); n != 1 || v != "" {
-		t.Fatalf("empty application traceparent is now %q (%d headers)", v, n)
+		panic(fmt.Sprintf("empty application traceparent is now %q (%d headers)", v, n))
 	}
 	if err := Consume(context.Background(), sent, func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	assertWorker(t, rec, pubs(rec)[0])
 }
@@ -96,13 +97,13 @@ func TestProduceWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	p := &fakeProducer{}
 	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("orders")}, Value: []byte(`{}`)}
 	if err := Produce(ctx, p, msg, nil); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	want := tpFor(pubs(rec)[0])
 	own, _ := hdr(p.got[0].Headers, core.KeyTSessionTraceparent)
 	tp, _ := hdr(p.got[0].Headers, "traceparent")
 	if hlc, n := hdr(p.got[0].Headers, core.KeyHLC); n != 1 || own != want+";"+hlc || tp != want {
-		t.Fatalf("traceparent %q, %s %q, want %q and that with the clock %q", tp, core.KeyTSessionTraceparent, own, want, hlc)
+		panic(fmt.Sprintf("traceparent %q, %s %q, want %q and that with the clock %q", tp, core.KeyTSessionTraceparent, own, want, hlc))
 	}
 }
 
@@ -119,28 +120,28 @@ func TestProduceReplacesStaleContext(t *testing.T) {
 				first.Headers = []kafka.Header{{Key: "traceparent", Value: []byte(app)}}
 			}
 			if err := Produce(ctx, p, first, nil); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			received := p.got[0]
 			err := Consume(context.Background(), received, func(hctx context.Context) error {
 				return Produce(hctx, p, &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("b")}, Headers: received.Headers}, nil)
 			})
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			second, pub2 := p.got[1], pubs(rec)[1]
 			if v, n := hdr(second.Headers, core.KeyTSessionTraceparent); n != 1 || v != ownFor(pub2, second.Headers) {
-				t.Fatalf("%s = %q (%d), want the second publish %q", core.KeyTSessionTraceparent, v, n, ownFor(pub2, second.Headers))
+				panic(fmt.Sprintf("%s = %q (%d), want the second publish %q", core.KeyTSessionTraceparent, v, n, ownFor(pub2, second.Headers)))
 			}
 			want := tpFor(pub2)
 			if app != "" {
 				want = app
 			}
 			if v, n := hdr(second.Headers, "traceparent"); n != 1 || v != want {
-				t.Fatalf("traceparent = %q (%d), want %q", v, n, want)
+				panic(fmt.Sprintf("traceparent = %q (%d), want %q", v, n, want))
 			}
 			if err := Consume(context.Background(), second, func(context.Context) error { return nil }); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			assertWorker(t, rec, pub2)
 		})
@@ -156,7 +157,7 @@ func TestConsumeReadsTraceparentFromOlderSDK(t *testing.T) {
 		{Key: core.KeyTraceparent, Value: []byte("00-" + trace + "-" + span + "-01")},
 	}}
 	if err := Consume(context.Background(), msg, func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	assertWorker(t, rec, core.Event{TraceID: trace, SpanID: span})
 }
@@ -169,7 +170,7 @@ func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 	rec, ctx := setup(t)
 	p := &fakeProducer{}
 	if err := Produce(ctx, p, &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("a")}}, nil); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	first := pubs(rec)[0]
 	republisher := core.Event{TraceID: first.TraceID, SpanID: core.NewSpanID()}
@@ -184,10 +185,10 @@ func TestConsumeIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 		msg.Headers = append(msg.Headers, h)
 	}
 	if v, _ := hdr(msg.Headers, core.KeyTSessionTraceparent); !strings.HasPrefix(v, tpFor(first)) {
-		t.Fatalf("the copied %s is %q, want the first publish", core.KeyTSessionTraceparent, v)
+		panic(fmt.Sprintf("the copied %s is %q, want the first publish", core.KeyTSessionTraceparent, v))
 	}
 	if err := Consume(context.Background(), msg, func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	assertWorker(t, rec, republisher)
 }
@@ -197,14 +198,14 @@ func TestCarrierFitsInjectionBudget(t *testing.T) {
 	_, ctx := setup(t)
 	p := &fakeProducer{}
 	if err := Produce(ctx, p, &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("a")}}, nil); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, k := range []string{core.KeyTSessionTraceparent, core.KeyTraceparent, core.KeySession, core.KeyHLC} {
 		if _, n := hdr(p.got[0].Headers, k); n != 1 {
-			t.Fatalf("%s: %d headers", k, n)
+			panic(fmt.Sprintf("%s: %d headers", k, n))
 		}
 	}
 	if n := len(p.got[0].Headers); n > maxInjectHeaders {
-		t.Fatalf("%d headers injected", n)
+		panic(fmt.Sprintf("%d headers injected", n))
 	}
 }

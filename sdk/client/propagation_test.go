@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -22,10 +23,10 @@ func TestWaitPropagated(t *testing.T) {
 	// No service connected: nothing to wait for.
 	s, err := client.Start(ctx, opts)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if n, err := s.WaitPropagated(ctx); err != nil || n != 0 {
-		t.Fatalf("no followers: %d %v", n, err)
+		panic(fmt.Sprintf("no followers: %d %v", n, err))
 	}
 
 	// A connected SDK is sent the session; once it was, the SDK has it shortly after.
@@ -34,23 +35,23 @@ func TestWaitPropagated(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for len(m.Subscribers()) == 0 {
 		if time.Now().After(deadline) {
-			t.Fatal("the SDK never connected")
+			panic("the SDK never connected")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	s2, err := client.Start(ctx, opts)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	n, err := s2.WaitPropagated(wctx)
 	cancel()
 	if err != nil || n != 1 {
-		t.Fatalf("one follower: %d %v", n, err)
+		panic(fmt.Sprintf("one follower: %d %v", n, err))
 	}
 	for !sdk.IsActive(s2.ID) {
 		if time.Now().After(deadline) {
-			t.Fatal("the SDK was reported as sent the session but never applied it")
+			panic("the SDK was reported as sent the session but never applied it")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -61,12 +62,12 @@ func TestWaitPropagated(t *testing.T) {
 	defer leave()
 	s3, err := client.Start(ctx, opts)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wctx, cancel = context.WithTimeout(ctx, 5*time.Second)
 	n, err = s3.WaitPropagated(wctx)
 	cancel()
 	if err != nil || n != 2 {
-		t.Fatalf("with an in-process follower: %d %v, want 2 and no error", n, err)
+		panic(fmt.Sprintf("with an in-process follower: %d %v, want 2 and no error", n, err))
 	}
 }

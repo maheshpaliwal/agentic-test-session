@@ -18,7 +18,7 @@ func TestBodyParamsScrubsText(t *testing.T) {
 	} {
 		b, err := json.Marshal(map[string]any{"value": bodyParams([]byte(body))})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if strings.Contains(string(b), "hunter2") {
 			t.Errorf("body %s recorded as %s", body, b)

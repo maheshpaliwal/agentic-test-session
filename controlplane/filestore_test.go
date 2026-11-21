@@ -17,7 +17,7 @@ func openStore(t *testing.T, path string) *FileStore {
 	fs, err := NewFileStore(path)
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		panic(fmt.Sprintf("open store: %v", err))
 	}
 	return fs
 }
@@ -46,7 +46,7 @@ func mustPut(t *testing.T, fs *FileStore, ss ...Session) {
 	t.Helper()
 	for _, s := range ss {
 		if err := fs.Put(s); err != nil {
-			t.Fatalf("put %s: %v", s.ID, err)
+			panic(fmt.Sprintf("put %s: %v", s.ID, err))
 		}
 	}
 }
@@ -86,11 +86,11 @@ func wantSameSessions(t *testing.T, what string, got, want []Session) {
 	t.Helper()
 	for i := 0; i < len(got) && i < len(want); i++ {
 		if !reflect.DeepEqual(got[i], want[i]) {
-			t.Fatalf("%s: [%d]\n got %+v\nwant %+v", what, i, got[i], want[i])
+			panic(fmt.Sprintf("%s: [%d]\n got %+v\nwant %+v", what, i, got[i], want[i]))
 		}
 	}
 	if len(got) != len(want) {
-		t.Fatalf("%s: %d sessions, want %d", what, len(got), len(want))
+		panic(fmt.Sprintf("%s: %d sessions, want %d", what, len(got), len(want)))
 	}
 }
 
@@ -101,7 +101,7 @@ func fileLines(t *testing.T, path string) [][]byte {
 		return nil
 	}
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return bytes.Split(bytes.TrimSuffix(b, []byte{'\n'}), []byte{'\n'})
 }
@@ -109,7 +109,7 @@ func fileLines(t *testing.T, path string) [][]byte {
 func appendRaw(t *testing.T, path, data string) {
 	t.Helper()
 	if err := appendFile(path, []byte(data), false); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -121,10 +121,10 @@ func TestFileStoreLoadsOldFormat(t *testing.T) {
 	for _, suffix := range []string{"", ".archive"} {
 		b, err := os.ReadFile(filepath.Join("testdata", "filestore_v1", "sessions.json"+suffix))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := os.WriteFile(path+suffix, b, 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	fs := openStore(t, path)
@@ -143,24 +143,24 @@ func TestFileStoreLoadsOldFormat(t *testing.T) {
 	}
 	list := fs.List()
 	if len(list) != len(want) {
-		t.Fatalf("list: %d sessions, want %d: %+v", len(list), len(want), list)
+		panic(fmt.Sprintf("list: %d sessions, want %d: %+v", len(list), len(want), list))
 	}
 	for i, w := range want {
 		if s := list[i]; s.ID != w.id || s.Name != w.name || s.State != w.state {
-			t.Fatalf("list[%d] = %+v, want %+v", i, s, w)
+			panic(fmt.Sprintf("list[%d] = %+v, want %+v", i, s, w))
 		}
 		if s, ok := fs.Get(w.id); !ok || s.Name != w.name {
-			t.Fatalf("get %s: %+v %v", w.id, s, ok)
+			panic(fmt.Sprintf("get %s: %+v %v", w.id, s, ok))
 		}
 		if _, hot := fs.MemStore.Get(w.id); hot != w.hot {
-			t.Fatalf("%s: hot=%v, want %v", w.id, hot, w.hot)
+			panic(fmt.Sprintf("%s: hot=%v, want %v", w.id, hot, w.hot))
 		}
 	}
 	if s, _ := fs.Get("ts_fixturea"); len(s.Bindings) != 1 || s.Bindings[0].Value != "u1" || s.CreatedAt.IsZero() {
-		t.Fatalf("fields lost: %+v", s)
+		panic(fmt.Sprintf("fields lost: %+v", s))
 	}
 	if s, _ := fs.Get("ts_fixturef"); !s.SealPending || s.SealError == "" || !s.Incomplete {
-		t.Fatalf("seal marker lost: %+v", s)
+		panic(fmt.Sprintf("seal marker lost: %+v", s))
 	}
 
 	// The loaded store takes every kind of change and keeps it.
@@ -169,17 +169,17 @@ func TestFileStoreLoadsOldFormat(t *testing.T) {
 	mustPut(t, fs, b)
 	fs.Evict("ts_fixturec")
 	if err := fs.Delete("ts_fixtured"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	re := wantSameAfterReopen(t, fs)
 	if s, ok := re.Get("ts_fixtureb"); !ok || s.State != StateSealed {
-		t.Fatalf("change lost: %+v %v", s, ok)
+		panic(fmt.Sprintf("change lost: %+v %v", s, ok))
 	}
 	if _, ok := re.Get("ts_fixtured"); ok || len(re.List()) != 5 {
-		t.Fatalf("delete lost: %+v", re.List())
+		panic(fmt.Sprintf("delete lost: %+v", re.List()))
 	}
 	if _, hot := re.MemStore.Get("ts_fixturec"); hot {
-		t.Fatal("evicted session is hot again")
+		panic("evicted session is hot again")
 	}
 }
 
@@ -197,44 +197,44 @@ func TestFileStoreJournalReplayAndCompact(t *testing.T) {
 	c.Name = "c renamed"
 	mustPut(t, fs, c) // archived and hot now
 	if err := fs.Delete(d.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("snapshot written by a change: %v", err)
+		panic(fmt.Sprintf("snapshot written by a change: %v", err))
 	}
 	if n := len(fileLines(t, fs.journalPath())); n != 8 {
-		t.Fatalf("journal has %d records, want 8 (one per change, one for the batch evict)", n)
+		panic(fmt.Sprintf("journal has %d records, want 8 (one per change, one for the batch evict)", n))
 	}
 
 	re := wantSameAfterReopen(t, fs)
 	if l := re.List(); len(l) != 3 || l[0].State != StateDraining || l[2].Name != "c renamed" {
-		t.Fatalf("replayed: %+v", l)
+		panic(fmt.Sprintf("replayed: %+v", l))
 	}
 	if _, err := os.Stat(re.journalPath()); !os.IsNotExist(err) {
-		t.Fatalf("journal not folded away on open: %v", err)
+		panic(fmt.Sprintf("journal not folded away on open: %v", err))
 	}
 	// The snapshot alone is what earlier versions wrote: an array of sessions.
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var snap []Session
 	if err := json.Unmarshal(raw, &snap); err != nil || !reflect.DeepEqual(snap, re.MemStore.List()) {
-		t.Fatalf("snapshot: %v\n%s", err, raw)
+		panic(fmt.Sprintf("snapshot: %v\n%s", err, raw))
 	}
 
 	// Compact does the same on demand, and the store stays usable.
 	mustPut(t, re, storeSession(4, "e", StateActive))
 	if err := re.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := os.Stat(re.journalPath()); !os.IsNotExist(err) {
-		t.Fatalf("journal left by Compact: %v", err)
+		panic(fmt.Sprintf("journal left by Compact: %v", err))
 	}
 	mustPut(t, re, storeSession(5, "f", StateActive))
 	if l := wantSameAfterReopen(t, re).List(); len(l) != 5 {
-		t.Fatalf("after compact: %+v", l)
+		panic(fmt.Sprintf("after compact: %+v", l))
 	}
 }
 
@@ -272,14 +272,14 @@ func TestFileStoreTornJournal(t *testing.T) {
 				wantN = 3
 			}
 			if l := re.List(); len(l) != wantN || l[0].Name != "a" || l[1].Name != "b" {
-				t.Fatalf("after torn journal: %+v", l)
+				panic(fmt.Sprintf("after torn journal: %+v", l))
 			}
 			if _, ok := re.Get(c.ID); ok != tc.wantC {
-				t.Fatalf("session of the torn tail present=%v, want %v", ok, tc.wantC)
+				panic(fmt.Sprintf("session of the torn tail present=%v, want %v", ok, tc.wantC))
 			}
 			mustPut(t, re, storeSession(3, "d", StateActive))
 			if l := wantSameAfterReopen(t, re).List(); len(l) != wantN+1 {
-				t.Fatalf("after another change: %+v", l)
+				panic(fmt.Sprintf("after another change: %+v", l))
 			}
 		})
 	}
@@ -289,7 +289,7 @@ func TestFileStoreTornJournal(t *testing.T) {
 		appendRaw(t, path+".journal", rec(c)[:25])
 		fs := openStore(t, path)
 		if l := fs.List(); len(l) != 0 {
-			t.Fatalf("list: %+v", l)
+			panic(fmt.Sprintf("list: %+v", l))
 		}
 		mustPut(t, fs, c)
 		wantSameAfterReopen(t, fs)
@@ -307,18 +307,18 @@ func TestFileStoreTornJournal(t *testing.T) {
 		mustPut(t, fs, storeSession(0, "a", StateActive))
 		appendRaw(t, fs.journalPath(), rec(c)[:40])
 		if err := os.Chmod(dir, 0o500); err != nil { // no snapshot can be written
-			t.Fatal(err)
+			panic(err)
 		}
 		re := openStore(t, path)
 		mustPut(t, re, storeSession(1, "b", StateActive)) // the journal itself is writable
 		if err := os.Chmod(dir, 0o700); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("snapshot written to a read-only directory: %v", err)
+			panic(fmt.Sprintf("snapshot written to a read-only directory: %v", err))
 		}
 		if l := wantSameAfterReopen(t, re).List(); len(l) != 2 {
-			t.Fatalf("list: %+v", l)
+			panic(fmt.Sprintf("list: %+v", l))
 		}
 	})
 }
@@ -331,7 +331,7 @@ func TestFileStoreLeftoverTempFile(t *testing.T) {
 	fs := openStore(t, path)
 	mustPut(t, fs, storeSession(0, "a", StateActive), storeSession(1, "b", StateSealed))
 	if err := fs.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	mustPut(t, fs, storeSession(2, "c", StateActive))
 
@@ -340,19 +340,19 @@ func TestFileStoreLeftoverTempFile(t *testing.T) {
 	foreign := filepath.Join(dir, ".other.json.1234.tmp") // another store in the same directory
 	for _, p := range []string{own, legacy, foreign} {
 		if err := os.WriteFile(p, []byte(`[{"id":"ts_half","na`), 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	re := wantSameAfterReopen(t, fs)
 	if l := re.List(); len(l) != 3 {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 	if _, err := os.Stat(own); !os.IsNotExist(err) {
-		t.Fatalf("own temp file not removed: %v", err)
+		panic(fmt.Sprintf("own temp file not removed: %v", err))
 	}
 	for _, p := range []string{legacy, foreign} {
 		if _, err := os.Stat(p); err != nil {
-			t.Fatalf("%s touched: %v", filepath.Base(p), err)
+			panic(fmt.Sprintf("%s touched: %v", filepath.Base(p), err))
 		}
 	}
 }
@@ -376,7 +376,7 @@ func TestFileStoreCrashBetweenSnapshotAndJournalCut(t *testing.T) {
 	mustPut(t, fs, ss[2])
 	for _, id := range []string{ss[0].ID, ss[3].ID} { // one archived, one hot
 		if err := fs.Delete(id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	ss[4].Name = "last write wins"
@@ -384,7 +384,7 @@ func TestFileStoreCrashBetweenSnapshotAndJournalCut(t *testing.T) {
 	// Deleted and stored again: the delete must not reach the newer record.
 	fs.Evict(ss[5].ID)
 	if err := fs.Delete(ss[5].ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ss[5].Name = "back after delete"
 	mustPut(t, fs, ss[5])
@@ -392,26 +392,26 @@ func TestFileStoreCrashBetweenSnapshotAndJournalCut(t *testing.T) {
 
 	journal, err := os.ReadFile(fs.journalPath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := fs.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := os.WriteFile(fs.journalPath(), journal, 0o600); err != nil { // the cut never happened
-		t.Fatal(err)
+		panic(err)
 	}
 	re := wantSameAfterReopen(t, fs)
 	if l := re.List(); len(l) != 4 {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 	if s, _ := re.Get(ss[1].ID); s.Name != "renamed from the archive" {
-		t.Fatalf("archived rename lost: %+v", s)
+		panic(fmt.Sprintf("archived rename lost: %+v", s))
 	}
 	if _, hot := re.MemStore.Get(ss[2].ID); !hot {
-		t.Fatal("session put after its eviction is not hot")
+		panic("session put after its eviction is not hot")
 	}
 	if s, ok := re.Get(ss[5].ID); !ok || s.Name != "back after delete" {
-		t.Fatalf("session stored again after a delete: %+v %v", s, ok)
+		panic(fmt.Sprintf("session stored again after a delete: %+v %v", s, ok))
 	}
 }
 
@@ -432,23 +432,23 @@ func TestFileStoreBackgroundCompaction(t *testing.T) {
 
 	snap, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("no snapshot after %d journal bytes: %v", written, err)
+		panic(fmt.Sprintf("no snapshot after %d journal bytes: %v", written, err))
 	}
 	fs.wmu.Lock()
 	journalSize, snapSize := fs.journalSize, fs.snapSize
 	fs.wmu.Unlock()
 	if snapSize != snap.Size() {
-		t.Fatalf("snapshot size %d, tracked %d", snap.Size(), snapSize)
+		panic(fmt.Sprintf("snapshot size %d, tracked %d", snap.Size(), snapSize))
 	}
 	onDisk := int64(0)
 	if st, err := os.Stat(fs.journalPath()); err == nil {
 		onDisk = st.Size()
 	}
 	if journalSize != onDisk || journalSize >= written {
-		t.Fatalf("journal: %d bytes tracked, %d on disk, %d written in total", journalSize, onDisk, written)
+		panic(fmt.Sprintf("journal: %d bytes tracked, %d on disk, %d written in total", journalSize, onDisk, written))
 	}
 	if l := wantSameAfterReopen(t, fs).List(); len(l) != 25 || l[24].Name != "round 399" {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 }
 
@@ -466,26 +466,26 @@ func TestFileStoreEvictBatch(t *testing.T) {
 
 	fs.Evict(ss[0].ID, ss[2].ID, "ts_unknown", ss[4].ID)
 	if n := len(fileLines(t, fs.archivePath())); n != 3 {
-		t.Fatalf("archive has %d lines, want 3", n)
+		panic(fmt.Sprintf("archive has %d lines, want 3", n))
 	}
 	if n := len(fileLines(t, fs.journalPath())) - before; n != 1 {
-		t.Fatalf("batch evict wrote %d journal records, want 1", n)
+		panic(fmt.Sprintf("batch evict wrote %d journal records, want 1", n))
 	}
 	for i, s := range ss {
 		_, hot := fs.MemStore.Get(s.ID)
 		if got, ok := fs.Get(s.ID); !ok || got.Name != s.Name || hot != (i%2 == 1) {
-			t.Fatalf("%s: %+v readable=%v hot=%v", s.ID, got, ok, hot)
+			panic(fmt.Sprintf("%s: %+v readable=%v hot=%v", s.ID, got, ok, hot))
 		}
 	}
 	if l := fs.List(); len(l) != 5 {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 
 	// Nothing to do: nothing is written.
 	fs.Evict()
 	fs.Evict(ss[0].ID, "ts_unknown")
 	if n := len(fileLines(t, fs.archivePath())); n != 3 {
-		t.Fatalf("archive has %d lines after no-op evicts, want 3", n)
+		panic(fmt.Sprintf("archive has %d lines after no-op evicts, want 3", n))
 	}
 	wantSameAfterReopen(t, fs)
 }
@@ -497,18 +497,18 @@ func TestFileStoreEvictKeepsSessionsWhenArchiveFails(t *testing.T) {
 	a := storeSession(0, "a", StateAborted)
 	mustPut(t, fs, a)
 	if err := os.Mkdir(fs.archivePath(), 0o700); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	fs.Evict(a.ID)
 	if _, hot := fs.MemStore.Get(a.ID); !hot {
-		t.Fatal("session dropped although the archive could not be written")
+		panic("session dropped although the archive could not be written")
 	}
 	if err := os.Remove(fs.archivePath()); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	fs.Evict(a.ID)
 	if _, hot := fs.MemStore.Get(a.ID); hot {
-		t.Fatal("session still hot")
+		panic("session still hot")
 	}
 	wantSameAfterReopen(t, fs)
 }
@@ -521,22 +521,22 @@ func TestFileStoreEvictRecordLost(t *testing.T) {
 	a, b := storeSession(0, "a", StateAborted), storeSession(1, "b", StateActive)
 	mustPut(t, fs, a, b)
 	if err := fs.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	fs.Evict(a.ID)
 	if err := os.Remove(fs.journalPath()); err != nil { // the record never made it
-		t.Fatal(err)
+		panic(err)
 	}
 	re := openStore(t, path)
 	if _, hot := re.MemStore.Get(a.ID); !hot {
-		t.Fatal("session lost")
+		panic("session lost")
 	}
 	if l := re.List(); len(l) != 2 {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 	re.Evict(a.ID)
 	if l := wantSameAfterReopen(t, re).List(); len(l) != 2 {
-		t.Fatalf("list after second evict: %+v", l)
+		panic(fmt.Sprintf("list after second evict: %+v", l))
 	}
 }
 
@@ -551,18 +551,18 @@ func TestFileStoreArchiveLineLost(t *testing.T) {
 	fs.Evict(b.ID)
 	lines := fileLines(t, fs.archivePath())
 	if err := os.WriteFile(fs.archivePath(), append(lines[0], '\n'), 0o600); err != nil { // b's line never made it
-		t.Fatal(err)
+		panic(err)
 	}
 	re := openStore(t, path)
 	if _, hot := re.MemStore.Get(a.ID); hot {
-		t.Fatal("archived session is hot")
+		panic("archived session is hot")
 	}
 	if s, hot := re.MemStore.Get(b.ID); !hot || s.Name != "b" {
-		t.Fatalf("session whose archive line was lost: %+v hot=%v", s, hot)
+		panic(fmt.Sprintf("session whose archive line was lost: %+v hot=%v", s, hot))
 	}
 	re.Evict(b.ID)
 	if l := wantSameAfterReopen(t, re).List(); len(l) != 2 {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 }
 
@@ -578,16 +578,16 @@ func TestFileStoreTornArchive(t *testing.T) {
 
 	re := openStore(t, path)
 	if l := re.List(); len(l) != 2 {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 	re.Evict(b.ID)
 	re2 := wantSameAfterReopen(t, re)
 	for _, s := range []Session{a, b} {
 		if got, ok := re2.Get(s.ID); !ok || got.Name != s.Name {
-			t.Fatalf("%s: %+v %v", s.ID, got, ok)
+			panic(fmt.Sprintf("%s: %+v %v", s.ID, got, ok))
 		}
 		if _, hot := re2.MemStore.Get(s.ID); hot {
-			t.Fatalf("%s is hot", s.ID)
+			panic(fmt.Sprintf("%s is hot", s.ID))
 		}
 	}
 }
@@ -602,23 +602,23 @@ func TestFileStoreDeleteFinishedOnOpen(t *testing.T) {
 	fs.Evict(a.ID, b.ID)
 	archive, err := os.ReadFile(fs.archivePath())
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := fs.Delete(a.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := os.WriteFile(fs.archivePath(), archive, 0o600); err != nil { // the rewrite never happened
-		t.Fatal(err)
+		panic(err)
 	}
 	re := openStore(t, path)
 	if _, ok := re.Get(a.ID); ok {
-		t.Fatal("deleted session is back")
+		panic("deleted session is back")
 	}
 	if n := len(fileLines(t, re.archivePath())); n != 1 {
-		t.Fatalf("archive has %d lines, want 1", n)
+		panic(fmt.Sprintf("archive has %d lines, want 1", n))
 	}
 	if l := wantSameAfterReopen(t, re).List(); len(l) != 1 || l[0].ID != b.ID {
-		t.Fatalf("list: %+v", l)
+		panic(fmt.Sprintf("list: %+v", l))
 	}
 }
 
@@ -678,7 +678,7 @@ func TestFileStoreConcurrentUse(t *testing.T) {
 	}
 	// The last round re-put every session and then deleted one per worker.
 	if l := wantSameAfterReopen(t, fs).List(); len(l) != workers*(perWorker-1) {
-		t.Fatalf("%d sessions, want %d", len(l), workers*(perWorker-1))
+		panic(fmt.Sprintf("%d sessions, want %d", len(l), workers*(perWorker-1)))
 	}
 }
 
@@ -704,7 +704,7 @@ func TestSweepEvictsInOneBatch(t *testing.T) {
 	for range 5 {
 		s, err := m.Start(StartRequest{})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		m.Abort(s.ID)
 		ids = append(ids, s.ID)
@@ -716,9 +716,9 @@ func TestSweepEvictsInOneBatch(t *testing.T) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if len(st.calls) != 1 || !reflect.DeepEqual(st.calls[0], ids) {
-		t.Fatalf("evict calls: %v, want one with %v", st.calls, ids)
+		panic(fmt.Sprintf("evict calls: %v, want one with %v", st.calls, ids))
 	}
 	if l := st.List(); len(l) != 1 || l[0].ID != live.ID {
-		t.Fatalf("store after sweep: %+v", l)
+		panic(fmt.Sprintf("store after sweep: %+v", l))
 	}
 }

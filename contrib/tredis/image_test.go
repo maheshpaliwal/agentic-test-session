@@ -48,15 +48,15 @@ func TestImageReadsCappedOutsidePipeline(t *testing.T) {
 	ch := &countHook{}
 	c.AddHook(ch)
 	if n, err := c.Del(ctx, keys...).Result(); err != nil || n != 500 {
-		t.Fatal(n, err)
+		panic(fmt.Sprint(n, err))
 	}
 	// 1 DEL + at most 20 keys x (TYPE+GET before, TYPE after).
 	if n := ch.n.Load(); n > 1+20*3 {
-		t.Fatalf("one DEL of 500 keys cost %d round trips", n)
+		panic(fmt.Sprintf("one DEL of 500 keys cost %d round trips", n))
 	}
 	e := rec.Events()[0]
 	if e.Attrs["image_skipped"] != "cap" || len(e.Mutations) != 500 {
-		t.Fatalf("attrs=%v mutations=%d", e.Attrs, len(e.Mutations))
+		panic(fmt.Sprintf("attrs=%v mutations=%d", e.Attrs, len(e.Mutations)))
 	}
 	imaged := 0
 	for _, m := range e.Mutations {
@@ -65,21 +65,21 @@ func TestImageReadsCappedOutsidePipeline(t *testing.T) {
 		}
 	}
 	if imaged != 20 {
-		t.Fatalf("before-images=%d, want the default cap of 20", imaged)
+		panic(fmt.Sprintf("before-images=%d, want the default cap of 20", imaged))
 	}
 }
 
 func TestImageDeadline(t *testing.T) {
 	c, rec, ctx := setup(t, WithBeforeImage("*"), WithImageDeadline(time.Nanosecond))
 	if err := c.MSet(ctx, "a", "1", "b", "2").Err(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := rec.Events()[0]
 	if e.Attrs["image_skipped"] != "deadline" || len(e.Mutations) != 2 || !e.Mutations[0].Before.IsZero() {
-		t.Fatalf("%+v", e)
+		panic(fmt.Sprintf("%+v", e))
 	}
 	if string(e.Mutations[1].After.Inline) != `"2"` {
-		t.Fatalf("without an image the argument is the after value: %s", e.Mutations[1].After.Inline)
+		panic(fmt.Sprintf("without an image the argument is the after value: %s", e.Mutations[1].After.Inline))
 	}
 }
 
@@ -101,11 +101,11 @@ func TestCollectionImagesCapped(t *testing.T) {
 	evs := rec.Events()
 	var set []string
 	if err := json.Unmarshal(evs[0].Mutations[0].Before.Inline, &set); err != nil || len(set) != redisx.ImageLimit {
-		t.Fatalf("set image: %d elements, err=%v, truncated=%v", len(set), err, evs[0].Mutations[0].Before.Truncated)
+		panic(fmt.Sprintf("set image: %d elements, err=%v, truncated=%v", len(set), err, evs[0].Mutations[0].Before.Truncated))
 	}
 	var hash map[string]string
 	if err := json.Unmarshal(evs[1].Mutations[0].Before.Inline, &hash); err != nil || len(hash) != redisx.ImageLimit {
-		t.Fatalf("hash image: %d fields, err=%v", len(hash), err)
+		panic(fmt.Sprintf("hash image: %d fields, err=%v", len(hash), err))
 	}
 }
 
@@ -120,11 +120,11 @@ func TestPipelineSameKeyImages(t *testing.T) {
 		p.Set(ctx, "cnt", "3", 0)
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	evs := rec.Events()
 	if len(evs) != 3 {
-		t.Fatalf("events=%d", len(evs))
+		panic(fmt.Sprintf("events=%d", len(evs)))
 	}
 	want := [][2]string{{`"0"`, `"1"`}, {``, `"2"`}, {``, `"3"`}}
 	for i, w := range want {
@@ -134,7 +134,7 @@ func TestPipelineSameKeyImages(t *testing.T) {
 		}
 	}
 	if n := ch.n.Load(); n != 4 { // TYPE+GET before the first write, TYPE+GET after the last
-		t.Fatalf("image round trips=%d, want 4", n)
+		panic(fmt.Sprintf("image round trips=%d, want 4", n))
 	}
 }
 
@@ -149,9 +149,9 @@ func TestPipelineAfterImageSkipsFailedWrite(t *testing.T) {
 	evs := rec.Events()
 	m := evs[0].Mutations[0]
 	if string(m.Before.Inline) != `{"f":"0"}` || string(m.After.Inline) != `{"f":"1"}` {
-		t.Fatalf("%s -> %s", m.Before.Inline, m.After.Inline)
+		panic(fmt.Sprintf("%s -> %s", m.Before.Inline, m.After.Inline))
 	}
 	if evs[1].Err == "" || len(evs[1].Mutations) != 0 {
-		t.Fatalf("%+v", evs[1])
+		panic(fmt.Sprintf("%+v", evs[1]))
 	}
 }

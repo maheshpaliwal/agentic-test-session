@@ -128,7 +128,9 @@ TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
   with `tsql.WithPKColumns` for a table without a primary key or a view. Flags on a write say what could not
   be captured: `pk_unknown` (no key value was found for the row), `after_unavailable` (an updated row could not
   be read back, so the record has its before image and no diff), `pk_not_unique` (the key columns matched more
-  than one row, so no new values were recorded) and `pk_lookup_failed` (the catalog could not be read). The package doc has the details.
+  than one row, so no new values were recorded), `pk_lookup_failed` (the catalog could not be read),
+  `upsert_unknown` (whether an upsert inserted or updated is not known; no diff) and `effects_unknown` (a `DO`
+  or `CALL`: the rows it changed are not recorded). The package doc has the details.
 
 ### 3. Record a session
 
@@ -162,6 +164,8 @@ tracectl events my-run --kind 'db.*' --errors
 tracectl entities my-run                     # what the session changed; "N uncertain" = incomplete key or image
 tracectl history my-run postgres orders 42   # every change to one row, with diffs and the event's flags
 tracectl history my-run redis 'user:*' user:1   # a Redis key; diffs need tredis.WithBeforeImage (see its doc comment)
+# a key that holds a secret is recorded masked ("session:#1f2e3d4c5b6a"): copy it from `tracectl entities`;
+# it cannot be found by its real name, and it reads differently in each service
 tracectl history my-run postgres items order_id=7,sku=a   # composite key; or the JSON that entities prints
 tracectl history my-run postgres orders --unknown-key     # changes recorded without a key
 tracectl trace my-run --errors               # call tree, only branches that failed
@@ -250,7 +254,7 @@ empty. A live session works too and says so. Details: [`docs/DIGEST.md`](docs/DI
 | `3` | a gate failed: failed events, an incomplete or an empty session | read "Verdict" and "Failures" in the digest, then `show <seq>` |
 | `1` | the session could not be stopped, sealed or read | `tracectl doctor`; the recording cannot be relied on |
 | `2` | wrong usage of `tracectl` | fix the command line |
-| anything else | the command's own status (`128+n`: killed by signal `n`) | the command's output; the digest is still written |
+| anything else | the command's own status (`128+n`: killed by signal `n`) | the command's output; the digest is still written, except for `126`/`127` (the command could not be started, so no session was) |
 
 A command that itself exits 1, 2 or 3 looks the same; the line `tracectl: the command failed: exit status N` on
 stderr tells them apart. Do not assert on a mutation marked `UNCERTAIN`: its key or values were not fully

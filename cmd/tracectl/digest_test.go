@@ -32,7 +32,7 @@ var (
 func checkDigestMarkdown(t *testing.T, out string) map[string]string {
 	t.Helper()
 	if !utf8.ValidString(out) || !strings.HasSuffix(out, "\n") {
-		t.Fatalf("not valid UTF-8 text ending in a newline:\n%s", out)
+		panic(fmt.Sprintf("not valid UTF-8 text ending in a newline:\n%s", out))
 	}
 	sections := map[string]string{}
 	var heads []string
@@ -40,11 +40,11 @@ func checkDigestMarkdown(t *testing.T, out string) map[string]string {
 	for i, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
 		for _, r := range line {
 			if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co) {
-				t.Fatalf("line %d holds the control or format character %U:\n%q", i+1, r, line)
+				panic(fmt.Sprintf("line %d holds the control or format character %U:\n%q", i+1, r, line))
 			}
 		}
 		if n := utf8.RuneCountInString(line); n > 3000 {
-			t.Fatalf("line %d is %d runes long", i+1, n)
+			panic(fmt.Sprintf("line %d is %d runes long", i+1, n))
 		}
 		sections[section] += line + "\n"
 		switch {
@@ -52,32 +52,32 @@ func checkDigestMarkdown(t *testing.T, out string) map[string]string {
 			fence = ""
 		case fence != "":
 			if !reDigestBlockLine.MatchString(line) {
-				t.Fatalf("line %d of a code block does not start with the digest's own text:\n%q", i+1, line)
+				panic(fmt.Sprintf("line %d of a code block does not start with the digest's own text:\n%q", i+1, line))
 			}
 		case line == "":
 		case strings.HasPrefix(line, "```"):
 			if strings.Trim(line, "`") != "text" {
-				t.Fatalf("line %d opens a code block that is not the digest's: %q", i+1, line)
+				panic(fmt.Sprintf("line %d opens a code block that is not the digest's: %q", i+1, line))
 			}
 			fence = strings.TrimSuffix(line, "text")
 		case line == digestNotice:
 			notices++
 		case !reDigestTextLine.MatchString(line):
-			t.Fatalf("line %d does not start with the digest's own text:\n%q", i+1, line)
+			panic(fmt.Sprintf("line %d does not start with the digest's own text:\n%q", i+1, line))
 		case strings.HasPrefix(line, "#"):
 			heads = append(heads, line)
 			section = line
 		}
 	}
 	if fence != "" {
-		t.Fatalf("a code block is not closed:\n%s", out)
+		panic(fmt.Sprintf("a code block is not closed:\n%s", out))
 	}
 	if notices != 1 {
-		t.Fatalf("the notice is printed %d times, want once:\n%s", notices, out)
+		panic(fmt.Sprintf("the notice is printed %d times, want once:\n%s", notices, out))
 	}
 	if len(heads) != len(digestHeadings)+1 || !strings.HasPrefix(heads[0], "## tsession digest: ") ||
 		strings.Join(heads[1:], "\n") != strings.Join(digestHeadings, "\n") {
-		t.Fatalf("headings %q, want the title and %q", heads, digestHeadings)
+		panic(fmt.Sprintf("headings %q, want the title and %q", heads, digestHeadings))
 	}
 	return sections
 }
@@ -87,23 +87,23 @@ func checkDigestMarkdown(t *testing.T, out string) map[string]string {
 func checkDigestJSON(t *testing.T, out string) digest {
 	t.Helper()
 	if strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, "\n") {
-		t.Fatalf("want one line of JSON:\n%s", out)
+		panic(fmt.Sprintf("want one line of JSON:\n%s", out))
 	}
 	var d digest
 	dec := json.NewDecoder(strings.NewReader(out))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
-		t.Fatalf("not a digest: %v\n%s", err, out)
+		panic(fmt.Sprintf("not a digest: %v\n%s", err, out))
 	}
 	if d.Schema != digestSchema || d.Notice != digestNotice {
-		t.Fatalf("schema %q, notice %q", d.Schema, d.Notice)
+		panic(fmt.Sprintf("schema %q, notice %q", d.Schema, d.Notice))
 	}
 	if d.Failures == nil || d.Mutations == nil || d.Tree == nil || d.Omitted == nil || d.DrillDown == nil {
-		t.Fatalf("a list is null:\n%s", out)
+		panic(fmt.Sprintf("a list is null:\n%s", out))
 	}
 	for _, r := range out[:len(out)-1] {
 		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co) {
-			t.Fatalf("holds the control or format character %U:\n%s", r, out)
+			panic(fmt.Sprintf("holds the control or format character %U:\n%s", r, out))
 		}
 	}
 	return d
@@ -130,7 +130,7 @@ func TestDigestClean(t *testing.T) {
 
 	code, out, e := env.tc("digest", reportID, "--fail-on-error", "--fail-on-incomplete", "--fail-on-empty")
 	if code != 0 || e != "" {
-		t.Fatalf("clean digest: %d %s", code, e)
+		panic(fmt.Sprintf("clean digest: %d %s", code, e))
 	}
 	sec := checkDigestMarkdown(t, out)
 	wantAll(t, out,
@@ -151,13 +151,13 @@ func TestDigestClean(t *testing.T) {
 	for _, flag := range []string{"--format=json", "--json"} {
 		code, out, e = env.tc("digest", reportID, flag)
 		if code != 0 || e != "" {
-			t.Fatalf("%s: %d %s", flag, code, e)
+			panic(fmt.Sprintf("%s: %d %s", flag, code, e))
 		}
 		d := checkDigestJSON(t, out)
 		if d.Verdict.Status != "passed" || d.Verdict.Recording != "complete" || d.Session.Live || d.Session.State != "SEALED" ||
 			d.Counts.Events != 2 || d.Counts.Mutations != 1 || len(d.Tree) != 2 || d.Tree[1].Depth != 1 || len(d.Omitted) != 0 ||
 			len(d.Mutations) != 1 || d.Mutations[0].Key != `{"id":42}` || d.Mutations[0].Changes[0].Outcome != "effective" || d.MaxBytes != digestDefaultBytes {
-			t.Fatalf("%s: unexpected digest:\n%s", flag, out)
+			panic(fmt.Sprintf("%s: unexpected digest:\n%s", flag, out))
 		}
 	}
 
@@ -165,7 +165,7 @@ func TestDigestClean(t *testing.T) {
 	empty := newReportEnv(t)
 	code, out, e = empty.tc("digest", reportID, "--fail-on-empty")
 	if code != exitCheckFailed || !strings.Contains(e, emptySession) || !strings.Contains(out, "**Empty**: ") {
-		t.Fatalf("empty session: %d %s\n%s", code, e, out)
+		panic(fmt.Sprintf("empty session: %d %s\n%s", code, e, out))
 	}
 	checkDigestMarkdown(t, out)
 }
@@ -174,7 +174,7 @@ func TestDigestFailures(t *testing.T) {
 	env := failingEnv(t)
 	code, out, e := env.tc("digest", reportID, "--fail-on-error")
 	if code != exitCheckFailed || !strings.Contains(e, "check failed: 3 failed event(s)") {
-		t.Fatalf("failing digest: %d %s", code, e)
+		panic(fmt.Sprintf("failing digest: %d %s", code, e))
 	}
 	t.Logf("\n%s", out)
 	sec := checkDigestMarkdown(t, out)
@@ -201,7 +201,7 @@ func TestDigestFailures(t *testing.T) {
 	_, out, _ = env.tc("digest", reportID, "--json")
 	d := checkDigestJSON(t, out)
 	if d.Verdict.Status != "failed" || len(d.Failures) != 3 || d.Counts.Failures != 3 {
-		t.Fatalf("unexpected digest:\n%s", out)
+		panic(fmt.Sprintf("unexpected digest:\n%s", out))
 	}
 	f := d.Failures[0]
 	if f.Seq != 5 || !f.InTree || !f.Async || len(f.Path) != 2 || f.Path[0].Seq != 1 || f.Path[1].Seq != 3 || f.Path[1].Async || f.Error != "carrier timeout" {
@@ -223,7 +223,7 @@ func TestDigestFailures(t *testing.T) {
 	env.sum.Incomplete, env.sum.DroppedEvents = true, 4
 	code, out, e = env.tc("digest", reportID, "--fail-on-incomplete")
 	if code != exitCheckFailed || !strings.Contains(e, "session is incomplete") {
-		t.Fatalf("incomplete: %d %s", code, e)
+		panic(fmt.Sprintf("incomplete: %d %s", code, e))
 	}
 	wantAll(t, checkDigestMarkdown(t, out)["### Verdict"], "- state: SEALED; recording: incomplete\n",
 		"- incomplete: 4 event(s) were dropped by the SDKs before they reached the collector.\n")
@@ -348,7 +348,7 @@ func TestDigestMutations(t *testing.T) {
 	d := checkDigestJSON(t, out)
 	orders := d.Mutations[0]
 	if orders.Count != 3 || orders.Effective != 1 || orders.RolledBack != 1 || orders.Unknown != 1 || orders.Uncertain != 1 || len(orders.Changes) != 3 {
-		t.Fatalf("orders: %+v", orders)
+		panic(fmt.Sprintf("orders: %+v", orders))
 	}
 	if c := orders.Changes[2]; !c.Uncertain || !c.AfterUnavailable || c.Outcome != "unknown" || len(c.Fields) != 0 || len(c.Flags) != 3 {
 		t.Errorf("flagged change: %+v", c)
@@ -419,7 +419,7 @@ func TestDigestHostileText(t *testing.T) {
 	for _, budget := range []string{"4096", "16384", "400000"} {
 		code, out, e := env.tc("digest", reportID, "--max-bytes", budget)
 		if code != 0 || e != "" {
-			t.Fatalf("--max-bytes %s: %d %s", budget, code, e)
+			panic(fmt.Sprintf("--max-bytes %s: %d %s", budget, code, e))
 		}
 		checkDigestMarkdown(t, out)
 		// Outside the code blocks nothing recorded is markup.
@@ -433,7 +433,7 @@ func TestDigestHostileText(t *testing.T) {
 
 		code, out, e = env.tc("digest", reportID, "--max-bytes", budget, "--format", "json")
 		if code != 0 || e != "" {
-			t.Fatalf("--max-bytes %s json: %d %s", budget, code, e)
+			panic(fmt.Sprintf("--max-bytes %s json: %d %s", budget, code, e))
 		}
 		if d := checkDigestJSON(t, out); d.Verdict.Status != "failed" || len(d.Failures) == 0 {
 			t.Errorf("--max-bytes %s json: %+v", budget, d.Verdict)
@@ -550,33 +550,33 @@ func TestDigestBudget(t *testing.T) {
 			what := fmt.Sprintf("session %d (%d events, %d failures), budget %d", i, len(evs), len(sum.Failures), budget)
 			md, err := src.fit(digestMarkdown{}, budget)
 			if err != nil || len(md) > budget {
-				t.Fatalf("%s: markdown is %d bytes: %v", what, len(md), err)
+				panic(fmt.Sprintf("%s: markdown is %d bytes: %v", what, len(md), err))
 			}
 			checkDigestMarkdown(t, string(md))
 			js, err := src.fit(digestJSON{}, budget)
 			if err != nil || len(js) > budget {
-				t.Fatalf("%s: JSON is %d bytes: %v", what, len(js), err)
+				panic(fmt.Sprintf("%s: JSON is %d bytes: %v", what, len(js), err))
 			}
 			d := checkDigestJSON(t, string(js))
 
 			status := map[bool]string{true: "failed", false: d.Verdict.Status}[len(sum.Failures) > 0]
 			if d.Verdict.Status != status || d.Counts.Failures != len(sum.Failures) || d.Counts.Events != len(evs) || d.MaxBytes != budget ||
 				(d.Verdict.Recording == "incomplete") != sum.Incomplete || d.Session.Live != (info.State == "ACTIVE") {
-				t.Fatalf("%s: verdict %+v, counts %+v", what, d.Verdict, d.Counts)
+				panic(fmt.Sprintf("%s: verdict %+v, counts %+v", what, d.Verdict, d.Counts))
 			}
 			if !bytes.Contains(md, []byte(map[string]string{"failed": "**Failed**: " + plural(len(sum.Failures), "failed event") + ".",
 				"incomplete": "**Incomplete**: ", "empty": "**Empty**: ", "passed": "**Passed**: "}[status])) {
-				t.Fatalf("%s: no verdict in:\n%s", what, md)
+				panic(fmt.Sprintf("%s: no verdict in:\n%s", what, md))
 			}
 			if len(sum.Failures) > 0 && (len(d.Failures) == 0 || d.Failures[0].Seq != sum.Failures[0].Seq || !bytes.Contains(md, []byte(fmt.Sprintf("```text\n#%d ", sum.Failures[0].Seq)))) {
-				t.Fatalf("%s: the first failure is not listed:\n%s\n%s", what, md, js)
+				panic(fmt.Sprintf("%s: the first failure is not listed:\n%s\n%s", what, md, js))
 			}
 			// Whatever is missing is named, with a command that prints it.
 			sections := map[string]bool{}
 			for _, o := range d.Omitted {
 				sections[o.Section] = true
 				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") || !strings.Contains(o.Get[0], reportID) {
-					t.Fatalf("%s: omitted entry %+v", what, o)
+					panic(fmt.Sprintf("%s: omitted entry %+v", what, o))
 				}
 			}
 			if len(d.Omitted) > 0 {
@@ -584,18 +584,18 @@ func TestDigestBudget(t *testing.T) {
 			}
 			if (len(d.Failures) < len(sum.Failures)) && !sections["failures"] || len(d.Tree) < len(src.lines) != sections["tree"] ||
 				len(d.Mutations) < len(src.entities) && !sections["mutations"] {
-				t.Fatalf("%s: %d/%d failures, %d/%d entities, %d/%d lines, but omitted is %+v", what,
-					len(d.Failures), len(sum.Failures), len(d.Mutations), len(src.entities), len(d.Tree), len(src.lines), d.Omitted)
+				panic(fmt.Sprintf("%s: %d/%d failures, %d/%d entities, %d/%d lines, but omitted is %+v", what,
+					len(d.Failures), len(sum.Failures), len(d.Mutations), len(src.entities), len(d.Tree), len(src.lines), d.Omitted))
 			}
 			// The tree is cut before mutations, and mutations before failures.
 			if len(d.Failures) < len(sum.Failures) && len(d.Mutations)+len(d.Tree) > 0 {
-				t.Fatalf("%s: failures were cut while %d entities and %d lines are shown", what, len(d.Mutations), len(d.Tree))
+				panic(fmt.Sprintf("%s: failures were cut while %d entities and %d lines are shown", what, len(d.Mutations), len(d.Tree)))
 			}
 			// A line is shown only with its parent, and failed branches first.
 			hidden := 0
 			for j, n := range d.Tree {
 				if j > 0 && n.Depth > d.Tree[j-1].Depth+1 || j == 0 && n.Depth != 0 {
-					t.Fatalf("%s: line %d of the tree has no parent", what, j)
+					panic(fmt.Sprintf("%s: line %d of the tree has no parent", what, j))
 				}
 				hidden += n.Hidden
 			}
@@ -607,17 +607,17 @@ func TestDigestBudget(t *testing.T) {
 					}
 				}
 				if shownRoots := strings.Count(string(js), `{"depth":0,`); hidden == 0 && shownRoots == roots {
-					t.Fatalf("%s: lines are missing but none says so", what)
+					panic(fmt.Sprintf("%s: lines are missing but none says so", what))
 				}
 			}
 			// With room for everything nothing is left out.
 			if budget == 4<<20 && (len(d.Omitted) > 0 && !sections["counts"] || len(d.Tree) != len(src.lines) || len(d.Failures) != len(sum.Failures)) {
-				t.Fatalf("%s: left out %+v", what, d.Omitted)
+				panic(fmt.Sprintf("%s: left out %+v", what, d.Omitted))
 			}
 		}
 	}
 	if cut == 0 {
-		t.Fatal("no budget was small enough to cut anything: the test checks nothing")
+		panic("no budget was small enough to cut anything: the test checks nothing")
 	}
 }
 
@@ -641,19 +641,19 @@ func TestDigestCutOrder(t *testing.T) {
 	_, out, _ := env.tc("digest", reportID, "--max-bytes", "40000", "--json")
 	d := checkDigestJSON(t, out)
 	if len(out) > 40000 || len(d.Failures) != 60 || len(d.Failures[0].Error) < 200 || len(d.Mutations) == 0 || len(d.Tree) == 0 || len(d.Tree) == 120 {
-		t.Fatalf("40000 bytes: %d bytes, %d failures, %d entities, %d lines", len(out), len(d.Failures), len(d.Mutations), len(d.Tree))
+		panic(fmt.Sprintf("40000 bytes: %d bytes, %d failures, %d entities, %d lines", len(out), len(d.Failures), len(d.Mutations), len(d.Tree)))
 	}
 	// The failed branches are what is kept of the tree.
 	for _, n := range d.Tree {
 		if n.Depth != 0 || n.Error == "" {
-			t.Fatalf("a line that did not fail was kept before one that did: %+v", n)
+			panic(fmt.Sprintf("a line that did not fail was kept before one that did: %+v", n))
 		}
 	}
 	// Less: every failure is still there, shortened; the tree and the mutations go first.
 	_, out, _ = env.tc("digest", reportID, "--max-bytes", "14000")
 	sec := checkDigestMarkdown(t, out)
 	if len(out) > 14000 || strings.Count(sec["### Failures"], " ERR ") != 60 {
-		t.Fatalf("14000 bytes: %d bytes, %d failures:\n%s", len(out), strings.Count(sec["### Failures"], " ERR "), out)
+		panic(fmt.Sprintf("14000 bytes: %d bytes, %d failures:\n%s", len(out), strings.Count(sec["### Failures"], " ERR "), out))
 	}
 	wantAll(t, sec["### Omitted"],
 		"- failures: names, errors and the chains of ancestors are shortened: `tracectl show ts_r1 <seq>`, `tracectl trace ts_r1 --errors`\n",
@@ -665,10 +665,10 @@ func TestDigestCutOrder(t *testing.T) {
 	sec = checkDigestMarkdown(t, out)
 	if n := strings.Count(sec["### Failures"], " ERR "); len(out) > 4096 || n == 0 || n >= 60 ||
 		!strings.Contains(sec["### Omitted"], fmt.Sprintf("- failures: %d of 60 distinct failures are not listed: `tracectl events ts_r1 --errors --limit 50`", 60-n)) {
-		t.Fatalf("4096 bytes: %d bytes, %d failures:\n%s", len(out), n, out)
+		panic(fmt.Sprintf("4096 bytes: %d bytes, %d failures:\n%s", len(out), n, out))
 	}
 	if !strings.Contains(out, "**Failed**: 60 failed events.") {
-		t.Fatalf("4096 bytes: no verdict:\n%s", out)
+		panic(fmt.Sprintf("4096 bytes: no verdict:\n%s", out))
 	}
 }
 
@@ -682,11 +682,11 @@ func TestDigestDeterministic(t *testing.T) {
 		args = append([]string{"digest", reportID}, args...)
 		code, first, e := env.tc(args...)
 		if code != 0 || e != "" || first == "" {
-			t.Fatalf("%v: %d %s", args, code, e)
+			panic(fmt.Sprintf("%v: %d %s", args, code, e))
 		}
 		for range 2 {
 			if _, again, _ := env.tc(args...); again != first {
-				t.Fatalf("%v: two runs differ:\n%s\n---\n%s", args, first, again)
+				panic(fmt.Sprintf("%v: two runs differ:\n%s\n---\n%s", args, first, again))
 			}
 		}
 	}
@@ -697,21 +697,21 @@ func TestDigestLive(t *testing.T) {
 	env.info.State, env.sum.Sealed = "ACTIVE", false
 	code, out, e := env.tc("digest", reportID, "--fail-on-incomplete")
 	if code != 0 || e != "" {
-		t.Fatalf("live digest: %d %s", code, e)
+		panic(fmt.Sprintf("live digest: %d %s", code, e))
 	}
 	wantAll(t, checkDigestMarkdown(t, out)["### Verdict"],
 		"**Failed**: 3 failed events. **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.\n",
 		"- state: ACTIVE; recording: complete\n")
 	_, out, _ = env.tc("digest", reportID, "--json")
 	if d := checkDigestJSON(t, out); !d.Session.Live || d.Session.State != "ACTIVE" {
-		t.Fatalf("live digest: %+v", d.Session)
+		panic(fmt.Sprintf("live digest: %+v", d.Session))
 	}
 
 	// A session only the collector still holds: its state is not known.
 	src := newDigestSource(client.Info{ID: reportID}, env.sum, client.Trace{Roots: env.roots}, env.evs)
 	md, err := src.fit(digestMarkdown{}, digestDefaultBytes)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantAll(t, checkDigestMarkdown(t, string(md))["### Verdict"], "- state: unknown (the control plane no longer knows this session); recording: unknown\n")
 }
@@ -721,11 +721,11 @@ func TestDigestFileAndUsage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "digest.md")
 	code, out, e := env.tc("digest", "-o", path, reportID)
 	if code != 0 || out != "" || !strings.Contains(e, "wrote digest to "+path) {
-		t.Fatalf("-o: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("-o: %d %q %s", code, out, e))
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	checkDigestMarkdown(t, string(b))
 	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
@@ -759,24 +759,24 @@ func TestCLIRunDigest(t *testing.T) {
 	md, js := filepath.Join(dir, "digest.md"), filepath.Join(dir, "digest.json")
 	code, _, e := env.run("ok", []string{"--digest", md, "--report", filepath.Join(dir, "report.md"), "--fail-on-error"})
 	if code != exitCheckFailed || !strings.Contains(e, "wrote digest to "+md) || !strings.Contains(e, "wrote markdown report to ") {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	b, err := os.ReadFile(md)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantAll(t, checkDigestMarkdown(t, string(b))["### Failures"], "#3 api api.in \"GET /orders/42\" ERR \"HTTP 500\"\n")
 
 	// A name ending in .json selects JSON; the digest is written for a command that failed as well.
 	code, _, e = env.run("exit7", []string{"--digest", js})
 	if code != 7 {
-		t.Fatalf("exit %d\n%s", code, e)
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	if b, err = os.ReadFile(js); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if d := checkDigestJSON(t, string(b)); d.Session.ID != runID || d.Session.State != "SEALED" || len(d.Failures) != 1 {
-		t.Fatalf("digest: %s", b)
+		panic(fmt.Sprintf("digest: %s", b))
 	}
 
 	for _, tt := range []struct {
@@ -813,20 +813,68 @@ func TestDigestGroupsEqualFailures(t *testing.T) {
 	_, out, _ := env.tc("digest", reportID, "--max-bytes", "4096", "--json")
 	d := checkDigestJSON(t, out)
 	if len(out) > 4096 || d.Counts.Failures != 601 || len(d.Failures) != 3 {
-		t.Fatalf("%d bytes, %d failed events, %d failure entries: %s", len(out), d.Counts.Failures, len(d.Failures), out)
+		panic(fmt.Sprintf("%d bytes, %d failed events, %d failure entries: %s", len(out), d.Counts.Failures, len(d.Failures), out))
 	}
 	for _, f := range d.Failures {
 		if f.Path == nil {
-			t.Fatalf("path of #%d is null, the schema says it is always a list", f.Seq)
+			panic(fmt.Sprintf("path of #%d is null, the schema says it is always a list", f.Seq))
 		}
 	}
 	root, write, health := d.Failures[0], d.Failures[1], d.Failures[2]
 	if root.Count != 300 || root.Seq != 1 || root.LastSeq != 599 || root.Name != "POST /orders/?/pay" ||
 		write.Count != 300 || write.Seq != 2 || write.LastSeq != 600 || len(write.Path) != 1 ||
 		health.Count != 0 || health.Error != "HTTP 503" {
-		t.Fatalf("groups: %+v\n%+v\n%+v", root, write, health)
+		panic(fmt.Sprintf("groups: %+v\n%+v\n%+v", root, write, health))
 	}
 	_, md, _ := env.tc("digest", reportID, "--max-bytes", "4096")
 	sec := checkDigestMarkdown(t, md)
 	wantAll(t, sec["### Failures"], `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`, `300x #2 api db.write`, `#601 api api.in "GET /health" ERR "HTTP 503"`)
+}
+
+// The call tree keeps apart what ended differently and merges what ended the
+// same: three hundred requests that fail the same way are one line, a call
+// that returned NotFound is not folded into those that returned OK and shows
+// its status, and a flag counted in the verdict is on the line of its event.
+func TestDigestTreeOutcomes(t *testing.T) {
+	var evs []core.Event
+	for i := range 300 {
+		evs = append(evs, core.Event{Seq: uint64(i + 1), Service: "api", Kind: core.KindAPIIn, Name: fmt.Sprintf("GET /fail/%d", i), Err: "HTTP 500"})
+	}
+	evs = append(evs,
+		core.Event{Seq: 301, Service: "api", Kind: core.KindAPIOut, Name: "/shop.Stock/Get", Attrs: map[string]string{"grpc.code": "OK"}},
+		core.Event{Seq: 302, Service: "api", Kind: core.KindAPIOut, Name: "/shop.Stock/Get", Attrs: map[string]string{"grpc.code": "NotFound"}},
+		core.Event{Seq: 303, Service: "api", Kind: core.KindAPIOut, Name: "/shop.Stock/Get", Attrs: map[string]string{"grpc.code": "OK"}},
+		core.Event{Seq: 304, Service: "api", Kind: core.KindDBWrite, Name: "DO $$ BEGIN END $$", Flags: []string{"effects_unknown"}},
+	)
+	env := newReportEnv(t, evs...)
+	for i := range len(evs) {
+		env.roots = append(env.roots, env.node(i+1, nil, nil))
+	}
+	_, out, _ := env.tc("digest", reportID, "--max-bytes", "4096")
+	sec := checkDigestMarkdown(t, out)
+	tree := sec["### Call tree"]
+	wantAll(t, tree,
+		`300x api api.in "GET /fail/?" #1..#300`, `ERR "HTTP 500"`,
+		`#302 api api.out "/shop.Stock/Get" code NotFound`,
+		`#304 api db.write "DO $$ BEGIN END $$" [effects_unknown]`)
+	if n := strings.Count(tree, "GET /fail"); n != 1 {
+		t.Errorf("the failing requests take %d lines of the tree, want one:\n%s", n, tree)
+	}
+	if strings.Contains(tree, `3x api api.out`) || strings.Count(tree, `"/shop.Stock/Get"`) != 3 {
+		t.Errorf("calls with different statuses were merged:\n%s", tree)
+	}
+	_, js, _ := env.tc("digest", reportID, "--json")
+	d := checkDigestJSON(t, js)
+	var codes, flags int
+	for _, n := range d.Tree {
+		if n.Code == "NotFound" {
+			codes++
+		}
+		if len(n.Flags) == 1 && n.Flags[0] == "effects_unknown" {
+			flags++
+		}
+	}
+	if codes != 1 || flags != 1 {
+		t.Errorf("JSON tree: %d lines with code NotFound, %d with the flag; want one each", codes, flags)
+	}
 }
