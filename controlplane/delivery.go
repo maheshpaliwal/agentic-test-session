@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 	"github.com/maheshpaliwal/agentic-test-session/internal/scrub"
 )
@@ -746,21 +747,26 @@ func (m *Manager) countsFor(ctx context.Context, id string, st DrainStatus, ok b
 			ask = append(ask, InstanceCount{Service: service, Instance: instance})
 		}
 	}
-	m.mu.Lock()
-	for _, d := range m.live[id].Delivery {
-		add(d.Service, d.Instance)
-	}
-	if st := m.delivery[id]; st != nil {
-		for _, d := range st.refused {
+	// The unlock is deferred: a drain is started again after a panic, and
+	// one in here that left the lock held would stop the whole control plane.
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		faultpoint.Hit("countsFor.locked")
+		for _, d := range m.live[id].Delivery {
 			add(d.Service, d.Instance)
 		}
-	}
-	for _, sub := range m.subs {
-		if sub.stream && sub.DeliveryInstance != "" {
-			add(sub.Service, sub.DeliveryInstance)
+		if st := m.delivery[id]; st != nil {
+			for _, d := range st.refused {
+				add(d.Service, d.Instance)
+			}
 		}
-	}
-	m.mu.Unlock()
+		for _, sub := range m.subs {
+			if sub.stream && sub.DeliveryInstance != "" {
+				add(sub.Service, sub.DeliveryInstance)
+			}
+		}
+	}()
 	for chunk := range slices.Chunk(ask, MaxInstanceCountsAsk) {
 		got, err := ic.InstanceCounts(ctx, id, chunk)
 		if err != nil || len(got) != len(chunk) {

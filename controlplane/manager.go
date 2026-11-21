@@ -397,23 +397,10 @@ func (m *Manager) Abort(id string) (Session, error) {
 // cancelled and waited for, so that it cannot reach the collector after the
 // delete. If the collector delete then fails, the retries resume.
 func (m *Manager) Delete(ctx context.Context, id string) error {
-	m.mu.Lock()
-	s, err := m.stored(id)
-	// A session the store has but cannot read (ErrStore) is an archived one,
-	// and only finished sessions are archived: it can still be deleted, here
-	// and in the collector. Refusing would leave it undeletable until a
-	// restart, which then forgets it while the collector keeps its events.
-	unreadable := errors.Is(err, ErrStore)
-	if err != nil && !unreadable {
-		m.mu.Unlock()
+	inFlight, err := m.beginDelete(id)
+	if err != nil {
 		return err
 	}
-	if !unreadable && !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
-		m.mu.Unlock()
-		return fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
-	}
-	inFlight := m.disarmSealRetryLocked(id)
-	m.mu.Unlock()
 	if inFlight != nil {
 		select {
 		case <-inFlight:
@@ -436,6 +423,27 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	}
 	m.tel.deleted.Inc()
 	return nil
+}
+
+// beginDelete checks that id can be deleted and stops its seal retries; it
+// returns the attempt in flight, if any (see disarmSealRetryLocked). The
+// store is read under the lock, so the unlock is deferred.
+func (m *Manager) beginDelete(id string) (inFlight <-chan struct{}, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, err := m.stored(id)
+	// A session the store has but cannot read (ErrStore) is an archived one,
+	// and only finished sessions are archived: it can still be deleted, here
+	// and in the collector. Refusing would leave it undeletable until a
+	// restart, which then forgets it while the collector keeps its events.
+	unreadable := errors.Is(err, ErrStore)
+	if err != nil && !unreadable {
+		return nil, err
+	}
+	if !unreadable && !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+		return nil, fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
+	}
+	return m.disarmSealRetryLocked(id), nil
 }
 
 // Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through
@@ -598,7 +606,16 @@ type Subscriber struct {
 // Subscribers lists the current followers of the active set, by service and
 // instance. It answers "is my service connected?" when a session stays empty.
 func (m *Manager) Subscribers() []Subscriber {
+	out := m.subscribers()
+	slices.SortFunc(out, func(a, b Subscriber) int {
+		return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance), a.ConnectedAt.Compare(b.ConnectedAt))
+	})
+	return out
+}
+
+func (m *Manager) subscribers() []Subscriber {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	out := make([]Subscriber, 0, len(m.subs))
 	now := time.Now()
 	pending := m.pendingLocked()
@@ -612,10 +629,6 @@ func (m *Manager) Subscribers() []Subscriber {
 		}
 		out = append(out, s)
 	}
-	m.mu.Unlock()
-	slices.SortFunc(out, func(a, b Subscriber) int {
-		return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance), a.ConnectedAt.Compare(b.ConnectedAt))
-	})
 	return out
 }
 
@@ -634,13 +647,15 @@ func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
 	sub.since = time.Now()
 	sub.ConnectedAt = sub.since.UTC()
-	m.mu.Lock()
-	m.subs[ch] = sub
-	ch <- m.activeLocked()
-	m.mu.Unlock()
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.subs[ch] = sub
+		ch <- m.activeLocked()
+	}()
 	return ch, func() {
 		m.mu.Lock()
-		delete(m.subs, ch)
+		delete(m.subs, ch) // a delete: cannot panic
 		m.mu.Unlock()
 	}
 }
@@ -648,11 +663,11 @@ func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 // delivered records that the follower behind ch was sent generation gen.
 func (m *Manager) delivered(ch chan ActiveSet, gen uint64) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if s, ok := m.subs[ch]; ok && gen > s.Generation {
 		s.Generation = gen
 		m.subs[ch] = s
 	}
-	m.mu.Unlock()
 }
 
 func (m *Manager) broadcastLocked() {

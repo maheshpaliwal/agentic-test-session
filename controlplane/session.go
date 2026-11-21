@@ -217,8 +217,8 @@ func NewMemStore() *MemStore { return &MemStore{m: map[string]Session{}} }
 // Put implements Store.
 func (s *MemStore) Put(x Session) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.m[x.ID] = x
-	s.mu.Unlock()
 	return nil
 }
 
@@ -232,7 +232,7 @@ func (s *MemStore) Delete(id string) error {
 // no archive).
 func (s *MemStore) Evict(ids ...string) {
 	s.mu.Lock()
-	for _, id := range ids {
+	for _, id := range ids { // deletes only: cannot panic
 		delete(s.m, id)
 	}
 	s.mu.Unlock()
@@ -256,7 +256,7 @@ func sortSessions(s []Session) {
 // List implements Store.
 func (s *MemStore) List() []Session {
 	s.mu.RLock()
-	out := mapx.Values(s.m)
+	out := mapx.Values(s.m) // a copy of the values: cannot panic
 	s.mu.RUnlock()
 	sortSessions(out)
 	return out

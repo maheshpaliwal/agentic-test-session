@@ -81,7 +81,7 @@ type MemRecorder struct {
 	ev []Event
 }
 
-// Record implements Recorder.
+// Record implements Recorder. One append under the lock: it cannot panic.
 func (m *MemRecorder) Record(e Event) { m.mu.Lock(); m.ev = append(m.ev, e); m.mu.Unlock() }
 
 // Events returns a copy of everything recorded so far.

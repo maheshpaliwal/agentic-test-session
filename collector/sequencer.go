@@ -87,8 +87,17 @@ func (s *Sequencer) janitor() {
 // sweep evicts actors that are idle with nothing buffered. Their state is
 // reloaded from the store on demand.
 func (s *Sequencer) sweep(now time.Time) {
-	var gone []*sessionActor
+	for _, a := range s.idleActors(now) {
+		<-a.done
+	}
+}
+
+// idleActors stops and forgets the actors sweep evicts, and returns them.
+// The unlock is deferred: every ingest waits for this lock, and the janitor
+// is started again after a panic, so one in here must not leave it held.
+func (s *Sequencer) idleActors(now time.Time) (gone []*sessionActor) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for id, a := range s.actors {
 		if a.inflight > 0 || a.bufLen.Load() > 0 {
 			continue
@@ -103,26 +112,33 @@ func (s *Sequencer) sweep(now time.Time) {
 			gone = append(gone, a)
 		}
 	}
-	s.mu.Unlock()
-	for _, a := range gone {
-		<-a.done
-	}
+	return gone
 }
 
 // with runs f on the session's actor. With create unset an unknown session
 // is not given an actor (false is returned); reads must not spawn goroutines.
 // touch marks the session as recently used (keeps it from being evicted).
 func (s *Sequencer) with(id string, create, touch bool, f func(*sessionActor)) bool {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	a := s.acquire(id, create, touch)
+	if a == nil {
 		return false
+	}
+	// Deferred: an actor left in flight is never evicted or dropped.
+	defer s.release(a)
+	return a.run(f)
+}
+
+// acquire returns the session's actor, counted as in use, or nil (see with).
+func (s *Sequencer) acquire(id string, create, touch bool) *sessionActor {
+	s.mu.Lock()
+	defer s.mu.Unlock() // newActor starts a goroutine and reads the config
+	if s.closed {
+		return nil
 	}
 	a := s.actors[id]
 	if a == nil {
 		if !create {
-			s.mu.Unlock()
-			return false
+			return nil
 		}
 		a = newActor(id, s)
 		s.actors[id] = a
@@ -131,28 +147,37 @@ func (s *Sequencer) with(id string, create, touch bool, f func(*sessionActor)) b
 	if touch {
 		a.lastActive.Store(time.Now().UnixNano())
 	}
-	s.mu.Unlock()
-	ok := a.run(f)
+	return a
+}
+
+func (s *Sequencer) release(a *sessionActor) {
 	s.mu.Lock()
-	a.inflight--
+	a.inflight-- // one decrement of an actor acquire returned: cannot panic
 	s.mu.Unlock()
-	return ok
 }
 
 // drop stops and forgets a session's actor right away when nothing is using
 // it. Deleting a session must not leave a goroutine behind until (or, with
 // eviction disabled, forever instead of) the next idle sweep.
 func (s *Sequencer) drop(id string) {
+	if a := s.detach(id); a != nil {
+		<-a.done
+	}
+}
+
+// detach stops and forgets the actor of id when nothing is using it, and
+// returns it. The retention loop gets here, and is started again after a
+// panic: the unlock is deferred.
+func (s *Sequencer) detach(id string) *sessionActor {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	a := s.actors[id]
 	if a == nil || a.inflight > 0 || a.bufLen.Load() > 0 {
-		s.mu.Unlock()
-		return
+		return nil
 	}
 	delete(s.actors, id)
 	a.stop()
-	s.mu.Unlock()
-	<-a.done
+	return a
 }
 
 func (s *Sequencer) actorCount() int {
@@ -163,7 +188,7 @@ func (s *Sequencer) actorCount() int {
 
 func (s *Sequencer) addQuarantine(id string, n int) {
 	s.qmu.Lock()
-	s.quar[id] += n
+	s.quar[id] += n // quar is made with the sequencer, never nil: cannot panic
 	s.qmu.Unlock()
 	s.tel.quarantined.Add(n)
 }
@@ -181,7 +206,7 @@ func (s *Sequencer) buffered() int64 {
 
 func (s *Sequencer) forgetQuarantine(id string) {
 	s.qmu.Lock()
-	delete(s.quar, id)
+	delete(s.quar, id) // a delete cannot panic
 	s.qmu.Unlock()
 }
 
@@ -195,7 +220,7 @@ type statusMemo struct {
 
 func (s *Sequencer) forgetStatus(id string) {
 	s.memoMu.Lock()
-	delete(s.memo, id)
+	delete(s.memo, id) // a delete and an increment: cannot panic
 	s.memoGen++
 	s.memoMu.Unlock()
 }
@@ -358,7 +383,7 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 		return Status{}, err
 	}
 	s.memoMu.Lock()
-	m, hit := s.memo[id]
+	m, hit := s.memo[id] // two reads: cannot panic
 	gen := s.memoGen
 	s.memoMu.Unlock()
 	if hit && m.head == head {
@@ -372,7 +397,7 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 	st = t.status()
 	if t.next == head+1 { // the load saw exactly the head it is filed under
 		s.memoMu.Lock()
-		if s.memoGen == gen {
+		if s.memoGen == gen { // the map is made right before the write: cannot panic
 			if s.memo == nil || len(s.memo) >= maxStatusMemo {
 				s.memo = map[string]statusMemo{}
 			}
@@ -390,7 +415,7 @@ func (s *Sequencer) Status(ctx context.Context, id string) (st Status, err error
 // and a session whose store calls hang takes no time from the others.
 func (s *Sequencer) Close() {
 	s.mu.Lock()
-	already := s.closed
+	already := s.closed // a read and an assignment: cannot panic
 	s.closed = true
 	s.mu.Unlock()
 	if !already {
@@ -407,17 +432,21 @@ func (s *Sequencer) Close() {
 
 // evictAll stops all actors; state reloads from the store on next use.
 func (s *Sequencer) evictAll() {
+	for _, a := range s.detachAll() {
+		<-a.done
+	}
+}
+
+func (s *Sequencer) detachAll() []*sessionActor {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	gone := make([]*sessionActor, 0, len(s.actors))
 	for id, a := range s.actors {
 		a.stop()
 		gone = append(gone, a)
 		delete(s.actors, id)
 	}
-	s.mu.Unlock()
-	for _, a := range gone {
-		<-a.done
-	}
+	return gone
 }
 
 // Flush forces the reorder window closed for an existing session and returns
