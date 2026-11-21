@@ -151,7 +151,7 @@ func TestOfflineToleratesATornLastLineOnly(t *testing.T) {
 		t.Fatalf("an export cut mid-line must still open: %v", err)
 	}
 	s := d.sess[0]
-	if len(s.events) != 2 || !s.Incomplete || s.DroppedEvents != 0 || s.StartedAt != ts(time.Unix(5, 0)) {
+	if len(s.events) != 2 || !s.Incomplete || s.DroppedEvents != 0 || !s.StartedAt.Equal(time.Unix(5, 0)) {
 		t.Fatalf("session from a cut file: events=%d incomplete=%v dropped=%d started=%s", len(s.events), s.Incomplete, s.DroppedEvents, s.StartedAt)
 	}
 	// A bad line in the middle is corruption, not an interrupted write.
@@ -184,10 +184,13 @@ func TestOfflineKeepsSubSecondTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := d.sess[0]
-	start, err1 := time.Parse(time.RFC3339Nano, s.StartedAt)
-	end, err2 := time.Parse(time.RFC3339Nano, s.EndedAt)
-	if err1 != nil || err2 != nil || end.Sub(start) != 122*time.Millisecond {
-		t.Fatalf("started %s ended %s (%v %v), want 122ms apart", s.StartedAt, s.EndedAt, err1, err2)
+	if s.EndedAt.Sub(s.StartedAt) != 122*time.Millisecond {
+		t.Fatalf("started %s ended %s, want 122ms apart", s.StartedAt, s.EndedAt)
+	}
+	// And on the wire, where the control plane writes its times the same way.
+	b, _ := json.Marshal(s.Session)
+	if !strings.Contains(string(b), `"started_at":"1970-01-01T00:00:05.01Z"`) || !strings.Contains(string(b), `"ended_at":"1970-01-01T00:00:05.132Z"`) {
+		t.Fatalf("session: %s", b)
 	}
 }
 
@@ -215,18 +218,23 @@ func TestOfflineEntitiesCarryUncertainty(t *testing.T) {
 	if err := json.Unmarshal(b, &ents); err != nil || len(ents) != 2 {
 		t.Fatalf("entities: %s %v", b, err)
 	}
-	if ents[0]["entity"] != "stock" || ents[0]["mutation_count"] != 2.0 || ents[0]["uncertain"] != 1.0 {
+	// Sorted by store, entity and key, as the collector lists them.
+	if ents[1]["entity"] != "stock" || ents[1]["mutation_count"] != 2.0 || ents[1]["uncertain"] != 1.0 {
 		t.Fatalf("stock: %s", b)
 	}
-	if _, has := ents[1]["uncertain"]; has {
+	if _, has := ents[0]["uncertain"]; has {
 		t.Fatalf("an entity with nothing uncertain must not carry the field: %s", b)
 	}
 
 	_, b = get(t, srv.URL, "/api/col/v1/sessions/ts_run2/entities/postgres/stock/%7B%22sku%22%3A%22w%22%7D")
-	var hist []map[string]any
-	if err := json.Unmarshal(b, &hist); err != nil || len(hist) != 2 {
+	var doc struct {
+		PK        string           `json:"pk"`
+		Mutations []map[string]any `json:"mutations"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil || len(doc.Mutations) != 2 || doc.PK != `{"sku":"w"}` {
 		t.Fatalf("history: %s %v", b, err)
 	}
+	hist := doc.Mutations
 	if f, _ := hist[0]["flags"].([]any); len(f) != 2 || f[0] != "pk_not_unique" || f[1] != "after_unavailable" {
 		t.Fatalf("flags of the first change: %s", b)
 	}

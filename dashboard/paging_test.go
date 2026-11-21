@@ -35,9 +35,11 @@ func TestDemoListPaging(t *testing.T) {
 	s := demoServer(t, func() time.Time { return now })
 	const base = "/cp/v1/sessions"
 
-	// Without a limit nothing changes: every session, no paging headers.
+	const headerNext, headerTotal = controlplane.HeaderNext, controlplane.HeaderTotal
+	// Without a limit: every session, oldest first as the control plane lists
+	// them, and no paging headers.
 	r, ids := listIDs(t, s.URL, base)
-	if want := []string{"ts_demo0005", "ts_demo0004", "ts_demo0003", "ts_demo0002", "ts_demo0001"}; !slices.Equal(ids, want) {
+	if want := []string{"ts_demo0003", "ts_demo0001", "ts_demo0005", "ts_demo0004", "ts_demo0002"}; !slices.Equal(ids, want) {
 		t.Fatalf("unpaged list: %v, want %v", ids, want)
 	}
 	if r.Header.Get(headerNext) != "" || r.Header.Get(headerTotal) != "" {

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 func get(t *testing.T, base, path string) (*http.Response, []byte) {
@@ -188,11 +190,10 @@ func decode(t *testing.T, b []byte, v any) {
 	}
 }
 
-type eventsResp struct {
-	Events  []core.Event `json:"events"`
-	NextSeq uint64       `json:"next_seq"`
-	Sealed  bool         `json:"sealed"`
-}
+type eventsResp = client.EventPage
+
+// Node is one span of the trace tree, as the collector answers it.
+type Node = client.TraceNode
 
 func TestDemoEndpointShapes(t *testing.T) {
 	s := demoServer(t, time.Now)
@@ -204,7 +205,7 @@ func TestDemoEndpointShapes(t *testing.T) {
 	}
 	states := map[string]bool{}
 	for _, x := range sessions {
-		states[x.State] = true
+		states[string(x.State)] = true
 	}
 	if !states["ACTIVE"] || !states["SEALED"] {
 		t.Fatalf("states: %v", states)
@@ -228,14 +229,25 @@ func TestDemoEndpointShapes(t *testing.T) {
 	var er eventsResp
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/events?from_seq=0&limit=1000")
 	decode(t, b, &er)
-	if len(er.Events) < 30 || !er.Sealed || er.NextSeq != er.Events[len(er.Events)-1].Seq {
+	// from_seq is inclusive (0 reads from the first event) and next_seq is the
+	// from_seq of the page after it, as on the collector.
+	if len(er.Events) < 30 || !er.Sealed || er.Events[0].Seq != 1 || er.NextSeq != er.Events[len(er.Events)-1].Seq+1 {
 		t.Fatalf("events: n=%d next=%d sealed=%v", len(er.Events), er.NextSeq, er.Sealed)
 	}
 	var tail eventsResp
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/events?from_seq=10&limit=5")
 	decode(t, b, &tail)
-	if len(tail.Events) != 5 || tail.Events[0].Seq != 11 {
-		t.Fatalf("paging: %+v", tail.NextSeq)
+	if len(tail.Events) != 5 || tail.Events[0].Seq != 10 || tail.NextSeq != 15 {
+		t.Fatalf("paging: first %d next %d", tail.Events[0].Seq, tail.NextSeq)
+	}
+	// Past the end: no events, and next_seq stays where the request was.
+	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/events?from_seq=9999")
+	if strings.TrimSpace(string(b)) != `{"events":[],"next_seq":9999,"sealed":true}` {
+		t.Fatalf("page past the end: %s", b)
+	}
+	// A session the collector does not hold reads as an empty one, not as 404.
+	if r, b := get(t, s.URL, "/col/v1/sessions/ts_unknown/events"); r.StatusCode != 200 || strings.TrimSpace(string(b)) != `{"events":[],"next_seq":1,"sealed":false}` {
+		t.Fatalf("events of an unknown session: %d %s", r.StatusCode, b)
 	}
 
 	var trace struct {
@@ -247,20 +259,32 @@ func TestDemoEndpointShapes(t *testing.T) {
 	if trace.SessionID != "ts_demo0001" || len(trace.Roots) == 0 {
 		t.Fatal("trace shape")
 	}
-	var ents []EntityRef
+	var ents []client.Entity
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities")
 	decode(t, b, &ents)
 	if len(ents) == 0 {
 		t.Fatal("no entities")
 	}
-	var hist []EntityMutation
+	// The history is the collector's object, with the key in canonical form.
+	var hist client.EntityHistory
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities/postgres/orders/ord_1001")
 	decode(t, b, &hist)
-	if len(hist) != 2 || hist[0].Seq >= hist[1].Seq || hist[0].Op != "insert" || hist[1].Op != "update" {
-		t.Fatalf("orders history: %+v", hist)
+	if hm := hist.Mutations; hist.PK != `{"id":"ord_1001"}` || hist.Store != "postgres" || hist.Entity != "orders" || len(hm) != 2 ||
+		hm[0].Seq >= hm[1].Seq || hm[0].Op != "insert" || hm[1].Op != "update" || hm[0].Kind != core.KindDBWrite || hm[0].EndNs == 0 {
+		t.Fatalf("orders history: %s", b)
 	}
-	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities/postgres/loyalty_ledger/cus_synth_001,order_id=ord_1001")
-	_ = b
+	// The summary is the collector's: failures are objects, mutations a map
+	// of store to entity to count.
+	var typed client.Summary
+	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/summary")
+	strict := json.NewDecoder(bytes.NewReader(b))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(&typed); err != nil {
+		t.Fatalf("summary is not the collector's: %v\n%s", err, b)
+	}
+	if !typed.Sealed || len(typed.Failures) == 0 || typed.Failures[0].Err == "" || typed.Mutations["postgres"]["orders"] != 2 {
+		t.Fatalf("summary: %s", b)
+	}
 	var sum map[string]any
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/summary")
 	decode(t, b, &sum)
@@ -309,7 +333,7 @@ func TestDemoStartStop(t *testing.T) {
 	cur = cur.Add(5 * time.Second)
 	_, b = get(t, s.URL, "/cp/v1/sessions/"+ns.ID)
 	decode(t, b, &got)
-	if got.State != "SEALED" || got.EndedAt == "" {
+	if got.State != "SEALED" || got.EndedAt.IsZero() {
 		t.Fatalf("state %s", got.State)
 	}
 }
@@ -379,8 +403,8 @@ func TestDemoDataInvariants(t *testing.T) {
 		t.Errorf("retry/dlq counts: %d/%d", kinds[core.KindWorkerRetry], kinds[core.KindWorkerDLQ])
 	}
 
-	evs = resolveTx(evs)
-	roots := BuildTrace(evs)
+	evs = resolve(evs, true, nil)
+	roots := buildTrace("ts_x", evs).Roots
 	var all []*Node
 	flatten(roots, &all)
 	if len(all) != len(evs) {
@@ -494,14 +518,15 @@ func TestDemoDataInvariants(t *testing.T) {
 func TestPrefixSessionsAreConsistent(t *testing.T) {
 	d := newDemoAt(time.Now)
 	for _, s := range d.sess {
-		_, evs := d.view(s)
+		_, cv := d.view(s)
+		evs := cv.evs
 		for i, e := range evs {
 			if e.Seq != uint64(i+1) {
 				t.Fatalf("%s: seq gap at %d", s.ID, i)
 			}
 		}
 		var all []*Node
-		flatten(BuildTrace(evs), &all)
+		flatten(buildTrace(s.ID, evs).Roots, &all)
 		if len(all) != len(evs) {
 			t.Fatalf("%s: tree drops events", s.ID)
 		}
@@ -751,7 +776,7 @@ func TestDemoBindings(t *testing.T) {
 }
 
 func TestActivityDemoInvariants(t *testing.T) {
-	evs := resolveTx(activityEvents("ts_x", time.Now()))
+	evs := resolve(activityEvents("ts_x", time.Now()), true, nil)
 	spans := map[string]core.Event{}
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) || (i > 0 && e.EndHLC < evs[i-1].EndHLC) {
@@ -793,7 +818,7 @@ func TestActivityDemoInvariants(t *testing.T) {
 		t.Errorf("rolled back mutations: %d", rolled)
 	}
 	var all []*Node
-	flatten(BuildTrace(evs), &all)
+	flatten(buildTrace("ts_x", evs).Roots, &all)
 	if len(all) != len(evs) {
 		t.Fatalf("tree has %d of %d", len(all), len(evs))
 	}
@@ -937,7 +962,7 @@ func TestDemoDelete(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&ss)
 		out := map[string]string{}
 		for _, x := range ss {
-			out[x.ID] = x.State
+			out[x.ID] = string(x.State)
 		}
 		return out
 	}
