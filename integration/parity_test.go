@@ -398,11 +398,11 @@ func undeliveredEvents(t *testing.T, cpURL, id string, base time.Time) []core.Ev
 	} {
 		resp, err := plain.Post(cpURL+"/v1/sessions/"+id+"/delivery", "application/json", strings.NewReader(body))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("delivery report: %s", resp.Status)
+			panic(fmt.Sprintf("delivery report: %s", resp.Status))
 		}
 	}
 	var evs []core.Event
@@ -698,7 +698,7 @@ func statusDoc(t *testing.T, out string) string {
 	dec := json.NewDecoder(strings.NewReader(out))
 	var doc map[string]any
 	if err := dec.Decode(&doc); err != nil {
-		t.Fatalf("tracectl status printed no session document: %v\n%s", err, out)
+		panic(fmt.Sprintf("tracectl status printed no session document: %v\n%s", err, out))
 	}
 	rest, _ := io.ReadAll(dec.Buffered())
 	b, _ := json.Marshal(fileSession(doc))

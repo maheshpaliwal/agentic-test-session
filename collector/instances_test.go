@@ -46,11 +46,11 @@ func TestDrainStatusCountsEventsPerInstance(t *testing.T) {
 			dropped := evOf("orders-api", "o-1", core.KindSDKDropped, 9)
 			dropped.Attrs = map[string]string{"count": "4"}
 			if r := post(t, srv.URL, evOf("orders-api", "o-1", core.KindCacheRead, 2), evOf("inventory", "i-1", core.KindCacheRead, 1), dropped); r.Duplicates != 2 {
-				t.Fatalf("resend: %+v", r)
+				panic(fmt.Sprintf("resend: %+v", r))
 			}
 			want := []InstanceCount{{"inventory", "i-1", 1}, {"orders-api", "o-1", 2}, {"orders-api", "o-2", 1}}
 			if ds := drainStatus(t, srv.URL); !reflect.DeepEqual(ds.Instances, want) || ds.InstancesTruncated {
-				t.Fatalf("instances %+v truncated=%v, want %+v", ds.Instances, ds.InstancesTruncated, want)
+				panic(fmt.Sprintf("instances %+v truncated=%v, want %+v", ds.Instances, ds.InstancesTruncated, want))
 			}
 		})
 	}
@@ -65,11 +65,11 @@ func TestDrainStatusInstancesFromTheStore(t *testing.T) {
 	want := []InstanceCount{{"a", "a-1", 2}, {"b", "b-1", 1}}
 	for range 2 { // the second answer comes from the status memo
 		if ds := drainStatus(t, srv.URL); !reflect.DeepEqual(ds.Instances, want) {
-			t.Fatalf("instances %+v, want %+v", ds.Instances, want)
+			panic(fmt.Sprintf("instances %+v, want %+v", ds.Instances, want))
 		}
 	}
 	if c.seq.has(sid) {
-		t.Fatal("drain-status created an actor")
+		panic("drain-status created an actor")
 	}
 }
 
@@ -79,12 +79,12 @@ func TestDrainStatusInstancesIsAlwaysPresent(t *testing.T) {
 	_, srv := newC(t, 0, "")
 	resp, err := http.Get(srv.URL + "/v1/internal/sessions/ts_nothing/drain-status")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(b), `"instances":[]`) || strings.Contains(string(b), "instances_truncated") {
-		t.Fatalf("drain-status of an unknown session: %s", b)
+		panic(fmt.Sprintf("drain-status of an unknown session: %s", b))
 	}
 }
 
@@ -96,15 +96,15 @@ func TestDrainStatusInstancesAreBounded(t *testing.T) {
 		evs = append(evs, evOf("svc", fmt.Sprintf("i%04d", i), core.KindCacheRead, 1))
 	}
 	if _, err := c.Ingest(context.Background(), "", evs); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ds, err := c.DrainStatus(context.Background(), sid)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if len(ds.Instances) != MaxStatusInstances || !ds.InstancesTruncated || ds.Instances[0].Instance != "i0000" ||
 		ds.Instances[MaxStatusInstances-1].Instance != fmt.Sprintf("i%04d", MaxStatusInstances-1) {
-		t.Fatalf("%d instances, truncated=%v, first %+v", len(ds.Instances), ds.InstancesTruncated, ds.Instances[0])
+		panic(fmt.Sprintf("%d instances, truncated=%v, first %+v", len(ds.Instances), ds.InstancesTruncated, ds.Instances[0]))
 	}
 }
 
@@ -113,7 +113,7 @@ func instanceCounts(t *testing.T, url, id string, ask ...InstanceCount) (int, []
 	body, _ := json.Marshal(map[string][]InstanceCount{"instances": ask})
 	resp, err := http.Post(url+"/v1/internal/sessions/"+id+"/instance-counts", "application/json", bytes.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -139,10 +139,10 @@ func TestInstanceCountsAnswerForNamedInstances(t *testing.T) {
 				evOf("real ", "real-1", core.KindCacheRead, 3), // the same instance to the control plane: names are cleaned
 				evOf("real", "real-1", core.KindSDKDropped, 4))
 			if _, err := c.Ingest(context.Background(), "", evs); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if ds := drainStatus(t, srv.URL); !ds.InstancesTruncated || slices.ContainsFunc(ds.Instances, func(i InstanceCount) bool { return i.Service == "real" }) {
-				t.Fatalf("test setup: the list should be cut before the instance asked about (truncated=%v)", ds.InstancesTruncated)
+				panic(fmt.Sprintf("test setup: the list should be cut before the instance asked about (truncated=%v)", ds.InstancesTruncated))
 			}
 			ask := []InstanceCount{{Service: "real", Instance: "real-1"}, {Service: "nobody", Instance: "n-1"}, {Service: "a", Instance: "x0003"}}
 			want := []InstanceCount{{"real", "real-1", 3}, {"nobody", "n-1", 0}, {"a", "x0003", 1}}
@@ -151,11 +151,11 @@ func TestInstanceCountsAnswerForNamedInstances(t *testing.T) {
 					c.seq.evictAll()
 				}
 				if code, got := instanceCounts(t, srv.URL, sid, ask...); code != http.StatusOK || !reflect.DeepEqual(got, want) {
-					t.Fatalf("evicted=%v: HTTP %d %+v, want %+v", evicted, code, got, want)
+					panic(fmt.Sprintf("evicted=%v: HTTP %d %+v, want %+v", evicted, code, got, want))
 				}
 			}
 			if c.seq.has(sid) {
-				t.Fatal("instance-counts created an actor")
+				panic("instance-counts created an actor")
 			}
 		})
 	}
@@ -167,23 +167,23 @@ func TestInstanceCountsBounds(t *testing.T) {
 	_, srv := newC(t, 0, "")
 	post(t, srv.URL, evOf("a", "a-1", core.KindCacheRead, 1), evOf("a", "a-1", core.KindCacheRead, 2))
 	if code, got := instanceCounts(t, srv.URL, sid, InstanceCount{Service: "a", Instance: "a-1"}); code != http.StatusOK || len(got) != 1 || got[0].Events != 2 {
-		t.Fatalf("HTTP %d %+v", code, got)
+		panic(fmt.Sprintf("HTTP %d %+v", code, got))
 	}
 	if code, got := instanceCounts(t, srv.URL, "ts_nothing", InstanceCount{Service: "a", Instance: "a-1"}); code != http.StatusOK || len(got) != 1 || got[0].Events != 0 {
-		t.Fatalf("unknown session: HTTP %d %+v", code, got)
+		panic(fmt.Sprintf("unknown session: HTTP %d %+v", code, got))
 	}
 	if code, got := instanceCounts(t, srv.URL, sid); code != http.StatusOK || len(got) != 0 {
-		t.Fatalf("nothing asked: HTTP %d %+v", code, got)
+		panic(fmt.Sprintf("nothing asked: HTTP %d %+v", code, got))
 	}
 	if code, _ := instanceCounts(t, srv.URL, sid, make([]InstanceCount, MaxInstanceCountsAsk+1)...); code != http.StatusBadRequest {
-		t.Fatalf("too many instances: HTTP %d", code)
+		panic(fmt.Sprintf("too many instances: HTTP %d", code))
 	}
 	resp, err := http.Post(srv.URL+"/v1/internal/sessions/"+sid+"/instance-counts", "application/json", strings.NewReader("{"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad JSON: HTTP %d", resp.StatusCode)
+		panic(fmt.Sprintf("bad JSON: HTTP %d", resp.StatusCode))
 	}
 }

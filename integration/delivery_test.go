@@ -157,7 +157,7 @@ func (e *deliveryEnv) startVia(bin, service, addr, collectorURL, downstream, cpU
 		"TSESSION_CONTROLPLANE_URL="+cpURL, "TSESSION_COLLECTOR_URL="+collectorURL,
 		"DELIVERYAPP_LISTEN="+addr, "DELIVERYAPP_DOWNSTREAM_URL="+downstream)
 	if err := p.cmd.Start(); err != nil {
-		e.t.Fatalf("start %s: %v", service, err)
+		panic(fmt.Sprintf("start %s: %v", service, err))
 	}
 	e.t.Cleanup(func() {
 		_ = p.cmd.Process.Kill()
@@ -247,8 +247,8 @@ func (e *deliveryEnv) runTracectl(args ...string) (int, string) {
 	case errors.As(err, &ee):
 		return ee.ExitCode(), string(out)
 	}
-	e.t.Fatalf("tracectl %v: %v\n%s", args, err, out)
-	return -1, ""
+	panic(fmt.Sprintf("tracectl %v: %v\n%s", args, err, out))
+
 }
 
 // complete fails the test unless the session ended complete, with every
@@ -285,7 +285,7 @@ func TestDelivery_WrongCollectorURLFailsTheGates(t *testing.T) {
 	began := time.Now()
 	s, info, sum, err := e.run(ctx, "wrong-collector-url")
 	if err != nil {
-		t.Fatalf("run: %v (info %+v)", err, info)
+		panic(fmt.Sprintf("run: %v (info %+v)", err, info))
 	}
 	t.Logf("sealed after %s: incomplete=%v reasons=%q", time.Since(began).Round(100*time.Millisecond), info.Incomplete, info.IncompleteReasons)
 
@@ -295,7 +295,7 @@ func TestDelivery_WrongCollectorURLFailsTheGates(t *testing.T) {
 			sum.Incomplete, sum.EventCount, sum.ByService)
 	}
 	if !info.Incomplete || info.DrainTimedOut || info.SealError != "" {
-		t.Fatalf("the session must end incomplete, by the delivery reports alone: %+v", info)
+		panic(fmt.Sprintf("the session must end incomplete, by the delivery reports alone: %+v", info))
 	}
 	if len(info.IncompleteReasons) != 1 || !strings.Contains(info.IncompleteReasons[0], "service orders-api") ||
 		!strings.Contains(info.IncompleteReasons[0], "0 of 2 recorded events reached the collector") ||
@@ -383,20 +383,20 @@ func TestDelivery_CollectorBackDuringDrainIsNotFlagged(t *testing.T) {
 		name := fmt.Sprintf("outage-%s", outage)
 		s, err := e.session(ctx, name)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e.gate.down.Store(true)
 		if err := e.request(ctx, s); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		time.AfterFunc(outage, func() { e.gate.down.Store(false) })
 		info, err := s.StopAndWait(ctx)
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			panic(fmt.Sprintf("%s: %v", name, err))
 		}
 		sum, err := s.Summary(ctx)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		complete(t, name, info, sum, 1)
 		took := info.EndedAt.Sub(info.StartedAt)

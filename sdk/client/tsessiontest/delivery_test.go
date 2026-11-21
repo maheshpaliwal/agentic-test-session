@@ -1,6 +1,7 @@
 package tsessiontest_test
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,11 +15,11 @@ func reportDelivery(t *testing.T, s *client.Session, base, body string) {
 	t.Helper()
 	resp, err := http.Post(base+"/v1/sessions/"+s.ID+"/delivery", "application/json", strings.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("delivery report: %s", resp.Status)
+		panic(fmt.Sprintf("delivery report: %s", resp.Status))
 	}
 }
 
@@ -36,11 +37,11 @@ func TestRequireNoFailuresWithUndeliveredEvents(t *testing.T) {
 	})
 	info := s.Info()
 	if !info.Incomplete || len(info.IncompleteReasons) != 1 || len(info.Delivery) != 2 {
-		t.Fatalf("test setup: expected a delivery shortfall, got %+v", info)
+		panic(fmt.Sprintf("test setup: expected a delivery shortfall, got %+v", info))
 	}
 	if !failed || !strings.Contains(out, "is incomplete: service orders-api (instance o-1): 0 of 7 recorded events") || !strings.Contains(out, "7 dropped") ||
 		strings.Contains(out, "inventory") {
-		t.Fatalf("RequireNoFailures: failed=%v output %q", failed, out)
+		panic(fmt.Sprintf("RequireNoFailures: failed=%v output %q", failed, out))
 	}
 
 	// Every event delivered: nothing to report.
@@ -50,7 +51,7 @@ func TestRequireNoFailuresWithUndeliveredEvents(t *testing.T) {
 		tsessiontest.RequireNoFailures(tb, s)
 	})
 	if failed || len(s.Info().Delivery) != 1 {
-		t.Fatalf("a healthy session failed: %q (info %+v)", out, s.Info())
+		panic(fmt.Sprintf("a healthy session failed: %q (info %+v)", out, s.Info()))
 	}
 }
 
@@ -66,11 +67,11 @@ func TestRequireDeliveryConfirmed(t *testing.T) {
 		tsessiontest.RequireNoFailures(tb, s)
 	})
 	if failed || !strings.Contains(out, "delivery unconfirmed: service batch (instance b-1): 3 of 5") {
-		t.Fatalf("RequireNoFailures: failed=%v output %q (info %+v)", failed, out, s.Info())
+		panic(fmt.Sprintf("RequireNoFailures: failed=%v output %q (info %+v)", failed, out, s.Info()))
 	}
 	failed, out = check(t, func(tb testing.TB) { tsessiontest.RequireDeliveryConfirmed(tb, s) })
 	if !failed || !strings.Contains(out, "delivery unconfirmed: service batch (instance b-1): 3 of 5") {
-		t.Fatalf("RequireDeliveryConfirmed: failed=%v output %q", failed, out)
+		panic(fmt.Sprintf("RequireDeliveryConfirmed: failed=%v output %q", failed, out))
 	}
 
 	// The report says that everything was delivered, and nothing but the
@@ -82,7 +83,7 @@ func TestRequireDeliveryConfirmed(t *testing.T) {
 		tsessiontest.RequireDeliveryConfirmed(tb, s)
 	})
 	if !failed || !strings.Contains(out, "the collector does not count events per instance") {
-		t.Fatalf("RequireDeliveryConfirmed with a collector that does not count: failed=%v output %q", failed, out)
+		panic(fmt.Sprintf("RequireDeliveryConfirmed with a collector that does not count: failed=%v output %q", failed, out))
 	}
 
 	// The collector has what the report says: confirmed.
@@ -93,6 +94,6 @@ func TestRequireDeliveryConfirmed(t *testing.T) {
 		tsessiontest.RequireDeliveryConfirmed(tb, s)
 	})
 	if failed {
-		t.Fatalf("RequireDeliveryConfirmed on a healthy session: %q", out)
+		panic(fmt.Sprintf("RequireDeliveryConfirmed on a healthy session: %q", out))
 	}
 }

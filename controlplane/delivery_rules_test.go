@@ -69,7 +69,7 @@ func newAskEnv(t *testing.T, fail bool, has map[string]int64) (*deliveryEnv, *as
 	t.Cleanup(m.Close)
 	s, err := m.Start(StartRequest{Name: "d", QuiesceSeconds: 2, MaxDrainSeconds: 1000})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return &deliveryEnv{t: t, m: m, col: col.scriptCollector, id: s.ID}, col
 }
@@ -88,7 +88,7 @@ func TestDrainAsksTheCollectorByName(t *testing.T) {
 		s, _ := e.stop()
 		wantShortfall(t, s, "service real (instance real-1): 0 of 10 recorded events reached the collector")
 		if !col.askedFor("real", "real-1") || col.askedFor("a0000", "x0000") {
-			t.Fatalf("asked %v: want the reporting instance, and none that the list names", col.asked)
+			panic(fmt.Sprintf("asked %v: want the reporting instance, and none that the list names", col.asked))
 		}
 	})
 	t.Run("an honest report", func(t *testing.T) {
@@ -105,7 +105,7 @@ func TestDrainAsksTheCollectorByName(t *testing.T) {
 		s, _ := e.stop()
 		if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 ||
 			!strings.Contains(s.DeliveryUnconfirmed[0], "service real (instance real-1): 10 of 10 recorded events were delivered by the instance's own count (the collector's count for the instance was not available)") {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 	})
 	t.Run("no answer: a final shortfall is not taken back by a later report", func(t *testing.T) {
@@ -129,7 +129,7 @@ func TestDrainAsksTheCollectorByName(t *testing.T) {
 		s, took := e.stop()
 		wantShortfall(t, s, "service orders-api (instance o-1): the collector has 3 events from it, but none of its delivery reports for the session arrived")
 		if took < testGrace-20*time.Millisecond || !col.askedFor("orders-api", "o-1") {
-			t.Fatalf("sealed after %v, asked %d times", took, len(col.asked))
+			panic(fmt.Sprintf("sealed after %v, asked %d times", took, len(col.asked)))
 		}
 	})
 	t.Run("no answer for a connected instance without a report", func(t *testing.T) {
@@ -141,10 +141,10 @@ func TestDrainAsksTheCollectorByName(t *testing.T) {
 		s, took := e.stop()
 		if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 ||
 			s.DeliveryUnconfirmed[0] != "the collector's list of instances was cut short and it did not answer for 2 connected instance(s) that sent no report, so whether they took part is unknown" {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 		if took >= testGrace/2 {
-			t.Fatalf("the drain waited %v", took)
+			panic(fmt.Sprintf("the drain waited %v", took))
 		}
 	})
 }
@@ -156,14 +156,14 @@ func TestDrainDoesNotAskWithoutNeed(t *testing.T) {
 	t.Cleanup(m.Close)
 	s, err := m.Start(StartRequest{Name: "d", QuiesceSeconds: 2, MaxDrainSeconds: 1000})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := &deliveryEnv{t: t, m: m, col: col.scriptCollector, id: s.ID}
 	e.report(final(rep("svc", "i", 2, 2, 0)))
 	col.scriptCollector.has("svc", "i", 2)
 	wantComplete(t, func() Session { s, _ := e.stop(); return s }())
 	if len(col.asked) != 0 {
-		t.Fatalf("asked %v", col.asked)
+		panic(fmt.Sprintf("asked %v", col.asked))
 	}
 }
 
@@ -183,7 +183,7 @@ func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
 	refused := func(e *deliveryEnv, d Delivery) {
 		e.t.Helper()
 		if ok, err := e.m.ReportDelivery(e.id, d); ok || !errors.Is(err, ErrBadState) || !errors.Is(err, errDeliveryFull) {
-			e.t.Fatalf("report %+v: accepted=%v err=%v, want it refused for the cap", d, ok, err)
+			panic(fmt.Sprintf("report %+v: accepted=%v err=%v, want it refused for the cap", d, ok, err))
 		}
 	}
 	t.Run("dropped events", func(t *testing.T) {
@@ -195,10 +195,10 @@ func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
 		if !s.Incomplete || len(s.IncompleteReasons) != 1 ||
 			s.IncompleteReasons[0] != "service real (instance real-1): its delivery report said that events were dropped or left undelivered; the report was refused because the session already keeps reports of 256 instances" ||
 			len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != "more than 256 instances reported; the reports of 1 others were refused and are not accounted for" {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 		if took >= testGrace {
-			t.Fatalf("drain %v", took)
+			panic(fmt.Sprintf("drain %v", took))
 		}
 	})
 	t.Run("a final report that still held events, and a later one that takes it back", func(t *testing.T) {
@@ -209,7 +209,7 @@ func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
 		refused(e, final(rep("real", "real-1", 10, 10, 0)))
 		s, _ := e.stop()
 		if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "service real (instance real-1)") || len(s.DeliveryUnconfirmed) != 0 {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 	})
 	// A connected instance whose report was refused is not taken for one whose
@@ -222,10 +222,10 @@ func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
 		refused(e, final(rep("fine", "fine-1", 4, 4, 0)))
 		s, took := e.stop()
 		if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "the reports of 1 others were refused") {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 		if took >= testGrace/2 {
-			t.Fatalf("the drain waited %v for an instance that reported", took)
+			panic(fmt.Sprintf("the drain waited %v for an instance that reported", took))
 		}
 	})
 	// What is remembered of the refused is bounded too. Beyond the bound a
@@ -243,7 +243,7 @@ func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
 		s, _ := e.stop()
 		if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "service real (instance real-1): the collector has 4 events from it, but none of its delivery reports") ||
 			len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "the reports of more than 1024 others were refused") {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 	})
 }
@@ -266,13 +266,13 @@ func TestDeliveryReasonsAreBoundedOnce(t *testing.T) {
 	s, _ := e.stop()
 	if !s.Incomplete || len(s.IncompleteReasons) != maxDeliveryReasons+1 || s.IncompleteReasons[maxDeliveryReasons] != "and 24 more" ||
 		!strings.HasPrefix(s.IncompleteReasons[0], "service svc (instance i00)") {
-		t.Fatalf("%d reasons, first %q, last %q", len(s.IncompleteReasons), s.IncompleteReasons[0], s.IncompleteReasons[len(s.IncompleteReasons)-1])
+		panic(fmt.Sprintf("%d reasons, first %q, last %q", len(s.IncompleteReasons), s.IncompleteReasons[0], s.IncompleteReasons[len(s.IncompleteReasons)-1]))
 	}
 	if len(s.DeliveryUnconfirmed) != maxDeliveryReasons+1 || s.DeliveryUnconfirmed[maxDeliveryReasons] != "and 4 more" {
-		t.Fatalf("%d unconfirmed, last %q", len(s.DeliveryUnconfirmed), s.DeliveryUnconfirmed[len(s.DeliveryUnconfirmed)-1])
+		panic(fmt.Sprintf("%d unconfirmed, last %q", len(s.DeliveryUnconfirmed), s.DeliveryUnconfirmed[len(s.DeliveryUnconfirmed)-1]))
 	}
 	if got := capReasons([]string{"a", "b"}); len(got) != 2 {
-		t.Fatalf("a short list was changed: %q", got)
+		panic(fmt.Sprintf("a short list was changed: %q", got))
 	}
 }
 
@@ -297,7 +297,7 @@ func TestDrainJudgesAgainstCountsReadAfterTheReportsClosed(t *testing.T) {
 	e.report(final(rep("svc", "i", 5, 5, 0)))
 	s, _ := e.stop()
 	if !s.DrainTimedOut || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 0 {
-		t.Fatalf("timed_out=%v reasons=%q unconfirmed=%q: the verdict was made from counts older than the reports", s.DrainTimedOut, s.IncompleteReasons, s.DeliveryUnconfirmed)
+		panic(fmt.Sprintf("timed_out=%v reasons=%q unconfirmed=%q: the verdict was made from counts older than the reports", s.DrainTimedOut, s.IncompleteReasons, s.DeliveryUnconfirmed))
 	}
 }
 
@@ -305,7 +305,7 @@ func postBatch(t *testing.T, url, body string) (int, []DeliveryResult, string) {
 	t.Helper()
 	resp, err := http.Post(url+"/v1/delivery", "application/json", strings.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -324,14 +324,14 @@ func TestDeliveryBatchEndpoint(t *testing.T) {
 	defer srv.Close()
 	other, err := e.m.Start(StartRequest{Name: "other"})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	gone, err := e.m.Start(StartRequest{Name: "gone"})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := e.m.Abort(gone.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e.report(rep("orders-api", "o-1", 9, 9, 0))
 
@@ -348,7 +348,7 @@ func TestDeliveryBatchEndpoint(t *testing.T) {
 	code, res, raw := postBatch(t, srv.URL, string(body))
 	want := []string{DeliveryAccepted, DeliveryStale, DeliveryClosed, DeliveryUnknown, DeliveryInvalid, DeliveryInvalid, DeliveryInvalid, DeliveryAccepted}
 	if code != http.StatusOK || len(res) != len(want) {
-		t.Fatalf("HTTP %d %s", code, raw)
+		panic(fmt.Sprintf("HTTP %d %s", code, raw))
 	}
 	for i, w := range want {
 		if res[i].Status != w {
@@ -356,15 +356,15 @@ func TestDeliveryBatchEndpoint(t *testing.T) {
 		}
 	}
 	if res[0].Session != other.ID || res[4].Error == "" || res[6].Error != "report exceeds 4096 bytes" {
-		t.Fatalf("results %+v", res)
+		panic(fmt.Sprintf("results %+v", res))
 	}
 	got, _ := e.m.Get(other.ID)
 	if len(got.Delivery) != 1 || got.Delivery[0].Service != "orders-api" || got.Delivery[0].Recorded != 4 || !got.Delivery[0].Final ||
 		got.Delivery[0].DeliveredTotal != 40 || got.Delivery[0].At.IsZero() {
-		t.Fatalf("stored %+v", got.Delivery)
+		panic(fmt.Sprintf("stored %+v", got.Delivery))
 	}
 	if got, _ := e.m.Get(e.id); len(got.Delivery) != 1 || got.Delivery[0].Recorded != 9 {
-		t.Fatalf("the stale report changed the session: %+v", got.Delivery)
+		panic(fmt.Sprintf("the stale report changed the session: %+v", got.Delivery))
 	}
 
 	// A batch without reports says that the instance's reports arrive.
@@ -373,7 +373,7 @@ func TestDeliveryBatchEndpoint(t *testing.T) {
 	req.Header.Set(core.HeaderDeliveryInstance, "o-2")
 	stream, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer stream.Body.Close()
 	deadline := time.Now().Add(5 * time.Second)
@@ -381,22 +381,22 @@ func TestDeliveryBatchEndpoint(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if subs := e.m.Subscribers(); len(subs) != 1 || !subs[0].LastDeliveryReport.IsZero() {
-		t.Fatalf("subscribers before a report: %+v", subs)
+		panic(fmt.Sprintf("subscribers before a report: %+v", subs))
 	}
 	if code, res, raw := postBatch(t, srv.URL, `{"service":"orders-api","instance":"o-2","reports":[]}`); code != http.StatusOK || len(res) != 0 || !strings.Contains(raw, `"results":[]`) {
-		t.Fatalf("a batch without reports: HTTP %d %s", code, raw)
+		panic(fmt.Sprintf("a batch without reports: HTTP %d %s", code, raw))
 	}
 	if subs := e.m.Subscribers(); len(subs) != 1 || subs[0].LastDeliveryReport.IsZero() {
-		t.Fatalf("subscribers after a report: %+v", subs)
+		panic(fmt.Sprintf("subscribers after a report: %+v", subs))
 	}
 	resp, err := http.Get(srv.URL + "/v1/subscribers")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(b), `"last_delivery_report":"20`) || !strings.Contains(string(b), `"service":"orders-api"`) {
-		t.Fatalf("GET /v1/subscribers: %s", b)
+		panic(fmt.Sprintf("GET /v1/subscribers: %s", b))
 	}
 
 	// What it refuses as a whole.
@@ -421,7 +421,7 @@ func TestDeliveryBatchEndpoint(t *testing.T) {
 	}
 	resp, err = http.Post(srv.URL+"/v1/delivery", "text/plain", strings.NewReader(`{"instance":"i","reports":[]}`))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnsupportedMediaType {
@@ -442,7 +442,7 @@ func TestDeliveryNamesCompareCleaned(t *testing.T) {
 	req.Header.Set(core.HeaderDeliveryInstance, " o-1")
 	stream, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer stream.Body.Close()
 	deadline := time.Now().Add(5 * time.Second)
@@ -450,15 +450,15 @@ func TestDeliveryNamesCompareCleaned(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if code, body := postDelivery(t, srv.URL, e.id, "application/json", `{"service":"orders-api ","instance":" o-1","recorded":3,"delivered":3,"final":true}`); code != http.StatusOK {
-		t.Fatalf("report: %d %s", code, body)
+		panic(fmt.Sprintf("report: %d %s", code, body))
 	}
 	s, took := e.stop()
 	wantComplete(t, s)
 	if len(s.Delivery) != 1 || s.Delivery[0].Service != "orders-api" || s.Delivery[0].Instance != "o-1" || took >= testGrace/2 {
-		t.Fatalf("drain %v, delivery %+v", took, s.Delivery)
+		panic(fmt.Sprintf("drain %v, delivery %+v", took, s.Delivery))
 	}
 	if subs := e.m.Subscribers(); len(subs) != 1 || subs[0].LastDeliveryReport.IsZero() {
-		t.Fatalf("the report was not taken for one of the connected instance: %+v", subs)
+		panic(fmt.Sprintf("the report was not taken for one of the connected instance: %+v", subs))
 	}
 }
 

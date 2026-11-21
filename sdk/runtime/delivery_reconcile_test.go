@@ -28,19 +28,19 @@ func TestAccountForgottenWithEventsInTheRing(t *testing.T) {
 	}
 	r.forget("s") // the session left the active set; its events are still in the ring
 	if got := r.accounts(); got != nil {
-		t.Fatalf("a forgotten account is listed: %+v", got)
+		panic(fmt.Sprintf("a forgotten account is listed: %+v", got))
 	}
 	r.Record(core.Event{SessionID: "s", LocalSeq: 6}) // a span that ended after the session did
 	if a := r.accounts()["s"]; a != (account{recorded: 6}) || a.buffered() != 6 {
-		t.Fatalf("after the late event: %+v", a)
+		panic(fmt.Sprintf("after the late event: %+v", a))
 	}
 	r.Commit(6)
 	a := r.accounts()["s"]
 	if a != (account{recorded: 6, delivered: 6}) || a.buffered() != 0 || len(accountErrors(r)) > 0 {
-		t.Fatalf("after delivery: %+v buffered=%d %v", a, a.buffered(), accountErrors(r))
+		panic(fmt.Sprintf("after delivery: %+v buffered=%d %v", a, a.buffered(), accountErrors(r)))
 	}
 	if r.deliveredTotal() != 6 {
-		t.Fatalf("total %d", r.deliveredTotal())
+		panic(fmt.Sprintf("total %d", r.deliveredTotal()))
 	}
 	// Forgotten again with nothing in the ring: the account goes at once, and
 	// one that was put aside goes when its events have left.
@@ -49,11 +49,11 @@ func TestAccountForgottenWithEventsInTheRing(t *testing.T) {
 	r.forget("t")
 	r.Commit(1)
 	if got := r.accounts(); got != nil || len(r.acct) != 0 {
-		t.Fatalf("accounts left: %+v (%d kept)", got, len(r.acct))
+		panic(fmt.Sprintf("accounts left: %+v (%d kept)", got, len(r.acct)))
 	}
 	// A count can never wrap, whatever happens to an account.
 	if b := (account{recorded: 1, delivered: 6}).buffered(); b != 0 {
-		t.Fatalf("buffered %d", b)
+		panic(fmt.Sprintf("buffered %d", b))
 	}
 }
 
@@ -69,7 +69,7 @@ func TestDeliveredTotal(t *testing.T) {
 	}
 	rec.forget("b")
 	if !exp.Flush(5*time.Second) || rec.deliveredTotal() != 4 {
-		t.Fatalf("total %d after 4 events were delivered", rec.deliveredTotal())
+		panic(fmt.Sprintf("total %d after 4 events were delivered", rec.deliveredTotal()))
 	}
 	col.answer = func(n int) string { return fmt.Sprintf(`{"accepted":%d,"rejected":1}`, n-1) }
 	for i := range 3 {
@@ -77,7 +77,7 @@ func TestDeliveredTotal(t *testing.T) {
 	}
 	exp.Flush(5 * time.Second)
 	if got := rec.deliveredTotal(); got != 6 {
-		t.Fatalf("total %d, want 6: a rejected event is not delivered", got)
+		panic(fmt.Sprintf("total %d, want 6: a rejected event is not delivered", got))
 	}
 }
 
@@ -113,7 +113,7 @@ func TestExporterSendsDrainingSessionsFirst(t *testing.T) {
 	record("draining", 3)
 	exp.setUrgent(map[string]struct{}{"draining": {}})
 	if !exp.Flush(5 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -123,16 +123,16 @@ func TestExporterSendsDrainingSessionsFirst(t *testing.T) {
 		for _, e := range req {
 			order = append(order, e.SessionID)
 			if e.LocalSeq <= last[e.SessionID] {
-				t.Fatalf("session %s: event %d sent after %d", e.SessionID, e.LocalSeq, last[e.SessionID])
+				panic(fmt.Sprintf("session %s: event %d sent after %d", e.SessionID, e.LocalSeq, last[e.SessionID]))
 			}
 			last[e.SessionID] = e.LocalSeq
 		}
 	}
 	if len(order) != 18 || strings.Join(order[:6], ",") != strings.Repeat("draining,", 5)+"draining" {
-		t.Fatalf("sent in the order %v: want the 6 events of the draining session first", order)
+		panic(fmt.Sprintf("sent in the order %v: want the 6 events of the draining session first", order))
 	}
 	if len(accountErrors(rec)) > 0 || rec.Len() != 0 {
-		t.Fatalf("ring %d, %v", rec.Len(), accountErrors(rec))
+		panic(fmt.Sprintf("ring %d, %v", rec.Len(), accountErrors(rec)))
 	}
 }
 
@@ -143,7 +143,7 @@ func TestScrubErrorNestedURL(t *testing.T) {
 		Err: errors.New(`proxyconnect tcp: proxy https://proxyuser:pr0xypw@proxy.internal:3128/?k=tok_def refused`)}
 	got := scrubError(err)
 	if got != "Post https://collector.internal/v1/ingest: proxyconnect tcp: proxy https://proxy.internal:3128/ refused" {
-		t.Fatalf("scrubbed: %q", got)
+		panic(fmt.Sprintf("scrubbed: %q", got))
 	}
 }
 
@@ -169,26 +169,26 @@ func TestReporterRefusedReportsAreLoggedAndRetried(t *testing.T) {
 	e.record("s1", 2)
 	eventually(t, "several attempts", func() bool { return e.cp.postCount() >= 4 })
 	if n := e.cp.postCount(); n > 8 {
-		t.Fatalf("%d attempts already: the pause between them does not grow", n)
+		panic(fmt.Sprintf("%d attempts already: the pause between them does not grow", n))
 	}
 	logged := out.String()
 	if n := strings.Count(logged, "cannot send delivery reports"); n != 1 {
-		t.Fatalf("%d log lines for one outage:\n%s", n, logged)
+		panic(fmt.Sprintf("%d log lines for one outage:\n%s", n, logged))
 	}
 	if !strings.Contains(logged, "HTTP 403") || strings.Contains(logged, "cpsecret") || strings.Contains(logged, "cpuser") || strings.Contains(logged, "s1") {
-		t.Fatalf("log line: %s", logged)
+		panic(fmt.Sprintf("log line: %s", logged))
 	}
 	if got := e.cp.reports("s1"); len(got) != 0 {
-		t.Fatalf("reports %+v", got)
+		panic(fmt.Sprintf("reports %+v", got))
 	}
 	// Recording and export are not affected.
 	if a := e.rec.accounts()["s1"]; a != (account{recorded: 2, delivered: 2}) {
-		t.Fatalf("account %+v", a)
+		panic(fmt.Sprintf("account %+v", a))
 	}
 	e.cp.setStatus(0)
 	e.settled("s1", deliveryReport{Recorded: 2, Delivered: 2})
 	if logged := out.String(); strings.Count(logged, "delivery reports reach the control plane") != 1 || strings.Contains(logged, "cpsecret") {
-		t.Fatalf("log after the recovery:\n%s", logged)
+		panic(fmt.Sprintf("log after the recovery:\n%s", logged))
 	}
 	// A second outage within the minute is not logged again.
 	e.cp.setStatus(http.StatusForbidden)
@@ -196,7 +196,7 @@ func TestReporterRefusedReportsAreLoggedAndRetried(t *testing.T) {
 	n := e.cp.postCount()
 	eventually(t, "attempts", func() bool { return e.cp.postCount() >= n+2 })
 	if logged := out.String(); strings.Count(logged, "cannot send delivery reports") != 1 {
-		t.Fatalf("a flapping control plane floods the log:\n%s", logged)
+		panic(fmt.Sprintf("a flapping control plane floods the log:\n%s", logged))
 	}
 }
 
@@ -209,14 +209,14 @@ func TestReporterLogsAnOutageOnce(t *testing.T) {
 	e.record("s1", 1)
 	eventually(t, "an attempt", func() bool { return e.cp.postCount() == 1 })
 	if logged := out.String(); strings.Contains(logged, "delivery reports") {
-		t.Fatalf("one failed report was logged:\n%s", logged)
+		panic(fmt.Sprintf("one failed report was logged:\n%s", logged))
 	}
 	eventually(t, "more attempts", func() bool { return e.cp.postCount() >= 3 })
 	e.cp.setStatus(0)
 	e.settled("s1", deliveryReport{Recorded: 1, Delivered: 1})
 	logged := out.String()
 	if strings.Count(logged, "cannot send delivery reports") != 1 || !strings.Contains(logged, "HTTP 502") || strings.Count(logged, "again") != 1 {
-		t.Fatalf("log:\n%s", logged)
+		panic(fmt.Sprintf("log:\n%s", logged))
 	}
 }
 
@@ -231,17 +231,17 @@ func TestReporterResendsAfterReconnect(t *testing.T) {
 	e.settled("s2", deliveryReport{Recorded: 1, Delivered: 1})
 	time.Sleep(testInterval + 50*time.Millisecond) // nothing changed: nothing more is sent
 	if n := e.cp.reportCount(); n != 2 {
-		t.Fatalf("%d reports, want 2", n)
+		panic(fmt.Sprintf("%d reports, want 2", n))
 	}
 	e.cp.drop <- struct{}{}
 	eventually(t, "both reports again", func() bool { return len(e.cp.reports("s1")) == 2 && len(e.cp.reports("s2")) == 2 })
 	// In one request, the one that tells the new control plane that the
 	// reports of this process arrive.
 	if _, hellos, sizes := e.cp.seen(); hellos != 1 || sizes[len(sizes)-1] != 2 {
-		t.Fatalf("after the reconnect: %d batches without reports, batches of %v", hellos, sizes)
+		panic(fmt.Sprintf("after the reconnect: %d batches without reports, batches of %v", hellos, sizes))
 	}
 	if got := e.cp.reports("s1"); got[1].counts() != got[0].counts() {
-		t.Fatalf("resent report %+v, first %+v", got[1], got[0])
+		panic(fmt.Sprintf("resent report %+v, first %+v", got[1], got[0]))
 	}
 }
 
@@ -259,10 +259,10 @@ func TestReporterDoesNotReportASessionItRecordedNothingFor(t *testing.T) {
 	e.cp.drop <- struct{}{}
 	eventually(t, "the report of s1 again", func() bool { return len(e.cp.reports("s1")) == 2 })
 	if got := e.cp.reports("idle"); len(got) != 0 {
-		t.Fatalf("a session without events was reported: %+v", got)
+		panic(fmt.Sprintf("a session without events was reported: %+v", got))
 	}
 	if posts, _, _ := e.cp.seen(); posts != 2 {
-		t.Fatalf("%d requests with reports, want 2", posts)
+		panic(fmt.Sprintf("%d requests with reports, want 2", posts))
 	}
 	// An event after all (a span that ended late): the session is reported
 	// like any other from then on.
@@ -278,7 +278,7 @@ func TestReporterSaysThatItsReportsArrive(t *testing.T) {
 	e := newReportEnv(t, `{"active":[]}`, nil)
 	time.Sleep(60 * time.Millisecond)
 	if posts, hellos, _ := e.cp.seen(); posts != 0 || hellos != 1 {
-		t.Fatalf("%d requests with reports, %d without, want 0 and 1", posts, hellos)
+		panic(fmt.Sprintf("%d requests with reports, %d without, want 0 and 1", posts, hellos))
 	}
 	e.cp.drop <- struct{}{}
 	eventually(t, "again after the reconnect", func() bool { _, hellos, _ := e.cp.seen(); return hellos == 2 })
@@ -288,7 +288,7 @@ func TestReporterSaysThatItsReportsArrive(t *testing.T) {
 	e.cp.drop <- struct{}{}
 	eventually(t, "attempts", func() bool { return e.cp.postCount() >= 2 })
 	if logged := out.String(); strings.Count(logged, "cannot send delivery reports") != 1 || !strings.Contains(logged, "HTTP 403") {
-		t.Fatalf("log:\n%s", logged)
+		panic(fmt.Sprintf("log:\n%s", logged))
 	}
 	e.cp.setStatus(0)
 	eventually(t, "it arrives", func() bool { _, hellos, _ := e.cp.seen(); return hellos == 3 })
@@ -311,10 +311,10 @@ func TestReporterNamesItselfAsTheStreamDoes(t *testing.T) {
 	rec.Record(core.Event{SessionID: "s1", Kind: core.KindAPIIn, LocalSeq: seqBase + 1})
 	eventually(t, "a report", func() bool { return len(cp.reports("s1")) >= 1 })
 	if got := cp.last("s1"); got.Service != "orders-api" || got.Instance != "pod-7-ab12" {
-		t.Fatalf("report names %q / %q", got.Service, got.Instance)
+		panic(fmt.Sprintf("report names %q / %q", got.Service, got.Instance))
 	}
 	if s := cp.streams(); len(s) != 1 || s[0] != "pod-7-ab12" {
-		t.Fatalf("the stream announced %q", s)
+		panic(fmt.Sprintf("the stream announced %q", s))
 	}
 }
 
@@ -331,20 +331,20 @@ func TestReporterRetriesQuicklyWhileASessionDrains(t *testing.T) {
 	eventually(t, "a failed attempt", func() bool { return e.cp.postCount() >= 1 })
 	time.Sleep(200 * time.Millisecond)
 	if n := e.cp.postCount(); n > 2 {
-		t.Fatalf("%d attempts in 200ms with a pause of 300ms and more: no backoff", n)
+		panic(fmt.Sprintf("%d attempts in 200ms with a pause of 300ms and more: no backoff", n))
 	}
 	// The session drains: the report is tried every DrainRetry (5ms here).
 	e.cp.set(`{"active":["s1"],"draining":["s1"]}`)
 	before := e.cp.postCount()
 	time.Sleep(250 * time.Millisecond)
 	if n := e.cp.postCount() - before; n < 8 {
-		t.Fatalf("%d attempts in 250ms while a session drains, want one every 5ms or so", n)
+		panic(fmt.Sprintf("%d attempts in 250ms while a session drains, want one every 5ms or so", n))
 	}
 	e.cp.setStatus(0)
 	began := time.Now()
 	e.settled("s1", deliveryReport{Recorded: 1, Delivered: 1, Final: true})
 	if took := time.Since(began); took > 200*time.Millisecond {
-		t.Fatalf("the report arrived %v after the control plane was back", took)
+		panic(fmt.Sprintf("the report arrived %v after the control plane was back", took))
 	}
 }
 
@@ -364,7 +364,7 @@ func TestReporterReportsProgressOnOtherSessions(t *testing.T) {
 	n := len(e.cp.reports("stuck"))
 	time.Sleep(100 * time.Millisecond)
 	if got := len(e.cp.reports("stuck")); got != n {
-		t.Fatalf("%d more reports with nothing new to say", got-n)
+		panic(fmt.Sprintf("%d more reports with nothing new to say", got-n))
 	}
 	e.record("other", 5)
 	eventually(t, "a report with the new total", func() bool {
@@ -401,10 +401,10 @@ func TestReporterReportsEagerlyWithoutTheStream(t *testing.T) {
 	rec.Record(core.Event{SessionID: "s1", Kind: core.KindAPIIn, LocalSeq: seqBase + 2})
 	eventually(t, "the change", func() bool { return cp.last("s1").Buffered == 2 })
 	if got := cp.last("s1"); got.Final || got.LastError == "" {
-		t.Fatalf("report %+v", got)
+		panic(fmt.Sprintf("report %+v", got))
 	}
 	if got := cp.reports("idle"); len(got) != 0 {
-		t.Fatalf("reports of a session nothing was recorded for, without the stream: %+v", got)
+		panic(fmt.Sprintf("reports of a session nothing was recorded for, without the stream: %+v", got))
 	}
 }
 
@@ -433,37 +433,37 @@ func TestReporterBatchesReports(t *testing.T) {
 		rec.Record(core.Event{SessionID: fmt.Sprintf("s%03d", i), Kind: core.KindAPIIn, LocalSeq: seqBase + uint64(i)})
 	}
 	if !exp.Flush(5 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	rep.pass() // the reporter's own loop never runs one (Tick)
 	posts, hellos, sizes := cp.seen()
 	if posts != 3 || hellos != 0 || fmt.Sprint(sizes) != "[256 256 88]" {
-		t.Fatalf("%d requests with reports (%d without), batches of %v; want 3 of 256, 256 and 88", posts, hellos, sizes)
+		panic(fmt.Sprintf("%d requests with reports (%d without), batches of %v; want 3 of 256, 256 and 88", posts, hellos, sizes))
 	}
 	if got := cp.all(); len(got) != sessions {
-		t.Fatalf("%d sessions reported, want all %d", len(got), sessions)
+		panic(fmt.Sprintf("%d sessions reported, want all %d", len(got), sessions))
 	}
 	cp.mu.Lock()
 	order := append([]string(nil), cp.order...)
 	cp.mu.Unlock()
 	for i, sid := range order[:len(draining)] {
 		if !strings.Contains(strings.Join(draining, ","), `"`+sid+`"`) {
-			t.Fatalf("report %d is of %s: the draining sessions go first", i, sid)
+			panic(fmt.Sprintf("report %d is of %s: the draining sessions go first", i, sid))
 		}
 	}
 	// Nothing changed: the next pass sends nothing.
 	rep.pass()
 	if posts, hellos, _ := cp.seen(); posts != 3 || hellos != 0 {
-		t.Fatalf("%d requests after a pass with nothing to say", posts+hellos)
+		panic(fmt.Sprintf("%d requests after a pass with nothing to say", posts+hellos))
 	}
 
 	// At shutdown the last word on every session is batched as well.
 	rep.close(5 * time.Second)
 	if posts, _, sizes := cp.seen(); posts != 6 || fmt.Sprint(sizes[3:]) != "[256 256 88]" {
-		t.Fatalf("at close: %d requests, batches of %v", posts-3, sizes[3:])
+		panic(fmt.Sprintf("at close: %d requests, batches of %v", posts-3, sizes[3:]))
 	}
 	if got := cp.last("s007"); !got.Final || got.Recorded != 1 || got.Delivered != 1 {
-		t.Fatalf("last report %+v", got)
+		panic(fmt.Sprintf("last report %+v", got))
 	}
 }
 
@@ -483,15 +483,15 @@ func TestReporterSlowBatchEndsThePass(t *testing.T) {
 		rec.Record(core.Event{SessionID: sid, Kind: core.KindAPIIn, LocalSeq: seqBase + uint64(i)})
 	}
 	if !exp.Flush(5 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	rep.pass()
 	if n := cp.reportCount(); n != 1 {
-		t.Fatalf("%d reports in a pass whose first request outlasted its budget, want 1", n)
+		panic(fmt.Sprintf("%d reports in a pass whose first request outlasted its budget, want 1", n))
 	}
 	rep.pass()
 	rep.pass()
 	if n := cp.reportCount(); n != 3 {
-		t.Fatalf("%d reports after three passes, want 3", n)
+		panic(fmt.Sprintf("%d reports after three passes, want 3", n))
 	}
 }

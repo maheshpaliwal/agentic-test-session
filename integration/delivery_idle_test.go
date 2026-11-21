@@ -44,7 +44,7 @@ func newFreezer(t *testing.T, target string) *freezer {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	f := &freezer{l: l}
 	t.Cleanup(func() { f.frozen.Store(false); l.Close() })
@@ -96,7 +96,7 @@ func (e *deliveryEnv) heard(service string) {
 			return
 		}
 		if time.Now().After(deadline) {
-			e.t.Fatalf("no delivery report of service %s reached the control plane: %v", service, err)
+			panic(fmt.Sprintf("no delivery report of service %s reached the control plane: %v", service, err))
 		}
 	}
 }

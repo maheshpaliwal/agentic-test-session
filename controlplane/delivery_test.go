@@ -118,7 +118,7 @@ func newDeliveryEnv(t *testing.T, grace time.Duration, mut func(*StartRequest)) 
 	}
 	s, err := m.Start(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return &deliveryEnv{t: t, m: m, col: col, id: s.ID}
 }
@@ -136,7 +136,7 @@ func failing(d Delivery, err string) Delivery { d.LastError = err; return d }
 func (e *deliveryEnv) report(d Delivery) {
 	e.t.Helper()
 	if ok, err := e.m.ReportDelivery(e.id, d); err != nil || !ok {
-		e.t.Fatalf("report %+v: accepted=%v err=%v", d, ok, err)
+		panic(fmt.Sprintf("report %+v: accepted=%v err=%v", d, ok, err))
 	}
 }
 
@@ -145,7 +145,7 @@ func (e *deliveryEnv) stop() (Session, time.Duration) {
 	e.t.Helper()
 	began := time.Now()
 	if _, err := e.m.Stop(e.id); err != nil {
-		e.t.Fatal(err)
+		panic(err)
 	}
 	return e.sealed(), time.Since(began)
 }
@@ -160,27 +160,27 @@ func (e *deliveryEnv) sealed() Session {
 		time.Sleep(time.Millisecond)
 	}
 	s, _ := e.m.Get(e.id)
-	e.t.Fatalf("session never sealed: %+v", s)
-	return s
+	panic(fmt.Sprintf("session never sealed: %+v", s))
+
 }
 
 func wantComplete(t *testing.T, s Session) {
 	t.Helper()
 	if s.State != StateSealed || s.Incomplete || len(s.IncompleteReasons) > 0 || len(s.DeliveryUnconfirmed) > 0 || s.DrainTimedOut {
-		t.Fatalf("want a complete session: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v delivery=%+v",
-			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut, s.Delivery)
+		panic(fmt.Sprintf("want a complete session: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v delivery=%+v",
+			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut, s.Delivery))
 	}
 }
 
 func wantShortfall(t *testing.T, s Session, parts ...string) {
 	t.Helper()
 	if s.State != StateSealed || !s.Incomplete || len(s.IncompleteReasons) != 1 || s.DrainTimedOut || s.SealError != "" {
-		t.Fatalf("want a session incomplete for one delivery shortfall: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v",
-			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut)
+		panic(fmt.Sprintf("want a session incomplete for one delivery shortfall: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v",
+			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut))
 	}
 	for _, p := range parts {
 		if !strings.Contains(s.IncompleteReasons[0], p) {
-			t.Fatalf("reason %q does not say %q", s.IncompleteReasons[0], p)
+			panic(fmt.Sprintf("reason %q does not say %q", s.IncompleteReasons[0], p))
 		}
 	}
 }
@@ -234,7 +234,7 @@ func TestDeliveryVerdict(t *testing.T) {
 	// The reports that could not be checked are one line, not one each.
 	if !reflect.DeepEqual(short, want) || len(unc) != 1 ||
 		unc[0] != "the collector does not count events per instance (an older collector), so the delivery reports of 1 instance(s) could not be checked against it" {
-		t.Fatalf("reasons\n got %q\nwant %q\nunconfirmed %q", short, want, unc)
+		panic(fmt.Sprintf("reasons\n got %q\nwant %q\nunconfirmed %q", short, want, unc))
 	}
 }
 
@@ -245,8 +245,8 @@ func wantUnchecked(t *testing.T, s Session) {
 	t.Helper()
 	if s.State != StateSealed || s.Incomplete || len(s.IncompleteReasons) > 0 || s.DrainTimedOut || len(s.DeliveryUnconfirmed) != 1 ||
 		!strings.Contains(s.DeliveryUnconfirmed[0], "the collector does not count events per instance") {
-		t.Fatalf("want a session complete by its reports, unchecked: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v delivery=%+v",
-			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut, s.Delivery)
+		panic(fmt.Sprintf("want a session complete by its reports, unchecked: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v delivery=%+v",
+			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut, s.Delivery))
 	}
 }
 
@@ -260,17 +260,17 @@ func TestDrainHealthyDeliveryIsNotFlagged(t *testing.T) {
 	s, took := e.stop()
 	wantUnchecked(t, s)
 	if took >= testGrace {
-		t.Fatalf("a healthy drain took %v: it must not wait the grace (%v)", took, testGrace)
+		panic(fmt.Sprintf("a healthy drain took %v: it must not wait the grace (%v)", took, testGrace))
 	}
 	if len(s.Delivery) != 2 || s.Delivery[0].Service != "inventory" || s.Delivery[1].Service != "orders-api" || s.Delivery[1].At.IsZero() {
-		t.Fatalf("delivery %+v", s.Delivery)
+		panic(fmt.Sprintf("delivery %+v", s.Delivery))
 	}
 
 	old := newDeliveryEnv(t, testGrace, nil)
 	s, took = old.stop()
 	wantComplete(t, s)
 	if len(s.Delivery) != 0 || took >= testGrace {
-		t.Fatalf("no reports: delivery %+v, drain %v", s.Delivery, took)
+		panic(fmt.Sprintf("no reports: delivery %+v, drain %v", s.Delivery, took))
 	}
 }
 
@@ -282,17 +282,17 @@ func TestDrainMarksUndeliveredEventsIncomplete(t *testing.T) {
 	e.report(rep("inventory", "i-1", 1, 1, 0))
 	e.report(failing(rep("orders-api", "o-1", 2, 0, 0), "dial tcp 127.0.0.1:1: connect: connection refused"))
 	if _, err := e.m.Stop(e.id); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	began := time.Now()
 	e.report(failing(final(rep("orders-api", "o-1", 2, 0, 0)), "dial tcp 127.0.0.1:1: connect: connection refused"))
 	s := e.sealed()
 	wantShortfall(t, s, "service orders-api (instance o-1)", "0 of 2 recorded events", "connection refused")
 	if took := time.Since(began); took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
-		t.Fatalf("sealed after %v: the drain waits the grace (%v) for the instance, and no longer", took, testGrace)
+		panic(fmt.Sprintf("sealed after %v: the drain waits the grace (%v) for the instance, and no longer", took, testGrace))
 	}
 	if strings.Contains(s.IncompleteReasons[0], "inventory") {
-		t.Fatalf("inventory delivered everything: %q", s.IncompleteReasons)
+		panic(fmt.Sprintf("inventory delivered everything: %q", s.IncompleteReasons))
 	}
 }
 
@@ -312,10 +312,10 @@ func TestDrainWaitsForSlowAndRecoveringDelivery(t *testing.T) {
 		s, took := e.stop()
 		wantUnchecked(t, s)
 		if took < 2*testGrace {
-			t.Fatalf("sealed after %v, before the last events arrived", took)
+			panic(fmt.Sprintf("sealed after %v, before the last events arrived", took))
 		}
 		if d := s.Delivery[0]; d.Delivered != 10 || d.Buffered != 0 {
-			t.Fatalf("delivery %+v", d)
+			panic(fmt.Sprintf("delivery %+v", d))
 		}
 	})
 	t.Run("down, back within the grace", func(t *testing.T) {
@@ -331,7 +331,7 @@ func TestDrainWaitsForSlowAndRecoveringDelivery(t *testing.T) {
 		s, took := e.stop()
 		wantUnchecked(t, s)
 		if took < testGrace/2 {
-			t.Fatalf("sealed after %v, before the events arrived", took)
+			panic(fmt.Sprintf("sealed after %v, before the events arrived", took))
 		}
 	})
 	// The grace counts from the stop at the earliest: an instance that was
@@ -348,7 +348,7 @@ func TestDrainWaitsForSlowAndRecoveringDelivery(t *testing.T) {
 		s, took := e.stop()
 		wantUnchecked(t, s)
 		if took < testGrace/2 {
-			t.Fatalf("sealed after %v", took)
+			panic(fmt.Sprintf("sealed after %v", took))
 		}
 	})
 }
@@ -362,7 +362,7 @@ func TestDrainEventsRecordedAfterTheFinalReport(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		e.col.setPending(1) // async work keeps the drain open
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e.report(final(rep("worker", "w", 5, 5, 0)))
 		time.Sleep(testGrace + 100*time.Millisecond) // longer than the grace: the drain is old now
@@ -371,20 +371,20 @@ func TestDrainEventsRecordedAfterTheFinalReport(t *testing.T) {
 		heard := time.Now()
 		time.Sleep(testGrace / 2) // the drain must be waiting for them, not sealing
 		if s, _ := e.m.Get(e.id); s.State != StateDraining {
-			t.Fatalf("sealed %v after hearing of new events, without waiting for them: %+v", time.Since(heard), s)
+			panic(fmt.Sprintf("sealed %v after hearing of new events, without waiting for them: %+v", time.Since(heard), s))
 		}
 		e.col.arrived()
 		e.report(final(rep("worker", "w", 8, 8, 0)))
 		s := e.sealed()
 		wantUnchecked(t, s)
 		if d := s.Delivery[0]; d.Recorded != 8 || d.Delivered != 8 || !d.Final {
-			t.Fatalf("delivery %+v", d)
+			panic(fmt.Sprintf("delivery %+v", d))
 		}
 	})
 	t.Run("never delivered", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e.report(final(rep("worker", "w", 5, 5, 0)))
 		e.report(final(rep("worker", "w", 8, 5, 0)))
@@ -392,7 +392,7 @@ func TestDrainEventsRecordedAfterTheFinalReport(t *testing.T) {
 		s := e.sealed()
 		wantShortfall(t, s, "service worker", "5 of 8 recorded events", "3 still undelivered")
 		if took := time.Since(heard); took < testGrace-20*time.Millisecond {
-			t.Fatalf("sealed %v after the report, before the grace (%v)", took, testGrace)
+			panic(fmt.Sprintf("sealed %v after the report, before the grace (%v)", took, testGrace))
 		}
 	})
 	// A report sent before the instance knew of the drain cannot take back a
@@ -403,12 +403,12 @@ func TestDrainEventsRecordedAfterTheFinalReport(t *testing.T) {
 		e.report(rep("svc", "i", 9, 9, 0))
 		for _, old := range []Delivery{rep("svc", "i", 8, 8, 0), rep("svc", "i", 10, 7, 0)} {
 			if ok, err := e.m.ReportDelivery(e.id, old); ok || err != nil {
-				t.Fatalf("report %+v behind the stored one: accepted=%v err=%v", old, ok, err)
+				panic(fmt.Sprintf("report %+v behind the stored one: accepted=%v err=%v", old, ok, err))
 			}
 		}
 		s, _ := e.m.Get(e.id)
 		if d := s.Delivery[0]; len(s.Delivery) != 1 || d.Recorded != 9 || d.Delivered != 9 || !d.Final {
-			t.Fatalf("delivery %+v", s.Delivery)
+			panic(fmt.Sprintf("delivery %+v", s.Delivery))
 		}
 	})
 }
@@ -423,10 +423,10 @@ func TestDrainJudgesVanishedInstanceOnItsLastReport(t *testing.T) {
 	if s.Incomplete || len(s.IncompleteReasons) > 0 || len(s.DeliveryUnconfirmed) != 2 ||
 		!strings.Contains(s.DeliveryUnconfirmed[0], "service gone (instance g): 3 of 5 recorded events") ||
 		!strings.Contains(s.DeliveryUnconfirmed[0], "unknown") || !strings.Contains(s.DeliveryUnconfirmed[1], "reports of 1 instance(s) could not be checked") {
-		t.Fatalf("a periodic report that left events open: incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+		panic(fmt.Sprintf("a periodic report that left events open: incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 	}
 	if took < 80*time.Millisecond {
-		t.Fatalf("sealed after %v: the instance might still have delivered", took)
+		panic(fmt.Sprintf("sealed after %v: the instance might still have delivered", took))
 	}
 
 	// Failing when it last reported, and never heard of again: with a
@@ -437,7 +437,7 @@ func TestDrainJudgesVanishedInstanceOnItsLastReport(t *testing.T) {
 	s, _ = e.stop()
 	if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "service gone (instance g): 0 of 5") ||
 		!strings.Contains(s.DeliveryUnconfirmed[0], "no route to host") {
-		t.Fatalf("a failing instance that went silent: incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+		panic(fmt.Sprintf("a failing instance that went silent: incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 	}
 }
 
@@ -448,7 +448,7 @@ func TestDrainDroppedEventsAreIncompleteWithoutWaiting(t *testing.T) {
 	s, took := e.stop()
 	wantShortfall(t, s, "3 of 5 recorded events", "2 dropped")
 	if took >= testGrace {
-		t.Fatalf("the drain waited %v for events that are gone", took)
+		panic(fmt.Sprintf("the drain waited %v for events that are gone", took))
 	}
 }
 
@@ -458,7 +458,7 @@ func TestDrainDeliveryIsBoundedByMaxDrain(t *testing.T) {
 	e.report(final(rep("svc", "i", 5, 0, 0)))
 	s, took := e.stop()
 	if !s.DrainTimedOut || !s.Incomplete || len(s.IncompleteReasons) != 1 || took > 5*time.Second {
-		t.Fatalf("drain %v: %+v", took, s)
+		panic(fmt.Sprintf("drain %v: %+v", took, s))
 	}
 }
 
@@ -469,7 +469,7 @@ func TestDeliveryCheckOff(t *testing.T) {
 	e.report(final(rep("svc", "i", 5, 0, 0)))
 	s, took := e.stop()
 	if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 || len(s.Delivery) != 1 || took > 2*time.Second {
-		t.Fatalf("check off: drain %v %+v", took, s)
+		panic(fmt.Sprintf("check off: drain %v %+v", took, s))
 	}
 }
 
@@ -477,14 +477,14 @@ func postDelivery(t *testing.T, url, id, contentType, body string) (int, string)
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url+"/v1/sessions/"+id+"/delivery", strings.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -501,7 +501,7 @@ func TestDeliveryEndpointBounds(t *testing.T) {
 	post := func(body string) (int, string) { return postDelivery(t, srv.URL, e.id, "application/json", body) }
 
 	if code, body := post(ok); code != http.StatusOK || !strings.Contains(body, `"accepted":true`) {
-		t.Fatalf("a valid report: %d %s", code, body)
+		panic(fmt.Sprintf("a valid report: %d %s", code, body))
 	}
 	for name, tc := range map[string]struct {
 		body string
@@ -543,7 +543,7 @@ func TestDeliveryEndpointBounds(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{"service": "pay\x1b[31m\nments", "instance": long, "recorded": 2, "buffered": 2,
 		"last_error": "Post \"https://user:s3cret@collector.internal/v1/ingest\": dial\ttcp: \x00refused " + strings.Repeat("e", 400)})
 	if code, resp := post(string(body)); code != http.StatusOK {
-		t.Fatalf("report with unclean text: %d %s", code, resp)
+		panic(fmt.Sprintf("report with unclean text: %d %s", code, resp))
 	}
 	s, _ := e.m.Get(e.id)
 	var got Delivery
@@ -554,13 +554,13 @@ func TestDeliveryEndpointBounds(t *testing.T) {
 	}
 	if got.Instance != long[:128] || len(got.LastError) != maxDeliveryError || strings.Contains(got.LastError, "s3cret") ||
 		!strings.HasPrefix(got.LastError, `Post "https://collector.internal/v1/ingest": dialtcp: refused eee`) {
-		t.Fatalf("stored %+v (last_error %d bytes)", got, len(got.LastError))
+		panic(fmt.Sprintf("stored %+v (last_error %d bytes)", got, len(got.LastError)))
 	}
 
 	// The session shows the reports, and nothing else changed.
 	resp, err := http.Get(srv.URL + "/v1/sessions/" + e.id)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var doc struct {
 		State      State
@@ -570,7 +570,7 @@ func TestDeliveryEndpointBounds(t *testing.T) {
 	err = json.NewDecoder(resp.Body).Decode(&doc)
 	resp.Body.Close()
 	if err != nil || doc.State != StateActive || doc.Incomplete || len(doc.Delivery) != 2 || doc.Delivery[0].Buffered != 1 || doc.Delivery[0].At.IsZero() {
-		t.Fatalf("session document: %+v %v", doc, err)
+		panic(fmt.Sprintf("session document: %+v %v", doc, err))
 	}
 }
 
@@ -583,13 +583,13 @@ func TestDeliveryInstanceLimit(t *testing.T) {
 		e.report(rep("svc", fmt.Sprintf("i%03d", i), 1, 1, 0))
 	}
 	if ok, err := e.m.ReportDelivery(e.id, rep("svc", "one-too-many", 1, 1, 0)); ok || !errors.Is(err, ErrBadState) {
-		t.Fatalf("instance %d: accepted=%v err=%v, want ErrBadState (409)", MaxDeliveryInstances+1, ok, err)
+		panic(fmt.Sprintf("instance %d: accepted=%v err=%v, want ErrBadState (409)", MaxDeliveryInstances+1, ok, err))
 	}
 	e.report(rep("svc", "i007", 2, 2, 0))
 	s, _ := e.stop()
 	if len(s.Delivery) != MaxDeliveryInstances || s.Incomplete || len(s.DeliveryUnconfirmed) != 2 ||
 		!strings.Contains(s.DeliveryUnconfirmed[1], "more than 256 instances reported; the reports of 1 others were refused") {
-		t.Fatalf("delivery %d incomplete=%v unconfirmed=%q", len(s.Delivery), s.Incomplete, s.DeliveryUnconfirmed)
+		panic(fmt.Sprintf("delivery %d incomplete=%v unconfirmed=%q", len(s.Delivery), s.Incomplete, s.DeliveryUnconfirmed))
 	}
 }
 
@@ -605,35 +605,35 @@ func TestDeliveryReportsAfterTheDrainGet409(t *testing.T) {
 
 	e.report(final(rep("svc", "i", 2, 2, 0)))
 	if _, err := e.m.Stop(e.id); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	// DRAINING is still a running session.
 	e.report(final(rep("svc", "i", 3, 3, 0)))
 	<-e.col.sealing
 	if code, resp := postDelivery(t, srv.URL, e.id, "application/json", body); code != http.StatusConflict || !strings.Contains(resp, "being sealed") {
-		t.Fatalf("report while the session is being sealed: %d %s, want 409", code, resp)
+		panic(fmt.Sprintf("report while the session is being sealed: %d %s, want 409", code, resp))
 	}
 	close(hold)
 	s := e.sealed()
 	wantUnchecked(t, s) // the late report was not let in, so it cannot flag the session either
 	if code, resp := postDelivery(t, srv.URL, e.id, "application/json", body); code != http.StatusConflict || !strings.Contains(resp, "SEALED") {
-		t.Fatalf("report after the seal: %d %s, want 409", code, resp)
+		panic(fmt.Sprintf("report after the seal: %d %s, want 409", code, resp))
 	}
 	if got, _ := e.m.Get(e.id); len(got.Delivery) != 1 || got.Delivery[0].Recorded != 3 {
-		t.Fatalf("delivery changed after the seal: %+v", got.Delivery)
+		panic(fmt.Sprintf("delivery changed after the seal: %+v", got.Delivery))
 	}
 
 	a := newDeliveryEnv(t, testGrace, nil)
 	a.report(rep("svc", "i", 2, 0, 0))
 	if _, err := a.m.Abort(a.id); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if ok, err := a.m.ReportDelivery(a.id, rep("svc", "i", 3, 0, 0)); ok || !errors.Is(err, ErrBadState) {
-		t.Fatalf("report after abort: accepted=%v err=%v", ok, err)
+		panic(fmt.Sprintf("report after abort: accepted=%v err=%v", ok, err))
 	}
 	// An aborted session is not judged: it was never drained.
 	if got, _ := a.m.Get(a.id); got.Incomplete || len(got.IncompleteReasons) > 0 || len(got.Delivery) != 1 {
-		t.Fatalf("aborted: %+v", got)
+		panic(fmt.Sprintf("aborted: %+v", got))
 	}
 }
 
@@ -645,19 +645,19 @@ func TestActiveSetNamesDrainingSessions(t *testing.T) {
 	e.col.setPending(1)
 	b, _ := json.Marshal(e.m.Active())
 	if strings.Contains(string(b), "draining") {
-		t.Fatalf("active set without a draining session: %s", b)
+		panic(fmt.Sprintf("active set without a draining session: %s", b))
 	}
 	if _, err := e.m.Stop(e.id); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	a := e.m.Active()
 	if len(a.Active) != 1 || len(a.Draining) != 1 || a.Draining[0] != e.id {
-		t.Fatalf("active set %+v", a)
+		panic(fmt.Sprintf("active set %+v", a))
 	}
 	e.col.setPending(0)
 	e.sealed()
 	if a := e.m.Active(); len(a.Active) != 0 || len(a.Draining) != 0 {
-		t.Fatalf("active set after the seal %+v", a)
+		panic(fmt.Sprintf("active set after the seal %+v", a))
 	}
 }
 
@@ -669,24 +669,24 @@ func TestSealRetryKeepsDeliveryShortfall(t *testing.T) {
 		m := newRetryMgr(t, c, nil)
 		s, err := m.Start(StartRequest{Name: "r", QuiesceSeconds: 1})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if shortfall {
 			if _, err := m.ReportDelivery(s.ID, final(rep("orders-api", "o", 4, 1, 3))); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		}
 		if _, err := m.Stop(s.ID); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		got := waitState(t, m, s.ID, StateSealed)
 		if !got.SealPending || !got.Incomplete || (len(got.IncompleteReasons) == 1) != shortfall {
-			t.Fatalf("shortfall=%v, seal failing: %+v", shortfall, got)
+			panic(fmt.Sprintf("shortfall=%v, seal failing: %+v", shortfall, got))
 		}
 		c.failing.Store(false) // the collector's seal now says "complete"
 		got = waitSession(t, m, s.ID, "sealed by a retry", func(s Session) bool { return !s.SealPending })
 		if got.SealError != "" || got.BundleURI == "" || got.Incomplete != shortfall || (len(got.IncompleteReasons) == 1) != shortfall {
-			t.Fatalf("shortfall=%v, after the seal retry: incomplete=%v reasons=%q seal_error=%q", shortfall, got.Incomplete, got.IncompleteReasons, got.SealError)
+			panic(fmt.Sprintf("shortfall=%v, after the seal retry: incomplete=%v reasons=%q seal_error=%q", shortfall, got.Incomplete, got.IncompleteReasons, got.SealError))
 		}
 	}
 }
@@ -715,19 +715,19 @@ func TestFileStoreKeepsDeliveryFields(t *testing.T) {
 		for _, want := range []Session{live, done} {
 			got, ok, err := s.GetErr(want.ID)
 			if err != nil || !ok || !reflect.DeepEqual(got, want) {
-				t.Fatalf("%s: %s\n got %+v (%v %v)\nwant %+v", what, want.ID, got, ok, err, want)
+				panic(fmt.Sprintf("%s: %s\n got %+v (%v %v)\nwant %+v", what, want.ID, got, ok, err, want))
 			}
 		}
 	}
 	check("as written", fs)
 	check("replayed from the journal", wantSameAfterReopen(t, fs))
 	if err := fs.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	check("read from the snapshot", wantSameAfterReopen(t, fs))
 	fs.Evict(done.ID)
 	if _, hot := fs.MemStore.Get(done.ID); hot {
-		t.Fatal("the session was not archived")
+		panic("the session was not archived")
 	}
 	check("read from the archive", fs)
 	check("read from the archive after a restart", wantSameAfterReopen(t, fs))
@@ -735,19 +735,19 @@ func TestFileStoreKeepsDeliveryFields(t *testing.T) {
 	// A Manager started on that store keeps the verdict of the finished
 	// session and the reports of the running one.
 	if err := fs.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	re := openStore(t, path)
 	m := NewManager(Config{Store: re, Collector: newScriptCollector(), PollInterval: 2 * time.Millisecond, TimeUnit: 10 * time.Millisecond})
 	t.Cleanup(m.Close)
 	if got, _ := m.Get(done.ID); !got.Incomplete || len(got.IncompleteReasons) != 1 || len(got.Delivery) != 2 {
-		t.Fatalf("finished session after a restart: %+v", got)
+		panic(fmt.Sprintf("finished session after a restart: %+v", got))
 	}
 	if ok, err := m.ReportDelivery(live.ID, rep("orders-api", "o-1", 9, 9, 0)); !ok || err != nil {
-		t.Fatalf("report after a restart: %v %v", ok, err)
+		panic(fmt.Sprintf("report after a restart: %v %v", ok, err))
 	}
 	if got, _ := m.Get(live.ID); len(got.Delivery) != 1 || got.Delivery[0].Delivered != 9 {
-		t.Fatalf("running session after a restart: %+v", got.Delivery)
+		panic(fmt.Sprintf("running session after a restart: %+v", got.Delivery))
 	}
 
 	// Unknown fields are ignored, in a snapshot and in a journal record.
@@ -759,7 +759,7 @@ func TestFileStoreKeepsDeliveryFields(t *testing.T) {
 	appendRaw(t, path2+".journal", `{"op":"put","a_later_field":true,"session":{"id":"ts_newer0002","state":"ACTIVE","created_at":"2026-05-06T07:09:09Z","a_later_field":1}}`+"\n")
 	fs2 := openStore(t, path2)
 	if got := fs2.List(); len(got) != 2 || got[0].ID != "ts_newer0001" || len(got[0].Delivery) != 1 || got[1].ID != "ts_newer0002" {
-		t.Fatalf("store file with fields this version does not know: %+v", got)
+		panic(fmt.Sprintf("store file with fields this version does not know: %+v", got))
 	}
 }
 
@@ -773,13 +773,13 @@ func TestDrainResumedAfterRestartStillJudgesDelivery(t *testing.T) {
 	m := NewManager(cfg)
 	s, err := m.Start(StartRequest{Name: "r", QuiesceSeconds: 1, MaxDrainSeconds: 1000})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := m.ReportDelivery(s.ID, failing(final(rep("orders-api", "o", 2, 0, 0)), "connection refused")); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := m.Stop(s.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m.Close() // the process ends mid-drain
 
@@ -790,6 +790,6 @@ func TestDrainResumedAfterRestartStillJudgesDelivery(t *testing.T) {
 	got := waitState(t, m2, s.ID, StateSealed)
 	wantShortfall(t, got, "service orders-api", "0 of 2")
 	if took := time.Since(began); took < 130*time.Millisecond {
-		t.Fatalf("sealed %v after the restart, without the grace", took)
+		panic(fmt.Sprintf("sealed %v after the restart, without the grace", took))
 	}
 }

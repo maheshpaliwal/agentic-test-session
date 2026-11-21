@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -22,15 +23,15 @@ func TestDeliveryShortfallIsShownAndFailsTheGate(t *testing.T) {
 	g := gates{onError: true, onIncomplete: true, onEmpty: true}
 	err := g.check(info, sum, 0)
 	if err == nil || !strings.Contains(err.Error(), "session is incomplete ("+reason+")") {
-		t.Fatalf("--fail-on-incomplete: %v", err)
+		panic(fmt.Sprintf("--fail-on-incomplete: %v", err))
 	}
 	if err := (&gates{onError: true, onEmpty: true}).check(info, sum, 0); err != nil {
-		t.Fatalf("without --fail-on-incomplete: %v", err)
+		panic(fmt.Sprintf("without --fail-on-incomplete: %v", err))
 	}
 	// An unconfirmed delivery is a warning: it does not fail the gate.
 	warn := client.Info{ID: "ts_2", State: "SEALED", DeliveryUnconfirmed: info.DeliveryUnconfirmed}
 	if err := g.check(warn, sum, 0); err != nil {
-		t.Fatalf("delivery_unconfirmed alone failed the gate: %v", err)
+		panic(fmt.Sprintf("delivery_unconfirmed alone failed the gate: %v", err))
 	}
 
 	var out bytes.Buffer
@@ -50,11 +51,11 @@ func TestDeliveryShortfallIsShownAndFailsTheGate(t *testing.T) {
 	rep := buildReport(info, sum, client.Trace{}, nil)
 	md, err := renderMarkdown(rep)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if !rep.incomplete || len(rep.reasons) != 1 || !strings.Contains(rep.reasons[0], "Events did not reach the collector: service orders-api") ||
 		strings.Contains(string(md), "**Passed**") || !strings.Contains(string(md), "Why it is incomplete") || !strings.Contains(string(md), "orders-api") {
-		t.Fatalf("report: incomplete=%v reasons=%q\n%s", rep.incomplete, rep.reasons, md)
+		panic(fmt.Sprintf("report: incomplete=%v reasons=%q\n%s", rep.incomplete, rep.reasons, md))
 	}
 }
 
@@ -72,13 +73,13 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 	rep := buildReport(info, sum, client.Trace{}, nil)
 	md, err := renderMarkdown(rep)
 	if err != nil || rep.incomplete {
-		t.Fatalf("report: incomplete=%v %v", rep.incomplete, err)
+		panic(fmt.Sprintf("report: incomplete=%v %v", rep.incomplete, err))
 	}
 	wantAll(t, string(md), "**Passed**: no failed events. Whether every event arrived could not be confirmed for 1 service instance (see below).",
 		"### Delivery not confirmed", "- service batch (instance b-1): the collector has 9 events")
 	junit, err := renderJUnit(rep)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantAll(t, string(junit), `<property name="incomplete" value="false">`, `<property name="delivery_unconfirmed" value="`+warn+`">`, `failures="0"`)
 
@@ -87,7 +88,7 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 	bad.Incomplete, bad.IncompleteReasons = true, []string{"service orders-api (instance o-1): 0 of 7 recorded events reached the collector"}
 	junit, err = renderJUnit(buildReport(bad, sum, client.Trace{}, nil))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantAll(t, string(junit), `<property name="incomplete" value="true">`,
 		`<property name="incomplete_reason" value="Events did not reach the collector: service orders-api (instance o-1): 0 of 7 recorded events reached the collector">`,
@@ -103,30 +104,30 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 		src := newDigestSource(in, sum, client.Trace{}, nil)
 		dmd, err := src.fit(digestMarkdown{}, digestMinBytes)
 		if err != nil || len(dmd) > digestMinBytes {
-			t.Fatalf("digest markdown: %d bytes, %v", len(dmd), err)
+			panic(fmt.Sprintf("digest markdown: %d bytes, %v", len(dmd), err))
 		}
 		checkDigestMarkdown(t, string(dmd))
 		wantAll(t, string(dmd), "**Passed**", "- delivery unconfirmed: service batch (instance b-1)")
 		js, err := src.fit(digestJSON{}, digestMinBytes)
 		if err != nil || len(js) > digestMinBytes {
-			t.Fatalf("digest JSON: %d bytes, %v", len(js), err)
+			panic(fmt.Sprintf("digest JSON: %d bytes, %v", len(js), err))
 		}
 		d := checkDigestJSON(t, string(js))
 		if d.Verdict.Status != "passed" || d.Verdict.Recording != "complete" || len(d.Verdict.Unconfirmed) == 0 ||
 			len(d.Verdict.Unconfirmed) > digestMaxUnconfirmed+1 || !strings.HasPrefix(d.Verdict.Unconfirmed[0], "service batch (instance b-1)") {
-			t.Fatalf("digest verdict %+v", d.Verdict)
+			panic(fmt.Sprintf("digest verdict %+v", d.Verdict))
 		}
 		if len(in.DeliveryUnconfirmed) > digestMaxUnconfirmed && d.Verdict.Unconfirmed[digestMaxUnconfirmed] != "and 37 more" {
-			t.Fatalf("digest verdict %+v", d.Verdict.Unconfirmed)
+			panic(fmt.Sprintf("digest verdict %+v", d.Verdict.Unconfirmed))
 		}
 		again, _ := newDigestSource(in, sum, client.Trace{}, nil).fit(digestJSON{}, digestMinBytes)
 		if !bytes.Equal(js, again) {
-			t.Fatal("the digest is not deterministic")
+			panic("the digest is not deterministic")
 		}
 	}
 	// A session without the warning says nothing of it.
 	clean, _ := newDigestSource(client.Info{ID: "ts_3", State: "SEALED"}, sum, client.Trace{}, nil).fit(digestJSON{}, digestMinBytes)
 	if strings.Contains(string(clean), "unconfirmed") {
-		t.Fatalf("digest of a healthy session: %s", clean)
+		panic(fmt.Sprintf("digest of a healthy session: %s", clean))
 	}
 }

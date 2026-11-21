@@ -75,7 +75,7 @@ func TestRecorderTakeSettleMatchesModel(t *testing.T) {
 			r.settle(ids, gone, &o)
 		}
 		if bad := accountErrors(r); len(bad) > 0 {
-			t.Fatalf("step %d: %v", step, bad)
+			panic(fmt.Sprintf("step %d: %v", step, bad))
 		}
 		got := []uint64{}
 		for _, ev := range r.Peek(16) {
@@ -135,7 +135,7 @@ func TestRecorderEviction(t *testing.T) {
 	}
 	// The accounts say the same: every event that was dropped, whichever way.
 	if a := r.accounts(); a["held"] != (account{recorded: 4, dropped: 3}) || a["ok"] != (account{recorded: 5, dropped: 2}) || len(accountErrors(r)) > 0 {
-		t.Fatalf("accounts %+v %v", a, accountErrors(r))
+		panic(fmt.Sprintf("accounts %+v %v", a, accountErrors(r)))
 	}
 
 	// A held event further from the end than evictScan is not looked for.

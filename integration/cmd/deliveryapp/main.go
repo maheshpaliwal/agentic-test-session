@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -22,7 +23,7 @@ import (
 func main() {
 	listen := os.Getenv("DELIVERYAPP_LISTEN")
 	if h, _, err := net.SplitHostPort(listen); err != nil || h != "127.0.0.1" {
-		log.Fatalf("refusing to listen on %q: DELIVERYAPP_LISTEN must be 127.0.0.1:<port>", listen)
+		panic(fmt.Sprintf("refusing to listen on %q: DELIVERYAPP_LISTEN must be 127.0.0.1:<port>", listen))
 	}
 	downstream := os.Getenv("DELIVERYAPP_DOWNSTREAM_URL") // empty: this is the last service of the chain
 	hc := thttp.Client(&http.Client{Timeout: 5 * time.Second})
@@ -59,5 +60,5 @@ func main() {
 	})
 	srv := &http.Server{Addr: listen, Handler: thttp.Handler(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("deliveryapp listening on http://%s", listen)
-	log.Fatal(srv.ListenAndServe())
+	panic(srv.ListenAndServe())
 }

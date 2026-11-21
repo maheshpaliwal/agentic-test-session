@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,33 +18,33 @@ func TestFailOnUnconfirmed(t *testing.T) {
 	sum := client.Summary{EventCount: 1}
 	unconfirmed := client.Info{ID: "ts_1", State: "SEALED", DeliveryUnconfirmed: []string{warn, "another"}}
 	if err := (&gates{onError: true, onIncomplete: true, onEmpty: true}).check(unconfirmed, sum, 0); err != nil {
-		t.Fatalf("without the flag: %v", err)
+		panic(fmt.Sprintf("without the flag: %v", err))
 	}
 	err := (&gates{onUnconfirmed: true}).check(unconfirmed, sum, 0)
 	if err == nil || err.Error() != "check failed: delivery is unconfirmed ("+warn+"; another)" {
-		t.Fatalf("--fail-on-unconfirmed: %v", err)
+		panic(fmt.Sprintf("--fail-on-unconfirmed: %v", err))
 	}
 	if err := (&gates{onUnconfirmed: true}).check(client.Info{ID: "ts_1", State: "SEALED"}, sum, 0); err != nil {
-		t.Fatalf("a confirmed session: %v", err)
+		panic(fmt.Sprintf("a confirmed session: %v", err))
 	}
 	// It does not stand in for --fail-on-incomplete, and adds to it.
 	incomplete := client.Info{ID: "ts_1", State: "SEALED", Incomplete: true, IncompleteReasons: []string{"lost"}, DeliveryUnconfirmed: []string{warn}}
 	if err := (&gates{onUnconfirmed: true, onIncomplete: true}).check(incomplete, sum, 0); err == nil ||
 		!strings.Contains(err.Error(), "session is incomplete (lost); delivery is unconfirmed (") {
-		t.Fatalf("both gates: %v", err)
+		panic(fmt.Sprintf("both gates: %v", err))
 	}
 	// A session the control plane no longer knows: nothing confirms anything.
 	if err := (&gates{onUnconfirmed: true}).check(client.Info{ID: "ts_1"}, sum, 0); err == nil || !strings.Contains(err.Error(), "whether its delivery was confirmed is unknown") {
-		t.Fatalf("an unknown session: %v", err)
+		panic(fmt.Sprintf("an unknown session: %v", err))
 	}
 	if err := (&gates{onUnconfirmed: true, onIncomplete: true}).check(client.Info{ID: "ts_1"}, sum, 0); err == nil || strings.Count(err.Error(), "no longer knows") != 1 {
-		t.Fatalf("an unknown session, both gates: %v", err)
+		panic(fmt.Sprintf("an unknown session, both gates: %v", err))
 	}
 
 	// The flag is one of summary, report, digest and run.
 	env := newResultsEnv(t)
 	if code, _, e := env.tc("start", "--name", "run-1"); code != 0 {
-		t.Fatalf("start: %d %s", code, e)
+		panic(fmt.Sprintf("start: %d %s", code, e))
 	}
 	for _, args := range [][]string{{"summary", "run-1"}, {"report", "run-1"}, {"digest", "run-1"}} {
 		if code, _, e := env.tc(append(args, "--fail-on-unconfirmed")...); code != 0 {
@@ -69,10 +70,10 @@ func TestDigestSaysWhenItShortensTheReasons(t *testing.T) {
 	for _, r := range []digestRender{digestMarkdown{}, digestJSON{}} {
 		out, err := src.fit(r, digestMinBytes)
 		if err != nil || len(out) > digestMinBytes {
-			t.Fatalf("%T: %d bytes, %v", r, len(out), err)
+			panic(fmt.Sprintf("%T: %d bytes, %v", r, len(out), err))
 		}
 		if strings.Contains(string(out), long) {
-			t.Fatalf("%T: test setup: the reason was not shortened", r)
+			panic(fmt.Sprintf("%T: test setup: the reason was not shortened", r))
 		}
 		// One reason shortened and two of six unconfirmed not listed.
 		wantAll(t, string(out), "3 of the reasons why the recording is incomplete or unconfirmed are shortened or not listed", "tracectl status ts_1", "and 2 more")
@@ -80,7 +81,7 @@ func TestDigestSaysWhenItShortensTheReasons(t *testing.T) {
 	md, _ := src.fit(digestMarkdown{}, digestMinBytes)
 	checkDigestMarkdown(t, string(md))
 	if strings.Contains(string(md), "Nothing was left out") {
-		t.Fatalf("the digest shortened the reasons and says that nothing was left out:\n%s", md)
+		panic(fmt.Sprintf("the digest shortened the reasons and says that nothing was left out:\n%s", md))
 	}
 
 	// Nothing cut: nothing noted.
@@ -88,10 +89,10 @@ func TestDigestSaysWhenItShortensTheReasons(t *testing.T) {
 		DeliveryUnconfirmed: []string{"service b (instance i): unknown"}}
 	out, err := newDigestSource(short, sum, client.Trace{}, nil).fit(digestJSON{}, digestMinBytes)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if d := checkDigestJSON(t, string(out)); len(d.Omitted) != 0 {
-		t.Fatalf("omitted %+v", d.Omitted)
+		panic(fmt.Sprintf("omitted %+v", d.Omitted))
 	}
 }
 
@@ -113,6 +114,6 @@ func TestDoctorNamesAServiceWithoutDeliveryReports(t *testing.T) {
 		}
 	}
 	if !strings.Contains(out.String(), "orders-api") {
-		t.Fatalf("doctor:\n%s", out.String())
+		panic(fmt.Sprintf("doctor:\n%s", out.String()))
 	}
 }

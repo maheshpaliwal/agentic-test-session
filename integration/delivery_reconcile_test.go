@@ -154,7 +154,7 @@ func (e *deliveryEnv) connected(service string) {
 			return
 		}
 		if time.Now().After(deadline) {
-			e.t.Fatalf("service %s never followed the control plane: %v", service, err)
+			panic(fmt.Sprintf("service %s never followed the control plane: %v", service, err))
 		}
 	}
 }
@@ -222,7 +222,7 @@ func failed(err error) deliveryRun { return deliveryRun{err: err} }
 func (e *deliveryEnv) cpProxy(block func(r *http.Request) int) string {
 	target, err := url.Parse(e.cpURL)
 	if err != nil {
-		e.t.Fatal(err)
+		panic(err)
 	}
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.FlushInterval = -1 // the active-set stream

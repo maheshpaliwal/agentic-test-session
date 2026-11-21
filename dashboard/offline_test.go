@@ -266,14 +266,14 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 			}
 			line, err := core.ExportLine(&evs[i], m)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			b.Write(line)
 			b.WriteByte('\n')
 		}
 		p := filepath.Join(t.TempDir(), name)
 		if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		return p
 	}
@@ -281,19 +281,19 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 		t.Helper()
 		h, err := New(Config{Open: []string{file}})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		srv := httptest.NewServer(h)
 		defer srv.Close()
 		var s Session
 		_, b := get(t, srv.URL, "/api/cp/v1/sessions/ts_v")
 		if err := json.Unmarshal(b, &s); err != nil {
-			t.Fatalf("%s %v", b, err)
+			panic(fmt.Sprintf("%s %v", b, err))
 		}
 		// The collector's own view of the events is not changed by it.
 		_, b = get(t, srv.URL, "/api/col/v1/sessions/ts_v/summary")
 		if !strings.Contains(string(b), `"incomplete":false`) || !strings.Contains(string(b), `"event_count":2`) {
-			t.Fatalf("summary: %s", b)
+			panic(fmt.Sprintf("summary: %s", b))
 		}
 		return s
 	}
@@ -304,19 +304,19 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 		s := open(write("verdict.ndjson", meta, on))
 		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason || len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != warn ||
 			!s.DrainTimedOut || s.MaxDrainSeconds != 60 || s.State != "SEALED" || s.Name != "verdict" {
-			t.Fatalf("session opened from an export with a verdict (on line %d): %+v", on+1, s)
+			panic(fmt.Sprintf("session opened from an export with a verdict (on line %d): %+v", on+1, s))
 		}
 	}
 	// A session that was complete says so, and stays complete.
 	if s := open(write("fine.ndjson", &core.ExportSession{State: "SEALED"}, 0)); s.Incomplete || len(s.IncompleteReasons)+len(s.DeliveryUnconfirmed) != 0 || s.DrainTimedOut {
-		t.Fatalf("a complete session: %+v", s)
+		panic(fmt.Sprintf("a complete session: %+v", s))
 	}
 	// A seal that failed.
 	if s := open(write("seal.ndjson", &core.ExportSession{State: "SEALED", Incomplete: true, SealError: "collector unavailable"}, 0)); !s.Incomplete || s.SealError != "collector unavailable" {
-		t.Fatalf("a failed seal: %+v", s)
+		panic(fmt.Sprintf("a failed seal: %+v", s))
 	}
 	// An export from before the verdict was carried: judged on its events.
 	if s := open(writeExport(t, "old.ndjson", evs...)); s.Incomplete || len(s.IncompleteReasons) != 0 {
-		t.Fatalf("an export without a verdict: %+v", s)
+		panic(fmt.Sprintf("an export without a verdict: %+v", s))
 	}
 }

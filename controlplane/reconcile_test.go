@@ -84,10 +84,10 @@ func TestDeliveryVerdictAgainstTheCollector(t *testing.T) {
 		"instance bare: 2 of 4 recorded events reached the collector, 1 dropped by the SDK",
 	}
 	if fmt.Sprint(short) != fmt.Sprint(want) {
-		t.Fatalf("reasons\n got %q\nwant %q", short, want)
+		panic(fmt.Sprintf("reasons\n got %q\nwant %q", short, want))
 	}
 	if len(unc) != 1 || !strings.HasPrefix(unc[0], "service billing (instance host-3): the collector has 6 events, more than the 2 of the instance's last report") {
-		t.Fatalf("unconfirmed %q", unc)
+		panic(fmt.Sprintf("unconfirmed %q", unc))
 	}
 
 	// An instance the collector's list leaves out: none of its events arrived,
@@ -96,41 +96,41 @@ func TestDeliveryVerdictAgainstTheCollector(t *testing.T) {
 	// session incomplete or leaves it unconfirmed, never complete.
 	d := []Delivery{final(rep("a", "i", 5, 5, 0))}
 	if short, _ := verdict(d, counts(false)); len(short) != 1 || !strings.Contains(short[0], "0 of 5 recorded events reached the collector") {
-		t.Fatalf("not in a complete list: %q", short)
+		panic(fmt.Sprintf("not in a complete list: %q", short))
 	}
 	if short, unc := verdict(d, counts(true)); len(short) != 0 || len(unc) != 1 ||
 		unc[0] != "service a (instance i): 5 of 5 recorded events were delivered by the instance's own count (the collector's count for the instance was not available), so that could not be checked" {
-		t.Fatalf("not in a truncated list, and the instance says all is delivered: %q %q", short, unc)
+		panic(fmt.Sprintf("not in a truncated list, and the instance says all is delivered: %q %q", short, unc))
 	}
 	if short, unc := verdict([]Delivery{rep("a", "i", 5, 3, 0)}, counts(true)); len(short) != 0 || len(unc) != 1 {
-		t.Fatalf("not in a truncated list, holding events: %q %q", short, unc)
+		panic(fmt.Sprintf("not in a truncated list, holding events: %q %q", short, unc))
 	}
 	if short, unc := verdict([]Delivery{final(rep("a", "i", 5, 3, 0))}, counts(true)); len(short) != 1 || len(unc) != 0 {
-		t.Fatalf("not in a truncated list, final and holding events: %q %q", short, unc)
+		panic(fmt.Sprintf("not in a truncated list, final and holding events: %q %q", short, unc))
 	}
 	if short, unc := verdict([]Delivery{rep("a", "i", 5, 4, 1)}, counts(true)); len(short) != 1 || len(unc) != 0 {
-		t.Fatalf("not in a truncated list, dropped events: %q %q", short, unc)
+		panic(fmt.Sprintf("not in a truncated list, dropped events: %q %q", short, unc))
 	}
 	// It said in a final report that it held events, and a later report took
 	// that back. With its count the collector decides; without it nothing but
 	// the instance's word (or a forger's) says that the events arrived.
 	took := map[string]struct{}{deliveryKey("a", "i"): {}}
 	if short, unc := deliveryVerdict(d, counts(true), took); len(short) != 1 || len(unc) != 0 || !strings.Contains(short[0], "an earlier final report of it held undelivered events") {
-		t.Fatalf("an earlier final shortfall, no count: %q %q", short, unc)
+		panic(fmt.Sprintf("an earlier final shortfall, no count: %q %q", short, unc))
 	}
 	if short, unc := deliveryVerdict(d, counts(false, "a", "i", 5), took); len(short)+len(unc) != 0 {
-		t.Fatalf("an earlier final shortfall, the collector has everything: %q %q", short, unc)
+		panic(fmt.Sprintf("an earlier final shortfall, the collector has everything: %q %q", short, unc))
 	}
 	// A collector that gives no counts at all is an older one, not one a
 	// forger crowded out: the later report is unconfirmed like every other.
 	if short, unc := deliveryVerdict(d, collectorCounts{}, took); len(short) != 0 || len(unc) != 1 {
-		t.Fatalf("an earlier final shortfall, an older collector: %q %q", short, unc)
+		panic(fmt.Sprintf("an earlier final shortfall, an older collector: %q %q", short, unc))
 	}
 
 	// The names of a report are cleaned; the collector's are compared cleaned.
 	c := countsOf(DrainStatus{Instances: []InstanceCount{{Service: "pay\x1bments", Instance: "hé-1", Events: 2}, {Service: "payments", Instance: "h-1", Events: 3}}}, true)
 	if n, ok := c.of("payments", "h-1"); !ok || n != 5 {
-		t.Fatalf("cleaned names: %d %v", n, ok)
+		panic(fmt.Sprintf("cleaned names: %d %v", n, ok))
 	}
 }
 
@@ -146,7 +146,7 @@ func TestDrainDoesNotCondemnOnAStaleReport(t *testing.T) {
 	s, took := e.stop()
 	wantComplete(t, s)
 	if took >= testGrace {
-		t.Fatalf("the drain waited %v for an instance whose events the collector has", took)
+		panic(fmt.Sprintf("the drain waited %v for an instance whose events the collector has", took))
 	}
 }
 
@@ -165,7 +165,7 @@ func TestDrainBelievesTheCollectorOverTheReport(t *testing.T) {
 			s, took := e.stop()
 			wantComplete(t, s)
 			if took >= testGrace {
-				t.Fatalf("the drain waited %v", took)
+				panic(fmt.Sprintf("the drain waited %v", took))
 			}
 		})
 	}
@@ -184,7 +184,7 @@ func TestDrainBelievesTheCollectorOverTheReport(t *testing.T) {
 		s, took := e.stop()
 		wantComplete(t, s)
 		if took < 2*testGrace {
-			t.Fatalf("sealed after %v, before the collector had the events", took)
+			panic(fmt.Sprintf("sealed after %v, before the collector had the events", took))
 		}
 	})
 	t.Run("and it stops short", func(t *testing.T) {
@@ -198,7 +198,7 @@ func TestDrainBelievesTheCollectorOverTheReport(t *testing.T) {
 		s, took := e.stop()
 		wantShortfall(t, s, "service orders-api (instance o-1): 5 of 8 recorded events reached the collector", "context deadline exceeded")
 		if took < testGrace+testGrace/2-40*time.Millisecond {
-			t.Fatalf("sealed after %v: the grace counts from the last event the collector got", took)
+			panic(fmt.Sprintf("sealed after %v: the grace counts from the last event the collector got", took))
 		}
 	})
 }
@@ -214,7 +214,7 @@ func TestDrainWaitsForAnInstanceWorkingThroughABacklog(t *testing.T) {
 			e.col.counting()
 			other, err := e.m.Start(StartRequest{Name: "other", QuiesceSeconds: 2, MaxDrainSeconds: 1000})
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			e.report(total(rep("orders-api", "o-1", 601, 0, 0), 0))
 			done := make(chan struct{})
@@ -236,7 +236,7 @@ func TestDrainWaitsForAnInstanceWorkingThroughABacklog(t *testing.T) {
 			<-done
 			wantComplete(t, s)
 			if took < 3*testGrace {
-				t.Fatalf("sealed after %v: the session was not waited for", took)
+				panic(fmt.Sprintf("sealed after %v: the session was not waited for", took))
 			}
 		})
 	}
@@ -246,7 +246,7 @@ func TestDrainWaitsForAnInstanceWorkingThroughABacklog(t *testing.T) {
 		e.col.counting()
 		e.report(total(rep("orders-api", "o-1", 601, 0, 0), 512))
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		began := time.Now()
 		for range 3 {
@@ -256,7 +256,7 @@ func TestDrainWaitsForAnInstanceWorkingThroughABacklog(t *testing.T) {
 		s := e.sealed()
 		wantShortfall(t, s, "0 of 601 recorded events reached the collector")
 		if took := time.Since(began); took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
-			t.Fatalf("sealed after %v, want the grace (%v)", took, testGrace)
+			panic(fmt.Sprintf("sealed after %v, want the grace (%v)", took, testGrace))
 		}
 	})
 }
@@ -271,12 +271,12 @@ func TestForgedReportCannotClearAShortfall(t *testing.T) {
 	e.report(failing(rep("orders-api", "o-1", 21, 0, 0), "connection refused"))
 	e.report(total(final(rep("orders-api", "o-1", 500, 500, 0)), 500)) // forged: "everything was delivered"
 	if ok, err := e.m.ReportDelivery(e.id, failing(final(rep("orders-api", "o-1", 21, 0, 0)), "connection refused")); ok || err != nil {
-		t.Fatalf("the real report, behind the forged one: accepted=%v err=%v", ok, err)
+		panic(fmt.Sprintf("the real report, behind the forged one: accepted=%v err=%v", ok, err))
 	}
 	// Lower counters never replace higher ones.
 	for _, lower := range []Delivery{rep("orders-api", "o-1", 499, 499, 0), rep("orders-api", "o-1", 600, 400, 0), rep("orders-api", "o-1", 0, 0, 0)} {
 		if ok, err := e.m.ReportDelivery(e.id, lower); ok || err != nil {
-			t.Fatalf("report %+v behind the stored one: accepted=%v err=%v", lower, ok, err)
+			panic(fmt.Sprintf("report %+v behind the stored one: accepted=%v err=%v", lower, ok, err))
 		}
 	}
 	s, _ := e.stop()
@@ -297,22 +297,22 @@ func TestDeliveryInstanceLimitKeepsKnownInstances(t *testing.T) {
 		e.col.has("svc", fmt.Sprintf("i%03d", i), 1)
 	}
 	if s, _ := e.m.Get(e.id); len(s.Delivery) != MaxDeliveryInstances {
-		t.Fatalf("%d reports stored", len(s.Delivery))
+		panic(fmt.Sprintf("%d reports stored", len(s.Delivery)))
 	}
 	// The instance with the real shortfall is one of them: its report counts.
 	e.report(failing(final(rep("svc", "i007", 9, 1, 0)), "connection refused"))
 	if ok, err := e.m.ReportDelivery(e.id, rep("svc", "one-too-many", 1, 1, 0)); ok || !errors.Is(err, ErrBadState) {
-		t.Fatalf("instance %d: accepted=%v err=%v, want ErrBadState (409)", MaxDeliveryInstances+1, ok, err)
+		panic(fmt.Sprintf("instance %d: accepted=%v err=%v, want ErrBadState (409)", MaxDeliveryInstances+1, ok, err))
 	}
 	s := func() Session {
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		return e.sealed()
 	}()
 	if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "instance i007): 1 of 9") ||
 		len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "more than 256 instances reported; the reports of 1 others were refused") {
-		t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+		panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 	}
 }
 
@@ -327,7 +327,7 @@ func follow(m *Manager, service, deliveryInstance string) func() {
 func hello(t *testing.T, m *Manager, service, instance string) {
 	t.Helper()
 	if res, err := m.ReportDeliveries(DeliveryBatch{Service: service, Instance: instance}); err != nil || len(res) != 0 {
-		t.Fatalf("a batch without reports: %+v %v", res, err)
+		panic(fmt.Sprintf("a batch without reports: %+v %v", res, err))
 	}
 }
 
@@ -350,10 +350,10 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took := e.stop()
 		wantShortfall(t, s, "service orders-api (instance o-1): the collector has 3 events from it, but none of its delivery reports for the session arrived")
 		if took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
-			t.Fatalf("sealed after %v, want the grace (%v)", took, testGrace)
+			panic(fmt.Sprintf("sealed after %v, want the grace (%v)", took, testGrace))
 		}
 		if len(s.DeliveryUnconfirmed) != 0 {
-			t.Fatalf("unconfirmed %q", s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("unconfirmed %q", s.DeliveryUnconfirmed))
 		}
 	})
 	// The review's F1: an idle instance frozen for longer than the grace
@@ -369,7 +369,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took := e.stop()
 		wantComplete(t, s)
 		if took >= testGrace/2 {
-			t.Fatalf("the drain waited %v for an instance that took no part", took)
+			panic(fmt.Sprintf("the drain waited %v for an instance that took no part", took))
 		}
 	})
 	// Not one report of it has arrived since it connected: something refuses
@@ -386,10 +386,10 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took := e.stop()
 		if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 ||
 			s.DeliveryUnconfirmed[0] != "service orders-api (instance o-1): it follows the control plane, but no delivery report of it has arrived since it connected (its log says why); the collector has no events from it for this session, so whether it recorded any is unknown" {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 		if took >= testGrace/2 {
-			t.Fatalf("the drain waited %v for it", took)
+			panic(fmt.Sprintf("the drain waited %v for it", took))
 		}
 	})
 	t.Run("connected a moment ago, not heard of yet: not named", func(t *testing.T) {
@@ -409,7 +409,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.col.sealHold = hold
 		leave := follow(e.m, "orders-api", "o-1")
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		<-e.col.sealing // the reports are closed: it was silent for the grace
 		leave()
@@ -424,7 +424,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took := e.stop()
 		wantComplete(t, s)
 		if took >= testGrace {
-			t.Fatalf("the drain waited %v for an instance that had left", took)
+			panic(fmt.Sprintf("the drain waited %v for an instance that had left", took))
 		}
 	})
 	t.Run("its report arrives within the grace", func(t *testing.T) {
@@ -432,17 +432,17 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.col.counting().has("orders-api", "o-1", 3)
 		defer follow(e.m, "orders-api", "o-1")()
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		time.Sleep(testGrace / 3)
 		if s, _ := e.m.Get(e.id); s.State != StateDraining {
-			t.Fatalf("sealed without the report of an instance that took part: %+v", s)
+			panic(fmt.Sprintf("sealed without the report of an instance that took part: %+v", s))
 		}
 		began := time.Now()
 		e.report(final(rep("orders-api", "o-1", 3, 3, 0)))
 		wantComplete(t, e.sealed())
 		if took := time.Since(began); took >= testGrace/2 {
-			t.Fatalf("sealed %v after the report", took)
+			panic(fmt.Sprintf("sealed %v after the report", took))
 		}
 	})
 	// The grace counts from the last sign of life, not from the stop: an
@@ -454,14 +454,14 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.col.counting().has("orders-api", "o-1", 3)
 		defer follow(e.m, "orders-api", "o-1")()
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		for range 6 { // twice the grace
 			time.Sleep(testGrace / 3)
 			hello(t, e.m, "orders-api", "o-1")
 		}
 		if s, _ := e.m.Get(e.id); s.State != StateDraining {
-			t.Fatalf("sealed while reports of the instance were arriving: %+v", s)
+			panic(fmt.Sprintf("sealed while reports of the instance were arriving: %+v", s))
 		}
 		e.report(final(rep("orders-api", "o-1", 3, 3, 0)))
 		wantComplete(t, e.sealed())
@@ -476,10 +476,10 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.report(rep("orders-api", "o-1", 3, 3, 0))
 		s, took := e.stop()
 		if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "the collector has 5 events, more than the 3 of the instance's last report") {
-			t.Fatalf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
+			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 		if took < testGrace-20*time.Millisecond {
-			t.Fatalf("sealed after %v: the instance is connected and its next report was not waited for", took)
+			panic(fmt.Sprintf("sealed after %v: the instance is connected and its next report was not waited for", took))
 		}
 
 		e = newDeliveryEnv(t, testGrace, nil)
@@ -490,7 +490,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took = e.stop()
 		wantComplete(t, s)
 		if took < testGrace/4 || took >= testGrace {
-			t.Fatalf("sealed after %v, want soon after the report (%v)", took, testGrace/4)
+			panic(fmt.Sprintf("sealed after %v, want soon after the report (%v)", took, testGrace/4))
 		}
 	})
 	t.Run("an SDK that sends no reports, and other followers", func(t *testing.T) {
@@ -504,14 +504,14 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took := e.stop()
 		wantComplete(t, s)
 		if took >= testGrace {
-			t.Fatalf("the drain waited %v", took)
+			panic(fmt.Sprintf("the drain waited %v", took))
 		}
 	})
 	t.Run("connects during the drain", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		e.col.counting().setPending(1)
 		if _, err := e.m.Stop(e.id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		time.Sleep(testGrace + 50*time.Millisecond) // the drain is older than the grace
 		defer follow(e.m, "late", "l-1")()
@@ -519,7 +519,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.col.setPending(0)
 		time.Sleep(testGrace / 2)
 		if s, _ := e.m.Get(e.id); s.State != StateDraining {
-			t.Fatalf("sealed before the new instance had the grace to report: %+v", s)
+			panic(fmt.Sprintf("sealed before the new instance had the grace to report: %+v", s))
 		}
 		e.report(final(rep("late", "l-1", 2, 2, 0)))
 		wantComplete(t, e.sealed())
@@ -532,7 +532,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		s, took := e.stop()
 		wantComplete(t, s)
 		if took > 2*time.Second {
-			t.Fatalf("drain %v", took)
+			panic(fmt.Sprintf("drain %v", took))
 		}
 	})
 }
@@ -551,10 +551,10 @@ func TestDeliveryGraceTimesAreMonotonic(t *testing.T) {
 		// The printed form of a time ends in "m=±<seconds>" when it carries a
 		// monotonic reading.
 		if !strings.Contains(sub.since.String(), " m=") || !strings.Contains(sub.heard.String(), " m=") {
-			t.Fatalf("since %v, heard %v: no monotonic reading", sub.since, sub.heard)
+			panic(fmt.Sprintf("since %v, heard %v: no monotonic reading", sub.since, sub.heard))
 		}
 		if sub.ConnectedAt.IsZero() || sub.LastDeliveryReport.IsZero() || sub.ConnectedAt.Location() != time.UTC {
-			t.Fatalf("shown times: connected %v, last report %v", sub.ConnectedAt, sub.LastDeliveryReport)
+			panic(fmt.Sprintf("shown times: connected %v, last report %v", sub.ConnectedAt, sub.LastDeliveryReport))
 		}
 	}
 }
@@ -571,7 +571,7 @@ func TestStreamNamesTheReportingInstance(t *testing.T) {
 	req.Header.Set(core.HeaderDeliveryInstance, "pod-7-4711-ab12cd")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	deadline := time.Now().Add(5 * time.Second)
@@ -580,7 +580,7 @@ func TestStreamNamesTheReportingInstance(t *testing.T) {
 	}
 	subs := m.Subscribers()
 	if len(subs) != 1 || subs[0].Instance != "pod-7" || subs[0].DeliveryInstance != "pod-7-4711-ab12cd" {
-		t.Fatalf("subscribers %+v", subs)
+		panic(fmt.Sprintf("subscribers %+v", subs))
 	}
 }
 
@@ -593,16 +593,16 @@ func TestDrainTimedOutClosesTheReports(t *testing.T) {
 	e.col.sealHold = hold
 	e.report(final(rep("svc", "i", 5, 0, 0)))
 	if _, err := e.m.Stop(e.id); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	<-e.col.sealing
 	if ok, err := e.m.ReportDelivery(e.id, final(rep("svc", "i", 5, 5, 0))); ok || !errors.Is(err, ErrBadState) || !strings.Contains(err.Error(), "being sealed") {
-		t.Fatalf("report after the drain timed out: accepted=%v err=%v, want ErrBadState", ok, err)
+		panic(fmt.Sprintf("report after the drain timed out: accepted=%v err=%v, want ErrBadState", ok, err))
 	}
 	close(hold)
 	s := e.sealed()
 	if !s.DrainTimedOut || !s.Incomplete || len(s.IncompleteReasons) != 1 || s.Delivery[0].Delivered != 0 {
-		t.Fatalf("timed out: %+v", s)
+		panic(fmt.Sprintf("timed out: %+v", s))
 	}
 }
 
@@ -614,14 +614,14 @@ func TestSessionListOmitsDeliveryReports(t *testing.T) {
 	e.report(rep("gone", "g-1", 4, 1, 0))
 	s, _ := e.stop()
 	if len(s.IncompleteReasons) != 1 || len(s.DeliveryUnconfirmed) != 1 {
-		t.Fatalf("verdict: %+v", s)
+		panic(fmt.Sprintf("verdict: %+v", s))
 	}
 	srv := httptest.NewServer(e.m.Handler())
 	defer srv.Close()
 	get := func(path string) string {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
@@ -631,19 +631,19 @@ func TestSessionListOmitsDeliveryReports(t *testing.T) {
 		var list []map[string]json.RawMessage
 		body := get(path)
 		if err := json.Unmarshal([]byte(body), &list); err != nil || len(list) != 1 {
-			t.Fatalf("%s: %v %s", path, err, body)
+			panic(fmt.Sprintf("%s: %v %s", path, err, body))
 		}
 		if _, has := list[0]["delivery"]; has || list[0]["incomplete_reasons"] == nil || list[0]["delivery_unconfirmed"] == nil {
-			t.Fatalf("%s: %s", path, body)
+			panic(fmt.Sprintf("%s: %s", path, body))
 		}
 	}
 	var one Session
 	if err := json.Unmarshal([]byte(get("/v1/sessions/"+e.id)), &one); err != nil || len(one.Delivery) != 2 {
-		t.Fatalf("the session itself: %v %+v", err, one)
+		panic(fmt.Sprintf("the session itself: %v %+v", err, one))
 	}
 	// The stored session is untouched by a list.
 	if got, _ := e.m.Get(e.id); len(got.Delivery) != 2 {
-		t.Fatalf("stored session after a list: %+v", got.Delivery)
+		panic(fmt.Sprintf("stored session after a list: %+v", got.Delivery))
 	}
 }
 

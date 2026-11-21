@@ -36,7 +36,7 @@ func (f *forgeEnv) post(path string, body any, hdr map[string]string) (int, stri
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, f.in.cpSrv.URL+path, strings.NewReader(string(b)))
 	if err != nil {
-		f.t.Fatal(err)
+		panic(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range hdr {
@@ -44,7 +44,7 @@ func (f *forgeEnv) post(path string, body any, hdr map[string]string) (int, stri
 	}
 	resp, err := deliveryHTTP.Do(req)
 	if err != nil {
-		f.t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
@@ -68,16 +68,16 @@ func (f *forgeEnv) ingest(id, service, instance string, n int) {
 	}
 	body, err := tsessionproto.Encode(evs)
 	if err != nil {
-		f.t.Fatal(err)
+		panic(err)
 	}
 	resp, err := deliveryHTTP.Post(f.in.colSrv.URL+"/v1/ingest", tsessionproto.ContentType, bytes.NewReader(body))
 	if err != nil {
-		f.t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		f.t.Fatalf("ingest: %s", resp.Status)
+		panic(fmt.Sprintf("ingest: %s", resp.Status))
 	}
 }
 
@@ -91,7 +91,7 @@ func (f *forgeEnv) stream(service, instance string) {
 	req.Header.Set(core.HeaderDeliveryInstance, instance)
 	resp, err := (&http.Client{Transport: &http.Transport{}}).Do(req)
 	if err != nil {
-		f.t.Fatal(err)
+		panic(err)
 	}
 	go func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
 }
