@@ -34,6 +34,7 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 
 	hc := cmp.Or(c.opts.HTTPClient, http.DefaultClient)
 	rep := doctorReport{ControlPlane: probe(ctx, hc, cp), Collector: probe(ctx, hc, col), Subscribers: []client.Subscriber{}}
+	notControlPlane := false
 	// A degraded control plane still answers: what it knows is shown.
 	if rep.ControlPlane.OK || rep.ControlPlane.Degraded != "" {
 		if active, err := client.List(ctx, c.opts, "ACTIVE"); err == nil {
@@ -41,16 +42,22 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		} else {
 			rep.Notes = append(rep.Notes, "listing active sessions failed: "+err.Error())
 		}
-		if on, err := client.KillSwitch(ctx, c.opts); err == nil {
+		on, killErr := client.KillSwitch(ctx, c.opts)
+		if killErr == nil {
 			rep.KillSwitch = on
 		} else {
-			rep.Notes = append(rep.Notes, "reading the kill switch failed: "+err.Error())
+			rep.Notes = append(rep.Notes, "reading the kill switch failed: "+killErr.Error())
 		}
 		subs, err := client.Subscribers(ctx, c.opts)
 		switch {
 		case err == nil:
 			rep.Subscribers = append(rep.Subscribers, subs...)
 			rep.noteDelivery()
+		case client.StatusCode(err) == http.StatusNotFound && client.StatusCode(killErr) == http.StatusNotFound:
+			// Every control plane has had the kill switch: one that knows neither is another service
+			// that answers /healthz, the collector for one.
+			notControlPlane = true
+			rep.Notes = append(rep.Notes, client.DisplayURL(cp)+" answers /healthz but not like a control plane; is --cp (TSESSION_CONTROLPLANE_URL) the collector's address?")
 		case client.StatusCode(err) == http.StatusNotFound:
 			rep.Notes = append(rep.Notes, "this control plane is too old to list connected services")
 		default:
@@ -67,6 +74,8 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		rep.print(c.stdout)
 	}
 	switch unreachable := func(p probeResult) bool { return !p.OK && p.Degraded == "" }; {
+	case notControlPlane:
+		return fmt.Errorf("doctor: the service at --cp is not a control plane")
 	case unreachable(rep.ControlPlane) || unreachable(rep.Collector):
 		return fmt.Errorf("doctor: a service is unreachable")
 	case !rep.ControlPlane.OK || !rep.Collector.OK:
@@ -215,7 +224,7 @@ func (r doctorReport) print(w io.Writer) {
 			unnamed++
 			continue
 		}
-		fmt.Fprintf(w, "  %-24s %-28s connected %s", clip(s.Service, 24), clip(s.Instance, 28),
+		fmt.Fprintf(w, "  %-24s %-28s connected %s", clip(s.Service, 24), clip(cmp.Or(s.Instance, s.DeliveryInstance), 28),
 			time.Since(s.ConnectedAt).Round(time.Second))
 		// It said that it sends delivery reports, and the control plane has
 		// heard nothing of it for too long: something refuses them. The control

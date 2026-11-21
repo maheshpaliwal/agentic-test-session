@@ -150,7 +150,7 @@ tracectl stop my-run --wait              # drains async work, then seals
 `doctor` lists every connected service. "Connected" means that the service follows the control plane; whether it
 can also deliver is a second question, and a service with a wrong `TSESSION_COLLECTOR_URL` used to look healthy
 until a session ran and its events were missing. Each service now asks its collector's `/healthz` when it starts
-and from time to time while it has nothing to send, and tells the control plane what it found, with no session
+and every 30 seconds while it has nothing to send (so an outage shorter than that can pass unseen), and tells the control plane what it found, with no session
 running:
 
 ```
@@ -169,13 +169,18 @@ service that holds events it cannot deliver (`CANNOT DELIVER`) or whose reports 
 its collector and passes (not known is not a failure), and a URL at which something other than a collector answers
 HTTP counts as reached. Credentials in a collector URL are never shown.
 
-No service wired yet? The repository has one that needs no database. Start it with the four variables of step 2
-and send it a request in place of the `curl` above:
+No service wired yet? The repository has one that needs no database. Start it in a second terminal, with the
+four variables of step 2; it stays in the foreground:
 
 ```bash
-(cd integration && DELIVERYAPP_LISTEN=127.0.0.1:8080 TSESSION_ENABLED=true TSESSION_SERVICE=sample \
+cd integration && DELIVERYAPP_LISTEN=127.0.0.1:8080 TSESSION_ENABLED=true TSESSION_SERVICE=sample \
   TSESSION_CONTROLPLANE_URL=http://127.0.0.1:7070 TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
-  go run ./cmd/deliveryapp)
+  go run ./cmd/deliveryapp
+```
+
+Then, in the terminal where `$ID` is set, send it a request in place of the `curl` above:
+
+```bash
 curl -X POST -H "x-tsession-id: $ID" http://127.0.0.1:8080/work
 ```
 

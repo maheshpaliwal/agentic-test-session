@@ -389,6 +389,10 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl doctor` with `--cp` at a service that answers `/healthz` and is no control plane (the collector's
+  address) says so and exits 1; it printed "ok" and "this control plane is too old". Its list of connected
+  services shows the instance name, which was blank. The README's sample-service step no longer puts a
+  foreground command before the `curl` it asks for.
 - The SDK's `stopped` note (it stopped recording after a panic) makes a session incomplete only when a delivery
   report or events in the collector tie that instance to it; for the other running sessions it is one
   `delivery_unconfirmed` line. One note, from any caller, marked every running session incomplete. The notes are

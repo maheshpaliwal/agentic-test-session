@@ -326,3 +326,20 @@ func TestDoctorRequireDeliveryNamesUnheardServices(t *testing.T) {
 		panic(fmt.Sprintf("undeliverable = %q, notes %q", got, rep.Notes))
 	}
 }
+
+// --cp at a service that answers /healthz and is no control plane (the
+// collector's address, the commonest slip): doctor says so and fails, where
+// it called the control plane ok and "too old".
+func TestDoctorRefusesACollectorAsControlPlane(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("[]")) })
+	col := httptest.NewServer(mux)
+	defer col.Close()
+	var out, errb bytes.Buffer
+	code := run([]string{"--cp", col.URL, "--collector", col.URL, "doctor"}, &out, &errb)
+	if code != 1 || !strings.Contains(out.String(), "not like a control plane; is --cp") || strings.Contains(out.String(), "too old") ||
+		!strings.Contains(errb.String(), "is not a control plane") {
+		panic(fmt.Sprintf("exit %d\n%s\n%s", code, out.String(), errb.String()))
+	}
+}
