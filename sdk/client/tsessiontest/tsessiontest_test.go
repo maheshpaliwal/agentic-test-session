@@ -229,3 +229,32 @@ type cleanupRecorder struct {
 }
 
 func (c *cleanupRecorder) Cleanup(fn func()) { *c.fns = append(*c.fns, fn) }
+
+// A failed event that RequireNoFailures reported is not printed again when
+// the test ends.
+func TestFailureIsListedOnce(t *testing.T) {
+	e := newEnv(t)
+	e.sum.Failures = []client.Failure{{Seq: 3, Service: "worker", Kind: core.KindWorkerEnd, Name: "ship", Err: "timeout"}}
+	r := &recorder{TB: t}
+	var cleanups []func()
+	rc := &cleanupRecorder{recorder: r, fns: &cleanups}
+	s := tsessiontest.Run(rc, e.opts)
+	func() {
+		defer func() {
+			if _, ok := recover().(failNow); !ok {
+				t.Fatal("RequireNoFailures must stop the test")
+			}
+		}()
+		tsessiontest.RequireNoFailures(rc, s)
+	}()
+	for _, fn := range cleanups {
+		fn()
+	}
+	out := strings.Join(r.msgs, "\n")
+	if n := strings.Count(out, "#3 worker worker.end ship: timeout"); n != 1 {
+		t.Fatalf("the failed event is listed %d times, want once:\n%s", n, out)
+	}
+	if !strings.Contains(out, "tracectl summary "+s.ID) {
+		t.Fatalf("the pointer to the session is still printed:\n%s", out)
+	}
+}

@@ -20,7 +20,7 @@ const usage = `usage: tracectl [--cp URL] [--collector URL] <command> [flags]
 
 session lifecycle (control plane):
   (--name templates: {bind} {bind.<name>} {initiated_by} {time} {date}; with no --name the server auto-names)
-  start [--name N] [--mode header|exclusive] [--ttl S] [--quiesce S] [--max-drain S]
+  start [--name N] [--mode header|exclusive] [--ttl S] [--quiesce S] [--max-drain S] [--id-only]
         [--bind source:name=value]...   source header|jwt|jwt_claim|cookie|query (repeatable;
         not with --mode exclusive). jwt reads an UNVERIFIED token: spoofable, test envs only.
   rename <id|name> <new name>   (works on sealed sessions; templates allowed)

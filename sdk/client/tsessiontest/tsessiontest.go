@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,7 +129,9 @@ func Run(t testing.TB, o client.Options) *client.Session {
 			return
 		}
 		t.Logf("tsession: session %s (%s) recorded this test; inspect it with: tracectl summary %s", s.ID, s.Info().Name, s.ID)
-		if sum, err := s.Summary(ctx); err == nil {
+		if _, listed := failuresListed.Load(s.ID); listed {
+			failuresListed.Delete(s.ID)
+		} else if sum, err := s.Summary(ctx); err == nil {
 			for _, f := range sum.Failures {
 				t.Logf("tsession: failed event #%d %s %s %s: %s", f.Seq, f.Service, f.Kind, f.Name, f.Err)
 			}
@@ -170,11 +173,19 @@ func Stop(t testing.TB, s *client.Session) client.Summary {
 	return sum
 }
 
+// failuresListed holds the ids of sessions whose failed events
+// RequireNoFailures has already printed, so Run's cleanup does not print them
+// a second time.
+var failuresListed sync.Map
+
 // RequireNoFailures fails the test if the session recorded a failed event or is incomplete (dropped or
 // quarantined events, asynchronous work that never finished).
 func RequireNoFailures(t testing.TB, s *client.Session) {
 	t.Helper()
 	sum := Stop(t, s)
+	if len(sum.Failures) > 0 {
+		failuresListed.Store(s.ID, struct{}{})
+	}
 	for _, f := range sum.Failures {
 		t.Errorf("tsession: failed event #%d %s %s %s: %s", f.Seq, f.Service, f.Kind, f.Name, f.Err)
 	}

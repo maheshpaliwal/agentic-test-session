@@ -56,3 +56,15 @@ func TestEmptySessionReferenceIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// start --id-only prints the id and nothing else, so a script can capture it.
+func TestStartIDOnly(t *testing.T) {
+	env := newResultsEnv(t)
+	code, out, e := env.tc("start", "--name", "run-1", "--id-only")
+	if code != 0 || e != "" || !strings.HasPrefix(out, "ts_") || strings.Count(out, "\n") != 1 || strings.ContainsAny(out, "{ \"") {
+		t.Fatalf("start --id-only: %d %q %q", code, out, e)
+	}
+	if code, _, e := env.tc("status", strings.TrimSpace(out)); code != 0 {
+		t.Fatalf("the printed id does not resolve: %d %s", code, e)
+	}
+}

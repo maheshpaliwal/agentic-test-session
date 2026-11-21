@@ -343,6 +343,9 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 		verdict = "**Failed**: " + plural(n, "failed event") + "."
 	case rep.incomplete:
 		verdict = "**Incomplete**: no failed events were recorded, but the recording is missing data."
+	case sum.EventCount == 0:
+		// Not "Passed": nothing was checked. This text is what a CI job summary shows.
+		verdict = "**Empty**: the session recorded no events, so nothing was checked (see `tracectl doctor`)."
 	default:
 		verdict = "**Passed**: no failed events."
 	}

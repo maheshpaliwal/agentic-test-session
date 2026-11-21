@@ -157,6 +157,10 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl report`: a session with no events is headed **Empty**, not **Passed**; with `--fail-on-empty` the
+  job summary used to say "Passed" on a failed job. `tracectl start --id-only` prints just the id for scripts.
+- `tsessiontest`: a failed event reported by `RequireNoFailures` is no longer printed a second time when the
+  test ends.
 - Collector: an ingest racing with shutdown could panic (send on a closed channel); it now gets `503`. A seal
   racing with shutdown gets `500`.
 - Collector: a store call that timed out could get an event quarantined as "poison"; timeouts are retried, and

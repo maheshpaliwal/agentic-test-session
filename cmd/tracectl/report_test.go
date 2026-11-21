@@ -581,3 +581,20 @@ func TestReportUsageErrors(t *testing.T) {
 		t.Error("report is missing from the usage text")
 	}
 }
+
+// A session with no events is not reported as passed: with the documented CI
+// recipe this text becomes the job summary, and nothing was checked.
+func TestReportEmptySession(t *testing.T) {
+	env := newReportEnv(t)
+	code, out, e := env.tc("report", reportID, "--fail-on-error", "--fail-on-incomplete")
+	if code != 0 || e != "" {
+		t.Fatalf("an empty session fails no gate unless --fail-on-empty is given: %d %s", code, e)
+	}
+	if strings.Contains(out, "**Passed**") || !strings.Contains(out, "**Empty**: the session recorded no events") {
+		t.Fatalf("headline of an empty session:\n%s", out)
+	}
+	code, out, e = env.tc("report", reportID, "--fail-on-empty")
+	if code != 3 || !strings.Contains(e, "recorded no events") || strings.Contains(out, "**Passed**") {
+		t.Fatalf("--fail-on-empty: %d %q\n%s", code, e, out)
+	}
+}

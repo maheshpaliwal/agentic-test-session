@@ -36,7 +36,8 @@ make down                               # when finished; this also deletes the r
 ```
 
 To move a port: `--listen` (collector, control plane), `-listen` (dashboard). Then point the services and
-`tracectl` at the new addresses with `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`. Run the collector
+`tracectl` at the new addresses with `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`, the control plane
+at the collector with `--collector-url`, and the dashboard at both with `-control-plane` and `-collector`. Run the collector
 from a directory you choose: it writes sealed bundles to `./bundles` there.
 
 ## Instrument a service
@@ -76,8 +77,8 @@ TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
 go build -o tracectl ./cmd/tracectl      # or: go run ./cmd/tracectl <command>
 
 tracectl doctor                          # both services answer; which services are connected
-tracectl start --name my-run             # prints the session as JSON; the id is the "id" field
-curl -H 'x-tsession-id: <id>' http://127.0.0.1:8080/orders
+ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
+curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
 tracectl stop my-run --wait              # drains async work, then seals
 ```
 
@@ -123,6 +124,8 @@ Stopping a session waits for it to go quiet (3s by default), so each such test t
 # gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included), or no events at all
 tracectl report my-run --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
 tracectl report my-run --format junit -o tsession-junit.xml
+# Limit: the gates see what reached the collector. A service that could not deliver its events (wrong
+# TSESSION_COLLECTOR_URL) says so only in its own log, and the session still passes if another service recorded.
 
 # keep a run after the job is gone: export it, then open the file without the services
 tracectl export my-run -o run.ndjson

@@ -22,6 +22,7 @@ func (c *cli) start(ctx context.Context, args []string) error {
 	fs.IntVar(&opts.MaxDrainSeconds, "max-drain", 0, "max drain seconds")
 	var binds bindFlags
 	fs.Var(&binds, "bind", "source:name=value (repeatable; header|jwt|jwt_claim|cookie|query)")
+	idOnly := fs.Bool("id-only", false, "print only the session id, for scripts: ID=$(tracectl start --id-only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -29,6 +30,10 @@ func (c *cli) start(ctx context.Context, args []string) error {
 	warnJWT(c.stderr, opts.Bindings)
 	s, err := client.Start(ctx, opts)
 	if err != nil {
+		return err
+	}
+	if *idOnly {
+		_, err = fmt.Fprintln(c.stdout, s.ID)
 		return err
 	}
 	printJSON(c.stdout, s.Info())
