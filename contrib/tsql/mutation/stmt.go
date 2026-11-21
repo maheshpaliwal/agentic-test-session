@@ -41,6 +41,7 @@ func (p *parser) insertStmt(in *Info, t []token) {
 	in.Kind = Insert
 	if t[0].val == "REPLACE" {
 		in.Kind = Upsert
+		in.Conflict = Conflict{AnyKey: true, Replace: true}
 	}
 	i := skipWords(t, 1, "LOW_PRIORITY", "DELAYED", "HIGH_PRIORITY", "IGNORE")
 	if i < len(t) && t[i].isWord("INTO") {
@@ -65,9 +66,6 @@ func (p *parser) insertStmt(in *Info, t []token) {
 		}
 	}
 	base := t[0].depth
-	if i < len(t) && t[i].isWord("VALUES") || i < len(t) && t[i].isWord("VALUE") {
-		p.values(in, t, i+1)
-	}
 	for j := i; j < len(t); j++ {
 		if t[j].depth != base {
 			continue
@@ -75,15 +73,59 @@ func (p *parser) insertStmt(in *Info, t []token) {
 		switch {
 		case t[j].isWord("ON") && j+1 < len(t) && t[j+1].isWord("CONFLICT"):
 			in.Kind = Upsert
+			in.Conflict = p.conflict(t, j+2, base)
 		case t[j].isWord("ON") && j+2 < len(t) && t[j+1].isWord("DUPLICATE"):
 			in.Kind = Upsert
+			in.Conflict = Conflict{AnyKey: true}
 		case t[j].isWord("RETURNING"):
 			p.returning(in, t, j)
 		}
 	}
+	// after the conflict clause: only an upsert needs every row of VALUES
+	if i < len(t) && t[i].isWord("VALUES") || i < len(t) && t[i].isWord("VALUE") {
+		p.values(in, t, i+1)
+	}
 	if in.MultiRow || len(in.Columns) == 0 {
 		in.Values = nil
 	}
+	if len(in.Columns) == 0 {
+		in.Rows = nil
+	}
+}
+
+// conflict reads what follows ON CONFLICT at t[i:]: an optional target and
+// the action.
+func (p *parser) conflict(t []token, i, base int) (c Conflict) {
+	if i < len(t) && t[i].isPunct("(") {
+		end := closeParen(t, i)
+		// a name and a comma in turn; anything else is an expression, a
+		// collation or an operator class
+		plain := (end-i)%2 == 0
+		var cols []string
+		for j := i + 1; j < end && plain; j++ {
+			switch {
+			case (j-i)%2 == 0:
+				plain = t[j].isPunct(",")
+			case t[j].isIdent():
+				cols = append(cols, t[j].name(p.d))
+			default:
+				plain = false
+			}
+		}
+		// "(a) WHERE ..." names a partial index: a row with these values that
+		// the predicate leaves out is not in the statement's way.
+		if plain && !(end+1 < len(t) && t[end+1].isWord("WHERE")) {
+			c.Target = cols
+		}
+		i = end + 1
+	}
+	for ; i+1 < len(t); i++ {
+		if t[i].depth == base && t[i].isWord("DO") {
+			c.DoNothing = t[i+1].isWord("NOTHING")
+			break
+		}
+	}
+	return c
 }
 
 func (p *parser) values(in *Info, t []token, i int) {
@@ -93,15 +135,31 @@ func (p *parser) values(in *Info, t []token, i int) {
 	end := closeParen(t, i)
 	if end+1 < len(t) && t[end+1].isPunct(",") {
 		in.MultiRow = true
+		for in.Kind == Upsert && len(in.Rows) < maxValueRows {
+			in.Rows = append(in.Rows, p.valueRow(in, t, i, end))
+			if end+2 >= len(t) || !t[end+1].isPunct(",") || !t[end+2].isPunct("(") {
+				return
+			}
+			i = end + 2
+			end = closeParen(t, i)
+		}
+		in.Rows = nil
 		return
 	}
+	in.Values = p.valueRow(in, t, i, end)
+}
+
+// valueRow maps the columns to the operands of one row of a VALUES list: the
+// parenthesis at t[i] that closes at t[end]. A value that is not a single
+// placeholder or literal is left out.
+func (p *parser) valueRow(in *Info, t []token, i, end int) map[string]Value {
 	d := t[i].depth + 1
-	in.Values = map[string]Value{}
+	row := map[string]Value{}
 	col, start := 0, i+1
 	flush := func(stop int) {
 		if col < len(in.Columns) {
 			if v, ok := operand(t[start:stop]); ok {
-				in.Values[in.Columns[col]] = v
+				row[in.Columns[col]] = v
 			}
 		}
 		col++
@@ -113,6 +171,7 @@ func (p *parser) values(in *Info, t []token, i int) {
 		}
 	}
 	flush(end)
+	return row
 }
 
 // operand converts a token run that is exactly one placeholder/literal.

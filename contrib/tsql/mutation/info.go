@@ -48,6 +48,28 @@ type Value struct {
 	Literal any // int64, float64, string or nil (NULL) when Arg == -1
 }
 
+// maxValueRows bounds the rows of a VALUES list that are kept in Info.Rows.
+const maxValueRows = 256
+
+// Conflict is the conflict clause of an upsert: Postgres ON CONFLICT, MySQL
+// ON DUPLICATE KEY UPDATE and REPLACE.
+type Conflict struct {
+	// DoNothing: ON CONFLICT ... DO NOTHING. Every row the statement writes
+	// is then a new one.
+	DoNothing bool
+	// Target is the column list of "ON CONFLICT (a, b)": the columns of the
+	// unique index the statement can collide on. It is nil for every other
+	// target, which does not say by which columns the row is found: ON
+	// CONSTRAINT name, an expression, a collation or operator class, the
+	// predicate of a partial index, and MySQL, where any unique key counts.
+	Target []string
+	// AnyKey: the row collides on whichever unique key of the table has its
+	// values (ON DUPLICATE KEY UPDATE, REPLACE).
+	AnyKey bool
+	// Replace: MySQL REPLACE, which deletes the rows in the way and inserts.
+	Replace bool
+}
+
 // Placeholder locates a bind parameter inside Info.Where.
 type Placeholder struct {
 	Start, End int // byte range relative to Info.Where
@@ -69,20 +91,26 @@ type Info struct {
 	Columns      []string
 	Values       map[string]Value // single-row INSERT: column -> operand
 	MultiRow     bool
-	HasWhere     bool
-	Where        string
-	WherePH      []Placeholder
-	HasLimit     bool             // WHERE tail contains LIMIT
-	Equals       map[string]Value // top-level AND-ed "col = operand" predicates
-	Complex      bool             // predicate cannot be replayed (joins, FROM/USING, CTE writes)
-	Named        bool             // uses :name placeholders
-	WritesInCTE  bool
-	Dollar       bool // uses $n placeholders
-	QMark        bool // uses ? placeholders
-	End          int  // byte offset just past the last non-';' token
-	Multi        bool // more than one statement in the text
-	CurrentOf    bool // WHERE CURRENT OF <cursor>
-	Bulk         bool // COPY ... FROM (bulk load, row set unknown)
+	// Rows is Values for each row of the multi-row VALUES list of an upsert,
+	// in order; nil for a single row, without a column list and beyond
+	// maxValueRows rows.
+	Rows []map[string]Value
+	// Conflict says what an upsert does with a row that is already there.
+	Conflict    Conflict
+	HasWhere    bool
+	Where       string
+	WherePH     []Placeholder
+	HasLimit    bool             // WHERE tail contains LIMIT
+	Equals      map[string]Value // top-level AND-ed "col = operand" predicates
+	Complex     bool             // predicate cannot be replayed (joins, FROM/USING, CTE writes)
+	Named       bool             // uses :name placeholders
+	WritesInCTE bool
+	Dollar      bool // uses $n placeholders
+	QMark       bool // uses ? placeholders
+	End         int  // byte offset just past the last non-';' token
+	Multi       bool // more than one statement in the text
+	CurrentOf   bool // WHERE CURRENT OF <cursor>
+	Bulk        bool // COPY ... FROM (bulk load, row set unknown)
 
 	// Tx is the transaction state the text leaves behind: every ';'-separated
 	// statement is classified and the last transaction-control one wins.
