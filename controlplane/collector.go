@@ -109,17 +109,29 @@ func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, in, o
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	// The body is read to its end before it is closed, whatever became of the
+	// request: the transport keeps a connection only then. A decoder stops at
+	// the end of the JSON value, which is not the end of the body (a newline
+	// follows, and the last chunk of an answer sent in chunks); an answer of
+	// 120 instances or more cost a connection per request that way.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxCollectorLeftover))
+		resp.Body.Close()
+	}()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("collector %s %s: %s: %s", method, suffix, resp.Status, bytes.TrimSpace(b))
 	}
 	if out == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // let the connection be reused
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
+
+// maxCollectorLeftover bounds what is read of an answer of the collector
+// after the part that was used, to keep the connection. An answer that has
+// more left than this costs its connection instead.
+const maxCollectorLeftover = 1 << 16
 
 // Delete implements Collector.
 func (c *HTTPCollector) Delete(ctx context.Context, id string) error {

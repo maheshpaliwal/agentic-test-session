@@ -587,9 +587,32 @@ func TestDeliveryNamesCompareCleaned(t *testing.T) {
 // them opened one of their own, and a machine ran out of local ports (found
 // with 500 sessions stopping together, four times in a row).
 func TestCollectorClientKeepsItsConnections(t *testing.T) {
+	// What the collector answers: its drain-status with few instances and with
+	// many, and an error with a body. The third review's F2: from about 120
+	// instances on the answer is sent in chunks, and the end of the body can
+	// arrive after the JSON value was decoded. A body that is closed before it
+	// was read to its end costs the connection: 2560 connections for 2560
+	// requests. Here the end always arrives late.
+	many := DrainStatus{Instances: make([]InstanceCount, 512)}
+	for i := range many.Instances {
+		many.Instances[i] = InstanceCount{Service: fmt.Sprintf("service-%04d", i), Instance: fmt.Sprintf("host-%04d-a1b2c3", i), Events: int64(i)}
+	}
 	var opened atomic.Int64
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"pending":0,"instances":[]}`)
+		switch {
+		case strings.Contains(r.URL.Path, "ts_few"):
+			_, _ = io.WriteString(w, `{"pending":0,"instances":[]}`)
+		case strings.Contains(r.URL.Path, "ts_many"):
+			// As the collector writes it: an encoder, so a newline follows the
+			// value; in chunks, the last of which is late.
+			b, _ := json.Marshal(many)
+			_, _ = w.Write(b)
+			w.(http.Flusher).Flush()
+			time.Sleep(2 * time.Millisecond)
+			_, _ = io.WriteString(w, "\n")
+		default:
+			http.Error(w, strings.Repeat("the store is down ", 400), http.StatusInternalServerError)
+		}
 	}))
 	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
 		if s == http.StateNew {
@@ -598,28 +621,49 @@ func TestCollectorClientKeepsItsConnections(t *testing.T) {
 	}
 	srv.Start()
 	defer srv.Close()
+	ctx := context.Background()
+	calls := map[string]func(c *HTTPCollector, id string) error{
+		"drain-status": func(c *HTTPCollector, id string) error { _, err := c.DrainStatus(ctx, id); return err },
+		"instance-counts": func(c *HTTPCollector, id string) error {
+			_, err := c.InstanceCounts(ctx, id, many.Instances[:3])
+			return err
+		},
+		"seal":   func(c *HTTPCollector, id string) error { _, err := c.Seal(ctx, id); return err },
+		"delete": func(c *HTTPCollector, id string) error { return c.Delete(ctx, id) },
+	}
 	for name, c := range map[string]*HTTPCollector{
 		"the default client":     {BaseURL: srv.URL},
 		"the client of the main": {BaseURL: srv.URL, Client: NewCollectorClient(30 * time.Second)},
 	} {
-		opened.Store(0)
-		const drains, polls = 64, 40
-		var wg sync.WaitGroup
-		for range drains {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for range polls {
-					if _, err := c.DrainStatus(context.Background(), "ts_1"); err != nil {
-						t.Error(err)
-						return
-					}
+		for call, do := range calls {
+			for _, id := range []string{"ts_few", "ts_many", "ts_failing"} {
+				// The connections the last round left idle would hide a round
+				// that keeps none: each starts with none.
+				if c.Client != nil {
+					c.Client.CloseIdleConnections()
+				} else {
+					defaultCollectorClient.CloseIdleConnections()
 				}
-			}()
-		}
-		wg.Wait()
-		if n := opened.Load(); n > 2*drains {
-			t.Errorf("%s: %d connections for %d requests of %d concurrent drains, want about one per drain", name, n, drains*polls, drains)
+				opened.Store(0)
+				const drains, polls = 32, 20
+				var wg sync.WaitGroup
+				for range drains {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for range polls {
+							if err := do(c, id); (err != nil) != (id == "ts_failing") {
+								t.Errorf("%s %s: %v", call, id, err)
+								return
+							}
+						}
+					}()
+				}
+				wg.Wait()
+				if n := opened.Load(); n > 2*drains {
+					t.Errorf("%s, %s of %s: %d connections for %d requests of %d concurrent drains, want about one per drain", name, call, id, n, drains*polls, drains)
+				}
+			}
 		}
 	}
 }
