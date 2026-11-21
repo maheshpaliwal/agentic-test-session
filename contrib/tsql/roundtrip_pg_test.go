@@ -47,12 +47,12 @@ func rtAdmin(tb testing.TB, stmts ...string) {
 	tb.Helper()
 	db, err := sql.Open("pgx", rtDSN(tb))
 	if err != nil {
-		tb.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
-			tb.Fatalf("%s: %v", s, err)
+			panic(fmt.Sprintf("%s: %v", s, err))
 		}
 	}
 }
@@ -176,7 +176,7 @@ func rtOpen(tb testing.TB, d *rtDriver, opts ...tsql.Option) *sql.DB {
 	sql.Register(name, d)
 	db, err := tsql.Open(name, dsn, append([]tsql.Option{tsql.WithStore("postgres")}, opts...)...)
 	if err != nil {
-		tb.Fatal(err)
+		panic(err)
 	}
 	db.SetMaxOpenConns(1)
 	tb.Cleanup(func() { db.Close() })
@@ -270,14 +270,14 @@ func rtMeasure(t *testing.T, c rtCase, inTx bool, legacy bool, opts ...tsql.Opti
 	d := &rtDriver{legacy: legacy}
 	db := rtOpen(t, d, opts...)
 	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var ex rtExecer = db
 	var tx *sql.Tx
 	if inTx {
 		var err error
 		if tx, err = db.BeginTx(ctx, nil); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		ex = tx
 	}
@@ -286,12 +286,12 @@ func rtMeasure(t *testing.T, c rtCase, inTx bool, legacy bool, opts ...tsql.Opti
 		d.take()
 		before := len(byKind(rec.Events(), core.KindDBWrite))
 		if _, err := ex.ExecContext(ctx, c.stmt, c.args(i)...); err != nil {
-			t.Fatalf("%s: %v", c.stmt, err)
+			panic(fmt.Sprintf("%s: %v", c.stmt, err))
 		}
 		out[i].calls = d.take()
 		ws := byKind(rec.Events(), core.KindDBWrite)
 		if len(ws) != before+1 {
-			t.Fatalf("%s recorded %d write events, want 1", c.name, len(ws)-before)
+			panic(fmt.Sprintf("%s recorded %d write events, want 1", c.name, len(ws)-before))
 		}
 		e := ws[len(ws)-1]
 		js, err := json.Marshal(struct {
@@ -299,13 +299,13 @@ func rtMeasure(t *testing.T, c rtCase, inTx bool, legacy bool, opts ...tsql.Opti
 			Flags     []string        `json:"flags"`
 		}{e.Mutations, e.Flags})
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		out[i].recorded = string(js)
 	}
 	if inTx {
 		if err := tx.Commit(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	return out
@@ -384,7 +384,7 @@ func BenchmarkPGRoundTrips(b *testing.B) {
 				if mode == "tx" {
 					var err error
 					if tx, err = db.BeginTx(ctx, nil); err != nil {
-						b.Fatal(err)
+						panic(err)
 					}
 					ex = tx
 				}
@@ -394,21 +394,21 @@ func BenchmarkPGRoundTrips(b *testing.B) {
 				}
 				// The first statement warms the connection (and pgx's statement cache).
 				if _, err := ex.ExecContext(sctx, c.stmt, c.args(0)...); err != nil {
-					b.Fatal(err)
+					panic(err)
 				}
 				d.take()
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					if _, err := ex.ExecContext(sctx, c.stmt, c.args(i+1)...); err != nil {
-						b.Fatal(err)
+						panic(err)
 					}
 				}
 				b.StopTimer()
 				b.ReportMetric(float64(len(d.take()))/float64(b.N), "rt/op")
 				if tx != nil {
 					if err := tx.Rollback(); err != nil {
-						b.Fatal(err)
+						panic(err)
 					}
 				}
 			})

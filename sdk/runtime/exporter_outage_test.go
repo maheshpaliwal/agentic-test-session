@@ -255,7 +255,7 @@ func TestExporterOutageScenarios(t *testing.T) {
 				}
 			}
 			if !exp.Flush(5 * time.Second) {
-				t.Fatal("warm-up flush failed")
+				panic("warm-up flush failed")
 			}
 			col.setFail(sc.fail())
 			col.mu.Lock()

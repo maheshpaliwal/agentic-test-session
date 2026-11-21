@@ -2,6 +2,7 @@ package tredisv8
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -40,7 +41,7 @@ func realServer(t *testing.T, run func(t *testing.T, addr string)) {
 	c := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
 	flush := func() {
 		if err := c.FlushDB(context.Background()).Err(); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	flush()
@@ -64,31 +65,31 @@ func setupAt(t *testing.T, addr string, opts ...Option) (*redis.Client, *core.Me
 func TestReadWriteAndNil(t *testing.T) {
 	c, rec, ctx := setup(t)
 	if err := c.Set(ctx, "user:123", "bob", 0).Err(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if v := c.Get(ctx, "user:123").Val(); v != "bob" {
-		t.Fatal(v)
+		panic(v)
 	}
 	if err := c.Get(ctx, "missing").Err(); err != redis.Nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ev := rec.Events()
 	if len(ev) != 3 {
-		t.Fatalf("events=%d", len(ev))
+		panic(fmt.Sprintf("events=%d", len(ev)))
 	}
 	w := ev[0]
 	if w.Kind != core.KindCacheWrite || w.Name != "SET user:123" || len(w.Mutations) != 1 {
-		t.Fatalf("%+v", w)
+		panic(fmt.Sprintf("%+v", w))
 	}
 	m := w.Mutations[0]
 	if m.Store != "redis" || m.Entity != "user:*" || m.PK["key"] != "user:123" || m.Op != "set" || string(m.After.Inline) != `"bob"` {
-		t.Fatalf("%+v", m)
+		panic(fmt.Sprintf("%+v", m))
 	}
 	if ev[1].Kind != core.KindCacheRead || string(ev[1].Resp.Inline) != `"bob"` {
-		t.Fatalf("%+v", ev[1])
+		panic(fmt.Sprintf("%+v", ev[1]))
 	}
 	if ev[2].Err != "" {
-		t.Fatalf("redis.Nil must not be an error: %q", ev[2].Err)
+		panic(fmt.Sprintf("redis.Nil must not be an error: %q", ev[2].Err))
 	}
 }
 
@@ -97,12 +98,12 @@ func TestIdempotentAndDisabled(t *testing.T) {
 	Wrap(c)
 	c.Set(ctx, "k", "v", 0)
 	if n := len(rec.Events()); n != 1 {
-		t.Fatalf("double wrap produced %d events", n)
+		panic(fmt.Sprintf("double wrap produced %d events", n))
 	}
 	core.Configure(core.Config{})
 	c2 := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	if Wrap(c2) != c2 {
-		t.Fatal("disabled Wrap must return the same client")
+		panic("disabled Wrap must return the same client")
 	}
 }
 
@@ -110,7 +111,7 @@ func TestNoSessionNoEvents(t *testing.T) {
 	c, rec, _ := setup(t)
 	c.Set(context.Background(), "k", "v", 0)
 	if len(rec.Events()) != 0 {
-		t.Fatal("unexpected events")
+		panic("unexpected events")
 	}
 }
 
@@ -121,14 +122,14 @@ func TestBeforeImage(t *testing.T) {
 	c.Set(ctx, "other", "x", 0)
 	ev := rec.Events()
 	if len(ev) != 3 { // image reads must not be traced
-		t.Fatalf("events=%d", len(ev))
+		panic(fmt.Sprintf("events=%d", len(ev)))
 	}
 	m := ev[1].Mutations[0]
 	if string(m.Before.Inline) != `{"name":"a"}` || string(m.After.Inline) != `{"name":"b"}` {
-		t.Fatalf("%s -> %s", m.Before.Inline, m.After.Inline)
+		panic(fmt.Sprintf("%s -> %s", m.Before.Inline, m.After.Inline))
 	}
 	if !ev[2].Mutations[0].Before.IsZero() {
-		t.Fatal("non-matching key must have no before image")
+		panic("non-matching key must have no before image")
 	}
 }
 
@@ -137,7 +138,7 @@ func TestMultiKeyAndPipeline(t *testing.T) {
 	c.MSet(ctx, "a", "1", "b", "2")
 	ev := rec.Events()
 	if len(ev[0].Mutations) != 2 || string(ev[0].Mutations[1].After.Inline) != `"2"` {
-		t.Fatalf("%+v", ev[0].Mutations)
+		panic(fmt.Sprintf("%+v", ev[0].Mutations))
 	}
 	_, err := c.Pipelined(ctx, func(p redis.Pipeliner) error {
 		p.Set(ctx, "p1", "x", 0)
@@ -145,14 +146,14 @@ func TestMultiKeyAndPipeline(t *testing.T) {
 		return nil
 	})
 	if err != redis.Nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	ev = rec.Events()[1:]
 	if len(ev) != 2 || ev[0].Attrs["pipeline"] != "true" || ev[1].Attrs["pipeline_index"] != "1" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	if ev[1].Err != "" {
-		t.Fatal("nil in pipeline is not an error")
+		panic("nil in pipeline is not an error")
 	}
 }
 
@@ -160,14 +161,14 @@ func TestErrorAndAuthRedaction(t *testing.T) {
 	c, rec, ctx := setup(t)
 	c.HSet(ctx, "k", "f", "v")
 	if err := c.Incr(ctx, "k").Err(); err == nil {
-		t.Fatal("expected error")
+		panic("expected error")
 	}
 	ev := rec.Events()
 	if ev[1].Err == "" || len(ev[1].Mutations) != 0 {
-		t.Fatalf("%+v", ev[1])
+		panic(fmt.Sprintf("%+v", ev[1]))
 	}
 	got, _ := (&redisx.Redactor{Capture: true}).MaskArgs("AUTH", []any{"AUTH", "user", "hunter2"}, nil)
 	if got[2] != "[REDACTED]" {
-		t.Fatal(got)
+		panic(got)
 	}
 }

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -26,7 +27,7 @@ func env(k, d string) string {
 func main() {
 	listen := env("EXAMPLEAPP_LISTEN", "127.0.0.1:0")
 	if h, _, err := net.SplitHostPort(listen); err != nil || h == "" || h == "0.0.0.0" || h == "::" {
-		log.Fatalf("refusing to listen on %q", listen)
+		panic(fmt.Sprintf("refusing to listen on %q", listen))
 	}
 	a, err := app.New(app.Config{
 		PGDSN:         env("EXAMPLEAPP_PG_DSN", "postgres://127.0.0.1:55432/postgres?sslmode=disable"),
@@ -35,12 +36,12 @@ func main() {
 		Namespace:     os.Getenv("EXAMPLEAPP_NAMESPACE"),
 	})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	defer a.Close()
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	log.Printf("exampleapp listening on http://%s", ln.Addr())
 	srv := &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second}
@@ -48,6 +49,6 @@ func main() {
 	defer stop()
 	go func() { <-ctx.Done(); _ = srv.Close() }()
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		panic(err)
 	}
 }

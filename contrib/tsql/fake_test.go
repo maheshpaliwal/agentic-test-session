@@ -404,7 +404,7 @@ func open(t *testing.T, f *fakeDB, driverName string, opts ...tsql.Option) *sql.
 	sql.Register(name, f)
 	db, err := tsql.Open(name, "dsn", opts...)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db

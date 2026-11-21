@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -107,8 +108,8 @@ func waitSession(t *testing.T, m *Manager, id, what string, ok func(Session) boo
 		time.Sleep(2 * time.Millisecond)
 	}
 	s, _ := m.Get(id)
-	t.Fatalf("session %s never reached %q: %+v", id, what, s)
-	return s
+	panic(fmt.Sprintf("session %s never reached %q: %+v", id, what, s))
+
 }
 
 // waitPending starts and stops a session and waits until its seal has failed
@@ -117,14 +118,14 @@ func waitPending(t *testing.T, m *Manager, req StartRequest) Session {
 	t.Helper()
 	s, err := m.Start(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := m.Stop(s.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	got := waitState(t, m, s.ID, StateSealed)
 	if !got.SealPending || got.SealError == "" || !got.Incomplete || got.BundleURI != "" || got.EndedAt.IsZero() {
-		t.Fatalf("seal budget exhausted: %+v", got)
+		panic(fmt.Sprintf("seal budget exhausted: %+v", got))
 	}
 	return got
 }
@@ -135,7 +136,7 @@ func waitSeals(t *testing.T, c *flakyCollector, n int32) {
 	deadline := time.Now().Add(3 * time.Second)
 	for c.seals.Load() <= n {
 		if time.Now().After(deadline) {
-			t.Fatalf("no seal attempt after the first %d", n)
+			panic(fmt.Sprintf("no seal attempt after the first %d", n))
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -187,38 +188,38 @@ func TestSealRecoversAfterBudgetExhausted(t *testing.T) {
 				s, _ = m.Start(tc.req)
 				s = waitState(t, m, s.ID, StateSealed)
 				if !s.SealPending || s.SealError == "" || s.Reason != "ttl" {
-					t.Fatalf("ttl seal failure: %+v", s)
+					panic(fmt.Sprintf("ttl seal failure: %+v", s))
 				}
 			} else {
 				s = waitPending(t, m, tc.req)
 			}
 			if s.DrainTimedOut != tc.busy {
-				t.Fatalf("drain_timed_out=%v, want %v", s.DrainTimedOut, tc.busy)
+				panic(fmt.Sprintf("drain_timed_out=%v, want %v", s.DrainTimedOut, tc.busy))
 			}
 			if len(m.Active().Active) != 0 {
-				t.Fatal("a session with a pending seal must not be in the active set")
+				panic("a session with a pending seal must not be in the active set")
 			}
 			if body := sessionJSON(t, m, s.ID); !strings.Contains(body, `"seal_pending":true`) {
-				t.Fatalf("marker not in the session JSON: %s", body)
+				panic(fmt.Sprintf("marker not in the session JSON: %s", body))
 			}
 			if got := scrapeMetrics(t, m); !strings.Contains(got, "tsession_controlplane_seals_pending 1\n") {
-				t.Fatalf("pending gauge:\n%s", got)
+				panic(fmt.Sprintf("pending gauge:\n%s", got))
 			}
 
 			c.failing.Store(false)
 			got := waitSession(t, m, s.ID, "sealed by a retry", func(s Session) bool { return !s.SealPending })
 			if got.State != StateSealed || got.SealError != "" || got.BundleURI != tc.res.BundleURI ||
 				got.Incomplete != tc.wantIncomplete || !got.EndedAt.Equal(s.EndedAt) {
-				t.Fatalf("recovered: %+v", got)
+				panic(fmt.Sprintf("recovered: %+v", got))
 			}
 			if body := sessionJSON(t, m, s.ID); strings.Contains(body, "seal_pending") || strings.Contains(body, "seal_error") {
-				t.Fatalf("marker or error still in the session JSON: %s", body)
+				panic(fmt.Sprintf("marker or error still in the session JSON: %s", body))
 			}
 			// Nothing is left to retry.
 			n := c.seals.Load()
 			time.Sleep(30 * time.Millisecond)
 			if c.seals.Load() != n || pendingCount(m) != 0 {
-				t.Fatalf("still retrying after success: %d -> %d seals, %d pending", n, c.seals.Load(), pendingCount(m))
+				panic(fmt.Sprintf("still retrying after success: %d -> %d seals, %d pending", n, c.seals.Load(), pendingCount(m)))
 			}
 			metrics := scrapeMetrics(t, m)
 			for _, want := range []string{
@@ -247,7 +248,7 @@ func TestSealPendingSurvivesRestart(t *testing.T) {
 			fs, err := NewFileStore(path)
 			closeLater(t, fs)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			c := newFlaky()
 			cfg := Config{Store: fs, Collector: c, PollInterval: 2 * time.Millisecond, TimeUnit: 10 * time.Millisecond,
@@ -258,17 +259,17 @@ func TestSealPendingSurvivesRestart(t *testing.T) {
 			if tc.archived {
 				m1.Sweep(time.Now().Add(2 * time.Hour))
 				if _, ok := fs.MemStore.Get(s.ID); ok {
-					t.Fatal("session not archived")
+					panic("session not archived")
 				}
 			}
 
 			fs2, err := NewFileStore(path)
 			closeLater(t, fs2)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if got, ok := fs2.Get(s.ID); !ok || !got.SealPending || got.SealError == "" || got.State != StateSealed {
-				t.Fatalf("reload: %+v %v", got, ok)
+				panic(fmt.Sprintf("reload: %+v %v", got, ok))
 			}
 			c.failing.Store(false)
 			before := c.seals.Load()
@@ -277,23 +278,23 @@ func TestSealPendingSurvivesRestart(t *testing.T) {
 			defer m2.Close()
 			got := waitSession(t, m2, s.ID, "sealed after restart", func(s Session) bool { return !s.SealPending })
 			if got.SealError != "" || got.BundleURI != "file:///bundle/late" || got.Incomplete || got.Name != "persist" {
-				t.Fatalf("after restart: %+v", got)
+				panic(fmt.Sprintf("after restart: %+v", got))
 			}
 			if n := c.seals.Load() - before; n != 1 {
-				t.Fatalf("%d seal calls after restart, want 1", n)
+				panic(fmt.Sprintf("%d seal calls after restart, want 1", n))
 			}
 			m2.Close() // the store shows the result before the file is rewritten: wait for the retry to return
 
 			fs3, err := NewFileStore(path)
 			closeLater(t, fs3)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if got, ok := fs3.Get(s.ID); !ok || got.SealPending || got.SealError != "" || got.BundleURI != "file:///bundle/late" {
-				t.Fatalf("persisted: %+v %v", got, ok)
+				panic(fmt.Sprintf("persisted: %+v %v", got, ok))
 			}
 			if l := fs3.List(); len(l) != 1 {
-				t.Fatalf("list after restart: %+v", l)
+				panic(fmt.Sprintf("list after restart: %+v", l))
 			}
 		})
 	}
@@ -308,30 +309,30 @@ func TestDeleteStopsPendingSeal(t *testing.T) {
 	// A failed collector delete keeps the session, and its retries.
 	c.deleteFails.Store(true)
 	if err := m.Delete(context.Background(), s.ID); !errors.Is(err, ErrCollector) {
-		t.Fatalf("collector failure: %v", err)
+		panic(fmt.Sprintf("collector failure: %v", err))
 	}
 	if got, ok := m.Get(s.ID); !ok || !got.SealPending || pendingCount(m) != 1 {
-		t.Fatalf("after failed delete: %+v %v, %d pending", got, ok, pendingCount(m))
+		panic(fmt.Sprintf("after failed delete: %+v %v, %d pending", got, ok, pendingCount(m)))
 	}
 	waitSeals(t, c, c.seals.Load())
 	c.deleteFails.Store(false)
 
 	if err := m.Delete(context.Background(), s.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, ok := m.Get(s.ID); ok {
-		t.Fatal("still readable after delete")
+		panic("still readable after delete")
 	}
 	n := c.seals.Load()
 	time.Sleep(50 * time.Millisecond)
 	if got := c.seals.Load(); got != n || pendingCount(m) != 0 {
-		t.Fatalf("retries continued after delete: %d -> %d seals, %d pending", n, got, pendingCount(m))
+		panic(fmt.Sprintf("retries continued after delete: %d -> %d seals, %d pending", n, got, pendingCount(m)))
 	}
 	if log := c.callLog(); log[len(log)-1] != "delete" {
-		t.Fatalf("a seal reached the collector after the delete: %v", log[max(0, len(log)-4):])
+		panic(fmt.Sprintf("a seal reached the collector after the delete: %v", log[max(0, len(log)-4):]))
 	}
 	if _, ok := m.Get(s.ID); ok {
-		t.Fatal("a retry brought the deleted session back")
+		panic("a retry brought the deleted session back")
 	}
 }
 
@@ -344,15 +345,15 @@ func TestDeleteWaitsForSealInFlight(t *testing.T) {
 	c.slow.Store(true)
 	waitSeals(t, c, c.seals.Load()) // a slow attempt is in flight (or just back)
 	if err := m.Delete(context.Background(), s.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	time.Sleep(80 * time.Millisecond) // longer than a slow attempt takes to return
 	log := c.callLog()
 	if i := slices.Index(log, "delete"); i != len(log)-1 {
-		t.Fatalf("a seal returned after the delete: %v", log[max(0, len(log)-4):])
+		panic(fmt.Sprintf("a seal returned after the delete: %v", log[max(0, len(log)-4):]))
 	}
 	if _, ok := m.Get(s.ID); ok || pendingCount(m) != 0 {
-		t.Fatalf("session or retry left behind (%d pending)", pendingCount(m))
+		panic(fmt.Sprintf("session or retry left behind (%d pending)", pendingCount(m)))
 	}
 }
 
@@ -377,23 +378,23 @@ func TestSealPendingBudgetHonoured(t *testing.T) {
 		return !cur.SealPending
 	})
 	if el := time.Since(s.EndedAt); el < budget {
-		t.Fatalf("gave up after %v, before the %v budget", el, budget)
+		panic(fmt.Sprintf("gave up after %v, before the %v budget", el, budget))
 	}
 	if got.State != StateSealed || got.SealError == "" || !got.Incomplete || got.BundleURI != "" {
-		t.Fatalf("given up: %+v", got)
+		panic(fmt.Sprintf("given up: %+v", got))
 	}
 	if maxDelay <= 2*time.Millisecond || maxDelay > maxInterval {
-		t.Fatalf("backoff reached %v, want above the 2ms start and at most %v", maxDelay, maxInterval)
+		panic(fmt.Sprintf("backoff reached %v, want above the 2ms start and at most %v", maxDelay, maxInterval))
 	}
 	// It is over for good, even though the collector is back.
 	c.failing.Store(false)
 	n := c.seals.Load()
 	time.Sleep(40 * time.Millisecond)
 	if c.seals.Load() != n || pendingCount(m) != 0 {
-		t.Fatalf("retried after the budget: %d -> %d seals, %d pending", n, c.seals.Load(), pendingCount(m))
+		panic(fmt.Sprintf("retried after the budget: %d -> %d seals, %d pending", n, c.seals.Load(), pendingCount(m)))
 	}
 	if cur, _ := m.Get(s.ID); cur.SealError == "" || cur.SealPending {
-		t.Fatalf("after the budget: %+v", cur)
+		panic(fmt.Sprintf("after the budget: %+v", cur))
 	}
 	metrics := scrapeMetrics(t, m)
 	for _, want := range []string{
@@ -407,6 +408,6 @@ func TestSealPendingBudgetHonoured(t *testing.T) {
 	}
 	// The session can still be deleted.
 	if err := m.Delete(context.Background(), s.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }

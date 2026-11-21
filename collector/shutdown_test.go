@@ -23,28 +23,28 @@ func TestCloseFlushesReorderWindow(t *testing.T) {
 		a, b := ev("b", core.KindAPIIn, 20, uint64(2+10*i)), ev("a", core.KindAPIIn, 10, uint64(1+10*i))
 		a.SessionID, b.SessionID = id, id
 		if r, err := c.Ingest(ctx, "", []core.Event{a, b}); err != nil || r.Accepted != 2 {
-			t.Fatalf("ingest %s: %+v %v", id, r, err)
+			panic(fmt.Sprintf("ingest %s: %+v %v", id, r, err))
 		}
 		if h, _ := st.Head(ctx, id); h != 0 {
-			t.Fatalf("%s flushed before Close (head %d)", id, h)
+			panic(fmt.Sprintf("%s flushed before Close (head %d)", id, h))
 		}
 	}
 	c.Close()
 	for _, id := range []string{"s1", "s2"} {
 		evs, err := st.Events(ctx, id, 0, 0)
 		if err != nil || len(evs) != 2 {
-			t.Fatalf("%s after Close: %d events, err %v", id, len(evs), err)
+			panic(fmt.Sprintf("%s after Close: %d events, err %v", id, len(evs), err))
 		}
 		if evs[0].SpanID != "a" || evs[0].Seq != 1 || evs[1].Seq != 2 {
-			t.Fatalf("%s not sequenced in HLC order: %+v", id, evs)
+			panic(fmt.Sprintf("%s not sequenced in HLC order: %+v", id, evs))
 		}
 	}
 	// A closed collector refuses work instead of panicking or hanging.
 	if _, err := c.Ingest(ctx, "", []core.Event{ev("z", core.KindAPIIn, 99, 99)}); !errors.Is(err, errSeqClosed) {
-		t.Fatalf("ingest after Close: %v", err)
+		panic(fmt.Sprintf("ingest after Close: %v", err))
 	}
 	if _, err := c.Seal(ctx, sid); !errors.Is(err, errSeqClosed) {
-		t.Fatalf("seal after Close: %v", err)
+		panic(fmt.Sprintf("seal after Close: %v", err))
 	}
 	c.Close() // idempotent
 }
@@ -89,7 +89,7 @@ func TestCloseRacesWithIngest(t *testing.T) {
 		wg.Wait()
 		for id, n := range accepted {
 			if h, _ := st.Head(ctx, id); int(h) != n {
-				t.Fatalf("round %d: session %s accepted %d events but stored %d", round, id, n, h)
+				panic(fmt.Sprintf("round %d: session %s accepted %d events but stored %d", round, id, n, h))
 			}
 		}
 	}
@@ -113,10 +113,10 @@ func TestHungStoreIsBounded(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("want deadline exceeded, got %v", err)
+			panic(fmt.Sprintf("want deadline exceeded, got %v", err))
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("ingest hung on a hung store")
+		panic("ingest hung on a hung store")
 	}
 	hs.hang.Store(false)
 	waitFor(t, "retry after the store recovers", func() bool { return len(events(t, c)) == 1 })
@@ -165,7 +165,7 @@ func TestCloseIsBoundedWithHungStore(t *testing.T) {
 				a, b := ev("a", core.KindAPIIn, 10, uint64(1+10*i)), ev("b", core.KindAPIIn, 20, uint64(2+10*i))
 				a.SessionID, b.SessionID = id, id
 				if r, err := c.Ingest(ctx, "", []core.Event{a, b}); err != nil || r.Accepted != 2 {
-					t.Fatalf("ingest %s: %+v %v", id, r, err)
+					panic(fmt.Sprintf("ingest %s: %+v %v", id, r, err))
 				}
 			}
 			if tc.window < time.Hour {
@@ -173,7 +173,7 @@ func TestCloseIsBoundedWithHungStore(t *testing.T) {
 				case <-hs.entered:
 					hs.entered <- struct{}{} // keep the token for the check below
 				case <-time.After(5 * time.Second):
-					t.Fatal("the window flush never reached the store")
+					panic("the window flush never reached the store")
 				}
 			}
 			start := time.Now()
@@ -182,23 +182,23 @@ func TestCloseIsBoundedWithHungStore(t *testing.T) {
 			select {
 			case <-closed:
 			case <-time.After(5 * time.Second):
-				t.Fatalf("Close still blocked after %v with ShutdownTimeout %v", time.Since(start), cfg.ShutdownTimeout)
+				panic(fmt.Sprintf("Close still blocked after %v with ShutdownTimeout %v", time.Since(start), cfg.ShutdownTimeout))
 			}
 			if d := time.Since(start); d < cfg.ShutdownTimeout {
-				t.Fatalf("Close returned after %v, before the hung flush got its %v", d, cfg.ShutdownTimeout)
+				panic(fmt.Sprintf("Close returned after %v, before the hung flush got its %v", d, cfg.ShutdownTimeout))
 			}
 			select {
 			case <-hs.entered:
 			default:
-				t.Fatal("the hung session's flush was never attempted")
+				panic("the hung session's flush was never attempted")
 			}
 			for _, id := range []string{"ok1", "ok2"} {
 				if h, _ := mem.Head(ctx, id); h != 2 {
-					t.Fatalf("%s: %d events stored after Close, want 2", id, h)
+					panic(fmt.Sprintf("%s: %d events stored after Close, want 2", id, h))
 				}
 			}
 			if h, _ := mem.Head(ctx, "hung"); h != 0 {
-				t.Fatalf("hung session stored %d events", h)
+				panic(fmt.Sprintf("hung session stored %d events", h))
 			}
 		})
 	}
@@ -206,11 +206,11 @@ func TestCloseIsBoundedWithHungStore(t *testing.T) {
 
 func TestShutdownTimeoutDefault(t *testing.T) {
 	if d := DefaultConfig().ShutdownTimeout; d != 15*time.Second {
-		t.Fatalf("DefaultConfig().ShutdownTimeout = %v", d)
+		panic(fmt.Sprintf("DefaultConfig().ShutdownTimeout = %v", d))
 	}
 	c := New(store.NewMem(), Config{})
 	defer c.Close()
 	if d := c.cfg.ShutdownTimeout; d != 15*time.Second {
-		t.Fatalf("zero ShutdownTimeout normalised to %v", d)
+		panic(fmt.Sprintf("zero ShutdownTimeout normalised to %v", d))
 	}
 }

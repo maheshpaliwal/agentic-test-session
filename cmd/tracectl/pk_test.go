@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode"
@@ -140,13 +141,13 @@ func TestCLIHistoryKeyForms(t *testing.T) {
 	code, out, e := env.tc("history", "run-1", "postgres", "orders", "43")
 	if code != 1 || out != "" || len(env.histPKs) != 0 || !strings.Contains(e, `postgres/orders with key 43`) ||
 		!strings.Contains(e, `{"id":42}`) || !strings.Contains(e, "tracectl entities run-1") {
-		t.Fatalf("missing entity: %d %q %v\n%s", code, out, env.histPKs, e)
+		panic(fmt.Sprintf("missing entity: %d %q %v\n%s", code, out, env.histPKs, e))
 	}
 	if code, _, e := env.tc("history", "run-1", "postgres", "items", "--unknown-key"); code != 1 || !strings.Contains(e, "an unknown key") {
-		t.Fatalf("no unknown key recorded: %d %s", code, e)
+		panic(fmt.Sprintf("no unknown key recorded: %d %s", code, e))
 	}
 	if code, _, e := env.tc("history", "run-1", "postgres", "payments", "1"); code != 1 || !strings.Contains(e, "changed nothing in postgres/payments") {
-		t.Fatalf("missing table: %d %s", code, e)
+		panic(fmt.Sprintf("missing table: %d %s", code, e))
 	}
 	for _, args := range [][]string{
 		{"history", "run-1", "postgres", "orders"},                        // no key, and no --unknown-key
@@ -181,13 +182,13 @@ func TestCLIHistoryAndEntitiesShowUncertainty(t *testing.T) {
 
 	code, out, e := env.tc("entities", "run-1")
 	if code != 0 || !strings.Contains(out, "3 mutation(s), 2 uncertain\n") || !strings.Contains(out, "2 mutation(s)\n") || strings.Count(out, "uncertain") != 1 {
-		t.Fatalf("entities: %d\n%s%s", code, out, e)
+		panic(fmt.Sprintf("entities: %d\n%s%s", code, out, e))
 	}
 	var ents []map[string]any
 	if _, out, _ := env.tc("entities", "run-1", "--json"); json.Unmarshal([]byte(out), &ents) != nil || len(ents) != 2 || ents[0]["uncertain"] != 2.0 {
-		t.Fatalf("entities --json: %s", out)
+		panic(fmt.Sprintf("entities --json: %s", out))
 	} else if _, has := ents[1]["uncertain"]; has {
-		t.Fatalf("an entity without uncertain mutations must not carry the field: %s", out)
+		panic(fmt.Sprintf("an entity without uncertain mutations must not carry the field: %s", out))
 	}
 
 	code, out, e = env.tc("history", "run-1", "postgres", "stock", "w")
@@ -203,26 +204,26 @@ func TestCLIHistoryAndEntitiesShowUncertainty(t *testing.T) {
 #9     delete   effective    api          db.write
 `
 	if code != 0 || out != want {
-		t.Fatalf("history: %d %s\ngot:\n%s\nwant:\n%s", code, e, out, want)
+		panic(fmt.Sprintf("history: %d %s\ngot:\n%s\nwant:\n%s", code, e, out, want))
 	}
 	var h struct {
 		Mutations []map[string]any `json:"mutations"`
 	}
 	if _, out, _ := env.tc("history", "run-1", "postgres", "stock", "w", "--json"); json.Unmarshal([]byte(out), &h) != nil || len(h.Mutations) != 4 {
-		t.Fatalf("history --json: %s", out)
+		panic(fmt.Sprintf("history --json: %s", out))
 	}
 	if f, _ := h.Mutations[0]["flags"].([]any); len(f) != 2 || f[0] != "pk_not_unique" {
-		t.Fatalf("history --json flags: %v", h.Mutations[0])
+		panic(fmt.Sprintf("history --json flags: %v", h.Mutations[0]))
 	}
 	if _, has := h.Mutations[3]["flags"]; has {
-		t.Fatalf("a change without flags must not carry the field: %v", h.Mutations[3])
+		panic(fmt.Sprintf("a change without flags must not carry the field: %v", h.Mutations[3]))
 	}
 
 	// A history without flags (an older collector) prints as it always did.
 	env.hist = nil
 	if _, out, _ := env.tc("history", "run-1", "postgres", "orders", "42"); strings.Contains(out, "flags") || strings.Contains(out, "uncertain") ||
 		!strings.HasPrefix(out, `postgres/orders {"id":42}: 2 mutation(s)`+"\n") {
-		t.Fatalf("history without flags:\n%s", out)
+		panic(fmt.Sprintf("history without flags:\n%s", out))
 	}
 }
 
@@ -234,20 +235,20 @@ func TestCLIShortOutput(t *testing.T) {
 	id = strings.TrimSpace(id)
 
 	if code, out, e := env.tc("status", "run-1", "--short"); code != 0 || out != id+" ACTIVE\n" {
-		t.Fatalf("status --short: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("status --short: %d %q %s", code, out, e))
 	}
 	if code, out, e := env.tc("rename", "--short", "run-1", "run-2"); code != 0 || out != id+" ACTIVE\n" {
-		t.Fatalf("rename --short: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("rename --short: %d %q %s", code, out, e))
 	}
 	if code, out, e := env.tc("stop", "run-2", "--wait", "--short"); code != 0 || out != id+" SEALED\n" {
-		t.Fatalf("stop --wait --short: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("stop --wait --short: %d %q %s", code, out, e))
 	}
 	if code, out, e := env.tc("wait", "--short", "run-2"); code != 0 || out != id+" SEALED\n" {
-		t.Fatalf("wait --short: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("wait --short: %d %q %s", code, out, e))
 	}
 	_, id2, _ := env.tc("start", "--name", "doomed", "--id-only")
 	if code, out, e := env.tc("abort", "doomed", "--short"); code != 0 || out != strings.TrimSpace(id2)+" ABORTED\n" {
-		t.Fatalf("abort --short: %d %q %s", code, out, e)
+		panic(fmt.Sprintf("abort --short: %d %q %s", code, out, e))
 	}
 
 	// Unchanged without the flag.
@@ -255,11 +256,11 @@ func TestCLIShortOutput(t *testing.T) {
 		var info client.Info
 		_, out, _ := env.tc(cmd, "run-2")
 		if err := json.NewDecoder(strings.NewReader(out)).Decode(&info); err != nil || info.ID != id || info.State != "SEALED" {
-			t.Fatalf("%s: %v\n%s", cmd, err, out)
+			panic(fmt.Sprintf("%s: %v\n%s", cmd, err, out))
 		}
 	}
 	if _, out, _ := env.tc("status", "run-2"); !strings.Contains(out, "\nname: run-2\n") {
-		t.Fatalf("status lost its name line:\n%s", out)
+		panic(fmt.Sprintf("status lost its name line:\n%s", out))
 	}
 }
 
@@ -267,6 +268,6 @@ func TestPrintInfoShortMarksIncomplete(t *testing.T) {
 	var b strings.Builder
 	printInfo(&b, client.Info{ID: "ts_1", State: "SEALED", Incomplete: true}, true)
 	if b.String() != "ts_1 SEALED incomplete\n" {
-		t.Fatalf("got %q", b.String())
+		panic(fmt.Sprintf("got %q", b.String()))
 	}
 }

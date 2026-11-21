@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -23,11 +24,11 @@ import (
 func noBeforeCheck(t *testing.T, e core.Event, flag string, rows int) {
 	t.Helper()
 	if len(e.Mutations) != rows {
-		t.Fatalf("%d mutations, want %d (flags %v)", len(e.Mutations), rows, e.Flags)
+		panic(fmt.Sprintf("%d mutations, want %d (flags %v)", len(e.Mutations), rows, e.Flags))
 	}
 	for _, m := range e.Mutations {
 		if m.Op != "update" || !m.Before.IsZero() || m.After.IsZero() {
-			t.Fatalf("mutation %+v: want an update with an after image only", m)
+			panic(fmt.Sprintf("mutation %+v: want an update with an after image only", m))
 		}
 		if len(m.Diff) != 0 {
 			t.Errorf("a diff was recorded although the values before the update are not known: %+v", m.Diff)
@@ -90,15 +91,15 @@ func TestUpdateWithoutBeforeImageRecordsNoDiff(t *testing.T) {
 			if tc.rows {
 				rs, err := db.QueryContext(ctx, tc.stmt)
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				for rs.Next() {
 				}
 				if err := rs.Close(); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			} else if _, err := db.ExecContext(ctx, tc.stmt); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			noBeforeCheck(t, lastWrite(t, rec), tc.flag, 1)
 		})
@@ -110,22 +111,22 @@ func TestUpdateDiffNeedsBothImages(t *testing.T) {
 	rec, ctx := setup(t)
 	db := open(t, fenceFake(&fakeDB{}), "postgres", noPKLookup)
 	if _, err := db.ExecContext(ctx, fenceUpdate); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m := lastWrite(t, rec).Mutations[0]
 	if len(m.Diff) != 1 || m.Diff[0].Field != "a" || m.Before.IsZero() || m.After.IsZero() {
-		t.Fatalf("update with both images: %+v", m)
+		panic(fmt.Sprintf("update with both images: %+v", m))
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(context.WithoutCancel(ctx), fenceUpdate); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := lastWrite(t, rec)
 	if m := e.Mutations[0]; len(m.Diff) != 0 || !m.Before.IsZero() || !m.After.IsZero() || !hasFlag(e, "image_skipped") {
-		t.Fatalf("update with no image: %+v flags %v", m, e.Flags)
+		panic(fmt.Sprintf("update with no image: %+v flags %v", m, e.Flags))
 	}
 }

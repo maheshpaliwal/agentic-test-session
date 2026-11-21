@@ -24,7 +24,7 @@ func TestValidateSchemaName(t *testing.T) {
 		}
 	}
 	if _, err := OpenPGConfig(context.Background(), PGConfig{DSN: "postgres://127.0.0.1:1/x", Schema: `x"; drop`}); err == nil || !strings.Contains(err.Error(), "invalid pg schema") {
-		t.Fatalf("expected validation error before connecting: %v", err)
+		panic(fmt.Sprintf("expected validation error before connecting: %v", err))
 	}
 }
 
@@ -40,7 +40,7 @@ func openTestPG(t *testing.T, schema string) *PG {
 	t.Helper()
 	pg, err := OpenPGConfig(context.Background(), PGConfig{DSN: pgDSN(t), Schema: schema})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() { pg.Close() })
 	return pg
@@ -55,16 +55,16 @@ func TestPGSchemaIsolation(t *testing.T) {
 	var n int
 	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
 		WHERE table_name IN ('sessions','session_events','entity_mutations') AND table_schema=$1`, schema).Scan(&n); err != nil || n != 3 {
-		t.Fatalf("tables in %s: %d %v", schema, n, err)
+		panic(fmt.Sprintf("tables in %s: %d %v", schema, n, err))
 	}
 	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
 		WHERE table_name IN ('sessions','session_events','entity_mutations') AND table_schema='public'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("trace tables leaked into public: %d %v", n, err)
+		panic(fmt.Sprintf("trace tables leaked into public: %d %v", n, err))
 	}
 	// every pooled connection must be pinned
 	var sp string
 	if err := pg.pool.QueryRow(ctx, `SHOW search_path`).Scan(&sp); err != nil || !strings.Contains(sp, schema) {
-		t.Fatalf("search_path=%q %v", sp, err)
+		panic(fmt.Sprintf("search_path=%q %v", sp, err))
 	}
 	// re-open is idempotent
 	pg2 := openTestPG(t, schema)
@@ -81,21 +81,21 @@ func TestPGReopenKeepsSeqContinuity(t *testing.T) {
 		return core.Event{SessionID: "s", SpanID: "x", Instance: "i", LocalSeq: seq, Seq: seq, Kind: core.KindDBWrite, Service: "svc", EndHLC: seq}
 	}
 	if err := pg.AppendEvents(ctx, "s", []core.Event{mk(1), mk(2), mk(3)}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	pg.Close()
 	pg = openTestPG(t, schema)
 	if err := pg.AppendEvents(ctx, "s", []core.Event{mk(3)}); err != ErrSeqConflict {
-		t.Fatalf("replayed seq must conflict: %v", err)
+		panic(fmt.Sprintf("replayed seq must conflict: %v", err))
 	}
 	if err := pg.AppendEvents(ctx, "s", []core.Event{mk(4), mk(6)}); err != ErrSeqConflict {
-		t.Fatalf("gap inside batch must conflict: %v", err)
+		panic(fmt.Sprintf("gap inside batch must conflict: %v", err))
 	}
 	if err := pg.AppendEvents(ctx, "s", []core.Event{mk(4), mk(5)}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got, _ := pg.Events(ctx, "s", 0, 0); len(got) != 5 || got[4].Seq != 5 {
-		t.Fatalf("got %d events", len(got))
+		panic(fmt.Sprintf("got %d events", len(got)))
 	}
 }
 
@@ -136,11 +136,11 @@ func TestPGConcurrentAppend(t *testing.T) {
 	wg.Wait()
 	got, err := pg.Events(ctx, "c", 0, 0)
 	if err != nil || len(got) != writers*per || ok.Load() != writers*per {
-		t.Fatalf("events=%d ok=%d err=%v", len(got), ok.Load(), err)
+		panic(fmt.Sprintf("events=%d ok=%d err=%v", len(got), ok.Load(), err))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("gap at %d: seq %d", i, e.Seq)
+			panic(fmt.Sprintf("gap at %d: seq %d", i, e.Seq))
 		}
 	}
 	t.Logf("ok=%d conflicts=%d", ok.Load(), conflicts.Load())

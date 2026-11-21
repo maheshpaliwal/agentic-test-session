@@ -46,13 +46,13 @@ func TestBindingValidation(t *testing.T) {
 		ok[i] = Binding{Source: "query", Name: long(64), Value: long(256 - i)}
 	}
 	if s, err := m.Start(StartRequest{Bindings: ok}); err != nil || len(s.Bindings) != 8 {
-		t.Fatalf("8 bindings: %v %+v", err, s.Bindings)
+		panic(fmt.Sprintf("8 bindings: %v %+v", err, s.Bindings))
 	}
 	// Normalization: header lowercased, exact dup removed, other names case kept.
 	s, err := m.Start(StartRequest{Bindings: []Binding{hdr("X-User-ID", "U1"), hdr("x-user-id", "U1"),
 		{Source: "cookie", Name: "SID", Value: "c"}}})
 	if err != nil || len(s.Bindings) != 2 || s.Bindings[0].Name != "x-user-id" || s.Bindings[1].Name != "SID" {
-		t.Fatalf("normalize: %v %+v", err, s.Bindings)
+		panic(fmt.Sprintf("normalize: %v %+v", err, s.Bindings))
 	}
 }
 
@@ -62,7 +62,7 @@ func post(t *testing.T, url, body string) (*http.Response, map[string]any) {
 	t.Helper()
 	resp, err := http.Post(url, "application/json", strings.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	var out map[string]any
@@ -78,28 +78,28 @@ func TestBindingHTTPShapesAndExclusive400(t *testing.T) {
 
 	resp, out := post(t, srv.URL+"/v1/sessions", `{"name":"a","mode":"exclusive","bindings":[{"source":"header","name":"x","value":"1"}]}`)
 	if resp.StatusCode != 400 {
-		t.Fatalf("exclusive+bindings: %d %v", resp.StatusCode, out)
+		panic(fmt.Sprintf("exclusive+bindings: %d %v", resp.StatusCode, out))
 	}
 	resp, out = post(t, srv.URL+"/v1/sessions", `{"name":"a","bindings":[{"source":"header","name":"X-User-Id","value":"u_1"}]}`)
 	if resp.StatusCode != 201 {
-		t.Fatalf("create: %d %v", resp.StatusCode, out)
+		panic(fmt.Sprintf("create: %d %v", resp.StatusCode, out))
 	}
 	id := out["id"].(string)
 	b := out["bindings"].([]any)[0].(map[string]any)
 	if b["source"] != "header" || b["name"] != "x-user-id" || b["value"] != "u_1" {
-		t.Fatalf("session bindings %v", b)
+		panic(fmt.Sprintf("session bindings %v", b))
 	}
 	resp, out = post(t, srv.URL+"/v1/sessions", `{"name":"b","bindings":[{"source":"header","name":"x-USER-id","value":"u_1"}]}`)
 	if resp.StatusCode != 409 || out["error"] != "binding_conflict" || out["conflicting_session"] != id {
-		t.Fatalf("conflict: %d %v", resp.StatusCode, out)
+		panic(fmt.Sprintf("conflict: %d %v", resp.StatusCode, out))
 	}
 	cb := out["binding"].(map[string]any)
 	if cb["source"] != "header" || cb["name"] != "x-user-id" || cb["value"] != "u_1" {
-		t.Fatalf("conflict binding %v", cb)
+		panic(fmt.Sprintf("conflict binding %v", cb))
 	}
 	// Different value (exact, case-sensitive) does not conflict.
 	if resp, _ = post(t, srv.URL+"/v1/sessions", `{"bindings":[{"source":"header","name":"x-user-id","value":"U_1"}]}`); resp.StatusCode != 201 {
-		t.Fatalf("case-different value: %d", resp.StatusCode)
+		panic(fmt.Sprintf("case-different value: %d", resp.StatusCode))
 	}
 	var raw map[string]any
 	getJSON(t, srv.URL+"/v1/active", &raw)
@@ -109,7 +109,7 @@ func TestBindingHTTPShapesAndExclusive400(t *testing.T) {
 		found = found || (x.(map[string]any)["session_id"] == id && x.(map[string]any)["value"] == "u_1")
 	}
 	if len(ab) != 2 || !found {
-		t.Fatalf("active bindings %v", ab)
+		panic(fmt.Sprintf("active bindings %v", ab))
 	}
 }
 
@@ -118,7 +118,7 @@ func TestActiveOmitsBindingsWhenNone(t *testing.T) {
 	m.Start(StartRequest{Name: "plain"})
 	b, _ := json.Marshal(m.Active())
 	if bytes.Contains(b, []byte("bindings")) {
-		t.Fatalf("unexpected bindings key: %s", b)
+		panic(fmt.Sprintf("unexpected bindings key: %s", b))
 	}
 }
 
@@ -146,10 +146,10 @@ func TestBindingConflictConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	if len(okIDs) != 1 || conflicts != 49 {
-		t.Fatalf("winners=%d conflicts=%d", len(okIDs), conflicts)
+		panic(fmt.Sprintf("winners=%d conflicts=%d", len(okIDs), conflicts))
 	}
 	if a := m.Active(); len(a.Bindings) != 1 || a.Bindings[0].SessionID != okIDs[0] {
-		t.Fatalf("active %+v", a)
+		panic(fmt.Sprintf("active %+v", a))
 	}
 }
 
@@ -161,26 +161,26 @@ func TestBindingRemovedOnStopAbortTTL(t *testing.T) {
 	b, _ := m.Start(StartRequest{Bindings: []Binding{hdr("x-b", "1")}})
 	c, _ := m.Start(StartRequest{Bindings: []Binding{hdr("x-c", "1")}, TTLSeconds: 1})
 	if n := len(m.Active().Bindings); n != 3 {
-		t.Fatalf("want 3 got %d", n)
+		panic(fmt.Sprintf("want 3 got %d", n))
 	}
 	// Stop: gone from bindings while still in Active (DRAINING).
 	m.Stop(a.ID)
 	as := m.Active()
 	if len(as.Bindings) != 2 || len(as.Active) != 3 {
-		t.Fatalf("after stop %+v", as)
+		panic(fmt.Sprintf("after stop %+v", as))
 	}
 	// Binding of a draining session is free again.
 	if _, err := m.Start(StartRequest{Bindings: []Binding{hdr("x-a", "1")}}); err != nil {
-		t.Fatalf("rebind after stop: %v", err)
+		panic(fmt.Sprintf("rebind after stop: %v", err))
 	}
 	m.Abort(b.ID)
 	if got := m.Active(); len(got.Bindings) != 2 {
-		t.Fatalf("after abort %+v", got.Bindings)
+		panic(fmt.Sprintf("after abort %+v", got.Bindings))
 	}
 	m.Sweep(time.Now().Add(time.Hour))
 	for _, ab := range m.Active().Bindings {
 		if ab.SessionID == c.ID {
-			t.Fatalf("ttl session still bound: %+v", ab)
+			panic(fmt.Sprintf("ttl session still bound: %+v", ab))
 		}
 	}
 }
@@ -194,7 +194,7 @@ func TestSSEBindingChange(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/v1/active/stream", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	msgs := make(chan ActiveSet, 16)
@@ -217,14 +217,14 @@ func TestSSEBindingChange(t *testing.T) {
 					return a
 				}
 			case <-ctx.Done():
-				t.Fatalf("timeout waiting for %d bindings", want)
+				panic(fmt.Sprintf("timeout waiting for %d bindings", want))
 			}
 		}
 	}
 	wait(0)
 	s, _ := m.Start(StartRequest{Bindings: []Binding{hdr("x-user-id", "u1"), {Source: "jwt_claim", Name: "sub", Value: "u1"}}})
 	if a := wait(2); a.Bindings[0].SessionID != s.ID {
-		t.Fatalf("%+v", a)
+		panic(fmt.Sprintf("%+v", a))
 	}
 	m.Stop(s.ID)
 	wait(0)
@@ -242,18 +242,18 @@ func TestFileStoreBindingsRoundTrip(t *testing.T) {
 	fs2, err := NewFileStore(path)
 	closeLater(t, fs2)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got, ok := fs2.Get(live.ID); !ok || len(got.Bindings) != 1 || got.Bindings[0] != hdr("x-live", "1") {
-		t.Fatalf("live reload %+v", got)
+		panic(fmt.Sprintf("live reload %+v", got))
 	}
 	got, ok := fs2.Get(old.ID) // from the archive
 	if !ok || len(got.Bindings) != 1 || got.Bindings[0].Source != "cookie" {
-		t.Fatalf("archive %+v %v", got, ok)
+		panic(fmt.Sprintf("archive %+v %v", got, ok))
 	}
 	// Restart rebuilds the active set with the persisted binding.
 	m2 := newMgr(t, newFakeCollector(t), func(c *Config) { c.Store = fs2 })
 	if a := m2.Active(); len(a.Bindings) != 1 || a.Bindings[0].SessionID != live.ID {
-		t.Fatalf("restart active %+v", a)
+		panic(fmt.Sprintf("restart active %+v", a))
 	}
 }

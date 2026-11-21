@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -14,14 +15,14 @@ import (
 func TestTransportErrorHidesCredentialsInTheURL(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	addr := ln.Addr().String()
 	ln.Close() // nothing listens there now
 	for _, base := range []string{"http://ciuser:hunter2@" + addr, "http://" + addr + "/?token=tok123"} {
 		_, err := Start(context.Background(), Options{BaseURL: base})
 		if err == nil {
-			t.Fatalf("%s: expected an error", base)
+			panic(fmt.Sprintf("%s: expected an error", base))
 		}
 		for _, secret := range []string{"ciuser", "hunter2", "tok123"} {
 			if strings.Contains(err.Error(), secret) {

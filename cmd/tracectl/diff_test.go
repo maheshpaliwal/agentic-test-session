@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -197,7 +198,7 @@ func TestDiffEvents(t *testing.T) {
 	t.Run("identical apart from ids and interleaving", func(t *testing.T) {
 		rep := diffEvents(base, diffRun("977", false), false)
 		if rep.Differs {
-			t.Fatalf("unexpected differences: %+v", rep)
+			panic(fmt.Sprintf("unexpected differences: %+v", rep))
 		}
 	})
 
@@ -207,23 +208,23 @@ func TestDiffEvents(t *testing.T) {
 		rep := diffEvents(base, b, false)
 		if !rep.Differs || len(rep.Failures.OnlyA) != 0 || len(rep.Failures.OnlyB) != 1 ||
 			len(rep.Mutations)+len(rep.Events)+len(rep.Divergence) != 0 {
-			t.Fatalf("report: %+v", rep)
+			panic(fmt.Sprintf("report: %+v", rep))
 		}
 		f := rep.Failures.OnlyB[0]
 		if f.Service != "worker" || f.Kind != core.KindWorkerEnd || f.Err != "carrier timeout for order ?" || f.Count != 1 || len(f.Seqs) != 1 || f.Seqs[0] != 8 {
-			t.Fatalf("failure: %+v", f)
+			panic(fmt.Sprintf("failure: %+v", f))
 		}
 		// The same failure in both runs is not a difference, whatever the id in its text.
 		a := diffRun("42", true)
 		a[7].Err = "carrier timeout for order 42"
 		if rep := diffEvents(a, b, false); rep.Differs {
-			t.Fatalf("same failure on both sides: %+v", rep)
+			panic(fmt.Sprintf("same failure on both sides: %+v", rep))
 		}
 		// Failures are a multiset: a second occurrence is reported once.
 		b2 := insertAt(b, 8, b[7])
 		rep = diffEvents(a, b2, true)
 		if len(rep.Failures.OnlyB) != 1 || rep.Failures.OnlyB[0].Count != 1 || len(rep.Failures.OnlyB[0].Seqs) != 2 {
-			t.Fatalf("repeated failure: %+v", rep.Failures)
+			panic(fmt.Sprintf("repeated failure: %+v", rep.Failures))
 		}
 	})
 
@@ -232,10 +233,10 @@ func TestDiffEvents(t *testing.T) {
 		b[6].Mutations = nil
 		rep := diffEvents(base, b, false)
 		if len(rep.Mutations) != 1 || len(rep.Events)+len(rep.Divergence)+len(rep.Failures.OnlyA)+len(rep.Failures.OnlyB) != 0 {
-			t.Fatalf("report: %+v", rep)
+			panic(fmt.Sprintf("report: %+v", rep))
 		}
 		if m := rep.Mutations[0]; m.Store != "postgres" || m.Entity != "orders" || m.Op != "update" || m.A != 1 || m.B != 0 {
-			t.Fatalf("mutation: %+v", m)
+			panic(fmt.Sprintf("mutation: %+v", m))
 		}
 	})
 
@@ -245,10 +246,10 @@ func TestDiffEvents(t *testing.T) {
 		b[2].Mutations[0].Effective = &no
 		rep := diffEvents(base, b, false)
 		if len(rep.Mutations) != 1 {
-			t.Fatalf("report: %+v", rep)
+			panic(fmt.Sprintf("report: %+v", rep))
 		}
 		if m := rep.Mutations[0]; m.Op != "insert" || m.A != 1 || m.B != 0 || m.RolledBackA != 0 || m.RolledBackB != 1 {
-			t.Fatalf("mutation: %+v", m)
+			panic(fmt.Sprintf("mutation: %+v", m))
 		}
 	})
 
@@ -256,13 +257,13 @@ func TestDiffEvents(t *testing.T) {
 		b := insertAt(diffRun("43", true), 2, core.Event{Service: "api", Kind: core.KindDBRead, Name: "SELECT * FROM coupons WHERE code = 'X1'"})
 		rep := diffEvents(base, b, false)
 		if len(rep.Events) != 1 || len(rep.Mutations)+len(rep.Failures.OnlyA)+len(rep.Failures.OnlyB) != 0 {
-			t.Fatalf("report: %+v", rep)
+			panic(fmt.Sprintf("report: %+v", rep))
 		}
 		if e := rep.Events[0]; e.Service != "api" || e.Kind != core.KindDBRead || e.Name != "SELECT * FROM coupons WHERE code = ?" || e.A != 0 || e.B != 1 {
-			t.Fatalf("event: %+v", e)
+			panic(fmt.Sprintf("event: %+v", e))
 		}
 		if len(rep.Divergence) != 1 || rep.Divergence[0].Service != "api" || rep.Divergence[0].Position != 3 {
-			t.Fatalf("divergence: %+v", rep.Divergence)
+			panic(fmt.Sprintf("divergence: %+v", rep.Divergence))
 		}
 	})
 
@@ -271,15 +272,15 @@ func TestDiffEvents(t *testing.T) {
 		b[3].Kind, b[3].Name, b[4].Kind, b[4].Name = b[4].Kind, b[4].Name, b[3].Kind, b[3].Name
 		rep := diffEvents(base, b, false)
 		if !rep.Differs || len(rep.Events)+len(rep.Mutations)+len(rep.Failures.OnlyA)+len(rep.Failures.OnlyB) != 0 || len(rep.Divergence) != 1 {
-			t.Fatalf("a reorder must only show as a divergence: %+v", rep)
+			panic(fmt.Sprintf("a reorder must only show as a divergence: %+v", rep))
 		}
 		d := rep.Divergence[0]
 		if d.Service != "api" || d.Position != 4 || d.LenA != 5 || d.LenB != 5 || len(d.A) != 4 || len(d.B) != 4 {
-			t.Fatalf("divergence: %+v", d)
+			panic(fmt.Sprintf("divergence: %+v", d))
 		}
 		if a, b := d.A[2], d.B[2]; !a.Diverges || a.Seq != 4 || a.Kind != core.KindCacheWrite || a.Name != "SET order:42" ||
 			!b.Diverges || b.Seq != 4 || b.Kind != core.KindQueuePub {
-			t.Fatalf("diverging events: %+v %+v", a, b)
+			panic(fmt.Sprintf("diverging events: %+v %+v", a, b))
 		}
 	})
 
@@ -287,15 +288,15 @@ func TestDiffEvents(t *testing.T) {
 		b := append(diffRun("43", true)[:7], core.Event{Service: "mailer", Kind: core.KindAPIOut, Name: "POST /send"})
 		rep := diffEvents(base, reseq(b), false)
 		if len(rep.Divergence) != 2 {
-			t.Fatalf("divergence: %+v", rep.Divergence)
+			panic(fmt.Sprintf("divergence: %+v", rep.Divergence))
 		}
 		// Ordered by where it happens in the baseline; a service the baseline never ran comes last.
 		w, m := rep.Divergence[0], rep.Divergence[1]
 		if w.Service != "worker" || w.Position != 3 || w.LenB != 2 || len(w.B) != 2 || w.B[0].Diverges || w.B[1].Diverges {
-			t.Fatalf("worker: %+v", w)
+			panic(fmt.Sprintf("worker: %+v", w))
 		}
 		if m.Service != "mailer" || m.Position != 1 || m.LenA != 0 || len(m.A) != 0 {
-			t.Fatalf("mailer: %+v", m)
+			panic(fmt.Sprintf("mailer: %+v", m))
 		}
 	})
 
@@ -306,15 +307,15 @@ func TestDiffEvents(t *testing.T) {
 		b = insertAt(b, 5, b[4])
 		rep := diffEvents(base, b, false)
 		if len(rep.Events) != 2 || rep.Events[0].B != 3 || len(rep.Mutations) != 1 || rep.Mutations[0].B != 2 || len(rep.Divergence) != 1 {
-			t.Fatalf("without --ignore-counts: %+v", rep)
+			panic(fmt.Sprintf("without --ignore-counts: %+v", rep))
 		}
 		if rep := diffEvents(base, b, true); rep.Differs {
-			t.Fatalf("with --ignore-counts: %+v", rep)
+			panic(fmt.Sprintf("with --ignore-counts: %+v", rep))
 		}
 		// Something present on one side only still differs.
 		b = insertAt(b, 0, core.Event{Service: "api", Kind: core.KindCacheRead, Name: "GET flags"})
 		if rep := diffEvents(base, b, true); len(rep.Events) != 1 || rep.Events[0].Name != "GET flags" || len(rep.Divergence) != 1 {
-			t.Fatalf("new key with --ignore-counts: %+v", rep)
+			panic(fmt.Sprintf("new key with --ignore-counts: %+v", rep))
 		}
 	})
 
@@ -326,7 +327,7 @@ func TestDiffEvents(t *testing.T) {
 		rep := diffEvents(base, b, false)
 		if len(rep.Events) != 3 || rep.Events[0].Name != "GET a" || rep.Events[2].Name != "GET z" ||
 			len(rep.Failures.OnlyB) != 3 || rep.Failures.OnlyB[0].Name != "GET a" || rep.Failures.OnlyB[2].Name != "GET z" {
-			t.Fatalf("report: %+v", rep)
+			panic(fmt.Sprintf("report: %+v", rep))
 		}
 	})
 }
@@ -350,7 +351,7 @@ func TestCLIDiff(t *testing.T) {
 		code, out, e := env.tc("start", "--name", name)
 		var info struct{ ID string }
 		if err := json.Unmarshal([]byte(out), &info); code != 0 || err != nil || info.ID == "" {
-			t.Fatalf("start %s: %d %s %v", name, code, e, err)
+			panic(fmt.Sprintf("start %s: %d %s %v", name, code, e, err))
 		}
 		ids[name] = info.ID
 	}
@@ -359,11 +360,11 @@ func TestCLIDiff(t *testing.T) {
 	code, out, e := env.tc("diff", "pass", "again", "--fail-on-diff")
 	want := "a  " + ids["pass"] + "  pass\nb  " + ids["again"] + "  again\nno differences\n"
 	if code != 0 || out != want || e != "" {
-		t.Fatalf("identical: %d %q\n%s", code, e, out)
+		panic(fmt.Sprintf("identical: %d %q\n%s", code, e, out))
 	}
 	// A session is identical to itself, by id as well as by name.
 	if code, out, _ := env.tc("diff", ids["default"], "default", "--fail-on-diff"); code != 0 || !strings.Contains(out, "no differences") {
-		t.Fatalf("self: %d\n%s", code, out)
+		panic(fmt.Sprintf("self: %d\n%s", code, out))
 	}
 
 	code, out, e = env.tc("diff", "pass", "broken")
@@ -393,30 +394,30 @@ func TestCLIDiff(t *testing.T) {
 		"",
 	}, "\n")
 	if code != 0 || out != want || e != "" {
-		t.Fatalf("broken: %d %q\n%s", code, e, out)
+		panic(fmt.Sprintf("broken: %d %q\n%s", code, e, out))
 	}
 	if again := func() string { _, out, _ := env.tc("diff", "pass", "broken"); return out }(); again != out {
-		t.Fatalf("output is not stable:\n%s\n%s", out, again)
+		panic(fmt.Sprintf("output is not stable:\n%s\n%s", out, again))
 	}
 
 	// Differences fail the gate only when asked to, and still print.
 	code, out, e = env.tc("diff", "--fail-on-diff", "pass", "broken")
 	if code != exitCheckFailed || !strings.Contains(e, "sessions differ") || !strings.Contains(out, "first divergence") {
-		t.Fatalf("--fail-on-diff: %d %q\n%s", code, e, out)
+		panic(fmt.Sprintf("--fail-on-diff: %d %q\n%s", code, e, out))
 	}
 	// The other direction, against a run that stopped early.
 	if code, out, _ := env.tc("diff", "broken", "short"); code != 0 || !strings.Contains(out, "failures only in a:") ||
 		strings.Contains(out, "failures only in b:") || !strings.Contains(out, "  worker worker.end ship  1 -> 0") ||
 		!strings.Contains(out, "  a> #9 worker.end ship\n  b  #6 worker.start ship\n  b  #7 db.write UPDATE orders SET status = 'shipped' WHERE id = 45\n  b> (no more events)\n") {
-		t.Fatalf("broken vs short: %d\n%s", code, out)
+		panic(fmt.Sprintf("broken vs short: %d\n%s", code, out))
 	}
 	// Sessions without an override get the default events.
 	if code, out, _ := env.tc("diff", "pass", "default"); code != 0 || !strings.Contains(out, "  api db.write INSERT INTO orders  0 -> 1") {
-		t.Fatalf("pass vs default: %d\n%s", code, out)
+		panic(fmt.Sprintf("pass vs default: %d\n%s", code, out))
 	}
 
 	if code, _, e := env.tc("diff", "pass", "nope"); code != 1 || !strings.Contains(e, `no session named "nope"`) {
-		t.Fatalf("unknown session: %d %s", code, e)
+		panic(fmt.Sprintf("unknown session: %d %s", code, e))
 	}
 }
 
@@ -436,7 +437,7 @@ func TestCLIDiffHTTPStatus(t *testing.T) {
 		code, out, e := env.tc("start", "--name", name)
 		var info struct{ ID string }
 		if err := json.Unmarshal([]byte(out), &info); code != 0 || err != nil {
-			t.Fatalf("start %s: %d %s %v", name, code, e, err)
+			panic(fmt.Sprintf("start %s: %d %s %v", name, code, e, err))
 		}
 		ids[name] = info.ID
 	}
@@ -452,11 +453,11 @@ failures only in b:
   1x api api.out POST http://psp/charges/?: HTTP 503  (#2)
 `
 	if code != exitCheckFailed || out != want {
-		t.Fatalf("500 vs 503: %d\n got %q\nwant %q", code, out, want)
+		panic(fmt.Sprintf("500 vs 503: %d\n got %q\nwant %q", code, out, want))
 	}
 	// The same status for another order is still the same failure.
 	if code, out, _ := env.tc("diff", "r500", "r500b", "--fail-on-diff"); code != 0 || !strings.Contains(out, "no differences") {
-		t.Fatalf("500 vs 500: %d\n%s", code, out)
+		panic(fmt.Sprintf("500 vs 500: %d\n%s", code, out))
 	}
 }
 
@@ -474,11 +475,11 @@ func TestCLIDiffJSON(t *testing.T) {
 	code, out, _ := env.tc("diff", "pass", "again", "--json")
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, []byte(out)); code != 0 || err != nil {
-		t.Fatalf("--json: %d %v\n%s", code, err, out)
+		panic(fmt.Sprintf("--json: %d %v\n%s", code, err, out))
 	}
 	if got := compact.String(); !strings.HasSuffix(got, `"differs":false,"failures":{"only_a":[],"only_b":[]},"mutations":[],"events":[],"divergence":[]}`) ||
 		!strings.Contains(got, `"name":"pass"},"b":{"id":"ts_`) {
-		t.Fatalf("--json without differences: %s", got)
+		panic(fmt.Sprintf("--json without differences: %s", got))
 	}
 
 	code, out, e := env.tc("diff", "--json", "--fail-on-diff", "pass", "broken")
@@ -500,10 +501,10 @@ func TestCLIDiffJSON(t *testing.T) {
 		}
 	}
 	if err := json.Unmarshal([]byte(out), &rep); code != exitCheckFailed || err != nil {
-		t.Fatalf("--json: %d %s %v\n%s", code, e, err, out)
+		panic(fmt.Sprintf("--json: %d %s %v\n%s", code, e, err, out))
 	}
 	if !rep.Differs || rep.A.Name != "pass" || rep.B.Name != "broken" || !strings.HasPrefix(rep.B.ID, "ts_") {
-		t.Fatalf("header: %+v", rep)
+		panic(fmt.Sprintf("header: %+v", rep))
 	}
 	wantObj := func(what string, got, want map[string]any) {
 		t.Helper()
@@ -514,14 +515,14 @@ func TestCLIDiffJSON(t *testing.T) {
 		}
 	}
 	if len(rep.Failures.OnlyA) != 0 || len(rep.Failures.OnlyB) != 1 || len(rep.Mutations) != 1 || len(rep.Events) != 1 || len(rep.Divergence) != 1 {
-		t.Fatalf("sections: %s", out)
+		panic(fmt.Sprintf("sections: %s", out))
 	}
 	wantObj("failure", rep.Failures.OnlyB[0], map[string]any{"service": "worker", "kind": "worker.end", "name": "ship", "err": "carrier timeout", "count": 1, "seqs": []int{9}})
 	wantObj("mutation", rep.Mutations[0], map[string]any{"store": "postgres", "entity": "orders", "op": "update", "a": 1, "b": 0, "rolled_back_a": 0, "rolled_back_b": 0})
 	wantObj("event", rep.Events[0], map[string]any{"service": "api", "kind": "cache.read", "name": "GET flags", "a": 0, "b": 1})
 	d := rep.Divergence[0]
 	if d.Service != "api" || d.Position != 1 || d.LenA != 5 || d.LenB != 6 || len(d.A) != 3 || len(d.B) != 3 {
-		t.Fatalf("divergence: %+v", d)
+		panic(fmt.Sprintf("divergence: %+v", d))
 	}
 	wantObj("diverging event", d.B[0], map[string]any{"seq": 1, "kind": "cache.read", "name": "GET flags", "diverges": true})
 	wantObj("context event", d.B[1], map[string]any{"seq": 2, "kind": "api.in", "name": "POST /orders/43"})
@@ -537,10 +538,10 @@ func TestCLIDiffIgnoreCounts(t *testing.T) {
 
 	code, out, _ := env.tc("diff", "pass", "retried", "--fail-on-diff")
 	if code != exitCheckFailed || !strings.Contains(out, "  api db.read SELECT * FROM users WHERE id = ?  1 -> 2") {
-		t.Fatalf("retry without --ignore-counts: %d\n%s", code, out)
+		panic(fmt.Sprintf("retry without --ignore-counts: %d\n%s", code, out))
 	}
 	if code, out, e := env.tc("diff", "pass", "retried", "--fail-on-diff", "--ignore-counts"); code != 0 || !strings.Contains(out, "no differences") {
-		t.Fatalf("retry with --ignore-counts: %d %s\n%s", code, e, out)
+		panic(fmt.Sprintf("retry with --ignore-counts: %d %s\n%s", code, e, out))
 	}
 }
 

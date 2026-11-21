@@ -40,7 +40,7 @@ func newPagingEnv(t *testing.T, old bool, sessions ...controlplane.Session) *pag
 	st := controlplane.NewMemStore()
 	for _, s := range sessions {
 		if err := st.Put(s); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	m := controlplane.NewManager(controlplane.Config{Store: st})
@@ -175,42 +175,42 @@ func TestListLimit(t *testing.T) {
 			// Without --limit: everything, oldest first, no hint, one unparameterised request.
 			code, out, e := env.tc("list")
 			if got := ids(out); code != 0 || len(got) != 1200 || got[0] != ss[0].ID || got[1199] != ss[1199].ID || e != "" {
-				t.Fatalf("list: exit %d, %d sessions, stderr %q", code, len(got), e)
+				panic(fmt.Sprintf("list: exit %d, %d sessions, stderr %q", code, len(got), e))
 			}
 			if reqs := env.requests(); len(reqs) != 1 || reqs[0] != "" {
-				t.Fatalf("list without --limit asked %q", reqs)
+				panic(fmt.Sprintf("list without --limit asked %q", reqs))
 			}
 			// --limit: the newest N, still oldest first, and a hint that there are more.
 			code, out, e = env.tc("list", "--limit", "3")
 			if got := ids(out); code != 0 || len(got) != 3 || got[0] != ss[1197].ID || got[2] != ss[1199].ID {
-				t.Fatalf("list --limit 3: exit %d, got %v", code, got)
+				panic(fmt.Sprintf("list --limit 3: exit %d, got %v", code, got))
 			}
 			if !strings.Contains(e, "newest 3 sessions") || !strings.Contains(e, "older ones") {
-				t.Fatalf("list --limit 3: no hint that the list was cut: %q", e)
+				panic(fmt.Sprintf("list --limit 3: no hint that the list was cut: %q", e))
 			}
 			if reqs := env.requests(); len(reqs) != 1 || reqs[0] != "limit=3" {
-				t.Fatalf("list --limit 3 asked %q", reqs)
+				panic(fmt.Sprintf("list --limit 3 asked %q", reqs))
 			}
 			// More than one request's worth.
 			code, out, e = env.tc("list", "--limit", "1100")
 			if got := ids(out); code != 0 || len(got) != 1100 || got[0] != ss[100].ID || got[1099] != ss[1199].ID || !strings.Contains(e, "newest 1100") {
-				t.Fatalf("list --limit 1100: exit %d, %d sessions, stderr %q", code, len(got), e)
+				panic(fmt.Sprintf("list --limit 1100: exit %d, %d sessions, stderr %q", code, len(got), e))
 			}
 			// A limit that covers everything: no hint.
 			code, out, e = env.tc("list", "--limit", "1200")
 			if got := ids(out); code != 0 || len(got) != 1200 || e != "" {
-				t.Fatalf("list --limit 1200: exit %d, %d sessions, stderr %q", code, len(got), e)
+				panic(fmt.Sprintf("list --limit 1200: exit %d, %d sessions, stderr %q", code, len(got), e))
 			}
 			code, out, e = env.tc("list", "--state", "ABORTED", "--limit", "5")
 			if got := ids(out); code != 0 || len(got) != 5 || got[4] != ss[1107].ID || got[0] != ss[707].ID || !strings.Contains(e, "newest 5") {
-				t.Fatalf("list --state ABORTED --limit 5: exit %d, got %v, stderr %q", code, got, e)
+				panic(fmt.Sprintf("list --state ABORTED --limit 5: exit %d, got %v, stderr %q", code, got, e))
 			}
 			code, out, e = env.tc("list", "--state", "ABORTED", "--limit", "50")
 			if got := ids(out); code != 0 || len(got) != 12 || e != "" {
-				t.Fatalf("list --state ABORTED --limit 50: exit %d, %d sessions, stderr %q", code, len(got), e)
+				panic(fmt.Sprintf("list --state ABORTED --limit 50: exit %d, %d sessions, stderr %q", code, len(got), e))
 			}
 			if code, _, e := env.tc("list", "--limit", "-1"); code != 1 || !strings.Contains(e, "--limit") {
-				t.Fatalf("list --limit -1: exit %d %q", code, e)
+				panic(fmt.Sprintf("list --limit -1: exit %d %q", code, e))
 			}
 		})
 	}

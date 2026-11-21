@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,45 +21,45 @@ func TestDeleteSession(t *testing.T) {
 	live, _ := m.Start(StartRequest{Name: "live"})
 	done, _ := m.Start(StartRequest{Name: "done"})
 	if _, err := m.Abort(done.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	if err := m.Delete(ctx, "ts_nope"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unknown id: %v", err)
+		panic(fmt.Sprintf("unknown id: %v", err))
 	}
 	if err := m.Delete(ctx, live.ID); !errors.Is(err, ErrBadState) {
-		t.Fatalf("running session must not be deletable: %v", err)
+		panic(fmt.Sprintf("running session must not be deletable: %v", err))
 	}
 
 	// A collector failure keeps the session so the delete can be retried.
 	f.deleteFails.Store(true)
 	if err := m.Delete(ctx, done.ID); !errors.Is(err, ErrCollector) {
-		t.Fatalf("collector failure: %v", err)
+		panic(fmt.Sprintf("collector failure: %v", err))
 	}
 	if _, ok := m.Get(done.ID); !ok {
-		t.Fatal("session forgotten although the collector still holds its events")
+		panic("session forgotten although the collector still holds its events")
 	}
 	f.deleteFails.Store(false)
 
 	if err := m.Delete(ctx, done.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, ok := m.Get(done.ID); ok {
-		t.Fatal("still readable after delete")
+		panic("still readable after delete")
 	}
 	if l := m.List(""); len(l) != 1 || l[0].ID != live.ID {
-		t.Fatalf("list after delete: %+v", l)
+		panic(fmt.Sprintf("list after delete: %+v", l))
 	}
 	f.mu.Lock()
 	got := append([]string(nil), f.deleted...)
 	f.mu.Unlock()
 	if len(got) != 1 || got[0] != done.ID {
-		t.Fatalf("collector deletes: %v", got)
+		panic(fmt.Sprintf("collector deletes: %v", got))
 	}
 	// The retention sweep later meets the stale queue entry; it must cope.
 	m.Sweep(time.Now().Add(48 * time.Hour))
 	if s, _ := m.Get(live.ID); s.ID != live.ID {
-		t.Fatal("live session lost")
+		panic("live session lost")
 	}
 }
 
@@ -75,7 +76,7 @@ func TestDeleteOverHTTP(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/sessions/"+id, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer resp.Body.Close()
 		var body map[string]any
@@ -83,32 +84,32 @@ func TestDeleteOverHTTP(t *testing.T) {
 		return resp.StatusCode, body
 	}
 	if code, _ := del("ts_nope"); code != http.StatusNotFound {
-		t.Fatalf("unknown: %d", code)
+		panic(fmt.Sprintf("unknown: %d", code))
 	}
 	if code, body := del(live.ID); code != http.StatusConflict || !strings.Contains(body["error"].(string), "ACTIVE") {
-		t.Fatalf("running: %d %v", code, body)
+		panic(fmt.Sprintf("running: %d %v", code, body))
 	}
 	f.deleteFails.Store(true)
 	if code, _ := del(done.ID); code != http.StatusBadGateway {
-		t.Fatalf("collector down: %d", code)
+		panic(fmt.Sprintf("collector down: %d", code))
 	}
 	f.deleteFails.Store(false)
 	if code, body := del(done.ID); code != http.StatusOK || body["deleted"] != true || body["id"] != done.ID {
-		t.Fatalf("delete: %d %v", code, body)
+		panic(fmt.Sprintf("delete: %d %v", code, body))
 	}
 	if code, _ := del(done.ID); code != http.StatusNotFound {
-		t.Fatalf("second delete: %d", code)
+		panic(fmt.Sprintf("second delete: %d", code))
 	}
 	// A browser on another origin must not be able to delete (CSRF).
 	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/sessions/"+live.ID, nil)
 	req.Header.Set("Origin", "https://evil.example")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-origin delete: %d", resp.StatusCode)
+		panic(fmt.Sprintf("cross-origin delete: %d", resp.StatusCode))
 	}
 }
 
@@ -119,7 +120,7 @@ func TestFileStoreDelete(t *testing.T) {
 	fs, err := NewFileStore(path)
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m := newMgr(t, newFakeCollector(t), func(c *Config) { c.Store = fs; c.Retention = time.Hour })
 	ctx := context.Background()
@@ -131,41 +132,41 @@ func TestFileStoreDelete(t *testing.T) {
 	}
 	m.Sweep(time.Now().Add(2 * time.Hour)) // archives all three
 	if _, err := m.Rename(cold.ID, "cold renamed"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m.Sweep(time.Now().Add(4 * time.Hour)) // re-archives the renamed one: two lines now
 	if _, err := m.Rename(hot.ID, "hot again"); err != nil {
-		t.Fatal(err) // back in the hot set
+		panic(err) // back in the hot set
 	}
 
 	for _, id := range []string{hot.ID, cold.ID} {
 		if err := m.Delete(ctx, id); err != nil {
-			t.Fatalf("delete %s: %v", id, err)
+			panic(fmt.Sprintf("delete %s: %v", id, err))
 		}
 	}
 	reopened, err := NewFileStore(path)
 	closeLater(t, reopened)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, st := range []*FileStore{fs, reopened} {
 		for _, id := range []string{hot.ID, cold.ID} {
 			if s, ok := st.Get(id); ok {
-				t.Fatalf("deleted session still readable: %+v", s)
+				panic(fmt.Sprintf("deleted session still readable: %+v", s))
 			}
 		}
 		if s, ok := st.Get(other.ID); !ok || s.Name != "other" {
-			t.Fatalf("unrelated archived session lost: %+v %v", s, ok)
+			panic(fmt.Sprintf("unrelated archived session lost: %+v %v", s, ok))
 		}
 		if l := st.List(); len(l) != 1 {
-			t.Fatalf("list: %+v", l)
+			panic(fmt.Sprintf("list: %+v", l))
 		}
 	}
 	// Deleting the last archived session removes the archive file.
 	if err := m.Delete(ctx, other.ID); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := os.Stat(fs.archivePath()); !os.IsNotExist(err) {
-		t.Fatalf("empty archive left behind: %v", err)
+		panic(fmt.Sprintf("empty archive left behind: %v", err))
 	}
 }

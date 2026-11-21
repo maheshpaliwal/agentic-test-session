@@ -269,21 +269,21 @@ func TestPropagationMatrix(t *testing.T) {
 	t.Log("\n" + doc)
 	md, err := os.ReadFile(matrixDocFile)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	head, rest, ok := strings.Cut(string(md), matrixDocBegin)
 	old, tail, ok2 := strings.Cut(rest, matrixDocEnd)
 	if !ok || !ok2 {
-		t.Fatalf("%s: matrix markers not found", matrixDocFile)
+		panic(fmt.Sprintf("%s: matrix markers not found", matrixDocFile))
 	}
 	if old == doc {
 		return
 	}
 	if os.Getenv("TSESSION_UPDATE_DOCS") == "" {
-		t.Fatalf("%s does not hold the matrix this test produced; rerun with TSESSION_UPDATE_DOCS=1 and review the difference.\n--- documented\n%s\n--- produced\n%s", matrixDocFile, old, doc)
+		panic(fmt.Sprintf("%s does not hold the matrix this test produced; rerun with TSESSION_UPDATE_DOCS=1 and review the difference.\n--- documented\n%s\n--- produced\n%s", matrixDocFile, old, doc))
 	}
 	if err := os.WriteFile(matrixDocFile, []byte(head+matrixDocBegin+doc+matrixDocEnd+tail), 0o644); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Logf("%s rewritten", matrixDocFile)
 }

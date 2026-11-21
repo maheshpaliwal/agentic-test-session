@@ -110,13 +110,13 @@ func postRaw(t *testing.T, url string, evs ...core.Event) (int, string, ingestBo
 	t.Helper()
 	resp, err := http.Post(url+"/v1/ingest", ctProto, bytes.NewReader(protoBody(t, evs...)))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	var b ingestBody
 	if err := json.Unmarshal(raw, &b); err != nil {
-		t.Fatalf("status %d, body %q: %v", resp.StatusCode, raw, err)
+		panic(fmt.Sprintf("status %d, body %q: %v", resp.StatusCode, raw, err))
 	}
 	return resp.StatusCode, string(raw), b
 }
@@ -125,7 +125,7 @@ func storedOf(t *testing.T, c *Collector, id string) []uint64 {
 	t.Helper()
 	evs, err := c.st.Events(context.Background(), id, 0, 0)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var out []uint64
 	for _, e := range evs {
@@ -142,10 +142,10 @@ func TestIngestAllSessionsAccepted(t *testing.T) {
 	_, url := newPartC(t, cfg, newPartStore())
 	code, raw, b := postRaw(t, url, sev("a", 1), sev("b", 2), sev("a", 3))
 	if code != 200 || b.Accepted != 3 || b.Duplicates != 0 {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if strings.Contains(raw, "failed_sessions") || strings.Contains(raw, "error") {
-		t.Fatalf("a successful response carries failure fields: %s", raw)
+		panic(fmt.Sprintf("a successful response carries failure fields: %s", raw))
 	}
 }
 
@@ -158,10 +158,10 @@ func TestIngestAllSessionsFailed(t *testing.T) {
 	_, url := newPartC(t, cfg, newPartStore("a", "b"))
 	code, raw, b := postRaw(t, url, sev("a", 1), sev("b", 2))
 	if code != http.StatusInternalServerError || b.Error != "storage error" {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if b.Accepted != 0 || len(b.FailedSessions) != 2 || b.FailedSessions["a"] != "storage" || b.FailedSessions["b"] != "storage" || b.FailedSessionsTruncated {
-		t.Fatalf("body %s", raw)
+		panic(fmt.Sprintf("body %s", raw))
 	}
 	got := scrape(t, url)
 	for _, want := range []string{
@@ -187,28 +187,28 @@ func TestIngestPartialFailure(t *testing.T) {
 	batch := []core.Event{sev("a", 1), sev("bad", 2), sev("b", 3), sev("bad", 4), sev("a", 5)}
 	code, raw, b := postRaw(t, url, batch...)
 	if code != http.StatusInternalServerError || b.Error != "storage error" {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if b.Accepted != 3 || len(b.FailedSessions) != 1 || b.FailedSessions["bad"] != "storage" || b.FailedSessionsTruncated {
-		t.Fatalf("body %s", raw)
+		panic(fmt.Sprintf("body %s", raw))
 	}
 	if got := fmt.Sprint(storedOf(t, c, "a"), storedOf(t, c, "b")); got != "[1 5] [3]" {
-		t.Fatalf("healthy sessions stored %s", got)
+		panic(fmt.Sprintf("healthy sessions stored %s", got))
 	}
 	// The whole batch again, as an exporter that ignores the field sends it.
 	code, raw, b = postRaw(t, url, batch...)
 	if code != http.StatusInternalServerError || b.Accepted != 0 || b.Duplicates != 3 || len(b.FailedSessions) != 1 {
-		t.Fatalf("resend: status %d body %s", code, raw)
+		panic(fmt.Sprintf("resend: status %d body %s", code, raw))
 	}
 	// The session recovers: the resend is accepted for it and a duplicate for
 	// the others.
 	st.set("bad", false)
 	code, raw, b = postRaw(t, url, batch...)
 	if code != 200 || b.Accepted != 2 || b.Duplicates != 3 || len(b.FailedSessions) != 0 {
-		t.Fatalf("after recovery: status %d body %s", code, raw)
+		panic(fmt.Sprintf("after recovery: status %d body %s", code, raw))
 	}
 	if got := fmt.Sprint(storedOf(t, c, "a"), storedOf(t, c, "b"), storedOf(t, c, "bad")); got != "[1 5] [3] [2 4]" {
-		t.Fatalf("stored %s", got)
+		panic(fmt.Sprintf("stored %s", got))
 	}
 	got := scrape(t, url)
 	for _, want := range []string{
@@ -234,24 +234,24 @@ func TestIngestFailedSessionCountsNothing(t *testing.T) {
 	st := newPartStore()
 	c, url := newPartC(t, cfg, st)
 	if code, raw, _ := postRaw(t, url, sev("bad", 1)); code != 200 {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	st.set("bad", true)
 	code, raw, b := postRaw(t, url, sev("bad", 2), sev("bad", 3))
 	if code != http.StatusInternalServerError || b.Accepted != 0 || b.Duplicates != 0 || b.FailedSessions["bad"] != "storage" {
-		t.Fatalf("only the failing session: status %d body %s", code, raw)
+		panic(fmt.Sprintf("only the failing session: status %d body %s", code, raw))
 	}
 	code, raw, b = postRaw(t, url, sev("bad", 2), sev("bad", 3), sev("a", 4))
 	if code != http.StatusInternalServerError || b.Accepted != 1 || b.Duplicates != 0 || len(b.FailedSessions) != 1 {
-		t.Fatalf("with a healthy session: status %d body %s", code, raw)
+		panic(fmt.Sprintf("with a healthy session: status %d body %s", code, raw))
 	}
 	st.set("bad", false)
 	code, raw, b = postRaw(t, url, sev("bad", 2), sev("bad", 3), sev("a", 4))
 	if code != 200 || b.Accepted+b.Duplicates != 3 || len(b.FailedSessions) != 0 {
-		t.Fatalf("after recovery: status %d body %s", code, raw)
+		panic(fmt.Sprintf("after recovery: status %d body %s", code, raw))
 	}
 	if got := fmt.Sprint(storedOf(t, c, "a"), storedOf(t, c, "bad")); got != "[4] [1 2 3]" {
-		t.Fatalf("stored %s", got)
+		panic(fmt.Sprintf("stored %s", got))
 	}
 }
 
@@ -263,14 +263,14 @@ func TestIngestPartialBackpressure(t *testing.T) {
 	cfg.MaxBufferedEvents = 2
 	_, url := newPartC(t, cfg, newPartStore())
 	if code, raw, _ := postRaw(t, url, sev("full", 1), sev("full", 2)); code != 200 {
-		t.Fatalf("filling the buffer: %d %s", code, raw)
+		panic(fmt.Sprintf("filling the buffer: %d %s", code, raw))
 	}
 	code, raw, b := postRaw(t, url, sev("full", 3), sev("ok", 4))
 	if code != http.StatusServiceUnavailable || b.Error != "session buffer full, retry later" {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if b.Accepted != 1 || len(b.FailedSessions) != 1 || b.FailedSessions["full"] != "backpressure" {
-		t.Fatalf("body %s", raw)
+		panic(fmt.Sprintf("body %s", raw))
 	}
 	if got := scrape(t, url); !strings.Contains(got, `tsession_collector_ingest_failed_sessions_total{cause="backpressure"} 1`) {
 		t.Errorf("backpressure not counted per session:\n%s", got)
@@ -285,14 +285,14 @@ func TestIngestPartialFailureMixedCauses(t *testing.T) {
 	cfg.MaxBufferedEvents = 1
 	_, url := newPartC(t, cfg, newPartStore("z-storage"))
 	if code, raw, _ := postRaw(t, url, sev("a-full", 1)); code != 200 {
-		t.Fatalf("filling the buffer: %d %s", code, raw)
+		panic(fmt.Sprintf("filling the buffer: %d %s", code, raw))
 	}
 	code, raw, b := postRaw(t, url, sev("a-full", 2), sev("m-ok", 3), sev("z-storage", 4))
 	if code != http.StatusServiceUnavailable {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if b.Accepted != 1 || fmt.Sprint(b.FailedSessions) != "map[a-full:backpressure z-storage:storage]" {
-		t.Fatalf("body %s", raw)
+		panic(fmt.Sprintf("body %s", raw))
 	}
 }
 
@@ -313,20 +313,20 @@ func TestIngestFailedSessionsCappedAndWithoutEventData(t *testing.T) {
 	c, url := newPartC(t, cfg, st)
 	code, raw, b := postRaw(t, url, batch...)
 	if code != http.StatusInternalServerError {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if len(b.FailedSessions) != maxFailedSessions || !b.FailedSessionsTruncated || b.Accepted != 1 {
-		t.Fatalf("%d sessions listed, truncated=%v, accepted=%d", len(b.FailedSessions), b.FailedSessionsTruncated, b.Accepted)
+		panic(fmt.Sprintf("%d sessions listed, truncated=%v, accepted=%d", len(b.FailedSessions), b.FailedSessionsTruncated, b.Accepted))
 	}
 	if max := maxFailedSessions*(128+16) + 256; len(raw) > max {
-		t.Fatalf("the response is %d bytes long, want at most %d", len(raw), max)
+		panic(fmt.Sprintf("the response is %d bytes long, want at most %d", len(raw), max))
 	}
 	if got := storedOf(t, c, "healthy"); len(got) != 1 {
-		t.Fatalf("the healthy session stored %v", got)
+		panic(fmt.Sprintf("the healthy session stored %v", got))
 	}
 	for _, secret := range []string{"SECRET", "span-", "svc", "secret-attr"} {
 		if strings.Contains(raw, secret) {
-			t.Fatalf("the response echoes event data (%q): %s", secret, raw)
+			panic(fmt.Sprintf("the response echoes event data (%q): %s", secret, raw))
 		}
 	}
 	// The same holds for an uncapped partial failure and for a success.
@@ -336,7 +336,7 @@ func TestIngestFailedSessionsCappedAndWithoutEventData(t *testing.T) {
 		_, raw, _ := postRaw(t, url2, evs...)
 		for _, secret := range []string{"SECRET", "span-", "svc", "secret-attr"} {
 			if strings.Contains(raw, secret) {
-				t.Fatalf("the response echoes event data (%q): %s", secret, raw)
+				panic(fmt.Sprintf("the response echoes event data (%q): %s", secret, raw))
 			}
 		}
 	}
@@ -354,13 +354,13 @@ func TestIngestPoisonEventIsNotAFailedSession(t *testing.T) {
 	c, url := newPartC(t, cfg, sp)
 	code, raw, b := postRaw(t, url, sev("p", 1), sev("p", 2), sev("p", 3), sev("q", 4))
 	if code != 200 || b.Accepted != 4 || len(b.FailedSessions) != 0 {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if st, _ := c.seq.Status(context.Background(), "p"); st.Quarantined != 1 || st.Pending != 0 || st.EventCount != 2 {
-		t.Fatalf("session p: %+v", st)
+		panic(fmt.Sprintf("session p: %+v", st))
 	}
 	if got := storedOf(t, c, "q"); len(got) != 1 {
-		t.Fatalf("session q stored %v", got)
+		panic(fmt.Sprintf("session q stored %v", got))
 	}
 }
 
@@ -374,9 +374,9 @@ func TestIngestShutdownNamesSessions(t *testing.T) {
 	c.Close()
 	code, raw, b := postRaw(t, url, sev("a", 1), sev("b", 2))
 	if code != http.StatusServiceUnavailable || b.Error != "collector is shutting down, retry later" {
-		t.Fatalf("status %d body %s", code, raw)
+		panic(fmt.Sprintf("status %d body %s", code, raw))
 	}
 	if fmt.Sprint(b.FailedSessions) != "map[a:shutdown b:shutdown]" {
-		t.Fatalf("body %s", raw)
+		panic(fmt.Sprintf("body %s", raw))
 	}
 }

@@ -134,8 +134,8 @@ func Run(t testing.TB, o client.Options) *client.Session {
 	defer cancel()
 	s, err := client.Start(ctx, o)
 	if err != nil {
-		t.Fatalf("tsession: start session: %v", err)
-		return nil
+		panic(fmt.Sprintf("tsession: start session: %v", err))
+
 	}
 	waitPropagated(ctx, t, s)
 	t.Cleanup(func() {
@@ -206,8 +206,8 @@ func Ambient(t testing.TB, o client.Options) *client.Session {
 	defer cancel()
 	s, err := client.AttachEnv(ctx, o)
 	if err != nil {
-		t.Fatalf("tsession: the ambient session of tracectl run: %v (Run starts a session for the test alone)", err)
-		return nil
+		panic(fmt.Sprintf("tsession: the ambient session of tracectl run: %v (Run starts a session for the test alone)", err))
+
 	}
 	waitPropagated(ctx, t, s)
 	t.Cleanup(func() {
@@ -248,21 +248,21 @@ func stop(ctx context.Context, s *client.Session) error {
 func Stop(t testing.TB, s *client.Session) client.Summary {
 	t.Helper()
 	if ambient(s) {
-		t.Fatalf("tsession: session %s is the one in $%s: it belongs to tracectl run and is shared with the rest of its command, "+
+		panic(fmt.Sprintf("tsession: session %s is the one in $%s: it belongs to tracectl run and is shared with the rest of its command, "+
 			"so a test must not stop it, and the assertions of tsessiontest need a stopped session. "+
 			"Assert on a session of the test's own (tsessiontest.Run), or let tracectl run check this one (--fail-on-error)",
-			s.ID, client.SessionEnv)
-		return client.Summary{}
+			s.ID, client.SessionEnv))
+
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	if err := stop(ctx, s); err != nil {
-		t.Fatalf("tsession: stop session %s: %v", s.ID, err)
-		return client.Summary{}
+		panic(fmt.Sprintf("tsession: stop session %s: %v", s.ID, err))
+
 	}
 	sum, err := s.Summary(ctx)
 	if err != nil {
-		t.Fatalf("tsession: summary of session %s: %v", s.ID, err)
+		panic(fmt.Sprintf("tsession: summary of session %s: %v", s.ID, err))
 	}
 	return sum
 }
@@ -310,7 +310,7 @@ func RequireMutation(t testing.TB, s *client.Session, f client.MutationFilter) [
 	f.ExcludeRolledBack = true
 	ms := mutations(t, s, f)
 	if len(ms) == 0 {
-		t.Fatalf("tsession: session %s recorded no effective mutation matching %+v", s.ID, f)
+		panic(fmt.Sprintf("tsession: session %s recorded no effective mutation matching %+v", s.ID, f))
 	}
 	return ms
 }
@@ -321,8 +321,8 @@ func RequireNoMutation(t testing.TB, s *client.Session, f client.MutationFilter)
 	f.ExcludeRolledBack = true
 	if ms := mutations(t, s, f); len(ms) > 0 {
 		m := ms[0]
-		t.Fatalf("tsession: session %s recorded %d mutation(s) matching %+v, first: event #%d %s %s/%s",
-			s.ID, len(ms), f, m.Seq, m.Op, m.Store, m.Entity)
+		panic(fmt.Sprintf("tsession: session %s recorded %d mutation(s) matching %+v, first: event #%d %s %s/%s",
+			s.ID, len(ms), f, m.Seq, m.Op, m.Store, m.Entity))
 	}
 }
 
@@ -332,14 +332,14 @@ func mutations(t testing.TB, s *client.Session, f client.MutationFilter) []clien
 	if e := s.Info().SealError; e != "" {
 		// Without the seal, open transactions are unresolved: an assertion
 		// about what took effect would be a guess.
-		t.Fatalf("tsession: session %s was not sealed, so transaction outcomes are not final: %s", s.ID, e)
-		return nil
+		panic(fmt.Sprintf("tsession: session %s was not sealed, so transaction outcomes are not final: %s", s.ID, e))
+
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	ms, err := s.Mutations(ctx, f)
 	if err != nil {
-		t.Fatalf("tsession: mutations of session %s: %v", s.ID, err)
+		panic(fmt.Sprintf("tsession: mutations of session %s: %v", s.ID, err))
 	}
 	return ms
 }

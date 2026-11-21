@@ -3,6 +3,7 @@ package tredisv8
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -36,17 +37,17 @@ func TestSecretKeyNamesAreMasked(t *testing.T) {
 			p.Get(ctx, sidKey)
 			return nil
 		}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if keys, err := c.Keys(ctx, "sess:*").Result(); err != nil || len(keys) != 2 {
-			t.Fatal(keys, err)
+			panic(fmt.Sprint(keys, err))
 		}
 		if v, err := c.BLPop(ctx, time.Second, sidKey+":jobs").Result(); err != nil || v[0] != sidKey+":jobs" {
-			t.Fatal(v, err) // the application still gets the real key
+			panic(fmt.Sprint(v, err)) // the application still gets the real key
 		}
 		c.Do(ctx, "BF.ADD", tokenKey, "item") // a command the tracer does not know
 		if err := c.Watch(ctx, func(*redis.Tx) error { return nil }, tokenKey); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 
 		evs := rec.Events()

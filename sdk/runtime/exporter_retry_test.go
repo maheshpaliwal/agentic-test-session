@@ -105,11 +105,11 @@ func recordSeqs(r *Recorder, from, to int) {
 func wantSeqs(t *testing.T, got []uint64, n int) {
 	t.Helper()
 	if len(got) != n {
-		t.Fatalf("stored %d events, want %d: %v", len(got), n, got)
+		panic(fmt.Sprintf("stored %d events, want %d: %v", len(got), n, got))
 	}
 	for i, s := range got {
 		if s != seqBase+uint64(i+1) {
-			t.Fatalf("event %d has local_seq %d, want %d (order broken or event lost)", i, s-seqBase, i+1)
+			panic(fmt.Sprintf("event %d has local_seq %d, want %d (order broken or event lost)", i, s-seqBase, i+1))
 		}
 	}
 }
@@ -129,20 +129,20 @@ func TestExporterKeepsBatchesAcrossOutage(t *testing.T) {
 	eventually(t, "several failed rounds", func() bool { return col.failedRequests() >= 9 })
 	recordSeqs(r, 51, 100)
 	if n := r.Len(); n != 100 {
-		t.Fatalf("ring holds %d events during the outage, want 100", n)
+		panic(fmt.Sprintf("ring holds %d events during the outage, want 100", n))
 	}
 	col.setMode(modeUp)
 	eventually(t, "delivery after recovery", func() bool { seqs, _, _ := col.stored(); return len(seqs) == 100 })
 	if !x.Flush(time.Second) {
-		t.Fatal("flush after recovery")
+		panic("flush after recovery")
 	}
 	seqs, dropped, resent := col.stored()
 	wantSeqs(t, seqs, 100)
 	if dropped != 0 || resent != 0 {
-		t.Fatalf("dropped=%d resent=%d, want 0 and 0", dropped, resent)
+		panic(fmt.Sprintf("dropped=%d resent=%d, want 0 and 0", dropped, resent))
 	}
 	if left := r.Drain(10); len(left) != 0 {
-		t.Fatalf("recorder still holds %+v", left)
+		panic(fmt.Sprintf("recorder still holds %+v", left))
 	}
 }
 
@@ -156,13 +156,13 @@ func TestFlushReportsUndeliveredEvents(t *testing.T) {
 
 	recordSeqs(r, 1, 3)
 	if x.Flush(60 * time.Millisecond) {
-		t.Fatal("Flush returned true during the outage")
+		panic("Flush returned true during the outage")
 	}
 	if n := r.Len(); n != 3 {
-		t.Fatalf("ring holds %d events after a failed flush, want 3", n)
+		panic(fmt.Sprintf("ring holds %d events after a failed flush, want 3", n))
 	}
 	if seqs, _, _ := col.stored(); len(seqs) != 0 {
-		t.Fatalf("collector stored %v during the outage", seqs)
+		panic(fmt.Sprintf("collector stored %v during the outage", seqs))
 	}
 
 	// Recovery in the middle of a Flush: it must notice within its timeout.
@@ -171,15 +171,15 @@ func TestFlushReportsUndeliveredEvents(t *testing.T) {
 		col.setMode(modeUp)
 	}()
 	if !x.Flush(3 * time.Second) {
-		t.Fatal("Flush returned false although the collector recovered within the timeout")
+		panic("Flush returned false although the collector recovered within the timeout")
 	}
 	seqs, dropped, resent := col.stored()
 	wantSeqs(t, seqs, 3)
 	if dropped != 0 || resent != 0 || r.Len() != 0 {
-		t.Fatalf("dropped=%d resent=%d len=%d", dropped, resent, r.Len())
+		panic(fmt.Sprintf("dropped=%d resent=%d len=%d", dropped, resent, r.Len()))
 	}
 	if !x.Flush(time.Second) {
-		t.Fatal("Flush of an empty ring")
+		panic("Flush of an empty ring")
 	}
 }
 
@@ -211,12 +211,12 @@ func TestExporterDropsBatchOn400(t *testing.T) {
 	r.Record(core.Event{SessionID: "s", LocalSeq: seqBase + 1, Attrs: map[string]string{"bad": "1"}})
 	recordSeqs(r, 2, 6)
 	if !x.Flush(2 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if refused != 1 {
-		t.Fatalf("refused batch was sent %d times, want 1 (no retry on 400)", refused)
+		panic(fmt.Sprintf("refused batch was sent %d times, want 1 (no retry on 400)", refused))
 	}
 	var seqs []uint64
 	var counts []string
@@ -228,13 +228,13 @@ func TestExporterDropsBatchOn400(t *testing.T) {
 		}
 	}
 	if fmt.Sprint(seqs) != "[3 4 5 6]" {
-		t.Fatalf("delivered %v, want [3 4 5 6]", seqs)
+		panic(fmt.Sprintf("delivered %v, want [3 4 5 6]", seqs))
 	}
 	if fmt.Sprint(counts) != "[2]" {
-		t.Fatalf("sdk.dropped counts %v, want [2]", counts)
+		panic(fmt.Sprintf("sdk.dropped counts %v, want [2]", counts))
 	}
 	if r.Len() != 0 {
-		t.Fatalf("ring holds %d events", r.Len())
+		panic(fmt.Sprintf("ring holds %d events", r.Len()))
 	}
 }
 
@@ -254,17 +254,17 @@ func TestExporterDoesNotSpinOnRefusedDropEvents(t *testing.T) {
 	defer x.Close(100 * time.Millisecond)
 	recordSeqs(r, 1, 3)
 	if !x.Flush(time.Second) { // the ring is empty: everything was refused
-		t.Fatal("flush")
+		panic("flush")
 	}
 	mu.Lock()
 	n := requests
 	mu.Unlock()
 	if n != 2 { // the events, then their sdk.dropped event
-		t.Fatalf("%d requests, want 2", n)
+		panic(fmt.Sprintf("%d requests, want 2", n))
 	}
 	left := r.Drain(10)
 	if len(left) != 1 || left[0].Kind != core.KindSDKDropped || left[0].Attrs["count"] != "3" {
-		t.Fatalf("drop count not kept: %+v", left)
+		panic(fmt.Sprintf("drop count not kept: %+v", left))
 	}
 }
 
@@ -281,23 +281,23 @@ func TestRingOverflowDuringOutageCountsDrops(t *testing.T) {
 	recordSeqs(r, 1, 8) // 6, 7 and 8 do not fit
 	eventually(t, "several failed rounds", func() bool { return col.failedRequests() >= 6 })
 	if n := r.Len(); n != 5 {
-		t.Fatalf("ring holds %d events during the outage, want 5", n)
+		panic(fmt.Sprintf("ring holds %d events during the outage, want 5", n))
 	}
 	col.setMode(modeUp)
 	eventually(t, "delivery after recovery", func() bool { seqs, _, _ := col.stored(); return len(seqs) == 5 })
 	if !x.Flush(time.Second) {
-		t.Fatal("flush after recovery")
+		panic("flush after recovery")
 	}
 	seqs, dropped, resent := col.stored()
 	wantSeqs(t, seqs, 5) // the oldest five survive
 	if dropped != 3 {
-		t.Fatalf("sdk.dropped counts add up to %d, want 3", dropped)
+		panic(fmt.Sprintf("sdk.dropped counts add up to %d, want 3", dropped))
 	}
 	if resent == 0 {
-		t.Fatal("the stored batch was never resent; the test did not exercise deduplication")
+		panic("the stored batch was never resent; the test did not exercise deduplication")
 	}
 	if left := r.Drain(10); len(left) != 0 {
-		t.Fatalf("recorder still holds %+v", left)
+		panic(fmt.Sprintf("recorder still holds %+v", left))
 	}
 }
 
@@ -308,26 +308,26 @@ func TestRecorderPeekCommit(t *testing.T) {
 	}
 	a := r.Peek(3)
 	if len(a) != 3 || a[0].LocalSeq != 1 || a[2].LocalSeq != 3 || r.Len() != 4 {
-		t.Fatalf("peek %+v len=%d", a, r.Len())
+		panic(fmt.Sprintf("peek %+v len=%d", a, r.Len()))
 	}
 	if b := r.Peek(3); len(b) != 3 || b[0].LocalSeq != 1 {
-		t.Fatalf("second peek differs: %+v", b)
+		panic(fmt.Sprintf("second peek differs: %+v", b))
 	}
 	r.Commit(2)
 	r.Record(core.Event{SessionID: "s", LocalSeq: 7}) // room again, wraps around
 	rest := r.Peek(10)
 	if len(rest) != 3 || rest[0].LocalSeq != 3 || rest[1].LocalSeq != 4 || rest[2].LocalSeq != 7 {
-		t.Fatalf("after commit: %+v", rest)
+		panic(fmt.Sprintf("after commit: %+v", rest))
 	}
 	d := r.TakeDrops()
 	if len(d) != 1 || d[0].Kind != core.KindSDKDropped || d[0].Attrs["count"] != "2" {
-		t.Fatalf("drops %+v", d)
+		panic(fmt.Sprintf("drops %+v", d))
 	}
 	if len(r.TakeDrops()) != 0 {
-		t.Fatal("drop counters not reset")
+		panic("drop counters not reset")
 	}
 	r.Commit(100) // more than buffered: empties, does not go negative
 	if r.Len() != 0 || len(r.Peek(10)) != 0 {
-		t.Fatalf("len=%d", r.Len())
+		panic(fmt.Sprintf("len=%d", r.Len()))
 	}
 }

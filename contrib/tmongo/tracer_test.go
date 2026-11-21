@@ -153,17 +153,17 @@ func TestPendingBounded(t *testing.T) {
 		start(id)
 	}
 	if n := pendingLen(tr); n != 8 || tr.npending.Load() != 8 {
-		t.Fatalf("pending=%d counter=%d, want 8", n, tr.npending.Load())
+		panic(fmt.Sprintf("pending=%d counter=%d, want 8", n, tr.npending.Load()))
 	}
 	evs := rec.Events()
 	if len(evs) != 92 || len(evs[0].Flags) != 1 || evs[0].Flags[0] != "unfinished" {
-		t.Fatalf("untracked commands must be recorded as unfinished: %d events", len(evs))
+		panic(fmt.Sprintf("untracked commands must be recorded as unfinished: %d events", len(evs)))
 	}
 	// A normal completion frees its slot.
 	tr.succeeded(ctx, &event.CommandSucceededEvent{CommandFinishedEvent: event.CommandFinishedEvent{CommandName: "find", RequestID: 3},
 		Reply: mustRaw(t, bson.D{{Key: "ok", Value: 1.0}})})
 	if tr.npending.Load() != 7 {
-		t.Fatalf("counter=%d after a completion", tr.npending.Load())
+		panic(fmt.Sprintf("counter=%d after a completion", tr.npending.Load()))
 	}
 	// Stale entries are swept (and recorded) once the table is full again.
 	tr.pendingAge = 0
@@ -172,10 +172,10 @@ func TestPendingBounded(t *testing.T) {
 	start(1000)
 	start(1001)
 	if n := pendingLen(tr); n != 1 || tr.npending.Load() != 1 {
-		t.Fatalf("pending=%d counter=%d after sweep, want 1", n, tr.npending.Load())
+		panic(fmt.Sprintf("pending=%d counter=%d after sweep, want 1", n, tr.npending.Load()))
 	}
 	if _, ok := tr.pending.Load(int64(1001)); !ok {
-		t.Fatal("the new command must be tracked after the sweep")
+		panic("the new command must be tracked after the sweep")
 	}
 }
 
@@ -189,10 +189,10 @@ func TestUntracedCommandIsNotDecoded(t *testing.T) {
 		CommandName: "insert", DatabaseName: "app", RequestID: 1}
 	bg := context.Background() // no session
 	if allocs := testing.AllocsPerRun(20, func() { m.Started(bg, ev) }); allocs > 5 {
-		t.Fatalf("untraced Started allocates %.0f times", allocs)
+		panic(fmt.Sprintf("untraced Started allocates %.0f times", allocs))
 	}
 	if len(rec.Events()) != 0 {
-		t.Fatal("untraced command recorded")
+		panic("untraced command recorded")
 	}
 }
 
@@ -205,7 +205,7 @@ func TestRealMongoOrderedInsert(t *testing.T) {
 	_, rec, ctx := setup(t)
 	client, err := mongo.Connect(Apply(options.Client().ApplyURI(uri).SetServerSelectionTimeout(3 * time.Second)))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	bg := context.Background()
 	db := client.Database(fmt.Sprintf("tsession_tmongo_%d", time.Now().UnixNano()))
@@ -215,14 +215,14 @@ func TestRealMongoOrderedInsert(t *testing.T) {
 	many := []any{bson.D{{Key: "_id", Value: 1}}, bson.D{{Key: "_id", Value: 1}}, bson.D{{Key: "_id", Value: 3}},
 		bson.D{{Key: "_id", Value: 4}, {Key: "card.cvv", Value: "cvv-live"}}}
 	if _, err := coll.InsertMany(ctx, many); err == nil {
-		t.Fatal("expected a duplicate key error")
+		panic("expected a duplicate key error")
 	}
 	if _, err := coll.InsertMany(ctx, many, options.InsertMany().SetOrdered(false)); err == nil {
-		t.Fatal("expected a duplicate key error")
+		panic("expected a duplicate key error")
 	}
 	evs := rec.Events()
 	if len(evs) != 2 {
-		t.Fatalf("events=%d", len(evs))
+		panic(fmt.Sprintf("events=%d", len(evs)))
 	}
 	if got := ids(evs[0].Mutations); got != "insert:1" {
 		t.Errorf("ordered: mutations %q, want insert:1", got)
@@ -231,7 +231,7 @@ func TestRealMongoOrderedInsert(t *testing.T) {
 		t.Errorf("unordered: mutations %q, want insert:3 insert:4", got)
 	}
 	if n, _ := coll.CountDocuments(bg, bson.D{}); n != 3 {
-		t.Fatalf("documents in collection=%d", n)
+		panic(fmt.Sprintf("documents in collection=%d", n))
 	}
 	if strings.Contains(string(evs[1].Req.Inline)+string(evs[1].Mutations[1].After.Inline), "cvv-live") {
 		t.Errorf("leaked: %s", evs[1].Req.Inline)

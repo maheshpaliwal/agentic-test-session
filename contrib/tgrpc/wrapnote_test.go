@@ -2,6 +2,7 @@ package tgrpc
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -34,14 +35,14 @@ func TestInterceptorsBeforeStartAreNoted(t *testing.T) {
 	in := metadata.NewIncomingContext(context.Background(), metadata.Pairs(core.KeySession, "s1"))
 	if _, err := us(in, "req", &grpc.UnaryServerInfo{FullMethod: "/svc/M"},
 		func(context.Context, any) (any, error) { return "resp", nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	out := core.ContextWith(context.Background(), core.SpanContext{SessionID: "s1", TraceID: core.NewTraceID()})
 	if err := uc(out, "/svc/M", "req", nil, nil,
 		func(context.Context, string, any, any, *grpc.ClientConn, ...grpc.CallOption) error { return nil }); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if n := len(rec.Events()); n != 0 {
-		t.Fatalf("%d events from interceptors built before the start: the note would be wrong", n)
+		panic(fmt.Sprintf("%d events from interceptors built before the start: the note would be wrong", n))
 	}
 }

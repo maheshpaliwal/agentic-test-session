@@ -3,6 +3,7 @@ package tgrpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -69,7 +70,7 @@ func setupStreams(t *testing.T, s core.SessionSet) (*core.MemRecorder, *grpc.Cli
 		grpc.WithUnaryInterceptor(UnaryClientInterceptor()),
 		grpc.WithStreamInterceptor(StreamClientInterceptor()))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	t.Cleanup(func() {
 		conn.Close()
@@ -101,7 +102,7 @@ func TestClientStreamSendEOFKeepsFinalStatus(t *testing.T) {
 	rec, conn := setupStreams(t, sess("s1"))
 	cs, err := conn.NewStream(sessionCtx(), &grpc.StreamDesc{StreamName: "Reject", ClientStreams: true}, "/test.Streams/Reject")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	var sendErr error
 	waitFor(t, func() bool {
@@ -109,16 +110,16 @@ func TestClientStreamSendEOFKeepsFinalStatus(t *testing.T) {
 		return sendErr != nil
 	})
 	if !errors.Is(sendErr, io.EOF) {
-		t.Fatalf("SendMsg err = %v, want io.EOF", sendErr)
+		panic(fmt.Sprintf("SendMsg err = %v, want io.EOF", sendErr))
 	}
 	if err := cs.RecvMsg(new(wrapperspb.StringValue)); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("RecvMsg err = %v", err)
+		panic(fmt.Sprintf("RecvMsg err = %v", err))
 	}
 	waitFor(t, func() bool { return len(eventsOf(rec, core.KindAPIOut)) == 1 })
 	out := eventsOf(rec, core.KindAPIOut)[0]
 	// PermissionDenied answers the caller, as an HTTP 403 does: recorded, not a failure.
 	if out.Attrs["grpc.code"] != "PermissionDenied" || out.Attrs["grpc.message"] == "" || out.Err != "" {
-		t.Fatalf("span lost the final status: code=%s message=%q err=%q", out.Attrs["grpc.code"], out.Attrs["grpc.message"], out.Err)
+		panic(fmt.Sprintf("span lost the final status: code=%s message=%q err=%q", out.Attrs["grpc.code"], out.Attrs["grpc.message"], out.Err))
 	}
 }
 
@@ -130,20 +131,20 @@ func TestClientStreamErrorStatusNeverLost(t *testing.T) {
 	for i := 0; i < n; i++ {
 		cs, err := conn.NewStream(sessionCtx(), &grpc.StreamDesc{StreamName: "Fail", ServerStreams: true}, "/test.Streams/Fail")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if err := cs.SendMsg(wrapperspb.String("x")); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		cs.CloseSend()
 		if err := cs.RecvMsg(new(wrapperspb.StringValue)); status.Code(err) != codes.NotFound {
-			t.Fatalf("RecvMsg err = %v", err)
+			panic(fmt.Sprintf("RecvMsg err = %v", err))
 		}
 	}
 	waitFor(t, func() bool { return len(eventsOf(rec, core.KindAPIOut)) == n })
 	for _, e := range eventsOf(rec, core.KindAPIOut) {
 		if e.Attrs["grpc.code"] != "NotFound" {
-			t.Fatalf("api.out recorded %s for a NotFound stream", e.Attrs["grpc.code"])
+			panic(fmt.Sprintf("api.out recorded %s for a NotFound stream", e.Attrs["grpc.code"]))
 		}
 	}
 }
@@ -154,28 +155,28 @@ func TestClientStreamingResponseRecorded(t *testing.T) {
 	rec, conn := setupStreams(t, sess("s1"))
 	cs, err := conn.NewStream(sessionCtx(), &grpc.StreamDesc{StreamName: "Count", ClientStreams: true}, "/test.Streams/Count")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, m := range []string{"a", "b", "c"} {
 		if err := cs.SendMsg(wrapperspb.String(m)); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	cs.CloseSend()
 	reply := new(wrapperspb.StringValue)
 	if err := cs.RecvMsg(reply); err != nil || reply.Value != "xxx" {
-		t.Fatalf("reply %q err %v", reply.Value, err)
+		panic(fmt.Sprintf("reply %q err %v", reply.Value, err))
 	}
 	waitFor(t, func() bool { return len(eventsOf(rec, core.KindAPIOut)) == 1 })
 	out := eventsOf(rec, core.KindAPIOut)[0]
 	if out.Attrs["grpc.code"] != "OK" || out.Err != "" {
-		t.Fatalf("code=%s err=%q", out.Attrs["grpc.code"], out.Err)
+		panic(fmt.Sprintf("code=%s err=%q", out.Attrs["grpc.code"], out.Err))
 	}
 	if got := string(out.Req.Inline); got != `["a","b","c"]` {
-		t.Fatalf("req = %s", got)
+		panic(fmt.Sprintf("req = %s", got))
 	}
 	if got := string(out.Resp.Inline); got != `["xxx"]` {
-		t.Fatalf("resp = %s", got)
+		panic(fmt.Sprintf("resp = %s", got))
 	}
 }
 
@@ -185,12 +186,12 @@ func TestClientStreamCancelRecorded(t *testing.T) {
 	rec, conn := setupStreams(t, sess("s1"))
 	ctx, cancel := context.WithCancel(sessionCtx())
 	if _, err := conn.NewStream(ctx, &grpc.StreamDesc{StreamName: "Count", ClientStreams: true}, "/test.Streams/Count"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	cancel()
 	waitFor(t, func() bool { return len(eventsOf(rec, core.KindAPIOut)) == 1 })
 	if out := eventsOf(rec, core.KindAPIOut)[0]; out.Attrs["grpc.code"] != "Canceled" {
-		t.Fatalf("code = %s", out.Attrs["grpc.code"])
+		panic(fmt.Sprintf("code = %s", out.Attrs["grpc.code"]))
 	}
 }
 
@@ -203,14 +204,14 @@ func TestStreamLogCapsRetainedBytes(t *testing.T) {
 		l.add(wrapperspb.String(strings.Repeat("m", 400)))
 	}
 	if l.bytes > 1000 || !l.more {
-		t.Fatalf("retained %d bytes in %d msgs (more=%v), want <= 1000", l.bytes, len(l.msgs), l.more)
+		panic(fmt.Sprintf("retained %d bytes in %d msgs (more=%v), want <= 1000", l.bytes, len(l.msgs), l.more))
 	}
 	if len(l.msgs) != 3 {
-		t.Fatalf("kept %d msgs, want 2 whole and 1 cut", len(l.msgs))
+		panic(fmt.Sprintf("kept %d msgs, want 2 whole and 1 cut", len(l.msgs)))
 	}
 	for _, m := range l.msgs {
 		if !strings.HasPrefix(string(m), `"`) || !strings.HasSuffix(string(m), `"`) {
-			t.Fatalf("entry is not a JSON string: %.40s", m)
+			panic(fmt.Sprintf("entry is not a JSON string: %.40s", m))
 		}
 	}
 
@@ -218,7 +219,7 @@ func TestStreamLogCapsRetainedBytes(t *testing.T) {
 	var big msgLog
 	big.add(wrapperspb.String(strings.Repeat("b", 5000)))
 	if big.bytes > 1000 || len(big.msgs) != 1 || !big.more {
-		t.Fatalf("oversized message retained %d bytes", big.bytes)
+		panic(fmt.Sprintf("oversized message retained %d bytes", big.bytes))
 	}
 }
 
@@ -226,16 +227,16 @@ func TestStreamSpanFlaggedWhenLogCapped(t *testing.T) {
 	rec, conn := setupStreams(t, sess("s1"))
 	cs, err := conn.NewStream(sessionCtx(), &grpc.StreamDesc{StreamName: "Count", ClientStreams: true}, "/test.Streams/Count")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for i := 0; i < maxStreamMsgs+1; i++ {
 		if err := cs.SendMsg(wrapperspb.String("m")); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	cs.CloseSend()
 	if err := cs.RecvMsg(new(wrapperspb.StringValue)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	waitFor(t, func() bool { return len(rec.Events()) == 2 })
 	for _, e := range rec.Events() {
@@ -244,7 +245,7 @@ func TestStreamSpanFlaggedWhenLogCapped(t *testing.T) {
 			flagged = flagged || f == flagTruncated
 		}
 		if !flagged {
-			t.Fatalf("%s span not flagged truncated: %v", e.Kind, e.Flags)
+			panic(fmt.Sprintf("%s span not flagged truncated: %v", e.Kind, e.Flags))
 		}
 	}
 }
@@ -262,7 +263,7 @@ func TestIngressAttributeBinding(t *testing.T) {
 		t.Helper()
 		ctx := metadata.AppendToOutgoingContext(context.Background(), kv...)
 		if err := conn.Invoke(ctx, "/test.Echo/Echo", wrapperspb.String("hi"), new(wrapperspb.StringValue)); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	call("x-user-id", "u1")
@@ -272,31 +273,31 @@ func TestIngressAttributeBinding(t *testing.T) {
 
 	in := eventsOf(rec, core.KindAPIIn)
 	if len(in) != 2 {
-		t.Fatalf("want 2 bound api.in spans, got %d: %+v", len(in), in)
+		panic(fmt.Sprintf("want 2 bound api.in spans, got %d: %+v", len(in), in))
 	}
 	if in[0].SessionID != "s1" || in[0].Attrs["bound_by"] != "header:x-user-id" {
-		t.Fatalf("header binding: %+v", in[0])
+		panic(fmt.Sprintf("header binding: %+v", in[0]))
 	}
 	if in[1].SessionID != "s2" || in[1].Attrs["bound_by"] != "jwt_claim:sub" {
-		t.Fatalf("jwt binding: %+v", in[1])
+		panic(fmt.Sprintf("jwt binding: %+v", in[1]))
 	}
 
 	// Streams bind the same way.
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-user-id", "u1")
 	cs, err := conn.NewStream(ctx, &grpc.StreamDesc{StreamName: "Fail", ServerStreams: true}, "/test.Streams/Fail")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	cs.SendMsg(wrapperspb.String("x"))
 	cs.CloseSend()
 	cs.RecvMsg(new(wrapperspb.StringValue))
 	waitFor(t, func() bool { return len(eventsOf(rec, core.KindAPIIn)) == 3 })
 	if e := eventsOf(rec, core.KindAPIIn)[2]; e.SessionID != "s1" || e.Name != "/test.Streams/Fail" {
-		t.Fatalf("stream binding: %+v", e)
+		panic(fmt.Sprintf("stream binding: %+v", e))
 	}
 	for _, e := range rec.Events() {
 		if strings.Contains(string(e.Req.Inline)+string(e.Resp.Inline), jwt) {
-			t.Fatal("token recorded")
+			panic("token recorded")
 		}
 	}
 }

@@ -33,12 +33,12 @@ func benchStore(b *testing.B, snapshot []byte) *FileStore {
 	b.Helper()
 	path := filepath.Join(b.TempDir(), "s.json")
 	if err := os.WriteFile(path, snapshot, 0o600); err != nil {
-		b.Fatal(err)
+		panic(err)
 	}
 	fs, err := NewFileStore(path)
 	closeLater(b, fs)
 	if err != nil {
-		b.Fatal(err)
+		panic(err)
 	}
 	return fs
 }
@@ -57,7 +57,7 @@ func BenchmarkFileStorePut(b *testing.B) {
 				s := ss[i%hot]
 				s.Name = fmt.Sprintf("renamed %d", i)
 				if err := fs.Put(s); err != nil {
-					b.Fatal(err)
+					panic(err)
 				}
 			}
 		})

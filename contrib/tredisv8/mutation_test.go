@@ -2,6 +2,7 @@ package tredisv8
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ func mutatedKeys(t *testing.T, rec *core.MemRecorder) (core.Event, []string) {
 	t.Helper()
 	evs := rec.Events()
 	if len(evs) == 0 {
-		t.Fatal("no events")
+		panic("no events")
 	}
 	e := evs[len(evs)-1]
 	var keys []string
@@ -29,11 +30,11 @@ func wantKeys(t *testing.T, rec *core.MemRecorder, kind core.Kind, want ...strin
 	t.Helper()
 	e, got := mutatedKeys(t, rec)
 	if e.Kind != kind || len(got) != len(want) {
-		t.Fatalf("%s: kind=%s mutated=%v, want kind=%s mutated=%v", e.Name, e.Kind, got, kind, want)
+		panic(fmt.Sprintf("%s: kind=%s mutated=%v, want kind=%s mutated=%v", e.Name, e.Kind, got, kind, want))
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("%s: mutated=%v, want %v", e.Name, got, want)
+			panic(fmt.Sprintf("%s: mutated=%v, want %v", e.Name, got, want))
 		}
 	}
 }
@@ -52,7 +53,7 @@ func TestStoreCommandsMutateOnlyDestination(t *testing.T) {
 	c.ZUnionStore(ctx, "zdest", &redis.ZStore{Keys: []string{"za"}})
 	wantKeys(t, rec, core.KindCacheWrite, "zdest")
 	if e, _ := mutatedKeys(t, rec); e.Name != "ZUNIONSTORE zdest" || !e.Mutations[0].After.IsZero() {
-		t.Fatalf("%+v", e)
+		panic(fmt.Sprintf("%+v", e))
 	}
 	c.Copy(ctx, "from", "to", 0, false)
 	wantKeys(t, rec, core.KindCacheWrite, "to")
@@ -64,7 +65,7 @@ func TestBlockingPopMutatesOnlyPoppedKey(t *testing.T) {
 	c, rec, ctx := setup(t)
 	c.RPush(context.Background(), "q2", "job")
 	if v, err := c.BLPop(ctx, time.Second, "q1", "q2").Result(); err != nil || v[0] != "q2" {
-		t.Fatal(v, err)
+		panic(fmt.Sprint(v, err))
 	}
 	wantKeys(t, rec, core.KindCacheWrite, "q2")
 }
@@ -73,7 +74,7 @@ func TestSortWithoutStoreIsRead(t *testing.T) {
 	c, rec, ctx := setup(t)
 	c.Sort(ctx, "l", &redis.Sort{Alpha: true}) // miniredis has no SORT; the span is still classified
 	if e := rec.Events()[0]; e.Kind != core.KindCacheRead || len(e.Mutations) != 0 {
-		t.Fatalf("%+v", e)
+		panic(fmt.Sprintf("%+v", e))
 	}
 }
 
@@ -106,7 +107,7 @@ func TestNoOpWritesYieldNoMutation(t *testing.T) {
 		run()
 		evs := rec.Events()
 		if len(evs) != n+1 {
-			t.Fatalf("%s: the command must still be traced", name)
+			panic(fmt.Sprintf("%s: the command must still be traced", name))
 		}
 		if e := evs[n]; e.Kind != core.KindCacheWrite || e.Err != "" || len(e.Mutations) != 0 {
 			t.Errorf("%s: kind=%s err=%q resp=%s mutations=%d, want a write span without mutation",
@@ -125,12 +126,12 @@ func TestNoOpWritesYieldNoMutation(t *testing.T) {
 func TestEvalMutationHasNoArgImage(t *testing.T) {
 	c, rec, ctx := setup(t)
 	if err := c.Eval(ctx, "return 1", []string{"k1", "k2"}, "argv1").Err(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	wantKeys(t, rec, core.KindCacheWrite, "k1", "k2")
 	for _, m := range rec.Events()[0].Mutations {
 		if !m.After.IsZero() {
-			t.Fatalf("other keys / ARGV recorded as the value of %v: %s", m.PK, m.After.Inline)
+			panic(fmt.Sprintf("other keys / ARGV recorded as the value of %v: %s", m.PK, m.After.Inline))
 		}
 	}
 }

@@ -7,6 +7,7 @@ package tsql_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -48,7 +49,7 @@ func isoExec(t *testing.T, ctx context.Context, ex isoExecer, qs ...string) {
 	t.Helper()
 	for _, q := range qs {
 		if _, err := ex.ExecContext(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
+			panic(fmt.Sprintf("%s: %v", q, err))
 		}
 	}
 }
@@ -73,7 +74,7 @@ func isoRunCheck(t *testing.T, c *sql.Conn, ic isoCase, ctx, ctl context.Context
 	} else {
 		tx, err := c.BeginTx(ctl, nil)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		ex, end = tx, tx.Commit
 	}
@@ -85,7 +86,7 @@ func isoRunCheck(t *testing.T, c *sql.Conn, ic isoCase, ctx, ctl context.Context
 		check(ex)
 	}
 	if err := end(); err != nil {
-		t.Fatalf("COMMIT: %v", err)
+		panic(fmt.Sprintf("COMMIT: %v", err))
 	}
 	return got
 }
@@ -135,16 +136,16 @@ func TestSerializableSetByStatementSendsNoCapture(t *testing.T) {
 				db := open(t, f, "postgres")
 				c, err := db.Conn(ctx)
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				defer c.Close()
 				take := fakeTake(f)
 				if got := isoRun(t, c, ic, ctx, ctl, take, isoTwoUpdates...); strings.Join(got, "\n") != fenceUpdate+"\n"+fenceUpdate {
-					t.Fatalf("driver saw:\n%s\nwant only the application's two statements", strings.Join(got, "\n"))
+					panic(fmt.Sprintf("driver saw:\n%s\nwant only the application's two statements", strings.Join(got, "\n")))
 				}
 				for _, e := range byKind(rec.Events(), core.KindDBWrite) {
 					if !hasFlag(e, "image_skipped:serializable") || len(e.Mutations) != 1 || !e.Mutations[0].Before.IsZero() {
-						t.Fatalf("event %q: flags %v mutations %+v", e.Name, e.Flags, e.Mutations)
+						panic(fmt.Sprintf("event %q: flags %v mutations %+v", e.Name, e.Flags, e.Mutations))
 					}
 				}
 				// The level is the transaction's, or the session's until it is
@@ -155,7 +156,7 @@ func TestSerializableSetByStatementSendsNoCapture(t *testing.T) {
 					next.begin = "BEGIN ISOLATION LEVEL REPEATABLE READ"
 				}
 				if got := isoRun(t, c, next, ctx, ctl, take, isoTwoUpdates...); isoReads(got) != 4 {
-					t.Fatalf("the transaction after it ran %d image reads, want 4:\n%s", isoReads(got), strings.Join(got, "\n"))
+					panic(fmt.Sprintf("the transaction after it ran %d image reads, want 4:\n%s", isoReads(got), strings.Join(got, "\n")))
 				}
 			})
 		}
@@ -172,11 +173,11 @@ func TestSerializableDefaultIsAskedOncePerConnection(t *testing.T) {
 	db := open(t, f, "postgres")
 	db.SetMaxOpenConns(1)
 	if _, err := db.ExecContext(ctx, fenceUpdate); err != nil { // the connection now takes two statements in one text
-		t.Fatal(err)
+		panic(err)
 	}
 	c, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	take := fakeTake(f)
 	got := isoRun(t, c, isoCase{}, ctx, ctx, take, isoTwoUpdates...)
@@ -185,23 +186,23 @@ func TestSerializableDefaultIsAskedOncePerConnection(t *testing.T) {
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture", fenceUpdate, fenceUpdate,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("first transaction, driver saw:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		panic(fmt.Sprintf("first transaction, driver saw:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n")))
 	}
 	for _, ic := range []isoCase{{}, {begin: "BEGIN"}, {begin: "START TRANSACTION READ WRITE"}} {
 		if got := isoRun(t, c, ic, ctx, ctx, take, isoTwoUpdates...); strings.Join(got, "\n") != fenceUpdate+"\n"+fenceUpdate {
-			t.Fatalf("later transaction (%q), driver saw:\n%s", ic.begin, strings.Join(got, "\n"))
+			panic(fmt.Sprintf("later transaction (%q), driver saw:\n%s", ic.begin, strings.Join(got, "\n")))
 		}
 	}
 	for _, e := range byKind(rec.Events(), core.KindDBWrite)[1:] {
 		if !hasFlag(e, "image_skipped:serializable") {
-			t.Fatalf("event %q: flags %v", e.Name, e.Flags)
+			panic(fmt.Sprintf("event %q: flags %v", e.Name, e.Flags))
 		}
 	}
 	// A transaction that states another level is read as before, and is not
 	// asked about; so is one at the default level once that has changed.
 	got = isoRun(t, c, isoCase{begin: "BEGIN ISOLATION LEVEL READ COMMITTED"}, ctx, ctx, take, isoTwoUpdates...)
 	if isoReads(got) != 4 || strings.Contains(strings.Join(got, "\n"), "transaction_isolation") {
-		t.Fatalf("READ COMMITTED transaction:\n%s", strings.Join(got, "\n"))
+		panic(fmt.Sprintf("READ COMMITTED transaction:\n%s", strings.Join(got, "\n")))
 	}
 	f.mu.Lock()
 	f.serializable = false
@@ -209,7 +210,7 @@ func TestSerializableDefaultIsAskedOncePerConnection(t *testing.T) {
 	isoExec(t, context.Background(), c, "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 	got = isoRun(t, c, isoCase{}, ctx, ctx, take, isoTwoUpdates...)
 	if isoReads(got) != 4 || strings.Count(strings.Join(got, "\n"), "transaction_isolation") != 1 {
-		t.Fatalf("after the default changed:\n%s", strings.Join(got, "\n"))
+		panic(fmt.Sprintf("after the default changed:\n%s", strings.Join(got, "\n")))
 	}
 }
 
@@ -221,12 +222,12 @@ func TestSerializableDefaultSetInRolledBackTransaction(t *testing.T) {
 	db := open(t, f, "postgres")
 	c, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer c.Close()
 	isoExec(t, ctx, c, "BEGIN", "SET default_transaction_isolation = 'serializable'", "ROLLBACK")
 	if got := isoRun(t, c, isoCase{}, ctx, ctx, fakeTake(f), isoTwoUpdates...); isoReads(got) != 4 {
-		t.Fatalf("%d image reads, want 4:\n%s", isoReads(got), strings.Join(got, "\n"))
+		panic(fmt.Sprintf("%d image reads, want 4:\n%s", isoReads(got), strings.Join(got, "\n")))
 	}
 }
 
@@ -255,7 +256,7 @@ func TestMySQLSerializableSetByStatementSendsNoCapture(t *testing.T) {
 			db := open(t, f, "mysql", noPKLookup)
 			c, err := db.Conn(ctx)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			defer c.Close()
 			take := fakeTake(f)
@@ -264,12 +265,12 @@ func TestMySQLSerializableSetByStatementSendsNoCapture(t *testing.T) {
 			}
 			for i, ic := range []isoCase{{before: []string{tc.set}}, {begin: "START TRANSACTION"}} {
 				if n := reads(ic); (n == 0) != (i < tc.skips) {
-					t.Fatalf("transaction %d: %d image reads (%d transactions are to be skipped)", i+1, n, tc.skips)
+					panic(fmt.Sprintf("transaction %d: %d image reads (%d transactions are to be skipped)", i+1, n, tc.skips))
 				}
 			}
 			if tc.sticky {
 				if n := reads(isoCase{before: []string{"SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"}}); n == 0 {
-					t.Fatalf("after the session level was set back: %d image reads", n)
+					panic(fmt.Sprintf("after the session level was set back: %d image reads", n))
 				}
 			}
 		})

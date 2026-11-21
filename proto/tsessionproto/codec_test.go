@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/rand"
@@ -42,11 +43,11 @@ func roundTrip(t *testing.T, in core.Event) core.Event {
 	t.Helper()
 	b, err := AppendFramed(nil, in)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	out, err := NewDecoder(bytes.NewReader(b), 1<<20).Next()
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return out
 }
@@ -54,7 +55,7 @@ func roundTrip(t *testing.T, in core.Event) core.Event {
 func TestRoundTripAllFields(t *testing.T) {
 	in := fullEvent()
 	if out := roundTrip(t, in); !reflect.DeepEqual(in, out) {
-		t.Fatalf("mismatch\n in: %+v\nout: %+v", in, out)
+		panic(fmt.Sprintf("mismatch\n in: %+v\nout: %+v", in, out))
 	}
 }
 
@@ -66,10 +67,10 @@ func TestRoundTripMatchesJSON(t *testing.T) {
 	var want core.Event
 	j, _ := json.Marshal(in)
 	if err := json.Unmarshal(j, &want); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got := roundTrip(t, in); !reflect.DeepEqual(want, got) {
-		t.Fatalf("differs from JSON round trip\nwant: %+v\n got: %+v", want, got)
+		panic(fmt.Sprintf("differs from JSON round trip\nwant: %+v\n got: %+v", want, got))
 	}
 }
 
@@ -86,7 +87,7 @@ func TestNilAndEmpty(t *testing.T) {
 	// empty strings and zero sizes survive inside non-nil containers
 	in := core.Event{Mutations: []core.Mutation{{}}, Reads: []core.ReadSummary{{}}}
 	if out := roundTrip(t, in); !reflect.DeepEqual(in, out) {
-		t.Fatalf("got %+v", out)
+		panic(fmt.Sprintf("got %+v", out))
 	}
 }
 
@@ -95,7 +96,7 @@ func TestEffectiveTriState(t *testing.T) {
 	out := roundTrip(t, in)
 	if out.Mutations[0].Effective != nil || out.Mutations[1].Effective == nil || !*out.Mutations[1].Effective ||
 		out.Mutations[2].Effective == nil || *out.Mutations[2].Effective {
-		t.Fatalf("tri-state lost: %+v", out.Mutations)
+		panic(fmt.Sprintf("tri-state lost: %+v", out.Mutations))
 	}
 }
 
@@ -103,12 +104,12 @@ func TestUnicodeAndInvalidUTF8(t *testing.T) {
 	in := core.Event{SessionID: "ts_日本語🙂", Name: "näme  ", Attrs: map[string]string{"ключ": "значение"},
 		Mutations: []core.Mutation{{PK: map[string]any{"ключ": "💥"}}}}
 	if out := roundTrip(t, in); !reflect.DeepEqual(in, out) {
-		t.Fatalf("got %+v", out)
+		panic(fmt.Sprintf("got %+v", out))
 	}
 	bad := core.Event{Name: "a\xffb", Attrs: map[string]string{"k\xfe": "v\xfd"}, Mutations: []core.Mutation{{PK: map[string]any{"k": "x\xff"}}}}
 	out := roundTrip(t, bad) // must encode (as encoding/json would) rather than fail
 	if out.Name != "a�b" || out.Attrs["k�"] != "v�" || out.Mutations[0].PK["k"] != "x�" {
-		t.Fatalf("got %+v", out)
+		panic(fmt.Sprintf("got %+v", out))
 	}
 }
 
@@ -117,7 +118,7 @@ func TestNonFiniteAndOddValues(t *testing.T) {
 	in := core.Event{Mutations: []core.Mutation{{PK: map[string]any{"nan": math.NaN(), "inf": math.Inf(1), "c": custom{1}, "ch": make(chan int)}}}}
 	pk := roundTrip(t, in).Mutations[0].PK
 	if pk["nan"] != nil || pk["inf"] != nil || pk["ch"] != nil || !reflect.DeepEqual(pk["c"], map[string]any{"A": 1.0}) {
-		t.Fatalf("got %#v", pk)
+		panic(fmt.Sprintf("got %#v", pk))
 	}
 }
 
@@ -129,17 +130,17 @@ func TestNULReplaced(t *testing.T) {
 	}
 	out := roundTrip(t, in)
 	if out.SessionID != "a�b" || out.Name != "x�" || out.Attrs["k�"] != "v�" || out.Flags[0] != "f�" || out.Req.BlobHash != "h�" {
-		t.Fatalf("got %+v", out)
+		panic(fmt.Sprintf("got %+v", out))
 	}
 	if got, want := string(out.Req.Inline), `{"a":"x�y","b":"\\u0000"}`; got != want {
-		t.Fatalf("inline: got %s want %s", got, want)
+		panic(fmt.Sprintf("inline: got %s want %s", got, want))
 	}
 	m := out.Mutations[0]
 	if m.Store != "s�" || m.PK["k�"] != "v�" || m.PK["l"].([]any)[0] != "�" || m.Diff[0].Field != "f�" || m.Diff[0].Old != "o�" {
-		t.Fatalf("got %+v", m)
+		panic(fmt.Sprintf("got %+v", m))
 	}
 	if b, _ := json.Marshal(out); bytes.Contains(b, []byte(`"\u0000`)) {
-		t.Fatalf("NUL survived: %s", b)
+		panic(fmt.Sprintf("NUL survived: %s", b))
 	}
 }
 
@@ -149,13 +150,13 @@ func TestInvalidInlineJSONRejected(t *testing.T) {
 	b3, _ := AppendFramed(nil, core.Event{SessionID: "after"})
 	d := NewDecoder(bytes.NewReader(append(append(b, b2...), b3...)), 1<<20)
 	if e, err := d.Next(); err != nil || e.SessionID != "ok" {
-		t.Fatal(e, err)
+		panic(fmt.Sprint(e, err))
 	}
 	if _, err := d.Next(); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("got %v", err)
+		panic(fmt.Sprintf("got %v", err))
 	}
 	if e, err := d.Next(); err != nil || e.SessionID != "after" {
-		t.Fatal(e, err)
+		panic(fmt.Sprint(e, err))
 	}
 }
 
@@ -163,7 +164,7 @@ func TestFramingStreamAndLimits(t *testing.T) {
 	evs := []core.Event{{SessionID: "a"}, {SessionID: "big", Name: strings.Repeat("x", 5000)}, {SessionID: "c"}}
 	b, err := Encode(evs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	d := NewDecoder(bytes.NewReader(b), 1000)
 	var got []string
@@ -178,15 +179,15 @@ func TestFramingStreamAndLimits(t *testing.T) {
 			continue
 		}
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		got = append(got, e.SessionID)
 	}
 	if over != 1 || !reflect.DeepEqual(got, []string{"a", "c"}) {
-		t.Fatalf("over=%d got=%v", over, got)
+		panic(fmt.Sprintf("over=%d got=%v", over, got))
 	}
 	if b, err := Encode(nil); err != nil || len(b) != 0 {
-		t.Fatalf("empty batch: %v %v", b, err)
+		panic(fmt.Sprintf("empty batch: %v %v", b, err))
 	}
 }
 
@@ -206,19 +207,19 @@ func TestUndecodableMessageKeepsFraming(t *testing.T) {
 			continue
 		}
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		res = append(res, e.SessionID)
 	}
 	if !reflect.DeepEqual(res, []string{"g", "bad", "g"}) {
-		t.Fatalf("got %v", res)
+		panic(fmt.Sprintf("got %v", res))
 	}
 }
 
 func TestTruncatedAndGarbageNeverPanic(t *testing.T) {
 	b, err := Encode([]core.Event{fullEvent(), fullEvent()})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	drain := func(data []byte) {
 		d := NewDecoder(bytes.NewReader(data), 1<<16)
@@ -230,7 +231,7 @@ func TestTruncatedAndGarbageNeverPanic(t *testing.T) {
 				return // EOF / corrupt / read error ends the stream
 			}
 		}
-		t.Fatalf("decoder did not terminate on %x", data)
+		panic(fmt.Sprintf("decoder did not terminate on %x", data))
 	}
 	for i := 0; i <= len(b); i++ { // every truncation point
 		drain(b[:i])
@@ -250,12 +251,12 @@ func TestTruncatedAndGarbageNeverPanic(t *testing.T) {
 	// truncation mid-stream is reported as corrupt framing
 	_, err = NewDecoder(bytes.NewReader(b[:len(b)-3]), 1<<20).Next()
 	if err != nil {
-		t.Fatal(err) // first message intact
+		panic(err) // first message intact
 	}
 	d := NewDecoder(bytes.NewReader(b[:len(b)-3]), 1<<20)
 	d.Next()
 	if _, err := d.Next(); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("got %v", err)
+		panic(fmt.Sprintf("got %v", err))
 	}
 }
 
@@ -270,7 +271,7 @@ func FuzzDecoder(f *testing.F) {
 			e, err := d.Next()
 			if err == nil {
 				if b, _ := json.Marshal(e); bytes.Contains(b, []byte(`"\u0000`)) || bytes.Contains(b, []byte(`x\u0000`)) {
-					t.Fatalf("NUL in decoded event: %s", b)
+					panic(fmt.Sprintf("NUL in decoded event: %s", b))
 				}
 				continue
 			}

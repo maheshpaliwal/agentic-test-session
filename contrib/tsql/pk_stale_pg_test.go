@@ -6,6 +6,7 @@ package tsql_test
 // it is flagged; it is never recorded with another row's values.
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -33,7 +34,7 @@ var twoSchemas = []string{
 func rtWantChange(t *testing.T, e core.Event, pk map[string]any, field string) {
 	t.Helper()
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	m := e.Mutations[0]
 	var changed []string
@@ -41,7 +42,7 @@ func rtWantChange(t *testing.T, e core.Event, pk map[string]any, field string) {
 		changed = append(changed, d.Field)
 	}
 	if !reflect.DeepEqual(m.PK, pk) || !slices.Equal(changed, []string{field}) {
-		t.Fatalf("recorded key %v and changed fields %v, want %v and [%s]", m.PK, changed, pk, field)
+		panic(fmt.Sprintf("recorded key %v and changed fields %v, want %v and [%s]", m.PK, changed, pk, field))
 	}
 }
 
@@ -53,14 +54,14 @@ func TestPGPKSearchPathRevertsWithItsTransaction(t *testing.T) {
 	rtMustExec(t, db, "SET search_path TO tsql_st_b")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO tsql_st_a"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	rtWantChange(t, rtWrite(t, rec, tx, ctx, "UPDATE t SET v = $1 WHERE a = $2", "a2", 1), map[string]any{"a": int64(1)}, "v")
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	rtWantChange(t, rtWrite(t, rec, db, ctx, "UPDATE t SET v = $1 WHERE b = $2", "z", 1), map[string]any{"b": int64(1)}, "v")
 }
@@ -77,10 +78,10 @@ func TestPGPKSearchPathSetOtherWays(t *testing.T) {
 			if how[0] == 'S' && how[1] == 'E' && how[2] == 'L' {
 				var s string
 				if err := db.QueryRowContext(ctx, how).Scan(&s); err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 			} else if _, err := db.ExecContext(ctx, how); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			rtWantChange(t, rtWrite(t, rec, db, ctx, "UPDATE t SET v = $1 WHERE b = $2", "z", 1), map[string]any{"b": int64(1)}, "v")
 		})
@@ -93,16 +94,16 @@ func TestPGPKChangedInARolledBackTransaction(t *testing.T) {
 	db := rtOpen(t, &rtDriver{})
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, s := range []string{"DELETE FROM tsql_st.c WHERE a = 2", "ALTER TABLE tsql_st.c DROP CONSTRAINT c_pkey", "ALTER TABLE tsql_st.c ADD PRIMARY KEY (b)"} {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	rtWantChange(t, rtWrite(t, rec, tx, ctx, "UPDATE tsql_st.c SET v = $1 WHERE a = $2", "in-tx", 1), map[string]any{"b": int64(5)}, "v")
 	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	rtWantChange(t, rtWrite(t, rec, db, ctx, "UPDATE tsql_st.c SET v = $1 WHERE a = $2", "z", 1), map[string]any{"a": int64(1)}, "v")
 }
@@ -115,7 +116,7 @@ func TestPGPKDefaultKeyThatIsNotUnique(t *testing.T) {
 	db := rtOpen(t, &rtDriver{})
 	e := rtWrite(t, rec, db, ctx, "UPDATE tsql_st.n SET name = $1 WHERE name = $2", "z", "b")
 	if !hasFlag(e, "pk_not_unique") || len(e.Mutations) != 1 || len(e.Mutations[0].Diff) != 0 || !e.Mutations[0].After.IsZero() {
-		t.Fatalf("flags %v mutations %+v", e.Flags, e.Mutations)
+		panic(fmt.Sprintf("flags %v mutations %+v", e.Flags, e.Mutations))
 	}
 }
 
@@ -126,7 +127,7 @@ func TestPGPKTableCreatedAfterAFailedStatement(t *testing.T) {
 	rec, ctx := setup(t)
 	db := rtOpen(t, &rtDriver{})
 	if _, err := db.ExecContext(ctx, "INSERT INTO tsql_st.late (sku, qty) VALUES ($1, $2)", "a", 1); err == nil {
-		t.Fatal("expected an error: the table does not exist")
+		panic("expected an error: the table does not exist")
 	}
 	rtAdmin(t, "CREATE TABLE tsql_st.late (sku text PRIMARY KEY, qty int)", "INSERT INTO tsql_st.late VALUES ('w', 1)")
 	rtWantChange(t, rtWrite(t, rec, db, ctx, "UPDATE tsql_st.late SET qty = qty + 1 WHERE qty = $1", 1), map[string]any{"sku": "w"}, "qty")
@@ -140,11 +141,11 @@ func TestPGPKDefaultKeySharedByTheRowsWritten(t *testing.T) {
 	db := rtOpen(t, &rtDriver{})
 	e := rtWrite(t, rec, db, ctx, "UPDATE tsql_st.dup SET v = v + 1 WHERE id = $1", 1)
 	if !hasFlag(e, "pk_not_unique") || len(e.Mutations) == 0 {
-		t.Fatalf("flags %v mutations %+v", e.Flags, e.Mutations)
+		panic(fmt.Sprintf("flags %v mutations %+v", e.Flags, e.Mutations))
 	}
 	for _, m := range e.Mutations {
 		if len(m.Diff) != 0 || !m.After.IsZero() {
-			t.Fatalf("a row was recorded with new values although the key does not identify it: %+v", m)
+			panic(fmt.Sprintf("a row was recorded with new values although the key does not identify it: %+v", m))
 		}
 	}
 }
@@ -159,26 +160,26 @@ func TestPGSerializableDefaultUndoneBySavepointRollback(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for _, s := range []string{"SAVEPOINT a", "SET default_transaction_isolation = 'serializable'", "ROLLBACK TO SAVEPOINT a"} {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got := rtShow(t, db, "SHOW default_transaction_isolation"); got != "read committed" {
-		t.Fatalf("test setup: the default is %q", got)
+		panic(fmt.Sprintf("test setup: the default is %q", got))
 	}
 	tx, err = db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer tx.Rollback()
 	e := rtWrite(t, rec, tx, ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "x", 1)
 	if len(e.Flags) != 0 || len(e.Mutations) != 1 || len(e.Mutations[0].Diff) != 1 {
-		t.Fatalf("flags %v mutations %+v", e.Flags, e.Mutations)
+		panic(fmt.Sprintf("flags %v mutations %+v", e.Flags, e.Mutations))
 	}
 }

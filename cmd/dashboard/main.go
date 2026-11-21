@@ -28,10 +28,10 @@ func main() {
 
 	h, err := dashboard.New(dashboard.Config{ControlPlaneURL: *cpURL, CollectorURL: *colURL, Demo: *demo, Open: open, AllowedHosts: svc.SplitCSV(*hosts)})
 	if err != nil {
-		log.Fatalf("dashboard: %v", err)
+		panic(fmt.Sprintf("dashboard: %v", err))
 	}
 	if svc.IsWildcardAddr(*listen) {
-		log.Fatalf("dashboard: refusing to listen on %q; bind a specific address such as 127.0.0.1:7072", *listen)
+		panic(fmt.Sprintf("dashboard: refusing to listen on %q; bind a specific address such as 127.0.0.1:7072", *listen))
 	}
 	srv := &http.Server{Addr: *listen, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := svc.SignalContext()
@@ -45,7 +45,7 @@ func main() {
 	}
 	ln, err := svc.Listen(*listen, "-listen or TSESSION_DASHBOARD_ADDR")
 	if err != nil {
-		log.Fatalf("dashboard: %v", err)
+		panic(fmt.Sprintf("dashboard: %v", err))
 	}
 	// The address that was bound, not the one asked for: with port 0 they differ.
 	base := "http://" + ln.Addr().String()
@@ -57,6 +57,6 @@ func main() {
 		log.Printf("  tracectl --cp %s/api/cp --collector %s/api/col list", base, base)
 	}
 	if err := svc.ServeOn(ctx, srv, ln, 3*time.Second, nil); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 }

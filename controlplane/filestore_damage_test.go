@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,23 +29,23 @@ func TestBlankingThatCouldNotBeSyncedStartsANewLine(t *testing.T) {
 	fs.Evict(b.ID) // 40 bytes of the line reach the file, then the write fails
 	faults.clear()
 	if !fs.archTorn {
-		t.Fatalf("after a blanking whose fsync failed the next append must start with a newline (archSize %d, was %d)", fs.archSize, before)
+		panic(fmt.Sprintf("after a blanking whose fsync failed the next append must start with a newline (archSize %d, was %d)", fs.archSize, before))
 	}
 
 	fs.Evict(c.ID)
 	raw := archiveBytes(t, fs)
 	at := strings.Index(string(raw), `"id":"`+c.ID+`"`)
 	if at < 0 {
-		t.Fatalf("c is not in the archive:\n%s", raw)
+		panic(fmt.Sprintf("c is not in the archive:\n%s", raw))
 	}
 	lineStart := strings.LastIndexByte(string(raw[:at]), '\n') + 1
 	if int64(lineStart) <= before+40 {
-		t.Fatalf("c's line starts at %d, inside or directly behind the failed append (%d..%d)", lineStart, before, before+40)
+		panic(fmt.Sprintf("c's line starts at %d, inside or directly behind the failed append (%d..%d)", lineStart, before, before+40))
 	}
 	// What the disk holds if the blanking was never written: the torn start of b's line, a
 	// newline, then c. Opening that must still find a (archived), b (hot) and c (archived).
 	if err := fs.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	dir := t.TempDir()
 	for _, suffix := range []string{"", ".journal", ".archive"} {
@@ -53,13 +54,13 @@ func TestBlankingThatCouldNotBeSyncedStartsANewLine(t *testing.T) {
 			continue
 		}
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if suffix == ".archive" {
 			copy(data[before:before+40], strings.Repeat("{", 40)) // 40 bytes that are not blanks and not a line
 		}
 		if err := os.WriteFile(filepath.Join(dir, "s.json"+suffix), data, 0o600); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	re := openStore(t, filepath.Join(dir, "s.json"))
@@ -80,24 +81,24 @@ func TestDamagedArchiveLine(t *testing.T) {
 	fs, err := NewFileStore(path, WithStoreLogger(logs.logger()))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	a, b, keep := archiveSession(1, "a", StateSealed), archiveSession(2, "b", StateAborted), archiveSession(4, "keep", StateSealed)
 	mustPut(t, fs, a, b, keep)
 	fs.Evict(a.ID, b.ID, keep.ID)
 	if err := fs.Compact(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	uncached(fs)
 	damage := func(id string) {
 		t.Helper()
 		fh, err := os.OpenFile(fs.archivePath(), os.O_WRONLY, 0)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer fh.Close()
 		if _, err := fh.WriteAt([]byte("#####"), fs.arch[id].off+20); err != nil { // a few bad bytes inside the line
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	damage(a.ID)
@@ -111,20 +112,20 @@ func TestDamagedArchiveLine(t *testing.T) {
 		return do(t, m.Handler(), method, "/v1/sessions/"+id, "127.0.0.1:7070", "", nil).Code
 	}
 	if got := code(m, "GET", a.ID); got != http.StatusInternalServerError {
-		t.Fatalf("GET of a session whose line is damaged: %d, want 500", got)
+		panic(fmt.Sprintf("GET of a session whose line is damaged: %d, want 500", got))
 	}
 	if got := code(m, "DELETE", a.ID); got != http.StatusOK {
-		t.Fatalf("DELETE of a session whose line is damaged: %d, want 200", got)
+		panic(fmt.Sprintf("DELETE of a session whose line is damaged: %d, want 200", got))
 	}
 	if calls := c.callLog(); len(calls) != 1 || calls[0] != "delete" {
-		t.Fatalf("the collector must be told to delete it too: %v", calls)
+		panic(fmt.Sprintf("the collector must be told to delete it too: %v", calls))
 	}
 	if got := code(m, "GET", a.ID); got != http.StatusNotFound {
-		t.Fatalf("GET after the delete: %d, want 404", got)
+		panic(fmt.Sprintf("GET after the delete: %d, want 404", got))
 	}
 	m.Close()
 	if err := fs.Close(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	// b's line is still damaged at the next start.
@@ -132,23 +133,23 @@ func TestDamagedArchiveLine(t *testing.T) {
 	re, err := NewFileStore(path, WithStoreLogger(logs2.logger()))
 	closeLater(t, re)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got, ok := re.Get(keep.ID); !ok || got.Name != keep.Name {
-		t.Fatal("the undamaged session is gone")
+		panic("the undamaged session is gone")
 	}
 	if _, ok := re.Get(b.ID); ok {
-		t.Fatal("a session whose line is damaged cannot be served")
+		panic("a session whose line is damaged cannot be served")
 	}
 	side, err := os.ReadFile(re.archivePath() + ".corrupt")
 	if err != nil || !strings.Contains(string(side), "#####") || strings.Count(string(side), "\n") != 1 {
-		t.Fatalf("the damaged line must be saved aside, exactly once: %q %v", side, err)
+		panic(fmt.Sprintf("the damaged line must be saved aside, exactly once: %q %v", side, err))
 	}
 	if !strings.Contains(logs2.String(), "cannot be read") || !strings.Contains(logs2.String(), "lines=1") {
-		t.Fatalf("the start must say that a line could not be read:\n%s", logs2.String())
+		panic(fmt.Sprintf("the start must say that a line could not be read:\n%s", logs2.String()))
 	}
 	if re.ReadErrors() != 1 {
-		t.Fatalf("read errors after open: %d, want 1", re.ReadErrors())
+		panic(fmt.Sprintf("read errors after open: %d, want 1", re.ReadErrors()))
 	}
 }
 
@@ -167,12 +168,12 @@ func TestListAfterCloseServesNoArchivedSession(t *testing.T) {
 		<-done
 		for _, s := range fs.List() {
 			if s.ID == cold.ID {
-				t.Fatalf("round %d: an archived session was listed after Close", i)
+				panic(fmt.Sprintf("round %d: an archived session was listed after Close", i))
 			}
 		}
 		re, err := NewFileStore(path)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		fs = re
 	}

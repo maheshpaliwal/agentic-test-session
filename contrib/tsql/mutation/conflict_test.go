@@ -1,6 +1,7 @@
 package mutation
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -44,19 +45,19 @@ func TestMultiRowValues(t *testing.T) {
 		{"id": {Arg: 3}, "v": {Arg: -1, Literal: "x"}},
 	}
 	if !in.MultiRow || in.Values != nil || !reflect.DeepEqual(in.Rows, want) {
-		t.Fatalf("rows %+v values %+v", in.Rows, in.Values)
+		panic(fmt.Sprintf("rows %+v values %+v", in.Rows, in.Values))
 	}
 	if in := Parse("INSERT INTO t (id, v) VALUES ($1, $2)", Postgres); in.Rows != nil || len(in.Values) != 2 {
-		t.Fatalf("single row: rows %+v values %+v", in.Rows, in.Values)
+		panic(fmt.Sprintf("single row: rows %+v values %+v", in.Rows, in.Values))
 	}
 	if in := Parse("INSERT INTO t VALUES ($1, $2), ($3, $4)", Postgres); in.Rows != nil || !in.MultiRow {
-		t.Fatalf("no column list: rows %+v", in.Rows)
+		panic(fmt.Sprintf("no column list: rows %+v", in.Rows))
 	}
 	sql := "INSERT INTO t (id) VALUES (1)"
 	for i := 0; i < maxValueRows; i++ {
 		sql += ", (2)"
 	}
 	if in := Parse(sql, Postgres); in.Rows != nil || !in.MultiRow {
-		t.Fatalf("%d rows kept, want none beyond %d", len(in.Rows), maxValueRows)
+		panic(fmt.Sprintf("%d rows kept, want none beyond %d", len(in.Rows), maxValueRows))
 	}
 }

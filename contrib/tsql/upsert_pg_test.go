@@ -46,11 +46,11 @@ func upPGOne(t *testing.T, opts []tsql.Option, stmt string, args ...any) core.Ev
 	rec, ctx := setup(t)
 	db, err := tsql.Open("pgx", rtDSN(t), opts...)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	if _, err := db.ExecContext(ctx, stmt, args...); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return lastWrite(t, rec)
 }
@@ -59,7 +59,7 @@ func upPGOne(t *testing.T, opts []tsql.Option, stmt string, args ...any) core.Ev
 func upPGClean(t *testing.T, e core.Event) core.Mutation {
 	t.Helper()
 	if len(e.Mutations) != 1 || len(e.Flags) != 0 {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	return e.Mutations[0]
 }
@@ -95,7 +95,7 @@ func TestPGUpsert(t *testing.T) {
 		e := upPGOne(t, nil, "INSERT INTO tsql_up (sku, qty, name) VALUES ($1, $2, $3), ($4, $5, $6), ($7, $8, $9) ON CONFLICT (sku) DO UPDATE SET qty = EXCLUDED.qty",
 			"widget", 7, "x", "gadget", 5, "Gadget", "bolt", 4, "y")
 		if core.HasUncertainFlag(e.Flags) || len(e.Mutations) != 3 {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		got := map[any]core.Mutation{}
 		for _, m := range e.Mutations {
@@ -111,7 +111,7 @@ func TestPGUpsert(t *testing.T) {
 		e := upPGOne(t, nil, "INSERT INTO tsql_up (sku, qty, name) VALUES ($1, $2, $3), ($4, $5, $6) ON CONFLICT (sku) DO UPDATE SET qty = EXCLUDED.qty WHERE tsql_up.qty > 5",
 			"widget", 7, "x", "bolt", 4, "y")
 		if core.HasUncertainFlag(e.Flags) || len(e.Mutations) != 1 {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		upCheck(t, e.Mutations[0], "update", true, "qty:10->7")
 	})
@@ -147,7 +147,7 @@ func TestPGUpsert(t *testing.T) {
 	t.Run("changes_the_key", func(t *testing.T) {
 		e := upPGOne(t, nil, "INSERT INTO tsql_up (sku, qty, name) VALUES ($1, $2, $3) ON CONFLICT (sku) DO UPDATE SET sku = 'moved'", "widget", 7, "x")
 		if len(e.Mutations) != 1 || !hasFlag(e, "after_unavailable") {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		upCheck(t, e.Mutations[0], "update", true, "")
 		if !e.Mutations[0].After.IsZero() {
@@ -175,7 +175,7 @@ func upPGTxRun(t *testing.T, ctx context.Context, db *sql.DB) []string {
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	rtMustExec(t, tx, "SET LOCAL statement_timeout = '3s'", "SAVEPOINT app")
 	res, err := tx.ExecContext(ctx, upPGStmt, "widget", 7, "x")
@@ -197,7 +197,7 @@ func upPGTxRun(t *testing.T, ctx context.Context, db *sql.DB) []string {
 	// an aborted transaction stays aborted, and the upsert fails as it does untraced
 	tx, err = db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	_, err = tx.ExecContext(context.Background(), "SELECT 1/0")
 	note("division", err)
@@ -207,7 +207,7 @@ func upPGTxRun(t *testing.T, ctx context.Context, db *sql.DB) []string {
 	note("commit of aborted tx", tx.Commit())
 	var qty, rows string
 	if err := db.QueryRowContext(context.Background(), "SELECT (SELECT qty FROM tsql_up WHERE sku = 'widget')::text, (SELECT count(*) FROM tsql_up)::text").Scan(&qty, &rows); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return append(out, "widget qty "+qty, "rows "+rows)
 }
@@ -219,7 +219,7 @@ func TestPGUpsertInTransaction(t *testing.T) {
 	upPGReset(t)
 	plain, err := sql.Open("pgx", rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer plain.Close()
 	want := upPGTxRun(t, context.Background(), plain)
@@ -228,13 +228,13 @@ func TestPGUpsertInTransaction(t *testing.T) {
 	rec, ctx := setup(t)
 	db, err := tsql.Open("pgx", rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	got := upPGTxRun(t, ctx, db)
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("traced:\n%s\nuntraced:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		panic(fmt.Sprintf("traced:\n%s\nuntraced:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n")))
 	}
 	t.Log(strings.Join(got, "\n"))
 	ws := byKind(rec.Events(), core.KindDBWrite)
@@ -245,7 +245,7 @@ func TestPGUpsertInTransaction(t *testing.T) {
 		}
 	}
 	if len(ups) != 3 {
-		t.Fatalf("%d upsert events", len(ups))
+		panic(fmt.Sprintf("%d upsert events", len(ups)))
 	}
 	upCheck(t, upPGClean(t, ups[0]), "update", true, "qty:10->7")
 	upCheck(t, upPGClean(t, ups[1]), "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
@@ -276,12 +276,12 @@ func TestPGUpsertConcurrentWriteBetweenReadAndStatement(t *testing.T) {
 			}
 			db := rtOpen(t, d)
 			if _, err := db.ExecContext(ctx, upPGStmt, tc.sku, 7, "Ours"); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			e := lastWrite(t, rec)
 			upUnknown(t, e)
 			if len(e.Mutations) != 1 || jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) {
-				t.Fatalf("mutations %+v", e.Mutations)
+				panic(fmt.Sprintf("mutations %+v", e.Mutations))
 			}
 		})
 	}
@@ -297,28 +297,28 @@ func TestPGUpsertThroughView(t *testing.T) {
 	rec, ctx := setup(t)
 	db, err := tsql.Open("pgx", rtDSN(t), tsql.WithPKColumns("tsql_up_view", "sku"))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	const stmt = "INSERT INTO tsql_up_view (sku, qty, name) VALUES ($1, $2, $3) ON CONFLICT (sku) DO UPDATE SET qty = EXCLUDED.qty"
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := tx.ExecContext(ctx, stmt, "widget", 7, "x"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	upCheck(t, upPGClean(t, lastWrite(t, rec)), "update", true, "qty:10->7")
 	if _, err := tx.ExecContext(ctx, stmt, "widget", 8, "x"); err != nil {
-		t.Fatalf("the transaction after the failed read: %v", err)
+		panic(fmt.Sprintf("the transaction after the failed read: %v", err))
 	}
 	upCheck(t, upPGClean(t, lastWrite(t, rec)), "update", true, "qty:7->8")
 	if _, err := tx.ExecContext(ctx, stmt, "gadget", 5, "Gadget"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	upCheck(t, upPGClean(t, lastWrite(t, rec)), "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -333,7 +333,7 @@ func TestPGUpsertBeforeOff(t *testing.T) {
 	e := upPGOne(t, off, upPGStmt, "widget", 7, "x")
 	upUnknown(t, e)
 	if len(e.Mutations) != 1 || jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 }
 
@@ -361,12 +361,12 @@ func TestPGUpsertDoesNotClaimARowItDidNotWrite(t *testing.T) {
 		rec, ctx := setup(t)
 		db, err := tsql.Open("pgx", rtDSN(t))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer db.Close()
 		// 1.6 is looked for as 1.6 (no row; 1 is not read either), and stored as 2.
 		if _, err := db.ExecContext(ctx, "INSERT INTO tsql_up_n (id, v) VALUES (1.6, 'x') ON CONFLICT (id) DO UPDATE SET v = EXCLUDED.v"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := lastWrite(t, rec)
 		untouched(t, e, "id", float64(1))
@@ -381,12 +381,12 @@ func TestPGUpsertDoesNotClaimARowItDidNotWrite(t *testing.T) {
 		rec, ctx := setup(t)
 		db, err := tsql.Open("pgx", rtDSN(t))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer db.Close()
 		rows, err := db.QueryContext(ctx, upPGStmt+" WHERE false", "widget", 7, "x")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		rows.Close()
 		e := lastWrite(t, rec)
@@ -408,11 +408,11 @@ func TestPGUpsertDoesNotClaimARowItDidNotWrite(t *testing.T) {
 		rec, ctx := setup(t)
 		db, err := tsql.Open("pgx", rtDSN(t), tsql.WithUpsertBefore(false))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer db.Close()
 		if _, err := db.ExecContext(ctx, upPGStmt, "gadget", 5, "Gadget"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		// The foreign-key check of the trigger's insert locks the new row: its xmax is set.
 		e := lastWrite(t, rec)
@@ -428,12 +428,12 @@ func TestPGUpsertDoesNotClaimARowItDidNotWrite(t *testing.T) {
 		rec, ctx := setup(t)
 		db, err := tsql.Open("pgx", rtDSN(t), tsql.WithImages(false))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer db.Close()
 		// The conflict is on email: the row that is updated is Ann's (id 1), not id 99.
 		if _, err := db.ExecContext(ctx, "INSERT INTO tsql_up_users (id, email, name) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name", 99, "a@example.com", "Anna"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := lastWrite(t, rec)
 		untouched(t, e, "id", int64(99))
@@ -457,7 +457,7 @@ func TestPGUpsertReturning(t *testing.T) {
 		upPGReset(t)
 		rs, err := db.QueryContext(ctx, stmt, "widget", 7, "x", "gadget", 5, "Gadget")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer rs.Close()
 		cols, _ := rs.Columns()
@@ -466,7 +466,7 @@ func TestPGUpsertReturning(t *testing.T) {
 			var sku string
 			var qty int
 			if err := rs.Scan(&sku, &qty); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			out = append(out, fmt.Sprint(sku, qty))
 		}
@@ -474,22 +474,22 @@ func TestPGUpsertReturning(t *testing.T) {
 	}
 	plain, err := sql.Open("pgx", rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer plain.Close()
 	want := run(context.Background(), plain)
 	rec, ctx := setup(t)
 	db, err := tsql.Open("pgx", rtDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer db.Close()
 	if got := run(ctx, db); !reflect.DeepEqual(got, want) || len(got) != 3 {
-		t.Fatalf("traced %v, untraced %v", got, want)
+		panic(fmt.Sprintf("traced %v, untraced %v", got, want))
 	}
 	e := lastWrite(t, rec)
 	if len(e.Mutations) != 2 || hasFlag(e, "upsert_unknown") {
-		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+		panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 	}
 	got := map[any]core.Mutation{}
 	for _, m := range e.Mutations {

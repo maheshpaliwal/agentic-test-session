@@ -39,21 +39,21 @@ func TestExporterBisectsOn413(t *testing.T) {
 		r.Record(e)
 	}
 	if !x.Flush(3 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	x.Close(time.Second)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 8 {
-		t.Fatalf("want 8 events delivered, got %d", len(got))
+		panic(fmt.Sprintf("want 8 events delivered, got %d", len(got)))
 	}
 	for _, e := range got {
 		if e.LocalSeq == 5 {
 			if len(e.Flags) != 1 || e.Flags[0] != "oversize_dropped" || e.Err == "" || e.SpanID != "sp5" || e.Attrs != nil {
-				t.Fatalf("bad stub: %+v", e)
+				panic(fmt.Sprintf("bad stub: %+v", e))
 			}
 		} else if len(e.Flags) != 0 {
-			t.Fatalf("collateral damage: %+v", e)
+			panic(fmt.Sprintf("collateral damage: %+v", e))
 		}
 	}
 }
@@ -81,7 +81,7 @@ func TestExporterCountsRejected(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(drops) == 0 || drops[0].Attrs["count"] != "3" {
-		t.Fatalf("rejected not reported: %+v", drops)
+		panic(fmt.Sprintf("rejected not reported: %+v", drops))
 	}
 }
 
@@ -104,7 +104,7 @@ func TestTransportPropagationFilters(t *testing.T) {
 		req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/"+path+"?token=SYNTH", nil)
 		resp, err := (&http.Client{Transport: tr}).Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		resp.Body.Close()
 	}
@@ -115,19 +115,19 @@ func TestTransportPropagationFilters(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if seen["/all"] != "s1" || seen["/listed"] != "s1" || seen["/notlisted"] != "" || seen["/denied"] != "" {
-		t.Fatalf("propagation wrong: %v", seen)
+		panic(fmt.Sprintf("propagation wrong: %v", seen))
 	}
 	evs := rec.Events()
 	if len(evs) != 4 {
-		t.Fatalf("all requests must be recorded, got %d", len(evs))
+		panic(fmt.Sprintf("all requests must be recorded, got %d", len(evs)))
 	}
 	for _, e := range evs {
 		if strings.Contains(string(e.Req.Inline), "SYNTH") {
-			t.Fatalf("query token leaked: %s", e.Req.Inline)
+			panic(fmt.Sprintf("query token leaked: %s", e.Req.Inline))
 		}
 	}
 	if !hostMatches("a.b.example.com:8080", []string{".example.com"}) || hostMatches("notexample.com", []string{"example.com"}) {
-		t.Fatal("hostMatches")
+		panic("hostMatches")
 	}
 }
 
@@ -150,6 +150,6 @@ func TestCloseAbandonsHungCollector(t *testing.T) {
 	start := time.Now()
 	x.Close(50 * time.Millisecond)
 	if d := time.Since(start); d > 5*time.Second {
-		t.Fatalf("Close took %v with a hung collector (HTTP timeout is 30s)", d)
+		panic(fmt.Sprintf("Close took %v with a hung collector (HTTP timeout is 30s)", d))
 	}
 }

@@ -18,7 +18,7 @@ import (
 //
 //	info, _ := sess.StopAndWait(ctx)
 //	sum, _ := sess.Summary(ctx)
-//	if len(sum.Failures) > 0 { t.Fatalf("session recorded failures: %+v", sum.Failures) }
+//	if len(sum.Failures) > 0 { panic(fmt.Sprintf("session recorded failures: %+v", sum.Failures)) }
 //	h, _ := sess.History(ctx, "postgres", "orders", "42")
 
 // Failure is one failed event of a session.

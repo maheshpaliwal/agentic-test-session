@@ -3,6 +3,7 @@ package thttp
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -60,11 +61,11 @@ func TestWriterReachesFeaturesBehindUnwrap(t *testing.T) {
 		}
 	})
 	if !base.flushed || !base.hijacked || base.pushed != "/style.css" {
-		t.Fatalf("not forwarded through Unwrap: flushed=%v hijacked=%v pushed=%q", base.flushed, base.hijacked, base.pushed)
+		panic(fmt.Sprintf("not forwarded through Unwrap: flushed=%v hijacked=%v pushed=%q", base.flushed, base.hijacked, base.pushed))
 	}
 	evs := kind(rec.Events(), core.KindAPIIn)
 	if len(evs) != 1 || evs[0].Attrs["stream"] != "true" {
-		t.Fatalf("hijack through Unwrap must end the span as a stream: %+v", evs)
+		panic(fmt.Sprintf("hijack through Unwrap must end the span as a stream: %+v", evs))
 	}
 }
 
@@ -96,14 +97,14 @@ func TestNestedHandlersRecordOneSpan(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/x", nil))
 	if rr.Body.String() != "ok" {
-		t.Fatalf("body %q", rr.Body.String())
+		panic(fmt.Sprintf("body %q", rr.Body.String()))
 	}
 	evs := kind(rec.Events(), core.KindAPIIn)
 	if len(evs) != 1 {
-		t.Fatalf("want one api.in for one request, got %d: %+v", len(evs), evs)
+		panic(fmt.Sprintf("want one api.in for one request, got %d: %+v", len(evs), evs))
 	}
 	if evs[0].Name != "GET /api/x" {
-		t.Fatalf("name = %q, want the innermost matched route", evs[0].Name)
+		panic(fmt.Sprintf("name = %q, want the innermost matched route", evs[0].Name))
 	}
 }
 
@@ -115,12 +116,12 @@ func TestSpanNameSetForTracedRequests(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/orders/7", nil)
 	resp, err := Client(nil).Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	for _, k := range []core.Kind{core.KindAPIIn, core.KindAPIOut} {
 		if evs := kind(rec.Events(), k); len(evs) != 1 || evs[0].Name != "GET /orders/7" {
-			t.Fatalf("%s: %+v", k, evs)
+			panic(fmt.Sprintf("%s: %+v", k, evs))
 		}
 	}
 }

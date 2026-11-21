@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ func eventJSON(t *testing.T, e core.Event) string {
 	t.Helper()
 	b, err := json.Marshal(e)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return string(b)
 }
@@ -28,7 +29,7 @@ func mustNotLeak(t *testing.T, e core.Event, secrets ...string) {
 	s := eventJSON(t, e)
 	for _, x := range secrets {
 		if strings.Contains(s, x) {
-			t.Fatalf("secret %q leaked in event: %s", x, s)
+			panic(fmt.Sprintf("secret %q leaked in event: %s", x, s))
 		}
 	}
 }
@@ -51,7 +52,7 @@ func TestDiffBeforeAfterRedactedByFieldName(t *testing.T) {
 	db := open(t, f, "postgres")
 	if _, err := db.ExecContext(ctx, "UPDATE users SET name = $1, password = $2, api_key = $3 WHERE id = $4",
 		"bobby", "NEWPW-plain", "NEWKEY", int64(1)); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	mustNotLeak(t, e, "OLDPW", "NEWPW", "OLDKEY", "NEWKEY")
@@ -61,13 +62,13 @@ func TestDiffBeforeAfterRedactedByFieldName(t *testing.T) {
 		got[d.Field] = [2]any{d.Old, d.New}
 	}
 	if got["password"] != [2]any{core.RedactedValue, core.RedactedValue} || got["api_key"] != [2]any{core.RedactedValue, core.RedactedValue} {
-		t.Fatalf("diff %+v", m.Diff)
+		panic(fmt.Sprintf("diff %+v", m.Diff))
 	}
 	if got["name"] != [2]any{"bob", "bobby"} {
-		t.Fatalf("non-sensitive diff must stay: %+v", m.Diff)
+		panic(fmt.Sprintf("non-sensitive diff must stay: %+v", m.Diff))
 	}
 	if jsonMap(t, m.Before)["password"] != core.RedactedValue || jsonMap(t, m.After)["api_key"] != core.RedactedValue {
-		t.Fatalf("images not redacted: %s %s", m.Before.Inline, m.After.Inline)
+		panic(fmt.Sprintf("images not redacted: %s %s", m.Before.Inline, m.After.Inline))
 	}
 }
 
@@ -76,7 +77,7 @@ func TestInsertAfterFromArgsRedactsNestedAndDiff(t *testing.T) {
 	f := &fakeDB{handler: func(string, []driver.Value) result { return result{affected: 1} }}
 	db := open(t, f, "postgres")
 	if _, err := db.ExecContext(ctx, "INSERT INTO users (id, name, password) VALUES ($1, $2, $3)", int64(5), "al", "PLAINPW"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	mustNotLeak(t, e, "PLAINPW")
@@ -114,7 +115,7 @@ func TestArgAndLiteralRedaction(t *testing.T) {
 			db := open(t, f, "postgres", tsql.WithImages(false))
 			rows, err := db.QueryContext(ctx, c.sql, c.args...)
 			if err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			rows.Close()
 			e := rec.Events()[0]
@@ -124,30 +125,30 @@ func TestArgAndLiteralRedaction(t *testing.T) {
 				Args []any  `json:"args"`
 			}
 			if err := json.Unmarshal(e.Req.Inline, &req); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			for _, i := range c.masked {
 				if req.Args[i] != core.RedactedValue {
-					t.Fatalf("arg %d not masked: %v", i, req.Args)
+					panic(fmt.Sprintf("arg %d not masked: %v", i, req.Args))
 				}
 			}
 			for _, i := range c.clean {
 				if req.Args[i] == core.RedactedValue {
-					t.Fatalf("arg %d needlessly masked: %v", i, req.Args)
+					panic(fmt.Sprintf("arg %d needlessly masked: %v", i, req.Args))
 				}
 			}
 			if hasFlag(e, "args_redacted_conservatively") != c.cons {
-				t.Fatalf("conservative flag=%v want %v (%v)", hasFlag(e, "args_redacted_conservatively"), c.cons, e.Flags)
+				panic(fmt.Sprintf("conservative flag=%v want %v (%v)", hasFlag(e, "args_redacted_conservatively"), c.cons, e.Flags))
 			}
 			if strings.Contains(c.sql, "'") {
 				if !strings.Contains(req.SQL, "password = '[REDACTED]'") || !strings.Contains(req.SQL, "name = 'plainname'") ||
 					!strings.Contains(e.Name, "token = '[REDACTED]'") {
-					t.Fatalf("sql=%q name=%q", req.SQL, e.Name)
+					panic(fmt.Sprintf("sql=%q name=%q", req.SQL, e.Name))
 				}
 			}
 			// the app's statement itself is never altered
 			if f.Calls()[0].SQL != c.sql {
-				t.Fatalf("app SQL altered: %q", f.Calls()[0].SQL)
+				panic(fmt.Sprintf("app SQL altered: %q", f.Calls()[0].SQL))
 			}
 		})
 	}
@@ -161,7 +162,7 @@ func TestReadSummaryRedaction(t *testing.T) {
 	db := open(t, f, "postgres")
 	rows, err := db.QueryContext(ctx, "SELECT * FROM users WHERE token = 'LIT-T' AND password = $1", "ARGPW")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	for rows.Next() {
 	}
@@ -169,10 +170,10 @@ func TestReadSummaryRedaction(t *testing.T) {
 	e := byKind(rec.Events(), core.KindDBRead)[0]
 	mustNotLeak(t, e, "ROWPW", "ROWKEY", "LIT-T", "ARGPW")
 	if len(e.Reads) != 1 || !strings.Contains(e.Reads[0].Statement, "'[REDACTED]'") {
-		t.Fatalf("%+v", e.Reads)
+		panic(fmt.Sprintf("%+v", e.Reads))
 	}
 	if !strings.Contains(string(e.Reads[0].Sample.Inline), `"name":"bob"`) {
-		t.Fatalf("sample %s", e.Reads[0].Sample.Inline)
+		panic(fmt.Sprintf("sample %s", e.Reads[0].Sample.Inline))
 	}
 }
 
@@ -189,16 +190,16 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 	db := open(t, f, "postgres", noPKLookup)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE t SET a = $1 WHERE id = $2", 1, 2); err != nil {
-		t.Fatalf("app statement failed after capture error: %v", err)
+		panic(fmt.Sprintf("app statement failed after capture error: %v", err))
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE t SET a = $1 WHERE id = $2", 3, 4); err != nil {
-		t.Fatalf("second app statement failed: %v", err)
+		panic(fmt.Sprintf("second app statement failed: %v", err))
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatalf("COMMIT must succeed: %v", err)
+		panic(fmt.Sprintf("COMMIT must succeed: %v", err))
 	}
 	calls := f.RawCalls()
 	// The first capture on a connection opens the fence statement by
@@ -212,12 +213,12 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 	}
 	for i, w := range want {
 		if !strings.HasPrefix(calls[i].SQL, w) {
-			t.Fatalf("call %d = %q, want prefix %q\n%s", i, calls[i].SQL, w, sqls(calls))
+			panic(fmt.Sprintf("call %d = %q, want prefix %q\n%s", i, calls[i].SQL, w, sqls(calls)))
 		}
 	}
 	for _, e := range byKind(rec.Events(), core.KindDBWrite) {
 		if !hasFlag(e, "image_failed") || e.Err != "" {
-			t.Fatalf("flags %v err %q", e.Flags, e.Err)
+			panic(fmt.Sprintf("flags %v err %q", e.Flags, e.Err))
 		}
 	}
 }
@@ -236,7 +237,7 @@ func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 	db := open(t, f, "postgres", noPKLookup)
 	tx, _ := db.BeginTx(ctx, nil)
 	if _, err := tx.ExecContext(ctx, "DELETE FROM t WHERE id = $1", 2); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	tx.Commit()
 	var got []string
@@ -251,7 +252,7 @@ func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 		"DELETE FROM t WHERE id = $1",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("sequence:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		panic(fmt.Sprintf("sequence:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n")))
 	}
 }
 
@@ -261,21 +262,21 @@ func TestSerializableTxSkipsCapture(t *testing.T) {
 	db := open(t, f, "postgres")
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE t SET a = $1 WHERE id = $2", 1, 2); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	tx.Commit()
 	if n := len(f.RawCalls()); n != 1 {
-		t.Fatalf("no capture queries expected in SERIALIZABLE, calls:\n%s", sqls(f.RawCalls()))
+		panic(fmt.Sprintf("no capture queries expected in SERIALIZABLE, calls:\n%s", sqls(f.RawCalls())))
 	}
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	if !hasFlag(e, "image_skipped:serializable") || !hasFlag(e, "image_skipped") {
-		t.Fatalf("flags %v", e.Flags)
+		panic(fmt.Sprintf("flags %v", e.Flags))
 	}
 	if len(e.Mutations) != 1 {
-		t.Fatalf("mutation still recorded: %+v", e.Mutations)
+		panic(fmt.Sprintf("mutation still recorded: %+v", e.Mutations))
 	}
 }
 
@@ -287,7 +288,7 @@ func TestMySQLCaptureInTxHasNoSavepoint(t *testing.T) {
 	tx.ExecContext(ctx, "UPDATE t SET a = ? WHERE id = ?", 1, 2)
 	tx.Commit()
 	if s := sqls(f.RawCalls()); strings.Contains(s, "SAVEPOINT") || strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") {
-		t.Fatalf("mysql must not use savepoints:\n%s", s)
+		panic(fmt.Sprintf("mysql must not use savepoints:\n%s", s))
 	}
 }
 
@@ -309,25 +310,25 @@ func TestBinaryPKBoundAsBytes(t *testing.T) {
 	}}
 	db := open(t, f, "postgres", tsql.WithImages(true))
 	if _, err := db.ExecContext(ctx, "UPDATE blobs SET v = upper(v) WHERE v < $1", "z"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	calls := f.Calls()
 	if len(calls) != 3 {
-		t.Fatalf("calls:\n%s", sqls(calls))
+		panic(fmt.Sprintf("calls:\n%s", sqls(calls)))
 	}
 	if !reflect.DeepEqual(calls[2].Args, []driver.Value{pk1, pk2}) {
-		t.Fatalf("PKs must be bound as []byte, got %#v", calls[2].Args)
+		panic(fmt.Sprintf("PKs must be bound as []byte, got %#v", calls[2].Args))
 	}
 	for _, a := range calls[2].Args {
 		if _, ok := a.([]byte); !ok {
-			t.Fatalf("lossy PK %T", a)
+			panic(fmt.Sprintf("lossy PK %T", a))
 		}
 	}
 	// before/after are paired by raw PK (display forms collide: "<4 bytes>")
 	ms := byKind(rec.Events(), core.KindDBWrite)[0].Mutations
 	if len(ms) != 2 || jsonMap(t, ms[0].Before)["v"] != "a" || jsonMap(t, ms[0].After)["v"] != "A" ||
 		jsonMap(t, ms[1].Before)["v"] != "b" || jsonMap(t, ms[1].After)["v"] != "B" {
-		t.Fatalf("mispaired: %+v", ms)
+		panic(fmt.Sprintf("mispaired: %+v", ms))
 	}
 }
 
@@ -341,14 +342,14 @@ func TestNullPKSkipsReread(t *testing.T) {
 	}}
 	db := open(t, f, "postgres")
 	if _, err := db.ExecContext(ctx, "UPDATE blobs SET v = 'x' WHERE v = $1", "a"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if n := len(f.Calls()); n != 2 {
-		t.Fatalf("no re-read expected, calls:\n%s", sqls(f.Calls()))
+		panic(fmt.Sprintf("no re-read expected, calls:\n%s", sqls(f.Calls())))
 	}
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	if !hasFlag(e, "image_skipped:pk_unbindable") {
-		t.Fatalf("flags %v", e.Flags)
+		panic(fmt.Sprintf("flags %v", e.Flags))
 	}
 }
 
@@ -367,7 +368,7 @@ func TestLongPKNotTruncatedWhenRebound(t *testing.T) {
 	db.ExecContext(ctx, "UPDATE t SET v = 'x' WHERE v = $1", "a")
 	calls := f.Calls()
 	if got, _ := calls[2].Args[0].(string); got != long {
-		t.Fatalf("PK truncated when re-bound (%d bytes)", len(got))
+		panic(fmt.Sprintf("PK truncated when re-bound (%d bytes)", len(got)))
 	}
 }
 
@@ -387,14 +388,14 @@ func TestCaptureTimeoutConfigurableAndBoundedByCtx(t *testing.T) {
 	db := open(t, f, "postgres", tsql.WithCaptureTimeout(60*time.Millisecond))
 	start := time.Now()
 	if _, err := db.ExecContext(ctx, "DELETE FROM t WHERE id = $1", 1); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Fatalf("capture took %v", d)
+		panic(fmt.Sprintf("capture took %v", d))
 	}
 	e := byKind(rec.Events(), core.KindDBWrite)[0]
 	if !hasFlag(e, "image_timeout") || e.Err != "" {
-		t.Fatalf("flags %v err %q", e.Flags, e.Err)
+		panic(fmt.Sprintf("flags %v err %q", e.Flags, e.Err))
 	}
 
 	// default 500ms, but never beyond the caller's own deadline
@@ -405,7 +406,7 @@ func TestCaptureTimeoutConfigurableAndBoundedByCtx(t *testing.T) {
 	start = time.Now()
 	db2.ExecContext(dctx, "DELETE FROM t WHERE id = $1", 1)
 	if d := time.Since(start); d > 400*time.Millisecond {
-		t.Fatalf("capture exceeded caller deadline: %v", d)
+		panic(fmt.Sprintf("capture exceeded caller deadline: %v", d))
 	}
 }
 
@@ -423,25 +424,25 @@ func TestInsertReturningVariants(t *testing.T) {
 		db := open(t, f, "postgres")
 		var id int64
 		if err := db.QueryRowContext(ctx, "INSERT INTO people (name) VALUES ($1) RETURNING id", "ann").Scan(&id); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if id != 11 {
-			t.Fatalf("app saw id=%d", id)
+			panic(fmt.Sprintf("app saw id=%d", id))
 		}
 		e := byKind(rec.Events(), core.KindDBWrite)[0]
 		if len(e.Mutations) != 1 {
-			t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("mutations %+v flags %v", e.Mutations, e.Flags))
 		}
 		m := e.Mutations[0]
 		if m.Op != "insert" || m.PK["id"] != int64(11) || jsonMap(t, m.After)["name"] != "ann" || !hasFlag(e, "returning_partial") {
-			t.Fatalf("%+v flags=%v", m, e.Flags)
+			panic(fmt.Sprintf("%+v flags=%v", m, e.Flags))
 		}
 		if hasFlag(e, "pk_unknown") {
-			t.Fatal("PK known from RETURNING")
+			panic("PK known from RETURNING")
 		}
 		last := f.Calls()[len(f.Calls())-1]
 		if !strings.HasPrefix(last.SQL, "SELECT * FROM people WHERE id IN ($1)") || last.Args[0] != int64(11) {
-			t.Fatalf("re-read %+v", last)
+			panic(fmt.Sprintf("re-read %+v", last))
 		}
 	})
 	t.Run("returning star multi-row", func(t *testing.T) {
@@ -452,7 +453,7 @@ func TestInsertReturningVariants(t *testing.T) {
 		db := open(t, f, "postgres")
 		rows, err := db.QueryContext(ctx, "INSERT INTO people (name) VALUES ($1), ($2), ($3) RETURNING *", "a", "b", "c")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		n := 0
 		for rows.Next() {
@@ -460,19 +461,19 @@ func TestInsertReturningVariants(t *testing.T) {
 		}
 		rows.Close()
 		if n != 3 {
-			t.Fatalf("app saw %d rows", n)
+			panic(fmt.Sprintf("app saw %d rows", n))
 		}
 		e := byKind(rec.Events(), core.KindDBWrite)[0]
 		if len(e.Mutations) != 3 || len(f.Calls()) != 1 {
-			t.Fatalf("mutations=%d calls:\n%s", len(e.Mutations), sqls(f.Calls()))
+			panic(fmt.Sprintf("mutations=%d calls:\n%s", len(e.Mutations), sqls(f.Calls())))
 		}
 		for i, m := range e.Mutations {
 			if m.PK["id"] != int64(i+1) || m.Op != "insert" {
-				t.Fatalf("%d: %+v", i, m)
+				panic(fmt.Sprintf("%d: %+v", i, m))
 			}
 		}
 		if hasFlag(e, "returning_partial") || !hasFlag(e, "multi_row_insert") {
-			t.Fatalf("flags %v", e.Flags)
+			panic(fmt.Sprintf("flags %v", e.Flags))
 		}
 	})
 	t.Run("returning id multi-row rereads", func(t *testing.T) {
@@ -490,7 +491,7 @@ func TestInsertReturningVariants(t *testing.T) {
 		rows.Close()
 		e := byKind(rec.Events(), core.KindDBWrite)[0]
 		if len(e.Mutations) != 2 || jsonMap(t, e.Mutations[1].After)["name"] != "b" {
-			t.Fatalf("%+v flags=%v", e.Mutations, e.Flags)
+			panic(fmt.Sprintf("%+v flags=%v", e.Mutations, e.Flags))
 		}
 	})
 	t.Run("without returning PK unknown", func(t *testing.T) {
@@ -498,14 +499,14 @@ func TestInsertReturningVariants(t *testing.T) {
 		f := &fakeDB{handler: func(string, []driver.Value) result { return result{affected: 1} }}
 		db := open(t, f, "postgres")
 		if _, err := db.ExecContext(ctx, "INSERT INTO people (name) VALUES ($1)", "zed"); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		e := byKind(rec.Events(), core.KindDBWrite)[0]
 		if len(e.Mutations) != 1 || !hasFlag(e, "pk_unknown") || !hasFlag(e, "after_from_args") {
-			t.Fatalf("flags %v muts %+v", e.Flags, e.Mutations)
+			panic(fmt.Sprintf("flags %v muts %+v", e.Flags, e.Mutations))
 		}
 		if e.Mutations[0].PK != nil || jsonMap(t, e.Mutations[0].After)["name"] != "zed" {
-			t.Fatalf("%+v", e.Mutations[0])
+			panic(fmt.Sprintf("%+v", e.Mutations[0]))
 		}
 	})
 }
@@ -519,7 +520,7 @@ func TestRawBeginIsTreatedAsOpenTx(t *testing.T) {
 	db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2")
 	s := sqls(f.RawCalls())
 	if strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") || !strings.Contains(s, "SAVEPOINT ts_capture") {
-		t.Fatalf("capture inside a hand-written BEGIN must use a savepoint:\n%s", s)
+		panic(fmt.Sprintf("capture inside a hand-written BEGIN must use a savepoint:\n%s", s))
 	}
 	f.mu.Lock()
 	f.calls = nil
@@ -527,6 +528,6 @@ func TestRawBeginIsTreatedAsOpenTx(t *testing.T) {
 	db.ExecContext(ctx, "COMMIT")
 	db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2")
 	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") {
-		t.Fatalf("after COMMIT capture runs in its own read-only tx:\n%s", s)
+		panic(fmt.Sprintf("after COMMIT capture runs in its own read-only tx:\n%s", s))
 	}
 }

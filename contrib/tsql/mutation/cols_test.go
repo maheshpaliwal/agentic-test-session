@@ -1,6 +1,7 @@
 package mutation
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
@@ -65,16 +66,16 @@ func TestLiteralMapping(t *testing.T) {
 	}
 	want := map[string][]string{"'x'": {"password"}, "5": {"n"}, "'y'": {"token"}, "7": {"id"}, "3": nil}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v want %v", got, want)
+		panic(fmt.Sprintf("got %v want %v", got, want))
 	}
 	for _, l := range in.Literals {
 		if q[l.Start:l.End] == "3" && !l.Benign {
-			t.Fatal("LIMIT literal should be benign")
+			panic("LIMIT literal should be benign")
 		}
 	}
 	in = Parse("INSERT INTO u (a, token) VALUES ('p', 'q'), ('r', 's')", Postgres)
 	if len(in.Literals) != 4 || in.Literals[3].Cols[0] != "token" || in.Literals[2].Cols[0] != "a" {
-		t.Fatalf("%+v", in.Literals)
+		panic(fmt.Sprintf("%+v", in.Literals))
 	}
 }
 
@@ -82,96 +83,96 @@ func TestEdgeCases(t *testing.T) {
 	// dollar quoting hides everything inside, including ';' and fake keywords
 	in := Parse("INSERT INTO t (a) VALUES ($tag$ x; DELETE FROM z WHERE id = $1 $tag$)", Postgres)
 	if in.Kind != Insert || in.Multi || in.Table != "t" || len(in.Literals) != 1 {
-		t.Fatalf("dollar quoting: %+v", in)
+		panic(fmt.Sprintf("dollar quoting: %+v", in))
 	}
 	in = Parse("SELECT $$it's; DROP TABLE x$$, 1", Postgres)
 	if in.Multi || in.Kind != Select {
-		t.Fatalf("$$ quoting: %+v", in)
+		panic(fmt.Sprintf("$$ quoting: %+v", in))
 	}
 	// nested comments (Postgres) vs MySQL (not nested)
 	in = Parse("/* a /* b */ still comment */ DELETE FROM t WHERE id = 1", Postgres)
 	if in.Kind != Delete || in.Table != "t" {
-		t.Fatalf("nested comment: %+v", in)
+		panic(fmt.Sprintf("nested comment: %+v", in))
 	}
 	in = Parse("/* a /* b */ DELETE FROM t WHERE id = 1", MySQL)
 	if in.Kind != Delete {
-		t.Fatalf("mysql comment: %+v", in)
+		panic(fmt.Sprintf("mysql comment: %+v", in))
 	}
 	// MySQL: "--x" is not a comment
 	in = Parse("UPDATE t SET a = 5--1 WHERE id = 1", MySQL)
 	if !in.HasWhere {
-		t.Fatalf("mysql dashes: %+v", in)
+		panic(fmt.Sprintf("mysql dashes: %+v", in))
 	}
 	// WHERE CURRENT OF
 	in = Parse("UPDATE t SET a = 1 WHERE CURRENT OF c1", Postgres)
 	if !in.CurrentOf || !in.Complex {
-		t.Fatalf("current of: %+v", in)
+		panic(fmt.Sprintf("current of: %+v", in))
 	}
 	if _, _, reason := in.ImageSelect(5); reason != "where_current_of" {
-		t.Fatalf("reason %q", reason)
+		panic(fmt.Sprintf("reason %q", reason))
 	}
 	// UPDATE ... FROM with aliases: complex, never replayed
 	in = Parse("UPDATE orders o SET status = s.v FROM src s WHERE o.id = s.id AND o.x = $1", Postgres)
 	if in.Kind != Update || in.Table != "orders" || in.TableRef != "orders o" || !in.Complex {
-		t.Fatalf("update from: %+v", in)
+		panic(fmt.Sprintf("update from: %+v", in))
 	}
 	if got := argCols(in); got[0] != "x" {
-		t.Fatalf("alias arg mapping %v", got)
+		panic(fmt.Sprintf("alias arg mapping %v", got))
 	}
 	// aliased target without FROM replays with alias
 	in = Parse("UPDATE orders AS o SET status = 'x' WHERE o.id = $1", Postgres)
 	q, _, reason := in.ImageSelect(5)
 	if reason != "" || q != "SELECT * FROM orders AS o WHERE o.id = $1 LIMIT 5" {
-		t.Fatalf("%q %q", q, reason)
+		panic(fmt.Sprintf("%q %q", q, reason))
 	}
 	// INSERT ... SELECT
 	in = Parse("INSERT INTO a (x, y) SELECT x, y FROM b WHERE z = $1 RETURNING id", Postgres)
 	if in.Kind != Insert || in.Table != "a" || in.Values != nil || !in.HasReturning || !reflect.DeepEqual(in.Columns, []string{"x", "y"}) {
-		t.Fatalf("insert select: %+v", in)
+		panic(fmt.Sprintf("insert select: %+v", in))
 	}
 	// MERGE
 	in = Parse("MERGE INTO tgt t USING src s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)", Postgres)
 	if in.Kind != Upsert || in.Table != "tgt" || !in.Complex || in.Verb != "MERGE" {
-		t.Fatalf("merge: %+v", in)
+		panic(fmt.Sprintf("merge: %+v", in))
 	}
 	if _, _, reason := in.ImageSelect(5); reason == "" {
-		t.Fatal("merge must not replay")
+		panic("merge must not replay")
 	}
 	// TRUNCATE
 	in = Parse("TRUNCATE TABLE ONLY a.b, c RESTART IDENTITY", Postgres)
 	if in.Kind != Truncate || in.Schema != "a" || in.Table != "b" || !reflect.DeepEqual(in.Tables, []string{"b", "c"}) {
-		t.Fatalf("truncate: %+v", in)
+		panic(fmt.Sprintf("truncate: %+v", in))
 	}
 	in = Parse("TRUNCATE t", MySQL)
 	if in.Kind != Truncate || in.Table != "t" {
-		t.Fatalf("truncate: %+v", in)
+		panic(fmt.Sprintf("truncate: %+v", in))
 	}
 	// COPY
 	in = Parse("COPY items (a, b) FROM STDIN WITH (FORMAT csv)", Postgres)
 	if in.Kind != Insert || !in.Bulk || in.Table != "items" || !in.Kind.IsMutation() {
-		t.Fatalf("copy from: %+v", in)
+		panic(fmt.Sprintf("copy from: %+v", in))
 	}
 	for _, q := range []string{"COPY items TO STDOUT", "COPY (SELECT 1) TO STDOUT"} {
 		if in = Parse(q, Postgres); in.Kind.IsWrite() {
-			t.Fatalf("%s must be a read: %+v", q, in)
+			panic(fmt.Sprintf("%s must be a read: %+v", q, in))
 		}
 	}
 	// multi-statement: the write is described, nothing is replayable, literals of both are listed
 	in = Parse("SELECT 1; UPDATE t SET password = 'p' WHERE id = 1; DELETE FROM u WHERE id = $1", Postgres)
 	if !in.Multi || !in.Complex || in.Kind != Update || in.Table != "t" || len(in.Literals) != 3 {
-		t.Fatalf("multi: %+v", in)
+		panic(fmt.Sprintf("multi: %+v", in))
 	}
 	if _, _, reason := in.ImageSelect(5); reason == "" {
-		t.Fatal("multi-statement must not replay")
+		panic("multi-statement must not replay")
 	}
 	in = Parse("SELECT 1;", Postgres)
 	if in.Multi {
-		t.Fatal("trailing semicolon is not multi")
+		panic("trailing semicolon is not multi")
 	}
 	// ';' inside quotes/comments does not split
 	in = Parse("UPDATE t SET a = 'x;y' /* ; */ WHERE id = 1 -- ;\n", Postgres)
 	if in.Multi || !in.HasWhere {
-		t.Fatalf("%+v", in)
+		panic(fmt.Sprintf("%+v", in))
 	}
 }
 
@@ -181,11 +182,11 @@ func TestQualifiedColumnInsideFunction(t *testing.T) {
 	q := "SELECT * FROM users u WHERE lower(u.password) = 'hunter2' AND lower(u.api_token) = $1 AND md5(s.u.secret) = $2"
 	in := Parse(q, Postgres)
 	if got, want := argCols(in), (map[int]string{0: "api_token", 1: "secret"}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("args: got %v want %v", got, want)
+		panic(fmt.Sprintf("args: got %v want %v", got, want))
 	}
 	for _, l := range in.Literals {
 		if q[l.Start:l.End] == "'hunter2'" && !reflect.DeepEqual(l.Cols, []string{"password"}) {
-			t.Fatalf("literal attributed to %v", l.Cols)
+			panic(fmt.Sprintf("literal attributed to %v", l.Cols))
 		}
 	}
 }
@@ -204,10 +205,10 @@ func TestLargeInListParsesFast(t *testing.T) {
 	start := time.Now()
 	in := Parse(b.String(), Postgres)
 	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("parse took %v", d)
+		panic(fmt.Sprintf("parse took %v", d))
 	}
 	if len(in.ArgCols) != 60000 || in.ArgCols[59999][0] != "id" {
-		t.Fatalf("attribution lost: %d args", len(in.ArgCols))
+		panic(fmt.Sprintf("attribution lost: %d args", len(in.ArgCols)))
 	}
 }
 

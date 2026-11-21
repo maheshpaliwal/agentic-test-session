@@ -48,7 +48,7 @@ func TestPGFenceThatFailedToOpenLeavesTheTransactionAlone(t *testing.T) {
 					db := rtOpen(t, d)
 					// the connection now takes two statements in one text
 					if _, err := db.ExecContext(ctx, "UPDATE tsql_fn SET v = v WHERE id = 1"); err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					var obs []string
 					note := func(what string, err error) { obs = append(obs, fmt.Sprintf("%s: %v", what, err)) }
@@ -57,7 +57,7 @@ func TestPGFenceThatFailedToOpenLeavesTheTransactionAlone(t *testing.T) {
 					}
 					tx, err := db.BeginTx(bg, nil)
 					if err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					rtMustExec(t, tx, "INSERT INTO tsql_fn VALUES (2,'b')")
 					if appSavepoint {
@@ -70,7 +70,7 @@ func TestPGFenceThatFailedToOpenLeavesTheTransactionAlone(t *testing.T) {
 					note("update", err)
 					sent := rtSQLs(d.take())
 					if traced && armed.Load() {
-						t.Fatal("the fence was not interfered with")
+						panic("the fence was not interfered with")
 					}
 					armed.Store(false)
 					if err == nil {
@@ -93,12 +93,12 @@ func TestPGFenceThatFailedToOpenLeavesTheTransactionAlone(t *testing.T) {
 				got, evs, sent := run(true)
 				t.Logf("traced, the driver was sent:\n  %s", strings.Join(sent, "\n  "))
 				if strings.Join(got, "\n") != strings.Join(want, "\n") {
-					t.Fatalf("traced run observed:\n%s\n\nuntraced run observed:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+					panic(fmt.Sprintf("traced run observed:\n%s\n\nuntraced run observed:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n")))
 				}
 				t.Logf("observed (traced == untraced):\n%s", strings.Join(got, "\n"))
 				e := evs[len(evs)-1]
 				if e.Err != "" || !hasFlag(e, "image_failed") || len(e.Mutations) != 1 || !e.Mutations[0].Before.IsZero() {
-					t.Fatalf("the update's event: err %q flags %v mutations %+v", e.Err, e.Flags, e.Mutations)
+					panic(fmt.Sprintf("the update's event: err %q flags %v mutations %+v", e.Err, e.Flags, e.Mutations))
 				}
 			})
 		}
@@ -113,13 +113,13 @@ func TestPGFenceSavepointName(t *testing.T) {
 	db := rtOpen(t, d)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE tsql_fence SET v = 'x' WHERE id = 1"); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -130,11 +130,11 @@ func TestPGFenceSavepointName(t *testing.T) {
 		}
 	}
 	if len(names) != 1 {
-		t.Fatalf("savepoint names sent: %v", names)
+		panic(fmt.Sprintf("savepoint names sent: %v", names))
 	}
 	for n := range names {
 		if !regexp.MustCompile(`^ts_capture_[0-9a-f]{16}$`).MatchString(n) {
-			t.Fatalf("savepoint name %q", n)
+			panic(fmt.Sprintf("savepoint name %q", n))
 		}
 	}
 }

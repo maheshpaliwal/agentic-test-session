@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -23,7 +24,7 @@ func get(t *testing.T, base, path string) (*http.Response, []byte) {
 	t.Helper()
 	r, err := http.Get(base + path)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer r.Body.Close()
 	b, _ := io.ReadAll(r.Body)
@@ -50,7 +51,7 @@ func TestProxyRoutingAndHeaderStripping(t *testing.T) {
 	defer col.Close()
 	h, err := New(Config{ControlPlaneURL: cp.URL, CollectorURL: col.URL})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	d := httptest.NewServer(h)
 	defer d.Close()
@@ -61,56 +62,56 @@ func TestProxyRoutingAndHeaderStripping(t *testing.T) {
 	req.Header.Set("X-Custom", "keep")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	resp.Body.Close()
 	if cpSeen.path != "/v1/sessions" || cpSeen.query != "state=ACTIVE" {
-		t.Fatalf("cp routing: %+v", cpSeen)
+		panic(fmt.Sprintf("cp routing: %+v", cpSeen))
 	}
 	if cpSeen.hdr.Get("Cookie") != "" || cpSeen.hdr.Get("Authorization") != "" {
-		t.Fatalf("credentials forwarded: %v", cpSeen.hdr)
+		panic(fmt.Sprintf("credentials forwarded: %v", cpSeen.hdr))
 	}
 	if cpSeen.hdr.Get("X-Custom") != "keep" {
-		t.Fatal("ordinary headers should pass")
+		panic("ordinary headers should pass")
 	}
 	if resp.Header.Get("Set-Cookie") != "" || resp.Header.Get("Access-Control-Allow-Origin") != "" {
-		t.Fatalf("response headers leaked: %v", resp.Header)
+		panic(fmt.Sprintf("response headers leaked: %v", resp.Header))
 	}
 
 	// collector + escaped path segments preserved
 	r, _ := get(t, d.URL, "/api/col/v1/sessions/ts_1/entities/redis/order:%2A/a%2Fb")
 	if r.StatusCode != 200 || colSeen.path != "/v1/sessions/ts_1/entities/redis/order:*/a/b" || !strings.HasSuffix(colSeen.rawPath, "/a%2Fb") {
-		t.Fatalf("col routing: %+v", colSeen)
+		panic(fmt.Sprintf("col routing: %+v", colSeen))
 	}
 	cpSeen = seen{}
 	// blocked endpoints
 	for _, p := range []string{"/api/cp/v1/kill", "/api/col/v1/internal/sessions/x/seal", "/api/cp/v1/internal/x"} {
 		if r, _ := get(t, d.URL, p); r.StatusCode != 403 {
-			t.Fatalf("%s should be 403, got %d", p, r.StatusCode)
+			panic(fmt.Sprintf("%s should be 403, got %d", p, r.StatusCode))
 		}
 	}
 	if cpSeen.path != "" {
-		t.Fatal("blocked request reached upstream")
+		panic("blocked request reached upstream")
 	}
 	// cross-origin POST refused; DELETE refused
 	req, _ = http.NewRequest("POST", d.URL+"/api/cp/v1/sessions", strings.NewReader("{}"))
 	req.Header.Set("Origin", "http://evil.example")
 	if resp, _ = http.DefaultClient.Do(req); resp.StatusCode != 403 {
-		t.Fatalf("cross-origin POST: %d", resp.StatusCode)
+		panic(fmt.Sprintf("cross-origin POST: %d", resp.StatusCode))
 	}
 	// DELETE is refused everywhere except a single session on the control plane
 	// (see TestProxyDeleteOnlyDeletesSession).
 	for _, p := range []string{"/api/cp/v1/sessions/x/stop", "/api/col/v1/sessions/x", "/api/cp/v1/active"} {
 		req, _ = http.NewRequest("DELETE", d.URL+p, nil)
 		if resp, _ = http.DefaultClient.Do(req); resp.StatusCode != 405 {
-			t.Fatalf("DELETE %s: %d", p, resp.StatusCode)
+			panic(fmt.Sprintf("DELETE %s: %d", p, resp.StatusCode))
 		}
 	}
 	// bad Host (DNS rebinding)
 	req, _ = http.NewRequest("GET", d.URL+"/", nil)
 	req.Host = "attacker.example"
 	if resp, _ = http.DefaultClient.Do(req); resp.StatusCode != 403 {
-		t.Fatalf("foreign Host: %d", resp.StatusCode)
+		panic(fmt.Sprintf("foreign Host: %d", resp.StatusCode))
 	}
 }
 
@@ -119,10 +120,10 @@ func TestProxyUpstreamDown(t *testing.T) {
 	d := httptest.NewServer(h)
 	defer d.Close()
 	if r, _ := get(t, d.URL, "/api/cp/v1/sessions"); r.StatusCode != 502 {
-		t.Fatalf("want 502, got %d", r.StatusCode)
+		panic(fmt.Sprintf("want 502, got %d", r.StatusCode))
 	}
 	if _, err := New(Config{ControlPlaneURL: "not a url"}); err == nil {
-		t.Fatal("expected URL validation error")
+		panic("expected URL validation error")
 	}
 }
 
@@ -133,10 +134,10 @@ func TestSPAServed(t *testing.T) {
 	for path, ct := range map[string]string{"/": "text/html", "/app.js": "text/javascript", "/style.css": "text/css"} {
 		r, b := get(t, d.URL, path)
 		if r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), ct) || len(b) == 0 {
-			t.Fatalf("%s: %d %q", path, r.StatusCode, r.Header.Get("Content-Type"))
+			panic(fmt.Sprintf("%s: %d %q", path, r.StatusCode, r.Header.Get("Content-Type")))
 		}
 		if r.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(r.Header.Get("Content-Security-Policy"), "default-src 'none'") {
-			t.Fatalf("%s: missing security headers", path)
+			panic(fmt.Sprintf("%s: missing security headers", path))
 		}
 	}
 }
@@ -169,7 +170,7 @@ func TestNoExternalURLsInWebAssets(t *testing.T) {
 		return nil
 	})
 	if err != nil || n < 3 {
-		t.Fatalf("walk: %v (%d files)", err, n)
+		panic(fmt.Sprintf("walk: %v (%d files)", err, n))
 	}
 }
 
@@ -186,7 +187,7 @@ func demoServer(t *testing.T, now func() time.Time) *httptest.Server {
 func decode(t *testing.T, b []byte, v any) {
 	t.Helper()
 	if err := json.Unmarshal(b, v); err != nil {
-		t.Fatalf("decode: %v\n%s", err, b)
+		panic(fmt.Sprintf("decode: %v\n%s", err, b))
 	}
 }
 
@@ -201,29 +202,29 @@ func TestDemoEndpointShapes(t *testing.T) {
 	_, b := get(t, s.URL, "/cp/v1/sessions")
 	decode(t, b, &sessions)
 	if len(sessions) != 5 {
-		t.Fatalf("sessions: %d", len(sessions))
+		panic(fmt.Sprintf("sessions: %d", len(sessions)))
 	}
 	states := map[string]bool{}
 	for _, x := range sessions {
 		states[string(x.State)] = true
 	}
 	if !states["ACTIVE"] || !states["SEALED"] {
-		t.Fatalf("states: %v", states)
+		panic(fmt.Sprintf("states: %v", states))
 	}
 	var one Session
 	_, b = get(t, s.URL, "/cp/v1/sessions/ts_demo0001")
 	decode(t, b, &one)
 	if one.ID != "ts_demo0001" {
-		t.Fatal(one)
+		panic(one)
 	}
 	if r, _ := get(t, s.URL, "/cp/v1/sessions/nope"); r.StatusCode != 404 {
-		t.Fatal("want 404")
+		panic("want 404")
 	}
 	var col []map[string]any
 	_, b = get(t, s.URL, "/col/v1/sessions")
 	decode(t, b, &col)
 	if len(col) != 5 || col[0]["event_count"] == nil {
-		t.Fatalf("collector list: %v", col)
+		panic(fmt.Sprintf("collector list: %v", col))
 	}
 
 	var er eventsResp
@@ -232,22 +233,22 @@ func TestDemoEndpointShapes(t *testing.T) {
 	// from_seq is inclusive (0 reads from the first event) and next_seq is the
 	// from_seq of the page after it, as on the collector.
 	if len(er.Events) < 30 || !er.Sealed || er.Events[0].Seq != 1 || er.NextSeq != er.Events[len(er.Events)-1].Seq+1 {
-		t.Fatalf("events: n=%d next=%d sealed=%v", len(er.Events), er.NextSeq, er.Sealed)
+		panic(fmt.Sprintf("events: n=%d next=%d sealed=%v", len(er.Events), er.NextSeq, er.Sealed))
 	}
 	var tail eventsResp
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/events?from_seq=10&limit=5")
 	decode(t, b, &tail)
 	if len(tail.Events) != 5 || tail.Events[0].Seq != 10 || tail.NextSeq != 15 {
-		t.Fatalf("paging: first %d next %d", tail.Events[0].Seq, tail.NextSeq)
+		panic(fmt.Sprintf("paging: first %d next %d", tail.Events[0].Seq, tail.NextSeq))
 	}
 	// Past the end: no events, and next_seq stays where the request was.
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/events?from_seq=9999")
 	if strings.TrimSpace(string(b)) != `{"events":[],"next_seq":9999,"sealed":true}` {
-		t.Fatalf("page past the end: %s", b)
+		panic(fmt.Sprintf("page past the end: %s", b))
 	}
 	// A session the collector does not hold reads as an empty one, not as 404.
 	if r, b := get(t, s.URL, "/col/v1/sessions/ts_unknown/events"); r.StatusCode != 200 || strings.TrimSpace(string(b)) != `{"events":[],"next_seq":1,"sealed":false}` {
-		t.Fatalf("events of an unknown session: %d %s", r.StatusCode, b)
+		panic(fmt.Sprintf("events of an unknown session: %d %s", r.StatusCode, b))
 	}
 
 	var trace struct {
@@ -257,13 +258,13 @@ func TestDemoEndpointShapes(t *testing.T) {
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/trace")
 	decode(t, b, &trace)
 	if trace.SessionID != "ts_demo0001" || len(trace.Roots) == 0 {
-		t.Fatal("trace shape")
+		panic("trace shape")
 	}
 	var ents []client.Entity
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities")
 	decode(t, b, &ents)
 	if len(ents) == 0 {
-		t.Fatal("no entities")
+		panic("no entities")
 	}
 	// The history is the collector's object, with the key in canonical form.
 	var hist client.EntityHistory
@@ -271,7 +272,7 @@ func TestDemoEndpointShapes(t *testing.T) {
 	decode(t, b, &hist)
 	if hm := hist.Mutations; hist.PK != `{"id":"ord_1001"}` || hist.Store != "postgres" || hist.Entity != "orders" || len(hm) != 2 ||
 		hm[0].Seq >= hm[1].Seq || hm[0].Op != "insert" || hm[1].Op != "update" || hm[0].Kind != core.KindDBWrite || hm[0].EndNs == 0 {
-		t.Fatalf("orders history: %s", b)
+		panic(fmt.Sprintf("orders history: %s", b))
 	}
 	// The summary is the collector's: failures are objects, mutations a map
 	// of store to entity to count.
@@ -280,10 +281,10 @@ func TestDemoEndpointShapes(t *testing.T) {
 	strict := json.NewDecoder(bytes.NewReader(b))
 	strict.DisallowUnknownFields()
 	if err := strict.Decode(&typed); err != nil {
-		t.Fatalf("summary is not the collector's: %v\n%s", err, b)
+		panic(fmt.Sprintf("summary is not the collector's: %v\n%s", err, b))
 	}
 	if !typed.Sealed || len(typed.Failures) == 0 || typed.Failures[0].Err == "" || typed.Mutations["postgres"]["orders"] != 2 {
-		t.Fatalf("summary: %s", b)
+		panic(fmt.Sprintf("summary: %s", b))
 	}
 	var sum map[string]any
 	_, b = get(t, s.URL, "/col/v1/sessions/ts_demo0001/summary")
@@ -308,33 +309,33 @@ func TestDemoStartStop(t *testing.T) {
 	post := func(path, body string) (*http.Response, []byte) {
 		r, err := http.Post(s.URL+path, "application/json", strings.NewReader(body))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer r.Body.Close()
 		b, _ := io.ReadAll(r.Body)
 		return r, b
 	}
 	if r, _ := post("/cp/v1/sessions", `{"name":"x","mode":"exclusive"}`); r.StatusCode != 409 {
-		t.Fatalf("exclusive conflict expected, got %d", r.StatusCode)
+		panic(fmt.Sprintf("exclusive conflict expected, got %d", r.StatusCode))
 	}
 	r, b := post("/cp/v1/sessions", `{"name":"mine","mode":"header"}`)
 	var ns Session
 	decode(t, b, &ns)
 	if r.StatusCode != 201 || ns.State != "ACTIVE" || ns.InitiatedBy != "dashboard" {
-		t.Fatalf("start: %d %+v", r.StatusCode, ns)
+		panic(fmt.Sprintf("start: %d %+v", r.StatusCode, ns))
 	}
 	post("/cp/v1/sessions/"+ns.ID+"/stop", "")
 	var got Session
 	_, b = get(t, s.URL, "/cp/v1/sessions/"+ns.ID)
 	decode(t, b, &got)
 	if got.State != "DRAINING" {
-		t.Fatalf("state %s", got.State)
+		panic(fmt.Sprintf("state %s", got.State))
 	}
 	cur = cur.Add(5 * time.Second)
 	_, b = get(t, s.URL, "/cp/v1/sessions/"+ns.ID)
 	decode(t, b, &got)
 	if got.State != "SEALED" || got.EndedAt.IsZero() {
-		t.Fatalf("state %s", got.State)
+		panic(fmt.Sprintf("state %s", got.State))
 	}
 }
 
@@ -350,7 +351,7 @@ func TestDemoLiveTailGrows(t *testing.T) {
 	a := n()
 	cur = cur.Add(6 * time.Second)
 	if b := n(); b <= a {
-		t.Fatalf("live session did not grow: %d -> %d", a, b)
+		panic(fmt.Sprintf("live session did not grow: %d -> %d", a, b))
 	}
 }
 
@@ -366,28 +367,28 @@ func TestDemoDataInvariants(t *testing.T) {
 	base := time.Now()
 	evs := demoEvents("ts_x", base)
 	if len(evs) < 30 {
-		t.Fatalf("expected a rich session, got %d events", len(evs))
+		panic(fmt.Sprintf("expected a rich session, got %d events", len(evs)))
 	}
 	spans := map[string]core.Event{}
 	locals := map[string]bool{}
 	kinds := map[core.Kind]int{}
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("seq not gapless at %d: %d", i, e.Seq)
+			panic(fmt.Sprintf("seq not gapless at %d: %d", i, e.Seq))
 		}
 		if i > 0 && e.EndHLC < evs[i-1].EndHLC {
-			t.Fatalf("seq %d not in completion order", e.Seq)
+			panic(fmt.Sprintf("seq %d not in completion order", e.Seq))
 		}
 		if e.EndNs < e.StartNs {
-			t.Fatalf("seq %d ends before it starts", e.Seq)
+			panic(fmt.Sprintf("seq %d ends before it starts", e.Seq))
 		}
 		if _, dup := spans[e.SpanID]; dup {
-			t.Fatalf("duplicate span %s", e.SpanID)
+			panic(fmt.Sprintf("duplicate span %s", e.SpanID))
 		}
 		spans[e.SpanID] = e
 		k := e.Instance + "/" + string(rune(e.LocalSeq))
 		if locals[k] {
-			t.Fatalf("dup idempotency key %s", k)
+			panic(fmt.Sprintf("dup idempotency key %s", k))
 		}
 		locals[k] = true
 		kinds[e.Kind]++
@@ -408,14 +409,14 @@ func TestDemoDataInvariants(t *testing.T) {
 	var all []*Node
 	flatten(roots, &all)
 	if len(all) != len(evs) {
-		t.Fatalf("tree has %d nodes for %d events (cycle or loss)", len(all), len(evs))
+		panic(fmt.Sprintf("tree has %d nodes for %d events (cycle or loss)", len(all), len(evs)))
 	}
 	seen := map[string]bool{}
 	var check func(n *Node, parent *Node, linked bool)
 	check = func(n *Node, parent *Node, linked bool) {
 		e := n.Event
 		if seen[e.SpanID] {
-			t.Fatalf("span %s appears twice in tree", e.SpanID)
+			panic(fmt.Sprintf("span %s appears twice in tree", e.SpanID))
 		}
 		seen[e.SpanID] = true
 		if parent != nil {
@@ -456,7 +457,7 @@ func TestDemoDataInvariants(t *testing.T) {
 	}
 	// 1 api root + 4 worker attempts
 	if len(roots) != 1 || roots[0].Event.Kind != core.KindAPIIn {
-		t.Fatalf("expected a single api.in root, got %d", len(roots))
+		panic(fmt.Sprintf("expected a single api.in root, got %d", len(roots)))
 	}
 	linked := 0
 	for _, n := range all {
@@ -522,13 +523,13 @@ func TestPrefixSessionsAreConsistent(t *testing.T) {
 		evs := cv.evs
 		for i, e := range evs {
 			if e.Seq != uint64(i+1) {
-				t.Fatalf("%s: seq gap at %d", s.ID, i)
+				panic(fmt.Sprintf("%s: seq gap at %d", s.ID, i))
 			}
 		}
 		var all []*Node
 		flatten(buildTrace(s.ID, evs).Roots, &all)
 		if len(all) != len(evs) {
-			t.Fatalf("%s: tree drops events", s.ID)
+			panic(fmt.Sprintf("%s: tree drops events", s.ID))
 		}
 	}
 }
@@ -546,7 +547,7 @@ func TestProxySendsUpstreamHostNoOriginAndJSONContentType(t *testing.T) {
 	defer up.Close()
 	h, err := New(Config{ControlPlaneURL: up.URL, CollectorURL: up.URL})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	d := httptest.NewServer(h)
 	defer d.Close()
@@ -562,7 +563,7 @@ func TestProxySendsUpstreamHostNoOriginAndJSONContentType(t *testing.T) {
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		resp.Body.Close()
 		return <-ch
@@ -603,15 +604,15 @@ func TestDemoEntityPKIsCanonicalJSONString(t *testing.T) {
 		ents = w.Entities
 	}
 	if len(ents) == 0 {
-		t.Fatal("no entities")
+		panic("no entities")
 	}
 	for _, e := range ents {
 		if !strings.HasPrefix(e.PK, "{") {
-			t.Fatalf("pk %q is not canonical JSON", e.PK)
+			panic(fmt.Sprintf("pk %q is not canonical JSON", e.PK))
 		}
 		resp, hb := get(t, s.URL, "/col/v1/sessions/ts_demo0001/entities/"+e.Store+"/"+e.Entity+"/"+url.PathEscape(e.PK))
 		if resp.StatusCode != 200 || len(hb) < 3 || string(hb) == "[]" {
-			t.Fatalf("history for %s: %d %s", e.PK, resp.StatusCode, hb)
+			panic(fmt.Sprintf("history for %s: %d %s", e.PK, resp.StatusCode, hb))
 		}
 	}
 }
@@ -622,10 +623,10 @@ func TestJSHelpers(t *testing.T) {
 		t.Skip("node not installed")
 	}
 	if out, err := exec.Command(node, "jstest/util_test.js").CombinedOutput(); err != nil {
-		t.Fatalf("%v\n%s", err, out)
+		panic(fmt.Sprintf("%v\n%s", err, out))
 	}
 	if out, err := exec.Command(node, "--check", "web/app.js").CombinedOutput(); err != nil {
-		t.Fatalf("app.js syntax: %v\n%s", err, out)
+		panic(fmt.Sprintf("app.js syntax: %v\n%s", err, out))
 	}
 }
 
@@ -639,7 +640,7 @@ func TestDemoHTTPEventsHaveRecordedShape(t *testing.T) {
 		dec := json.NewDecoder(strings.NewReader(string(p.Inline)))
 		dec.DisallowUnknownFields() // a field thttp does not record, such as the old "path"
 		if err := dec.Decode(&msg); err != nil {
-			t.Fatalf("%s %s: %s is not a recorded HTTP message: %v\n%s", e.Kind, e.Name, what, err, p.Inline)
+			panic(fmt.Sprintf("%s %s: %s is not a recorded HTTP message: %v\n%s", e.Kind, e.Name, what, err, p.Inline))
 		}
 		if p.Redacted != strings.Contains(string(p.Inline), core.RedactedValue) {
 			t.Errorf("%s %s: %s redacted=%v does not match its content", e.Kind, e.Name, what, p.Redacted)
@@ -693,7 +694,7 @@ func TestDemoHTTPEventsHaveRecordedShape(t *testing.T) {
 		}
 	}
 	if len(httpEvs) != 8 {
-		t.Fatalf("the demo has %d api.in/api.out events, want 8", len(httpEvs))
+		panic(fmt.Sprintf("the demo has %d api.in/api.out events, want 8", len(httpEvs)))
 	}
 
 	// The real curlFor accepts every one of them.
@@ -722,7 +723,7 @@ console.log(evs.length);`
 	cmd := exec.Command(node, "-e", script)
 	cmd.Stdin = strings.NewReader(string(in))
 	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "8" {
-		t.Fatalf("curlFor on the demo events: %v\n%s", err, out)
+		panic(fmt.Sprintf("curlFor on the demo events: %v\n%s", err, out))
 	}
 }
 
@@ -732,7 +733,7 @@ func TestDemoBindings(t *testing.T) {
 	post := func(path, body string) (*http.Response, []byte) {
 		r, err := http.Post(s.URL+path, "application/json", strings.NewReader(body))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer r.Body.Close()
 		b, _ := io.ReadAll(r.Body)
@@ -745,19 +746,19 @@ func TestDemoBindings(t *testing.T) {
 	_, b := get(t, s.URL, "/cp/v1/active")
 	decode(t, b, &act)
 	if len(act.Bindings) != 2 || act.Bindings[0]["session_id"] != "ts_demo0004" {
-		t.Fatalf("active bindings: %+v", act)
+		panic(fmt.Sprintf("active bindings: %+v", act))
 	}
 	in := `{"name":"b","mode":"header","bindings":[{"source":"header","name":"X-User-Id","value":"u1"}]}`
 	r, b := post("/cp/v1/sessions", in)
 	var ns Session
 	decode(t, b, &ns)
 	if r.StatusCode != 201 || len(ns.Bindings) != 1 || ns.Bindings[0].Value != "u1" {
-		t.Fatalf("start: %d %s", r.StatusCode, b)
+		panic(fmt.Sprintf("start: %d %s", r.StatusCode, b))
 	}
 	// same (source,name,value) with different header case => 409 naming the holder
 	r, b = post("/cp/v1/sessions", `{"bindings":[{"source":"header","name":"x-user-id","value":"u1"}]}`)
 	if r.StatusCode != 409 || !strings.Contains(string(b), ns.ID) {
-		t.Fatalf("dup: %d %s", r.StatusCode, b)
+		panic(fmt.Sprintf("dup: %d %s", r.StatusCode, b))
 	}
 	for _, bad := range []string{
 		`{"bindings":[{"source":"nope","name":"a","value":"b"}]}`,
@@ -765,13 +766,13 @@ func TestDemoBindings(t *testing.T) {
 		`{"mode":"exclusive","bindings":[{"source":"header","name":"a","value":"b"}]}`,
 	} {
 		if r, _ := post("/cp/v1/sessions", bad); r.StatusCode != 400 {
-			t.Fatalf("%s: %d", bad, r.StatusCode)
+			panic(fmt.Sprintf("%s: %d", bad, r.StatusCode))
 		}
 	}
 	// after stop the binding is released
 	post("/cp/v1/sessions/"+ns.ID+"/stop", "")
 	if r, _ := post("/cp/v1/sessions", in); r.StatusCode != 201 {
-		t.Fatalf("rebind after stop: %d", r.StatusCode)
+		panic(fmt.Sprintf("rebind after stop: %d", r.StatusCode))
 	}
 }
 
@@ -780,7 +781,7 @@ func TestActivityDemoInvariants(t *testing.T) {
 	spans := map[string]core.Event{}
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) || (i > 0 && e.EndHLC < evs[i-1].EndHLC) {
-			t.Fatalf("seq %d not gapless/completion ordered", e.Seq)
+			panic(fmt.Sprintf("seq %d not gapless/completion ordered", e.Seq))
 		}
 		spans[e.SpanID] = e
 	}
@@ -800,7 +801,7 @@ func TestActivityDemoInvariants(t *testing.T) {
 		}
 	}
 	if apiRoots != 3 || workers != 1 || orphans != 1 {
-		t.Fatalf("api triggers %d, workers %d, orphan roots %d", apiRoots, workers, orphans)
+		panic(fmt.Sprintf("api triggers %d, workers %d, orphan roots %d", apiRoots, workers, orphans))
 	}
 	// the trigger completes after its children: the point of the grouped view
 	if spans["sp_c_api"].Seq <= spans["sp_c_ins"].Seq {
@@ -820,7 +821,7 @@ func TestActivityDemoInvariants(t *testing.T) {
 	var all []*Node
 	flatten(buildTrace("ts_x", evs).Roots, &all)
 	if len(all) != len(evs) {
-		t.Fatalf("tree has %d of %d", len(all), len(evs))
+		panic(fmt.Sprintf("tree has %d of %d", len(all), len(evs)))
 	}
 }
 
@@ -842,13 +843,13 @@ func TestProxyPatchOnlyRenamesSession(t *testing.T) {
 		}
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		r.Body.Close()
 		return r.StatusCode
 	}
 	if c := patch("/api/cp/v1/sessions/ts_1", d.URL); c != 200 || len(got) != 1 || got[0] != "PATCH /v1/sessions/ts_1 application/json origin=" {
-		t.Fatalf("rename: %d %v", c, got)
+		panic(fmt.Sprintf("rename: %d %v", c, got))
 	}
 	for _, bad := range []string{"/api/cp/v1/sessions", "/api/cp/v1/sessions/", "/api/cp/v1/sessions/a/stop", "/api/cp/v1/internal/x", "/api/cp/v1/kill",
 		"/api/cp/v1/sessions/..", "/api/col/v1/sessions/ts_1"} {
@@ -872,7 +873,7 @@ func TestDemoRename(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer r.Body.Close()
 		var out Session
@@ -881,7 +882,7 @@ func TestDemoRename(t *testing.T) {
 	}
 	c, got := patch("ts_demo0002", `{"name":"  my live run "}`)
 	if c != 200 || got.Name != "my live run" || got.NameAuto {
-		t.Fatalf("rename: %d %+v", c, got)
+		panic(fmt.Sprintf("rename: %d %+v", c, got))
 	}
 	for _, bad := range []string{`{"name":""}`, `{"name":"   "}`, `{"name":"` + strings.Repeat("x", 121) + `"}`, `nope`} {
 		if c, _ := patch("ts_demo0001", bad); c != 400 {
@@ -916,13 +917,13 @@ func TestProxyDeleteOnlyDeletesSession(t *testing.T) {
 		}
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		r.Body.Close()
 		return r.StatusCode
 	}
 	if c := del("/api/cp/v1/sessions/ts_1", d.URL); c != 200 || len(got) != 1 || got[0] != "DELETE /v1/sessions/ts_1 origin=" {
-		t.Fatalf("delete: %d %v", c, got)
+		panic(fmt.Sprintf("delete: %d %v", c, got))
 	}
 	// Nothing else is deletable through the dashboard: not the collector's
 	// data directly, not internal endpoints, not collections.
@@ -947,7 +948,7 @@ func TestDemoDelete(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodDelete, s.URL+"/cp/v1/sessions/"+id, nil)
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		r.Body.Close()
 		return r.StatusCode
@@ -955,7 +956,7 @@ func TestDemoDelete(t *testing.T) {
 	list := func() map[string]string {
 		r, err := http.Get(s.URL + "/cp/v1/sessions")
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		defer r.Body.Close()
 		var ss []Session
@@ -968,7 +969,7 @@ func TestDemoDelete(t *testing.T) {
 	}
 	before := list()
 	if before["ts_demo0001"] != "SEALED" || before["ts_demo0002"] != "ACTIVE" {
-		t.Fatalf("demo fixture changed: %v", before)
+		panic(fmt.Sprintf("demo fixture changed: %v", before))
 	}
 	if c := del("ts_demo0002"); c != 409 {
 		t.Errorf("deleting a running session: %d, want 409", c)
@@ -977,11 +978,11 @@ func TestDemoDelete(t *testing.T) {
 		t.Errorf("unknown id: %d", c)
 	}
 	if c := del("ts_demo0001"); c != 200 {
-		t.Fatalf("delete: %d", c)
+		panic(fmt.Sprintf("delete: %d", c))
 	}
 	after := list()
 	if _, still := after["ts_demo0001"]; still || len(after) != len(before)-1 {
-		t.Fatalf("after delete: %v", after)
+		panic(fmt.Sprintf("after delete: %v", after))
 	}
 	if c := del("ts_demo0001"); c != 404 {
 		t.Errorf("second delete: %d", c)

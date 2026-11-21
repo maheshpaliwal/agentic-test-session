@@ -3,6 +3,7 @@ package thttp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -32,7 +33,7 @@ func recordedReq(t *testing.T, rec *core.MemRecorder, contentType string, body i
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	evs := kind(rec.Events(), core.KindAPIIn)
 	if len(evs) == 0 {
-		t.Fatal("no api.in recorded")
+		panic("no api.in recorded")
 	}
 	e := evs[len(evs)-1]
 	return recordedBody(t, e.Req.Inline), recordedBody(t, e.Resp.Inline)
@@ -46,7 +47,7 @@ func recordedBody(t *testing.T, inline []byte) string {
 		Body json.RawMessage `json:"body"`
 	}
 	if err := json.Unmarshal(inline, &m); err != nil {
-		t.Fatalf("payload %s: %v", inline, err)
+		panic(fmt.Sprintf("payload %s: %v", inline, err))
 	}
 	var text string
 	if json.Unmarshal(m.Body, &text) == nil {
@@ -119,6 +120,6 @@ func TestPlaceholderMediaTypeBounded(t *testing.T) {
 	l.add([]byte("payload"))
 	got, _ := l.body("application/" + strings.Repeat("x", 500) + "; q=1").(string)
 	if len(got) > maxMediaType+32 || !strings.HasSuffix(got, ", 7 bytes>") {
-		t.Fatalf("placeholder = %q", got)
+		panic(fmt.Sprintf("placeholder = %q", got))
 	}
 }

@@ -55,7 +55,7 @@ func TestViewOfDeletedSessionIsNotReusedAfterRacingRead(t *testing.T) {
 	go func() { defer close(done); c.viewOf(ctx, sid) }()
 	<-g.reached // the read has the old events in hand
 	if err := c.Delete(ctx, sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	close(g.release)
 	<-done
@@ -66,10 +66,10 @@ func TestViewOfDeletedSessionIsNotReusedAfterRacingRead(t *testing.T) {
 	stored, _ := g.Store.Events(ctx, sid, 0, 0)
 	v, err := c.viewOf(ctx, sid)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if fmt.Sprint(spansOf(v.evs)) != fmt.Sprint(spansOf(stored)) {
-		t.Fatalf("view  = %v\nstore = %v", spansOf(v.evs), spansOf(stored))
+		panic(fmt.Sprintf("view  = %v\nstore = %v", spansOf(v.evs), spansOf(stored)))
 	}
 }
 
@@ -81,20 +81,20 @@ func TestViewIsNotExtendedAcrossOutOfBandDelete(t *testing.T) {
 	ctx := context.Background()
 	ingest(t, c, ev("old1", core.KindDBRead, 100, 1), ev("old2", core.KindDBRead, 101, 2), ev("old3", core.KindDBRead, 102, 3))
 	if _, err := c.viewOf(ctx, sid); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if err := st.DeleteSession(ctx, sid); err != nil { // the other collector
-		t.Fatal(err)
+		panic(err)
 	}
 	ingest(t, c, ev("new1", core.KindDBRead, 200, 11), ev("new2", core.KindDBRead, 201, 12),
 		ev("new3", core.KindDBRead, 202, 13), ev("new4", core.KindDBRead, 203, 14))
 	stored, _ := st.Events(ctx, sid, 0, 0)
 	v, err := c.viewOf(ctx, sid)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if fmt.Sprint(spansOf(v.evs)) != fmt.Sprint(spansOf(stored)) {
-		t.Fatalf("view  = %v\nstore = %v", spansOf(v.evs), spansOf(stored))
+		panic(fmt.Sprintf("view  = %v\nstore = %v", spansOf(v.evs), spansOf(stored)))
 	}
 }
 
@@ -200,32 +200,32 @@ func TestWindowStress(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("stored %d of %d, buffered %d", h, writers*per, c.seq.buffered())
+			panic(fmt.Sprintf("stored %d of %d, buffered %d", h, writers*per, c.seq.buffered()))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	close(stop)
 	wg.Wait()
 	if b := bad.Load(); b != nil {
-		t.Fatal(b)
+		panic(b)
 	}
 	evs, _ := f.Store.Events(ctx, sid, 0, 0)
 	seen := map[string]bool{}
 	for i, e := range evs {
 		if e.Seq != uint64(i+1) {
-			t.Fatalf("gap at %d: %d", i, e.Seq)
+			panic(fmt.Sprintf("gap at %d: %d", i, e.Seq))
 		}
 		if seen[e.SpanID] {
-			t.Fatalf("duplicate %s", e.SpanID)
+			panic(fmt.Sprintf("duplicate %s", e.SpanID))
 		}
 		seen[e.SpanID] = true
 	}
 	if len(evs) != writers*per {
-		t.Fatalf("stored %d, want %d", len(evs), writers*per)
+		panic(fmt.Sprintf("stored %d, want %d", len(evs), writers*per))
 	}
 	v, _ := c.viewOf(ctx, sid)
 	if fmt.Sprint(spansOf(v.evs)) != fmt.Sprint(spansOf(evs)) {
-		t.Fatal("final view differs from store")
+		panic("final view differs from store")
 	}
 	// the actor must eventually be evicted (timer/goroutine not leaked)
 	waitFor(t, "actor eviction", func() bool { return c.seq.actorCount() == 0 })

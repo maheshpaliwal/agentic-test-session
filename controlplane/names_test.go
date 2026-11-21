@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,7 @@ func TestAutoNameShapes(t *testing.T) {
 	}
 	// whitespace-only is treated as empty
 	if got, auto := resolveName("  \t\n ", nil, "api", t0); !auto || got != "api 14:32:07" {
-		t.Fatalf("%q %v", got, auto)
+		panic(fmt.Sprintf("%q %v", got, auto))
 	}
 }
 
@@ -48,18 +49,18 @@ func TestStartAutoNameAndJWTAliasFlow(t *testing.T) {
 	s, err := m.Start(StartRequest{InitiatedBy: "dashboard", Bindings: []Binding{
 		{BindHeader, "X-USER-ID", "act_bind_9"}, {BindJWTClaim, "sub", "u_1"}, {BindCookie, "sid", "z"}}})
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if !s.NameAuto || s.Name != "x-user-id=act_bind_9 + jwt:sub=u_1 +1" {
-		t.Fatalf("%+v", s)
+		panic(fmt.Sprintf("%+v", s))
 	}
 	s2, _ := m.Start(StartRequest{Name: "mine"})
 	if s2.NameAuto || s2.Name != "mine" {
-		t.Fatalf("%+v", s2)
+		panic(fmt.Sprintf("%+v", s2))
 	}
 	s3, _ := m.Start(StartRequest{InitiatedBy: "cli"})
 	if !s3.NameAuto || !strings.HasPrefix(s3.Name, "cli ") || len(s3.Name) != len("cli 00:00:00") {
-		t.Fatalf("%+v", s3)
+		panic(fmt.Sprintf("%+v", s3))
 	}
 }
 
@@ -89,17 +90,17 @@ func TestTemplates(t *testing.T) {
 		}
 	}
 	if got := ExpandNameTemplate("x {bind}", nil, "api", t0); got != "x ?" {
-		t.Fatalf("%q", got)
+		panic(fmt.Sprintf("%q", got))
 	}
 	// expansion output is not re-expanded
 	if got := ExpandNameTemplate("{bind}", []Binding{{BindHeader, "h", "{time}"}}, "api", t0); got != "{time}" {
-		t.Fatalf("re-expanded: %q", got)
+		panic(fmt.Sprintf("re-expanded: %q", got))
 	}
 	// through Start
 	m := newMgr(t, newFakeCollector(t), nil)
 	s, err := m.Start(StartRequest{Name: "activity {bind}", Bindings: []Binding{{BindHeader, "x-user-id", "act_bind_9"}}})
 	if err != nil || s.Name != "activity act_bind_9" || s.NameAuto {
-		t.Fatalf("%+v %v", s, err)
+		panic(fmt.Sprintf("%+v %v", s, err))
 	}
 }
 
@@ -108,13 +109,13 @@ func TestTemplateHugeInput(t *testing.T) {
 	start := time.Now()
 	n := SanitizeName(ExpandNameTemplate(huge, []Binding{{BindHeader, "h", "v"}}, "api", t0))
 	if utf8.RuneCountInString(n) > MaxNameRunes || time.Since(start) > 2*time.Second {
-		t.Fatalf("len=%d took %v", utf8.RuneCountInString(n), time.Since(start))
+		panic(fmt.Sprintf("len=%d took %v", utf8.RuneCountInString(n), time.Since(start)))
 	}
 	// Cutting a long template must not change what a name within the limit expands to.
 	long := strings.Repeat("{bind.h}-", 200) // 1800 bytes, 400 runes once expanded
 	if got, want := SanitizeName(ExpandNameTemplate(long+strings.Repeat("x", 1<<20), []Binding{{BindHeader, "h", "v"}}, "api", t0)),
 		SanitizeName(ExpandNameTemplate(long, []Binding{{BindHeader, "h", "v"}}, "api", t0)); got != want {
-		t.Fatalf("a long tail changed the name: %q != %q", got, want)
+		panic(fmt.Sprintf("a long tail changed the name: %q != %q", got, want))
 	}
 }
 
@@ -122,7 +123,7 @@ func TestSanitizeName(t *testing.T) {
 	long := strings.Repeat("é", 500)
 	got := SanitizeName(long)
 	if utf8.RuneCountInString(got) != MaxNameRunes || !strings.HasSuffix(got, "…") || !utf8.ValidString(got) {
-		t.Fatalf("%d %q", utf8.RuneCountInString(got), got)
+		panic(fmt.Sprintf("%d %q", utf8.RuneCountInString(got), got))
 	}
 	cases := map[string]string{
 		"  a   b\t\nc  ":         "a b c",
@@ -142,7 +143,7 @@ func TestSanitizeName(t *testing.T) {
 	// exactly 121 runes truncates; trailing space before ellipsis is trimmed
 	s := strings.Repeat("a", 118) + " bc"
 	if got := SanitizeName(s); utf8.RuneCountInString(got) > MaxNameRunes {
-		t.Fatalf("too long %d", utf8.RuneCountInString(got))
+		panic(fmt.Sprintf("too long %d", utf8.RuneCountInString(got)))
 	}
 }
 
@@ -150,7 +151,7 @@ func TestStartSanitisesName(t *testing.T) {
 	m := newMgr(t, newFakeCollector(t), nil)
 	s, _ := m.Start(StartRequest{Name: "  hello \x00 \n world  ", InitiatedBy: "a\nb"})
 	if s.Name != "hello world" {
-		t.Fatalf("%+v", s)
+		panic(fmt.Sprintf("%+v", s))
 	}
 }
 
@@ -162,19 +163,19 @@ func TestRenameHTTP(t *testing.T) {
 	var s Session
 	json.Unmarshal(w.Body.Bytes(), &s)
 	if !s.NameAuto || s.Name != "x-u=v1" {
-		t.Fatalf("%s", w.Body)
+		panic(w.Body.String())
 	}
 	w = do(t, h, "PATCH", "/v1/sessions/"+s.ID, "127.0.0.1:7070", `{"name":"  new   name for {bind} "}`, j)
 	var r Session
 	json.Unmarshal(w.Body.Bytes(), &r)
 	if w.Code != 200 || r.Name != "new name for v1" || r.NameAuto || r.ID != s.ID {
-		t.Fatalf("%d %s", w.Code, w.Body)
+		panic(fmt.Sprintf("%d %s", w.Code, w.Body))
 	}
 	if g, _ := m.Get(s.ID); g.Name != "new name for v1" || g.NameAuto {
-		t.Fatalf("not persisted %+v", g)
+		panic(fmt.Sprintf("not persisted %+v", g))
 	}
 	if !strings.Contains(w.Body.String(), `"name_auto":false`) {
-		t.Fatalf("name_auto must always be present: %s", w.Body)
+		panic(fmt.Sprintf("name_auto must always be present: %s", w.Body))
 	}
 	for body, code := range map[string]int{`{"name":"  \n "}`: 400, `{"name":""}`: 400, `{}`: 400, `nope`: 400, `{"name":5}`: 400} {
 		if w := do(t, h, "PATCH", "/v1/sessions/"+s.ID, "127.0.0.1:7070", body, j); w.Code != code {
@@ -182,20 +183,20 @@ func TestRenameHTTP(t *testing.T) {
 		}
 	}
 	if w := do(t, h, "PATCH", "/v1/sessions/ts_nope", "127.0.0.1:7070", `{"name":"x"}`, j); w.Code != http.StatusNotFound {
-		t.Fatalf("404: %d", w.Code)
+		panic(fmt.Sprintf("404: %d", w.Code))
 	}
 	// guard: no JSON content type, bad host, browser origin
 	if w := do(t, h, "PATCH", "/v1/sessions/"+s.ID, "127.0.0.1:7070", `{"name":"x"}`, nil); w.Code < 400 {
-		t.Fatalf("no content-type accepted: %d", w.Code)
+		panic(fmt.Sprintf("no content-type accepted: %d", w.Code))
 	}
 	if w := do(t, h, "PATCH", "/v1/sessions/"+s.ID, "evil.example", `{"name":"x"}`, j); w.Code < 400 {
-		t.Fatalf("bad host accepted: %d", w.Code)
+		panic(fmt.Sprintf("bad host accepted: %d", w.Code))
 	}
 	if w := do(t, h, "PATCH", "/v1/sessions/"+s.ID, "127.0.0.1:7070", `{"name":"x"}`, map[string]string{"Content-Type": "application/json", "Origin": "http://evil.example"}); w.Code < 400 {
-		t.Fatalf("origin accepted: %d", w.Code)
+		panic(fmt.Sprintf("origin accepted: %d", w.Code))
 	}
 	if g, _ := m.Get(s.ID); g.Name != "new name for v1" {
-		t.Fatalf("guarded request mutated: %q", g.Name)
+		panic(fmt.Sprintf("guarded request mutated: %q", g.Name))
 	}
 }
 
@@ -211,26 +212,26 @@ func TestRenameSealedAndAbortedAndPersistence(t *testing.T) {
 	waitState(t, m, a.ID, StateSealed)
 	r, err := m.Rename(a.ID, "labelled")
 	if err != nil || r.State != StateSealed || r.Name != "labelled" || r.NameAuto {
-		t.Fatalf("%+v %v", r, err)
+		panic(fmt.Sprintf("%+v %v", r, err))
 	}
 	b, _ := m.Start(StartRequest{})
 	m.Abort(b.ID)
 	if r, err := m.Rename(b.ID, "aborted-one"); err != nil || r.State != StateAborted {
-		t.Fatalf("%+v %v", r, err)
+		panic(fmt.Sprintf("%+v %v", r, err))
 	}
 	// evict to archive, then rename from the archive
 	m.Sweep(time.Now().Add(2 * time.Hour))
 	if _, ok := fs.MemStore.Get(a.ID); ok {
-		t.Fatal("expected eviction to archive")
+		panic("expected eviction to archive")
 	}
 	if r, err := m.Rename(a.ID, "from archive"); err != nil || r.Name != "from archive" {
-		t.Fatalf("%+v %v", r, err)
+		panic(fmt.Sprintf("%+v %v", r, err))
 	}
 	// re-evict: archive now holds two lines; reads must return the latest
 	m.Sweep(time.Now().Add(4 * time.Hour))
 	for _, s := range m.List("") {
 		if s.ID == a.ID && s.Name != "from archive" {
-			t.Fatalf("stale list entry %q", s.Name)
+			panic(fmt.Sprintf("stale list entry %q", s.Name))
 		}
 	}
 	// restart: new store + manager read renamed sealed session
@@ -238,25 +239,25 @@ func TestRenameSealedAndAbortedAndPersistence(t *testing.T) {
 	fs2, err := NewFileStore(path)
 	closeLater(t, fs2)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	m2 := newMgr(t, f, func(c *Config) { c.Store = fs2 })
 	if g, ok := m2.Get(a.ID); !ok || g.Name != "from archive" || g.NameAuto {
-		t.Fatalf("after restart: %+v %v", g, ok)
+		panic(fmt.Sprintf("after restart: %+v %v", g, ok))
 	}
 	if r, err := m2.Rename(a.ID, "after restart"); err != nil || r.State != StateSealed {
-		t.Fatalf("%+v %v", r, err)
+		panic(fmt.Sprintf("%+v %v", r, err))
 	}
 	fs3, _ := NewFileStore(path)
 	closeLater(t, fs3)
 	if g, _ := fs3.Get(a.ID); g.Name != "after restart" {
-		t.Fatalf("not persisted: %q", g.Name)
+		panic(fmt.Sprintf("not persisted: %q", g.Name))
 	}
 	if _, err := m2.Rename("ts_nope", "x"); err != ErrNotFound {
-		t.Fatalf("%v", err)
+		panic(fmt.Sprintf("%v", err))
 	}
 	if _, err := m2.Rename(a.ID, " \x00 "); err != ErrInvalid {
-		t.Fatalf("%v", err)
+		panic(fmt.Sprintf("%v", err))
 	}
 }
 
@@ -297,9 +298,9 @@ func TestRenameWhileDraining(t *testing.T) {
 	got := waitState(t, m, s.ID, StateSealed)
 	close(done)
 	if got.DroppedEvents != 3 || got.EndedAt.IsZero() || got.Name == "" || got.NameAuto {
-		t.Fatalf("drain result lost or name wrong: %+v", got)
+		panic(fmt.Sprintf("drain result lost or name wrong: %+v", got))
 	}
 	if got.State != StateSealed {
-		t.Fatal(got.State)
+		panic(got.State)
 	}
 }

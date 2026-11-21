@@ -90,12 +90,12 @@ func seedSessions(t *testing.T, st store.Store, counts map[string]int, sealed ..
 				Seq: uint64(i + 1), LocalSeq: uint64(i + 1), StartNs: int64(100 + i), EndNs: int64(105 + i)}
 		}
 		if err := st.AppendEvents(ctx, id, evs); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 	for _, id := range sealed {
 		if err := st.PutSeal(ctx, id, store.SealInfo{SealedAt: time.Now()}); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
 }
@@ -105,12 +105,12 @@ func listGet(t *testing.T, url string) (int, string, []byte) {
 	t.Helper()
 	resp, err := http.Get(url)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return resp.StatusCode, resp.Header.Get(headerUnanswered), b
 }
@@ -119,7 +119,7 @@ func decodeList(t *testing.T, b []byte) []map[string]any {
 	t.Helper()
 	var l []map[string]any
 	if err := json.Unmarshal(b, &l); err != nil {
-		t.Fatalf("%v: %s", err, b)
+		panic(fmt.Sprintf("%v: %s", err, b))
 	}
 	return l
 }
@@ -131,20 +131,20 @@ func TestSessionListWithoutIDsIsUnchanged(t *testing.T) {
 	_, srv := newSpyC(t, DefaultConfig(), &spyStore{Store: sp})
 	code, hdr, b := listGet(t, srv.URL+"/v1/sessions")
 	if code != 200 || strings.TrimSpace(string(b)) != "[]" || hdr != "" {
-		t.Fatalf("empty list: %d %q %s", code, hdr, b)
+		panic(fmt.Sprintf("empty list: %d %q %s", code, hdr, b))
 	}
 	seedSessions(t, sp, map[string]int{"ts_a": 3, "ts_b": 1}, "ts_b")
 	code, hdr, b = listGet(t, srv.URL+"/v1/sessions")
 	want := `[{"id":"ts_a","event_count":3,"first_ns":100,"last_ns":107,"sealed":false},{"id":"ts_b","event_count":1,"first_ns":100,"last_ns":105,"sealed":true}]`
 	if code != 200 || strings.TrimSpace(string(b)) != want || hdr != "" {
-		t.Fatalf("list: %d %q\n got %s\nwant %s", code, hdr, b, want)
+		panic(fmt.Sprintf("list: %d %q\n got %s\nwant %s", code, hdr, b, want))
 	}
 	// Another parameter is not ids.
 	if _, _, b2 := listGet(t, srv.URL+"/v1/sessions?limit=1"); string(b2) != string(b) {
-		t.Fatalf("list with an unrelated parameter: %s", b2)
+		panic(fmt.Sprintf("list with an unrelated parameter: %s", b2))
 	}
 	if n := sp.lists.Load(); n != 3 {
-		t.Fatalf("ListSessions calls: %d, want 3", n)
+		panic(fmt.Sprintf("ListSessions calls: %d, want 3", n))
 	}
 }
 
@@ -156,24 +156,24 @@ func TestSessionListByID(t *testing.T) {
 	seedSessions(t, sp, map[string]int{"ts_a": 3, "ts_b": 1, "ts_c": 7}, "ts_b")
 	// A seal without events is not a session the collector holds events for.
 	if err := sp.PutSeal(context.Background(), "ts_sealonly", store.SealInfo{SealedAt: time.Now()}); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	code, hdr, b := listGet(t, srv.URL+"/v1/sessions?ids=ts_b,ts_unknown,ts_a,ts_sealonly,,ts_b")
 	want := `[{"id":"ts_b","event_count":1,"sealed":true},{"id":"ts_a","event_count":3,"sealed":false}]`
 	if code != 200 || strings.TrimSpace(string(b)) != want || hdr != "0" {
-		t.Fatalf("by id: %d %q\n got %s\nwant %s", code, hdr, b, want)
+		panic(fmt.Sprintf("by id: %d %q\n got %s\nwant %s", code, hdr, b, want))
 	}
 	// ids given in several parameters are one list.
 	_, _, b = listGet(t, srv.URL+"/v1/sessions?ids=ts_c&ids=ts_a")
 	if got := decodeList(t, b); len(got) != 2 || got[0]["id"] != "ts_c" || got[1]["id"] != "ts_a" {
-		t.Fatalf("two ids parameters: %s", b)
+		panic(fmt.Sprintf("two ids parameters: %s", b))
 	}
 	// An empty ids asks for nothing; it is not the full list.
 	for _, q := range []string{"?ids=", "?ids=,,"} {
 		code, hdr, b = listGet(t, srv.URL+"/v1/sessions"+q)
 		if code != 200 || strings.TrimSpace(string(b)) != "[]" || hdr != "0" {
-			t.Fatalf("%s: %d %q %s", q, code, hdr, b)
+			panic(fmt.Sprintf("%s: %d %q %s", q, code, hdr, b))
 		}
 	}
 	// Each element agrees with the full list.
@@ -182,12 +182,12 @@ func TestSessionListByID(t *testing.T) {
 	_, _, b = listGet(t, srv.URL+"/v1/sessions?ids=ts_a,ts_b,ts_c")
 	byID := decodeList(t, b)
 	if len(full) != 3 || len(byID) != 3 {
-		t.Fatalf("full %d, by id %d", len(full), len(byID))
+		panic(fmt.Sprintf("full %d, by id %d", len(full), len(byID)))
 	}
 	for i, f := range full {
 		g := byID[i]
 		if g["id"] != f.ID || int(g["event_count"].(float64)) != f.EventCount || g["sealed"] != f.Sealed || len(g) != 3 {
-			t.Fatalf("element %d: %v, full list has %+v", i, g, f)
+			panic(fmt.Sprintf("element %d: %v, full list has %+v", i, g, f))
 		}
 	}
 }
@@ -213,18 +213,18 @@ func TestSessionListByIDRejectsBadRequests(t *testing.T) {
 		code, _, b := listGet(t, srv.URL+"/v1/sessions?ids="+q)
 		var e map[string]string
 		if code != 400 || json.Unmarshal(b, &e) != nil || e["error"] == "" {
-			t.Fatalf("%s: %d %s", name, code, b)
+			panic(fmt.Sprintf("%s: %d %s", name, code, b))
 		}
 	}
 	if n := sp.heads.Load() + sp.seals.Load() + sp.lists.Load(); n != 0 {
-		t.Fatalf("a rejected request made %d store calls", n)
+		panic(fmt.Sprintf("a rejected request made %d store calls", n))
 	}
 	// The limit itself is accepted, and repeats do not count towards it.
 	if code, hdr, b := listGet(t, srv.URL+"/v1/sessions?ids="+ids(maxListIDs)+","+ids(10)); code != 200 || hdr != "0" || strings.TrimSpace(string(b)) != "[]" {
-		t.Fatalf("%d ids: %d %q %s", maxListIDs, code, hdr, b)
+		panic(fmt.Sprintf("%d ids: %d %q %s", maxListIDs, code, hdr, b))
 	}
 	if n := sp.heads.Load(); n != maxListIDs {
-		t.Fatalf("%d ids made %d Head calls", maxListIDs, n)
+		panic(fmt.Sprintf("%d ids made %d Head calls", maxListIDs, n))
 	}
 }
 
@@ -246,29 +246,29 @@ func TestSessionListByIDNeverListsOrReadsEvents(t *testing.T) {
 	code, hdr, b := listGet(t, srv.URL+"/v1/sessions?ids="+strings.Join(asked, ","))
 	got := decodeList(t, b)
 	if code != 200 || hdr != "0" || len(got) != 40 {
-		t.Fatalf("%d %q, %d elements", code, hdr, len(got))
+		panic(fmt.Sprintf("%d %q, %d elements", code, hdr, len(got)))
 	}
 	for i, g := range got {
 		if g["id"] != all[i] || int(g["event_count"].(float64)) != counts[all[i]] || g["sealed"] != true {
-			t.Fatalf("element %d: %v", i, g)
+			panic(fmt.Sprintf("element %d: %v", i, g))
 		}
 	}
 	if l, e := sp.lists.Load(), sp.events.Load(); l != 0 || e != 0 {
-		t.Fatalf("ListSessions %d, Events %d: want none", l, e)
+		panic(fmt.Sprintf("ListSessions %d, Events %d: want none", l, e))
 	}
 	// One Head per id asked; one GetSeal per id that has events.
 	if h, s := sp.heads.Load(), sp.seals.Load(); h != 42 || s != 40 {
-		t.Fatalf("Head %d, GetSeal %d: want 42 and 40", h, s)
+		panic(fmt.Sprintf("Head %d, GetSeal %d: want 42 and 40", h, s))
 	}
 	if p := sp.peak.Load(); p > listLookups || p < 2 {
-		t.Fatalf("%d lookups at once, want 2..%d", p, listLookups)
+		panic(fmt.Sprintf("%d lookups at once, want 2..%d", p, listLookups))
 	}
 	// Nothing was loaded into the collector either: no actor, no view.
 	c.vmu.Lock()
 	views := len(c.views)
 	c.vmu.Unlock()
 	if views != 0 || c.seq.has(all[0]) {
-		t.Fatalf("views %d, actor %v", views, c.seq.has(all[0]))
+		panic(fmt.Sprintf("views %d, actor %v", views, c.seq.has(all[0])))
 	}
 }
 
@@ -282,7 +282,7 @@ func TestSessionListByIDSurvivesAFailingLookup(t *testing.T) {
 	code, hdr, b := listGet(t, srv.URL+"/v1/sessions?ids=ts_a,ts_b,ts_c,ts_d,ts_unknown")
 	want := `[{"id":"ts_a","event_count":2,"sealed":false},{"id":"ts_c","event_count":2,"sealed":true}]`
 	if code != 200 || hdr != "2" || strings.TrimSpace(string(b)) != want {
-		t.Fatalf("%d %q\n got %s\nwant %s", code, hdr, b, want)
+		panic(fmt.Sprintf("%d %q\n got %s\nwant %s", code, hdr, b, want))
 	}
 	// Every lookup failing is still an answer, not a 500.
 	sp.mu.Lock()
@@ -290,7 +290,7 @@ func TestSessionListByIDSurvivesAFailingLookup(t *testing.T) {
 	sp.mu.Unlock()
 	code, hdr, b = listGet(t, srv.URL+"/v1/sessions?ids=ts_a,ts_b")
 	if code != 200 || hdr != "2" || strings.TrimSpace(string(b)) != "[]" {
-		t.Fatalf("all failing: %d %q %s", code, hdr, b)
+		panic(fmt.Sprintf("all failing: %d %q %s", code, hdr, b))
 	}
 }
 
@@ -307,10 +307,10 @@ func TestSessionListByIDStopsWithTheRequest(t *testing.T) {
 	}
 	out, unanswered := c.sessionCounts(ctx, ids)
 	if len(out) != 0 || unanswered != len(ids) {
-		t.Fatalf("%d answered, %d unanswered", len(out), unanswered)
+		panic(fmt.Sprintf("%d answered, %d unanswered", len(out), unanswered))
 	}
 	if n := sp.heads.Load() + sp.seals.Load(); n != 0 {
-		t.Fatalf("%d store calls after the request ended", n)
+		panic(fmt.Sprintf("%d store calls after the request ended", n))
 	}
 }
 
@@ -330,14 +330,14 @@ func TestSessionListByIDAcceptsALongQuery(t *testing.T) {
 	seedSessions(t, sp, map[string]int{page[0]: 1, page[199]: 4})
 	q := strings.Join(page, ",")
 	if len(q) < 6000 {
-		t.Fatalf("query is %d bytes", len(q))
+		panic(fmt.Sprintf("query is %d bytes", len(q)))
 	}
 	code, hdr, b := listGet(t, srv.URL+"/v1/sessions?ids="+q)
 	if got := decodeList(t, b); code != 200 || hdr != "0" || len(got) != 2 || got[1]["id"] != page[199] {
-		t.Fatalf("%d %q %s", code, hdr, b)
+		panic(fmt.Sprintf("%d %q %s", code, hdr, b))
 	}
 	q = strings.Join(mk(maxListIDs, 128), ",") // 129 KB
 	if code, hdr, _ := listGet(t, srv.URL+"/v1/sessions?ids="+q); code != 200 || hdr != "0" {
-		t.Fatalf("%d ids of 128 bytes: %d %q", maxListIDs, code, hdr)
+		panic(fmt.Sprintf("%d ids of 128 bytes: %d %q", maxListIDs, code, hdr))
 	}
 }

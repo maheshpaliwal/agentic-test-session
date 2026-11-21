@@ -126,20 +126,20 @@ func TestSensitiveCacheBoundedAndReset(t *testing.T) {
 	defer SetRedactKeys(DefaultRedactKeys)
 	SetRedactKeys([]string{"foo"})
 	if !IsSensitiveKey("foo_bar") || IsSensitiveKey("password") {
-		t.Fatal("custom list not applied")
+		panic("custom list not applied")
 	}
 	for i := range 3 * maxKeyCache {
 		IsSensitiveKey(fmt.Sprintf("user-%d", i))
 	}
 	if n := matcher.Load().cached.Load(); n > maxKeyCache {
-		t.Fatalf("memo grew to %d entries", n)
+		panic(fmt.Sprintf("memo grew to %d entries", n))
 	}
 	if !IsSensitiveKey("late_foo") { // past the cap verdicts are still computed
-		t.Fatal("uncached key misjudged")
+		panic("uncached key misjudged")
 	}
 	SetRedactKeys(DefaultRedactKeys)
 	if IsSensitiveKey("foo_bar") || !IsSensitiveKey("password") {
-		t.Fatal("stale verdicts survived SetRedactKeys")
+		panic("stale verdicts survived SetRedactKeys")
 	}
 }
 

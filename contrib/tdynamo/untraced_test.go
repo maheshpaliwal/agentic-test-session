@@ -2,6 +2,7 @@ package tdynamo
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -103,14 +104,14 @@ func TestUntracedCallLeavesInputAlone(t *testing.T) {
 			return middleware.InitializeOutput{}, middleware.Metadata{}, nil
 		})
 		if _, _, err := tr.handle(ctx, middleware.InitializeInput{Parameters: in}, next); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if seen != in {
-			t.Fatalf("%T: the request was replaced by a copy", in)
+			panic(fmt.Sprintf("%T: the request was replaced by a copy", in))
 		}
 	}
 	if put.ReturnValues != "" || upd.ReturnValues != "" || del.ReturnValues != "" {
-		t.Fatal("ReturnValues was set on the caller's input")
+		panic("ReturnValues was set on the caller's input")
 	}
 }
 
@@ -174,29 +175,29 @@ func TestKeyLearnedUntracedIsUsedWhenTraced(t *testing.T) {
 			})
 			learn(c)
 			if len(rec.Events()) != 0 {
-				t.Fatalf("the request outside a session was recorded: %+v", rec.Events())
+				panic(fmt.Sprintf("the request outside a session was recorded: %+v", rec.Events()))
 			}
 			if strings.Contains(st.reqs[0], "ReturnValues") {
-				t.Fatalf("ReturnValues injected outside a session: %s", st.reqs[0])
+				panic(fmt.Sprintf("ReturnValues injected outside a session: %s", st.reqs[0]))
 			}
 
 			// PutItem carries no Key: its PK comes only from the learned schema.
 			if _, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"),
 				Item: map[string]types.AttributeValue{"id": s("z"), "v": n("2")}}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if _, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String("t"), Key: key("9")}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			ev := rec.Events()
 			if len(ev) != 2 {
-				t.Fatalf("events=%d", len(ev))
+				panic(fmt.Sprintf("events=%d", len(ev)))
 			}
 			if m := ev[0].Mutations[0]; m.Op != "insert" || len(m.PK) != 1 || m.PK["id"] != "z" {
-				t.Fatalf("put: %+v", m)
+				panic(fmt.Sprintf("put: %+v", m))
 			}
 			if m := ev[1].Mutations[0]; m.Op != "delete" || len(m.PK) != 1 || m.PK["id"] != "9" || m.Before.IsZero() {
-				t.Fatalf("delete: %+v", m)
+				panic(fmt.Sprintf("delete: %+v", m))
 			}
 		})
 	}
@@ -229,18 +230,18 @@ func TestSchemaOpsLearnUntraced(t *testing.T) {
 				return `{}`
 			})
 			if err := learn(c); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			if len(rec.Events()) != 0 {
-				t.Fatal("schema operations are never recorded")
+				panic("schema operations are never recorded")
 			}
 			if _, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("t"),
 				Item: map[string]types.AttributeValue{"tenant": s("acme"), "id": s("z"), "v": n("2")}}); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 			m := rec.Events()[0].Mutations[0]
 			if len(m.PK) != 2 || m.PK["tenant"] != "acme" || m.PK["id"] != "z" {
-				t.Fatalf("%+v", m)
+				panic(fmt.Sprintf("%+v", m))
 			}
 		})
 	}

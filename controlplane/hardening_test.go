@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -34,50 +35,50 @@ func TestGuardRejectsCSRFAndRebinding(t *testing.T) {
 	// cross-origin browser POST (no-cors simple request shape)
 	w := do(t, h, "POST", "/v1/kill", lo, `{"kill":true}`, map[string]string{"Origin": "http://evil.example", "Content-Type": "text/plain"})
 	if w.Code != 403 || m.Active().Kill {
-		t.Fatalf("cross-origin kill: %d kill=%v", w.Code, m.Active().Kill)
+		panic(fmt.Sprintf("cross-origin kill: %d kill=%v", w.Code, m.Active().Kill))
 	}
 	w = do(t, h, "POST", "/v1/sessions", lo, `{"name":"x"}`, map[string]string{"Origin": "http://evil.example", "Content-Type": "application/json"})
 	if w.Code != 403 || len(m.List("")) != 0 {
-		t.Fatalf("cross-origin start: %d", w.Code)
+		panic(fmt.Sprintf("cross-origin start: %d", w.Code))
 	}
 	// Origin: null (sandboxed iframe / no-referrer redirects) with empty body
 	s, _ := m.Start(StartRequest{Name: "victim"})
 	w = do(t, h, "POST", "/v1/sessions/"+s.ID+"/stop", lo, "", map[string]string{"Origin": "null"})
 	if w.Code != 403 {
-		t.Fatalf("Origin null stop: %d", w.Code)
+		panic(fmt.Sprintf("Origin null stop: %d", w.Code))
 	}
 	if cur, _ := m.Get(s.ID); cur.State != StateActive {
-		t.Fatalf("session was stopped by forbidden request: %s", cur.State)
+		panic(fmt.Sprintf("session was stopped by forbidden request: %s", cur.State))
 	}
 	// DNS rebinding: attacker hostname resolving to loopback
 	if w = do(t, h, "GET", "/v1/active", "evil.example:7070", "", nil); w.Code != 403 {
-		t.Fatalf("wrong host: %d", w.Code)
+		panic(fmt.Sprintf("wrong host: %d", w.Code))
 	}
 	if w = do(t, h, "POST", "/v1/kill", "evil.example:7070", `{"kill":true}`, js); w.Code != 403 {
-		t.Fatalf("wrong host POST: %d", w.Code)
+		panic(fmt.Sprintf("wrong host POST: %d", w.Code))
 	}
 	// text/plain body from a non-browser/no-Origin caller
 	if w = do(t, h, "POST", "/v1/kill", lo, `{"kill":true}`, map[string]string{"Content-Type": "text/plain"}); w.Code != 415 {
-		t.Fatalf("text/plain: %d", w.Code)
+		panic(fmt.Sprintf("text/plain: %d", w.Code))
 	}
 	if w = do(t, h, "POST", "/v1/kill", lo, `{"kill":true}`, nil); w.Code != 415 {
-		t.Fatalf("no content type: %d", w.Code)
+		panic(fmt.Sprintf("no content type: %d", w.Code))
 	}
 	if m.Active().Kill {
-		t.Fatal("kill switch flipped by rejected request")
+		panic("kill switch flipped by rejected request")
 	}
 	// normal flows
 	if w = do(t, h, "POST", "/v1/kill", lo, `{"kill":true}`, js); w.Code != 200 {
-		t.Fatalf("json kill: %d", w.Code)
+		panic(fmt.Sprintf("json kill: %d", w.Code))
 	}
 	if w = do(t, h, "GET", "/v1/active", "controlplane:7070", "", nil); w.Code != 200 {
-		t.Fatalf("allowed service host: %d", w.Code)
+		panic(fmt.Sprintf("allowed service host: %d", w.Code))
 	}
 	if w = do(t, h, "POST", "/v1/sessions/"+s.ID+"/stop", lo, "", nil); w.Code != 200 { // sdk/client: empty body, no CT
-		t.Fatalf("empty-body stop: %d", w.Code)
+		panic(fmt.Sprintf("empty-body stop: %d", w.Code))
 	}
 	if w = do(t, h, "GET", "/healthz", "10.1.2.3:7070", "", nil); w.Code != 200 {
-		t.Fatalf("healthz: %d", w.Code)
+		panic(fmt.Sprintf("healthz: %d", w.Code))
 	}
 }
 
@@ -88,7 +89,7 @@ func TestSSEStreamWorksThroughGuard(t *testing.T) {
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/active/stream")
 	if err != nil || resp.StatusCode != 200 {
-		t.Fatal(err, resp)
+		panic(fmt.Sprint(err, resp))
 	}
 	resp.Body.Close()
 }
@@ -124,10 +125,10 @@ func TestDrainIgnoresCollectorClockSkew(t *testing.T) {
 		m.Stop(s.ID)
 		got := waitState(t, m, s.ID, StateSealed)
 		if got.Incomplete {
-			t.Fatalf("skew %v: %+v", skew, got)
+			panic(fmt.Sprintf("skew %v: %+v", skew, got))
 		}
 		if el := time.Since(start); el < 45*time.Millisecond {
-			t.Fatalf("skew %v: sealed after %v, before local quiesce window", skew, el)
+			panic(fmt.Sprintf("skew %v: sealed after %v, before local quiesce window", skew, el))
 		}
 	}
 }
@@ -152,7 +153,7 @@ func TestDrainResetsOnChangeDespiteSkew(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
 	if f.sealed.Load() != 0 {
-		t.Fatal("sealed while remote last-event marker kept changing")
+		panic("sealed while remote last-event marker kept changing")
 	}
 	waitState(t, m, s.ID, StateSealed)
 }
@@ -181,7 +182,7 @@ func TestSealCollectorDownThenUp(t *testing.T) {
 	down.Store(false)
 	got := waitState(t, m, s.ID, StateSealed)
 	if got.SealError != "" || got.BundleURI != "b" || !got.Incomplete {
-		t.Fatalf("recovered seal: %+v (incomplete expected: drain timed out)", got)
+		panic(fmt.Sprintf("recovered seal: %+v (incomplete expected: drain timed out)", got))
 	}
 }
 
@@ -201,10 +202,10 @@ func TestSealPermanentFailureEndsSealedWithError(t *testing.T) {
 	m.Stop(s.ID)
 	got := waitState(t, m, s.ID, StateSealed)
 	if !got.Incomplete || !strings.Contains(got.SealError, "permission denied") || got.EndedAt.IsZero() {
-		t.Fatalf("%+v", got)
+		panic(fmt.Sprintf("%+v", got))
 	}
 	if len(m.Active().Active) != 0 {
-		t.Fatal("still active")
+		panic("still active")
 	}
 }
 
@@ -212,7 +213,7 @@ func TestRetentionPrunesButFileStoreStillReads(t *testing.T) {
 	fs, err := NewFileStore(filepath.Join(t.TempDir(), "s.json"))
 	closeLater(t, fs)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	f := newFakeCollector(t)
 	m := newMgr(t, f, func(c *Config) { c.Store = fs; c.Retention = time.Hour })
@@ -221,29 +222,29 @@ func TestRetentionPrunesButFileStoreStillReads(t *testing.T) {
 	m.Abort(a.ID)
 	m.Sweep(time.Now())
 	if _, ok := fs.MemStore.Get(a.ID); !ok {
-		t.Fatal("pruned too early")
+		panic("pruned too early")
 	}
 	m.Sweep(time.Now().Add(70 * time.Minute))
 	if _, ok := fs.MemStore.Get(a.ID); ok {
-		t.Fatal("terminal session not evicted from memory")
+		panic("terminal session not evicted from memory")
 	}
 	if got, ok := m.Get(a.ID); !ok || got.State != StateAborted {
-		t.Fatalf("archived session unreadable: %+v %v", got, ok)
+		panic(fmt.Sprintf("archived session unreadable: %+v %v", got, ok))
 	}
 	if l := m.List(""); len(l) != 2 {
-		t.Fatalf("list %d", len(l))
+		panic(fmt.Sprintf("list %d", len(l)))
 	}
 	if cur, _ := m.Get(b.ID); cur.State != StateActive {
-		t.Fatal("live session touched")
+		panic("live session touched")
 	}
 	// restart: archived sessions remain readable
 	fs2, err := NewFileStore(fs.path)
 	closeLater(t, fs2)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	if got, ok := fs2.Get(a.ID); !ok || got.Name != "a" {
-		t.Fatal("not readable after reload")
+		panic("not readable after reload")
 	}
 }
 
@@ -257,10 +258,10 @@ func TestMemStoreRetentionBoundsMemory(t *testing.T) {
 	}
 	m.Sweep(time.Now().Add(time.Hour))
 	if n := len(st.List()); n != 0 {
-		t.Fatalf("%d sessions retained", n)
+		panic(fmt.Sprintf("%d sessions retained", n))
 	}
 	if len(m.terminal) != 0 || len(m.live) != 0 {
-		t.Fatalf("indexes not pruned: %d %d", len(m.terminal), len(m.live))
+		panic(fmt.Sprintf("indexes not pruned: %d %d", len(m.terminal), len(m.live)))
 	}
 }
 
@@ -273,7 +274,7 @@ func TestSweepScansOnlyLive(t *testing.T) {
 	}
 	m.Start(StartRequest{})
 	if len(m.live) != 1 {
-		t.Fatalf("live index %d", len(m.live))
+		panic(fmt.Sprintf("live index %d", len(m.live)))
 	}
 	_ = context.Background()
 }

@@ -40,7 +40,7 @@ func run(t *testing.T, m *event.CommandMonitor, ctx context.Context, name, db st
 func mustRaw(t *testing.T, d bson.D) bson.Raw {
 	b, err := bson.Marshal(d)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return b
 }
@@ -55,16 +55,16 @@ func TestInsertAndStripNoise(t *testing.T) {
 	}, bson.D{{Key: "ok", Value: 1.0}, {Key: "n", Value: int32(1)}})
 	ev := rec.Events()
 	if len(ev) != 1 || ev[0].Kind != core.KindDBWrite || ev[0].Name != "insert app.users" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	req := string(ev[0].Req.Inline)
 	if strings.Contains(req, "lsid") || strings.Contains(req, "$db") || !strings.Contains(req, "ann") {
-		t.Fatalf("req: %s", req)
+		panic(fmt.Sprintf("req: %s", req))
 	}
 	mu := ev[0].Mutations
 	if len(mu) != 1 || mu[0].Store != "mongo" || mu[0].Entity != "users" || mu[0].Op != "insert" ||
 		mu[0].PK["_id"] != int32(7) {
-		t.Fatalf("%+v", mu)
+		panic(fmt.Sprintf("%+v", mu))
 	}
 }
 
@@ -75,7 +75,7 @@ func TestFindReadSummary(t *testing.T) {
 			{Key: "firstBatch", Value: bson.A{bson.D{{Key: "_id", Value: "a"}}, bson.D{{Key: "_id", Value: "b"}}}}}}})
 	e := rec.Events()[0]
 	if e.Kind != core.KindDBRead || len(e.Reads) != 1 || e.Reads[0].RowCount != 2 || e.Reads[0].PKs[1] != "b" {
-		t.Fatalf("%+v", e)
+		panic(fmt.Sprintf("%+v", e))
 	}
 }
 
@@ -94,11 +94,11 @@ func TestUpdateDeleteAndNoMatch(t *testing.T) {
 	ev := rec.Events()
 	if len(ev[0].Mutations) != 0 || len(ev[1].Mutations) != 1 || ev[1].Mutations[0].Op != "update" ||
 		!strings.Contains(string(ev[1].Mutations[0].After.Inline), "$set") {
-		t.Fatalf("%+v", ev[:2])
+		panic(fmt.Sprintf("%+v", ev[:2]))
 	}
 	d := ev[2].Mutations[0]
 	if d.Op != "delete_many" || d.PK["filter"] == nil {
-		t.Fatalf("%+v", d)
+		panic(fmt.Sprintf("%+v", d))
 	}
 }
 
@@ -116,11 +116,11 @@ func TestFindAndModifyImages(t *testing.T) {
 	ev := rec.Events()
 	b := ev[0].Mutations[0]
 	if !strings.Contains(string(b.Before.Inline), `"n":5`) {
-		t.Fatalf("%+v", b)
+		panic(fmt.Sprintf("%+v", b))
 	}
 	a := ev[1].Mutations[0]
 	if !strings.Contains(string(a.After.Inline), `"n":5`) || !a.Before.IsZero() {
-		t.Fatalf("%+v", a)
+		panic(fmt.Sprintf("%+v", a))
 	}
 }
 
@@ -136,7 +136,7 @@ func TestFailedTransactionAndIgnore(t *testing.T) {
 	run(t, m, context.Background(), "find", "app", bson.D{{Key: "find", Value: "c"}}, bson.D{{Key: "ok", Value: 1.0}})
 	ev := rec.Events()
 	if len(ev) != 1 || ev[0].Err != "boom" || ev[0].TxID != "abcd-3" || len(ev[0].Mutations) != 0 {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 }
 
@@ -148,18 +148,18 @@ func TestApplyChainAndIdempotent(t *testing.T) {
 	first := o.Monitor
 	Apply(o)
 	if o.Monitor != first {
-		t.Fatal("Apply not idempotent")
+		panic("Apply not idempotent")
 	}
 	o.Monitor.Started(ctx, &event.CommandStartedEvent{CommandName: "find", DatabaseName: "d", RequestID: reqID.Add(1),
 		Command: mustRaw(t, bson.D{{Key: "find", Value: "c"}})})
 	if !called {
-		t.Fatal("previous monitor not chained")
+		panic("previous monitor not chained")
 	}
 	_ = rec
 	core.Configure(core.Config{})
 	o2 := options.Client()
 	if Apply(o2); o2.Monitor != nil {
-		t.Fatal("disabled Apply must not install a monitor")
+		panic("disabled Apply must not install a monitor")
 	}
 }
 
@@ -177,13 +177,13 @@ func TestCommitSuccessAndFailure(t *testing.T) {
 	m.Failed(ctx, &event.CommandFailedEvent{CommandFinishedEvent: event.CommandFinishedEvent{RequestID: id}, Failure: errors.New("commit boom")})
 	ev := rec.Events()
 	if len(ev) != 2 {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	if ev[0].Kind != core.KindDBTxCommit || ev[0].Err != "" || ev[0].Attrs["commit_failed"] != "" || ev[0].TxID != "abcd-3" {
-		t.Fatalf("%+v", ev[0])
+		panic(fmt.Sprintf("%+v", ev[0]))
 	}
 	if ev[1].Kind != core.KindDBTxRollbck || ev[1].Attrs["commit_failed"] != "true" || ev[1].Err != "commit boom" || ev[1].TxID != "abcd-3" {
-		t.Fatalf("%+v", ev[1])
+		panic(fmt.Sprintf("%+v", ev[1]))
 	}
 }
 

@@ -46,7 +46,7 @@ func decodeAll(t testing.TB, body []byte) []core.Event {
 			return out
 		}
 		if err != nil {
-			t.Fatalf("decode: %v", err)
+			panic(fmt.Sprintf("decode: %v", err))
 		}
 		out = append(out, e)
 	}
@@ -63,7 +63,7 @@ func parseFrames(t testing.TB, body []byte) []*pb.Event {
 			return out
 		}
 		if err != nil {
-			t.Fatalf("protodelim: %v", err)
+			panic(fmt.Sprintf("protodelim: %v", err))
 		}
 		out = append(out, m)
 	}
@@ -75,37 +75,37 @@ func conform(t testing.TB, batch []core.Event) {
 	enc := runtime.ProtobufEncoder{}
 	got, err := enc.Encode(batch)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	again, _ := enc.Encode(batch)
 	if !bytes.Equal(got, again) {
-		t.Fatal("SDK encoding is not deterministic")
+		panic("SDK encoding is not deterministic")
 	}
 	ref, err := Encode(batch)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	gotEvs, wantEvs := decodeAll(t, got), decodeAll(t, ref)
 	if len(gotEvs) != len(batch) || len(wantEvs) != len(batch) {
-		t.Fatalf("event counts: sdk=%d ref=%d want=%d", len(gotEvs), len(wantEvs), len(batch))
+		panic(fmt.Sprintf("event counts: sdk=%d ref=%d want=%d", len(gotEvs), len(wantEvs), len(batch)))
 	}
 	for i := range batch {
 		if !reflect.DeepEqual(gotEvs[i], wantEvs[i]) {
-			t.Fatalf("event %d decodes differently\n sdk: %+v\n ref: %+v", i, gotEvs[i], wantEvs[i])
+			panic(fmt.Sprintf("event %d decodes differently\n sdk: %+v\n ref: %+v", i, gotEvs[i], wantEvs[i]))
 		}
 		a, _ := json.Marshal(gotEvs[i])
 		b, _ := json.Marshal(wantEvs[i])
 		if !bytes.Equal(a, b) {
-			t.Fatalf("event %d JSON differs\n sdk: %s\n ref: %s", i, a, b)
+			panic(fmt.Sprintf("event %d JSON differs\n sdk: %s\n ref: %s", i, a, b))
 		}
 	}
 	msgs := parseFrames(t, got)
 	if len(msgs) != len(batch) {
-		t.Fatalf("frames: %d want %d", len(msgs), len(batch))
+		panic(fmt.Sprintf("frames: %d want %d", len(msgs), len(batch)))
 	}
 	for i := range batch {
 		if want := FromCore(batch[i]); !proto.Equal(msgs[i], want) {
-			t.Fatalf("event %d: proto.Equal false\n sdk: %v\n ref: %v", i, msgs[i], want)
+			panic(fmt.Sprintf("event %d: proto.Equal false\n sdk: %v\n ref: %v", i, msgs[i], want))
 		}
 	}
 }
@@ -174,11 +174,11 @@ func TestSDKEncoderConformanceTable(t *testing.T) {
 	t.Run("empty batch", func(t *testing.T) {
 		b, err := runtime.ProtobufEncoder{}.Encode(nil)
 		if err != nil || len(b) != 0 {
-			t.Fatalf("b=%v err=%v", b, err)
+			panic(fmt.Sprintf("b=%v err=%v", b, err))
 		}
 	})
 	if ct := (runtime.ProtobufEncoder{}).ContentType(); ct != ContentType {
-		t.Fatalf("content type %q", ct)
+		panic(fmt.Sprintf("content type %q", ct))
 	}
 }
 
@@ -193,7 +193,7 @@ func TestSDKEncoderBatchEqualsConcat(t *testing.T) {
 	}
 	all, _ := runtime.ProtobufEncoder{}.Encode(tbl)
 	if !bytes.Equal(cat, all) {
-		t.Fatal("batch encoding differs from concatenated single-event encodings")
+		panic("batch encoding differs from concatenated single-event encodings")
 	}
 }
 
@@ -428,21 +428,21 @@ func TestExporterDefaultEncoderDecodesWithCollectorDecoder(t *testing.T) {
 		rec.Record(want[i])
 	}
 	if !x.Flush(5 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	x.Close(time.Second)
 	mu.Lock()
 	defer mu.Unlock()
 	if ct != ContentType || len(got) != len(want) {
-		t.Fatalf("ct=%q got %d events want %d", ct, len(got), len(want))
+		panic(fmt.Sprintf("ct=%q got %d events want %d", ct, len(got), len(want)))
 	}
 	for i := range want {
 		w, err := ToCore(FromCore(want[i]))
 		if err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 		if !reflect.DeepEqual(got[i], w) {
-			t.Fatalf("event %d differs\n got: %+v\nwant: %+v", i, got[i], w)
+			panic(fmt.Sprintf("event %d differs\n got: %+v\nwant: %+v", i, got[i], w))
 		}
 	}
 }
@@ -477,17 +477,17 @@ func TestExporterOversizeStubOverProtobuf(t *testing.T) {
 		rec.Record(e)
 	}
 	if !x.Flush(3 * time.Second) {
-		t.Fatal("flush")
+		panic("flush")
 	}
 	x.Close(time.Second)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 5 {
-		t.Fatalf("delivered %d want 5", len(got))
+		panic(fmt.Sprintf("delivered %d want 5", len(got)))
 	}
 	for _, e := range got {
 		if e.LocalSeq == 3 && (len(e.Flags) != 1 || e.Flags[0] != "oversize_dropped") {
-			t.Fatalf("bad stub %+v", e)
+			panic(fmt.Sprintf("bad stub %+v", e))
 		}
 	}
 }

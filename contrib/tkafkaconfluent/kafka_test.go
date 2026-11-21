@@ -3,6 +3,7 @@ package tkafkaconfluent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -60,23 +61,23 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 		Headers:        []kafka.Header{{Key: "app", Value: []byte("x")}},
 	}
 	if err := Produce(ctx, p, msg, nil); err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	sent := p.got[0]
 	if v, _ := hdr(sent.Headers, "app"); v != "x" {
-		t.Fatalf("existing header clobbered: %+v", sent.Headers)
+		panic(fmt.Sprintf("existing header clobbered: %+v", sent.Headers))
 	}
 	if len(sent.Headers) < 2 {
-		t.Fatalf("carrier not injected: %+v", sent.Headers)
+		panic(fmt.Sprintf("carrier not injected: %+v", sent.Headers))
 	}
 	ev := rec.Events()
 	if len(ev) != 1 || ev[0].Kind != core.KindQueuePub || ev[0].Name != "orders" || ev[0].Attrs["system"] != "kafka" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	req := string(ev[0].Req.Inline)
 	if strings.Contains(req, "hunter2") || !strings.Contains(req, `"qty":2`) || !strings.Contains(req, `"topic":"orders"`) ||
 		!strings.Contains(req, `"partition":3`) || !strings.Contains(req, `"key":"k1"`) {
-		t.Fatalf("req=%s", req)
+		panic(fmt.Sprintf("req=%s", req))
 	}
 
 	// consumer in a fresh context: trace comes only from headers
@@ -84,20 +85,20 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 	cons.TopicPartition.Offset = 7
 	ran := 0
 	if err := Consume(context.Background(), &cons, func(context.Context) error { ran++; return nil }); err != nil || ran != 1 {
-		t.Fatal(err, ran)
+		panic(fmt.Sprint(err, ran))
 	}
 	ev = rec.Events()
 	if len(ev) != 3 || ev[1].Kind != core.KindWorkerStart || ev[2].Kind != core.KindWorkerEnd {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 	if ev[1].TraceID != ev[0].TraceID {
-		t.Fatal("trace not continued")
+		panic("trace not continued")
 	}
 	if ev[1].Attrs["message_id"] != "orders/3/7" {
-		t.Fatalf("attrs=%v", ev[1].Attrs)
+		panic(fmt.Sprintf("attrs=%v", ev[1].Attrs))
 	}
 	if len(ev[2].LinkIDs) == 0 || ev[2].LinkIDs[0] != ev[0].SpanID {
-		t.Fatalf("worker.end not linked to publish: %+v", ev[2].LinkIDs)
+		panic(fmt.Sprintf("worker.end not linked to publish: %+v", ev[2].LinkIDs))
 	}
 }
 
@@ -109,7 +110,7 @@ func TestProduceReplacesNoDuplicateHeaders(t *testing.T) {
 	Produce(ctx, p, msg, nil) // reuse of the same message (retry)
 	for _, h := range p.got[1].Headers {
 		if _, n := hdr(p.got[1].Headers, h.Key); n != 1 {
-			t.Fatalf("duplicate %q: %+v", h.Key, p.got[1].Headers)
+			panic(fmt.Sprintf("duplicate %q: %+v", h.Key, p.got[1].Headers))
 		}
 	}
 }
@@ -119,16 +120,16 @@ func TestProducePassthrough(t *testing.T) {
 	p := &fakeProducer{}
 	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("t")}, Value: []byte("v")}
 	if err := Produce(context.Background(), p, msg, nil); err != nil || p.calls != 1 || len(p.got[0].Headers) != 0 {
-		t.Fatal("disabled must be untouched", err, p.got)
+		panic(fmt.Sprint("disabled must be untouched", err, p.got))
 	}
 	// enabled, no session in ctx
 	rec, _ := setup(t)
 	if err := Produce(context.Background(), p, msg, nil); err != nil || p.calls != 2 || len(p.got[1].Headers) != 0 || len(rec.Events()) != 0 {
-		t.Fatal("no-session must be untouched")
+		panic("no-session must be untouched")
 	}
 	// nil message passes through to the producer
 	if err := Produce(context.Background(), p, nil, nil); err != nil || p.calls != 3 {
-		t.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -138,10 +139,10 @@ func TestProduceErrorPropagates(t *testing.T) {
 	p := &fakeProducer{err: want}
 	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("t")}, Value: []byte("v")}
 	if err := Produce(ctx, p, msg, nil); err != want {
-		t.Fatal(err)
+		panic(err)
 	}
 	if ev := rec.Events(); len(ev) != 1 || ev[0].Err == "" {
-		t.Fatalf("%+v", ev)
+		panic(fmt.Sprintf("%+v", ev))
 	}
 }
 
@@ -150,18 +151,18 @@ func TestHeaderLimit(t *testing.T) {
 	c := newCarrier(&hs, true)
 	c.Set("big", strings.Repeat("x", maxInjectBytes+1))
 	if len(hs) != 0 {
-		t.Fatal("oversized header must be dropped")
+		panic("oversized header must be dropped")
 	}
 	for i := 0; i < 20; i++ {
 		c.Set("k"+string(rune('a'+i)), "v")
 	}
 	if len(hs) != maxInjectHeaders {
-		t.Fatalf("headers=%d", len(hs))
+		panic(fmt.Sprintf("headers=%d", len(hs)))
 	}
 	var un []kafka.Header
 	newCarrier(&un, false).Set("big", strings.Repeat("x", 5000))
 	if len(un) != 1 {
-		t.Fatal("unlimited carrier must accept")
+		panic("unlimited carrier must accept")
 	}
 }
 
@@ -176,7 +177,7 @@ func TestConsumeRetrySemantics(t *testing.T) {
 	err := Consume(context.Background(), in, func(context.Context) error { return boom },
 		WithRetryExpected(func(a int, e error) bool { return true }))
 	if err != boom {
-		t.Fatal(err)
+		panic(err)
 	}
 	var kinds []string
 	var pending string
@@ -187,7 +188,7 @@ func TestConsumeRetrySemantics(t *testing.T) {
 		}
 	}
 	if !contains(kinds, string(core.KindWorkerRetry)) || pending != "true" {
-		t.Fatalf("kinds=%v pending=%q", kinds, pending)
+		panic(fmt.Sprintf("kinds=%v pending=%q", kinds, pending))
 	}
 
 	// final attempt -> dlq, no retry_pending
@@ -198,11 +199,11 @@ func TestConsumeRetrySemantics(t *testing.T) {
 	for _, e := range rec.Events()[n:] {
 		kinds = append(kinds, string(e.Kind))
 		if e.Kind == core.KindWorkerEnd && e.Attrs["retry_pending"] != "" {
-			t.Fatal("last attempt must not be retry_pending")
+			panic("last attempt must not be retry_pending")
 		}
 	}
 	if !contains(kinds, string(core.KindWorkerDLQ)) {
-		t.Fatalf("kinds=%v", kinds)
+		panic(fmt.Sprintf("kinds=%v", kinds))
 	}
 }
 
@@ -211,17 +212,17 @@ func TestConsumePassthrough(t *testing.T) {
 	h := func(context.Context) error { ran++; return nil }
 	msg := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: str("t")}}
 	if Consume(context.Background(), msg, h) != nil || ran != 1 { // disabled
-		t.Fatal(ran)
+		panic(ran)
 	}
 	rec, _ := setup(t)
 	if Consume(context.Background(), msg, h) != nil || ran != 2 || len(rec.Events()) != 0 { // no session in headers
-		t.Fatal(ran, rec.Events())
+		panic(fmt.Sprint(ran, rec.Events()))
 	}
 	if Consume(context.Background(), nil, h) != nil || ran != 3 {
-		t.Fatal(ran)
+		panic(ran)
 	}
 	if Consume(context.Background(), msg, nil) != nil {
-		t.Fatal("nil handler")
+		panic("nil handler")
 	}
 }
 
