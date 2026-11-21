@@ -274,6 +274,8 @@ Rolling back:
 
 ### Changed
 
+- `tracectl digest` lists a failed job once: a `worker.end` that failed with the error of its `worker.start` is
+  not a failure entry of its own (the count of failed events is unchanged). A small budget went on such pairs.
 - `tracectl diff` says when a side is incomplete (`note: b is incomplete: ...`, and `"recording": "incomplete"`
   on that side in JSON): what such a side lacks may be events that were lost, not what the run did.
 - `tracectl digest` shows an HTTP status of 400 and above on a request's line (`code HTTP 404`, `"code"` in

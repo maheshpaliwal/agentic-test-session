@@ -501,8 +501,21 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 	// not three hundred lines: failures that did the same thing in the same
 	// place are listed once, with a count.
 	groups := map[string]int{} // signature -> index in src.failures
+	errOf := map[uint64]string{}
+	for _, f := range src.rep.failures {
+		errOf[f.Seq] = f.Err
+	}
 	for _, f := range src.rep.failures {
 		p, ok := places[f.Seq]
+		// A job that fails is recorded twice with the same error, at its
+		// start (the span of the whole job) and at its end. The end says
+		// nothing the start does not, and the pair of every failed job is
+		// what a small budget would be spent on: the start stands for both.
+		if n := len(p.path); f.Kind == core.KindWorkerEnd && n > 0 {
+			if par := p.path[n-1]; par.Kind == string(core.KindWorkerStart) && errOf[par.Seq] == f.Err {
+				continue
+			}
+		}
 		if p.path == nil {
 			p.path = []dStep{} // "path" is always a list, also for a failed root
 		}

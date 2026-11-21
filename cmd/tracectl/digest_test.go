@@ -958,3 +958,26 @@ func TestDigestKeepsTheFirstErrorOfMergedFailures(t *testing.T) {
 	_, md, _ := env.tc("digest", reportID)
 	wantAll(t, checkDigestMarkdown(t, md)["### Failures"], `(the first: "dial tcp 127.0.0.1:18282: connect: connection refused")`)
 }
+
+// A failed job is recorded at its start and at its end with the same error:
+// the digest lists it once. An end that says something else stays.
+func TestDigestListsAFailedJobOnce(t *testing.T) {
+	start := core.Event{Seq: 1, Service: "worker", Kind: core.KindWorkerStart, Name: "ship", StartNs: 1, EndNs: 9, Err: "lock timeout"}
+	end := core.Event{Seq: 2, Service: "worker", Kind: core.KindWorkerEnd, Name: "ship", StartNs: 8, EndNs: 9, Err: "lock timeout"}
+	start2 := core.Event{Seq: 3, Service: "worker", Kind: core.KindWorkerStart, Name: "bill", StartNs: 11, EndNs: 19, Err: "declined"}
+	end2 := core.Event{Seq: 4, Service: "worker", Kind: core.KindWorkerEnd, Name: "bill", StartNs: 18, EndNs: 19, Err: "retry budget spent"}
+	env := newReportEnv(t, start, end, start2, end2)
+	env.roots = []*client.TraceNode{
+		{Event: start, Children: []*client.TraceNode{{Event: end}}},
+		{Event: start2, Children: []*client.TraceNode{{Event: end2}}},
+	}
+	_, out, _ := env.tc("digest", reportID, "--json")
+	d := checkDigestJSON(t, out)
+	var seqs []uint64
+	for _, f := range d.Failures {
+		seqs = append(seqs, f.Seq)
+	}
+	if want := []uint64{1, 3, 4}; !slices.Equal(seqs, want) || d.Counts.Failures != 4 {
+		panic(fmt.Sprintf("failure entries %v (want %v), counted %d (want 4)", seqs, want, d.Counts.Failures))
+	}
+}

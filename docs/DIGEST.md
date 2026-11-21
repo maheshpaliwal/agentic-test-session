@@ -112,7 +112,8 @@ Failed events that did the same thing in the same place (same service, kind, nor
 the same chain of ancestors) are one entry with `count` (above 1) and `last_seq`; its `seq` and `path` are those
 of the first, and its `name` and `error` are normalised; `first_error` is the first one's error as recorded,
 when normalising took something out of it (the host, the key), and is left out when the budget is tight.
-`counts.failures` is still the number of failed events.
+A failed job is recorded at its start and at its end: when both carry the same error only the
+`worker.start` is listed. `counts.failures` is still the number of failed events.
 In Markdown such an entry reads `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`. The call tree
 merges them the same way, by its own rule (consecutive siblings).
 
