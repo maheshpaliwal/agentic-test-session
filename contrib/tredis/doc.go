@@ -224,7 +224,12 @@
 // "tokens:<user>"; or matching a WithRedactKeys glob) has its values masked
 // in arguments, replies and images, and so has a hash or stream field with a
 // sensitive name; other values are scrubbed for JSON fields, key=value pairs
-// and bearer tokens with sensitive names. On top of that:
+// and bearer tokens with sensitive names. The names that only mark a key's
+// secret PART (session, sess, sid) do not make its value sensitive: under
+// "session:<token>" the token is masked and the stored value is recorded as
+// it is, since a session's content is ordinary application data as often as
+// not. Where it is not, list the key: WithRedactKeys("session:*"). On top of
+// that:
 //
 //   - Replies. HVALS has no field names to tell which values are sensitive
 //     and learning them would cost a round trip, so its values are always
