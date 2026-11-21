@@ -91,7 +91,9 @@ Prefer the variables for connection strings: flag values show up in the process 
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
 command only. Nothing reads it by itself: the command sends it as the `x-tsession-id` header (or uses a binding
-or `--mode exclusive`, which need no id).
+or `--mode exclusive`, which need no id). When `--cp` or `--collector` were given on the command line, the
+command also gets them as `TSESSION_CONTROLPLANE_URL` and `TSESSION_COLLECTOR_URL`. The session's TTL (`--ttl`,
+default one hour) must be longer than the command takes, or the session expires under it.
 
 `TSESSION_ARTIFACT_DIR` makes `sdk/client/tsessiontest` save the session of a failed test into that directory;
 use an absolute path.

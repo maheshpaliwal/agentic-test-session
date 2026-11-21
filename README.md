@@ -138,6 +138,7 @@ tracectl run --name my-run --fail-on-error --fail-on-incomplete --fail-on-empty 
 # Exit status: the command's own if it failed (128+n if killed by signal n); else 1 if the session could not be
 # stopped, sealed or read; else 3 if a gate failed; else 0. The session is stopped and sealed either way.
 # stdout is the command's: tracectl prints to stderr and writes the report (replacing FILE; --format junit for XML).
+# The command runs in its own process group, so it cannot read from the terminal; give --ttl more than its runtime.
 
 # or step by step, on a session that has been stopped
 # gate: exit 3 on failed events, an incomplete session (a failed seal or timed-out drain included), or no events at all

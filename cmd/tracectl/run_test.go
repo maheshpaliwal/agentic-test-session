@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
@@ -33,6 +34,10 @@ var helpers = map[string]func(args []string) int{
 		return 0
 	},
 	"exit7": func([]string) int { return 7 },
+	"env": func([]string) int {
+		fmt.Printf("cp=%s col=%s\n", os.Getenv("TSESSION_CONTROLPLANE_URL"), os.Getenv("TSESSION_COLLECTOR_URL"))
+		return 0
+	},
 }
 
 // TestHelperProcess is not a test: it is the command of the run tests, which
@@ -60,6 +65,7 @@ type runEnv struct {
 	evs []core.Event // what the session recorded
 
 	failStart bool // POST /v1/sessions fails
+	dropStops int  // this many stop requests get no answer: the connection is closed
 	neverSeal bool // the session stays DRAINING
 	onStop    func()
 
@@ -102,6 +108,15 @@ func newRunEnv(t *testing.T, evs ...core.Event) *runEnv {
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", func(w http.ResponseWriter, r *http.Request) {
 		env.mu.Lock()
 		defer env.mu.Unlock()
+		if env.dropStops > 0 {
+			env.dropStops--
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+			return
+		}
 		env.stops++
 		env.state = "DRAINING"
 		if env.onStop != nil && env.stops == 1 {
@@ -328,6 +343,9 @@ func TestCLIRunUsage(t *testing.T) {
 		{[]string{"--timeout", "soon", "--", "true"}, "invalid value"},
 		{[]string{"--bind", "nonsense", "--", "true"}, "invalid value"},
 		{[]string{"--report", "-", "--", "true"}, "--report needs a file"},
+		{[]string{"--timeout", "0", "--", "true"}, "--timeout must be more than zero"},
+		{[]string{"--timeout", "-1s", "--", "true"}, "--timeout must be more than zero"},
+		{[]string{"--report", "no/such/dir/r.md", "--", "true"}, "its directory does not exist"},
 		{[]string{"--format", "junit", "--", "true"}, "--format needs --report FILE"},
 		{[]string{"--report", "r.html", "--format", "html", "--", "true"}, `unknown --format "html"`},
 	} {
@@ -343,4 +361,30 @@ func TestCLIRunUsage(t *testing.T) {
 	if !strings.Contains(usage, "run [start's session flags") {
 		t.Error("the usage text does not list run")
 	}
+}
+
+// The command is told where the services are, when tracectl was told on the
+// command line, so a test it runs reaches the same ones.
+func TestCLIRunExportsTheServiceURLs(t *testing.T) {
+	env := newRunEnv(t, okEvents()...)
+	t.Setenv("TSESSION_CONTROLPLANE_URL", "http://127.0.0.1:1")
+	code, out, e := env.run("env", nil)
+	if want := "cp=" + env.url + " col=" + env.url + "\n"; code != 0 || out != want {
+		t.Fatalf("exit %d, stdout %q, want %q\n%s", code, out, want, e)
+	}
+}
+
+// A control plane that drops the connection when asked to stop (a restart)
+// is asked again: giving up would leave the session active until its TTL.
+func TestCLIRunRetriesTheStop(t *testing.T) {
+	old := stopRetryEvery
+	stopRetryEvery = 10 * time.Millisecond
+	defer func() { stopRetryEvery = old }()
+	env := newRunEnv(t, okEvents()...)
+	env.dropStops = 3
+	code, _, e := env.run("ok", []string{"--fail-on-error"})
+	if code != 0 || !strings.Contains(e, "(SEALED)") {
+		t.Fatalf("exit %d\n%s", code, e)
+	}
+	env.wantSession(1, "SEALED")
 }

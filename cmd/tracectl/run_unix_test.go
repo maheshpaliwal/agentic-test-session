@@ -17,6 +17,11 @@ import (
 const readyEnv = "TRACECTL_TEST_READY"
 
 func init() {
+	// pgid prints whether the command leads a process group of its own.
+	helpers["pgid"] = func([]string) int {
+		fmt.Printf("own-group=%v\n", syscall.Getpgrp() == os.Getpid())
+		return 0
+	}
 	helpers["killed"] = func([]string) int {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		time.Sleep(time.Minute)
@@ -100,4 +105,38 @@ func TestCLIRunSecondSignalAborts(t *testing.T) {
 		t.Fatalf("the wait was not aborted: took %s", d)
 	}
 	env.wantSession(1, "DRAINING")
+}
+
+// The command runs in a process group of its own, so a Ctrl-C in a terminal
+// (sent to tracectl's group) reaches it once, forwarded, not twice.
+func TestCLIRunCommandHasItsOwnProcessGroup(t *testing.T) {
+	env := newRunEnv(t, okEvents()...)
+	if code, out, e := env.run("pgid", nil); code != 0 || out != "own-group=true\n" {
+		t.Fatalf("exit %d, stdout %q\n%s", code, out, e)
+	}
+}
+
+// A SIGHUP (the terminal or the CI runner went away) is passed on like a
+// SIGTERM and the session is still stopped and sealed; tracectl used to die
+// of it with the session active and the command still running.
+func TestCLIRunHangupStillSealsTheSession(t *testing.T) {
+	env := newRunEnv(t, okEvents()...)
+	ready := t.TempDir() + "/ready"
+	t.Setenv(readyEnv, ready)
+	go func() {
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if _, err := os.Stat(ready); err == nil {
+				if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+		}
+		t.Error("the command never became ready")
+	}()
+	code, _, e := env.run("term", nil) // the helper does not catch SIGHUP: it dies of it
+	if want := 128 + int(syscall.SIGHUP); code != want || !strings.Contains(e, "(SEALED)") {
+		t.Fatalf("exit %d, want %d\n%s", code, want, e)
+	}
+	env.wantSession(1, "SEALED")
 }

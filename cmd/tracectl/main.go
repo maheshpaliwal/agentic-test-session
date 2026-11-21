@@ -43,7 +43,10 @@ record a command (control plane and collector):
                                 summary. The command is not run through a shell. Its stdin, stdout and stderr
                                 pass through; tracectl prints to stderr only and writes the report to FILE.
                                 The session is stopped and sealed also when the command fails.
-                                SIGINT and SIGTERM are passed on to the command; a second signal, once the
+                                The command runs in a process group of its own (it cannot read from the
+                                terminal) and needs a --ttl longer than its runtime (default 1h).
+                                SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on to the command's group, a
+                                third one kills it; a second signal, once the
                                 command has exited, stops waiting for the seal.
                                 exit status, first that applies: the command's own if it failed (128+n if
                                 signal n killed it; 127 not found and 126 not runnable, no session started);

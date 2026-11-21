@@ -99,6 +99,9 @@ func TestNormalizeNameMergesAndKeepsApart(t *testing.T) {
 		{"job ts_0193a5b7c2d4f6a8b0c1d2e", "job ts_0193a5b7c2d4f6a8b0c1d2f"},
 		{"GET /orders/1: HTTP 500", "GET /orders/22: HTTP 500"},
 		{"HTTP 503 after 120 ms", "HTTP 503 after 95 ms"},
+		{"connect to http 127.0.0.1", "connect to http 128.0.0.1"},
+		{"HTTP: 443 port closed", "HTTP: 444 port closed"},
+		{"SELECT code(41)", "SELECT code(42)"},
 	}
 	for _, p := range same {
 		if a, b := normalizeName(p[0]), normalizeName(p[1]); a != b {
@@ -130,6 +133,13 @@ func TestNormalizeNameMergesAndKeepsApart(t *testing.T) {
 		{"Error 1062 (23000): Duplicate entry", "Error 1213 (40001): Duplicate entry"},
 		{"rpc error: code = Code(17)", "rpc error: code = Code(18)"},
 		{"rpc error: code = Unavailable", "rpc error: code = Internal"},
+		{"StatusCode: 500", "StatusCode: 503"},
+		{"HTTP status: 500", "HTTP status: 503"},
+		{"SQLSTATE=23505", "SQLSTATE=40001"},
+		{"pq: error code 23505", "pq: error code 40001"},
+		{"mysql error 1062", "mysql error 1213"},
+		{"grpc status 14", "grpc status 13"},
+		{"exit status 1", "exit status 2"},
 	}
 	for _, p := range apart {
 		if a, b := normalizeName(p[0]), normalizeName(p[1]); a == b {

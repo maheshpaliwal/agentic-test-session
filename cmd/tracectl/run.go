@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -77,6 +79,8 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	switch {
 	case len(argv) == 0:
 		return runUsage("no command to run")
+	case *timeout <= 0:
+		return runUsage("--timeout must be more than zero: the session has to be stopped and sealed")
 	case *reportPath == "-":
 		return runUsage("--report needs a file: standard output belongs to the command")
 	case *reportPath == "" && *format != "":
@@ -89,6 +93,10 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		if render, err = reportRenderer(*format); err != nil {
 			return runUsage("%v", err)
 		}
+		// Now, not after the command has run for an hour.
+		if st, err := os.Stat(filepath.Dir(*reportPath)); err != nil || !st.IsDir() {
+			return runUsage("--report %s: its directory does not exist", *reportPath)
+		}
 	}
 	// The command is never run through a shell. It is looked up before the
 	// session starts, so a mistyped name leaves no session behind.
@@ -100,12 +108,14 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return exitError{code: code, msg: "cannot run the command: " + err.Error()}
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
+	ownGroup(cmd)
 
 	// From here on a signal is run's to handle: ctx ends at the first one,
 	// but the session must still be stopped.
 	sigs := make(chan os.Signal, 8)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigs, runSignals...)
 	defer signal.Stop(sigs)
+	defer surviveBrokenPipe()()
 
 	opts.Bindings = binds.list
 	warnJWT(c.stderr, opts.Bindings)
@@ -124,7 +134,15 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	defer close(relayDone)
 	go relay.run(sigs, relayDone)
 
+	// The id, and where tracectl found the services if it was told on the
+	// command line: the command then talks to the same ones.
 	cmd.Env = append(os.Environ(), sessionEnv+"="+s.ID)
+	if c.opts.BaseURL != "" {
+		cmd.Env = append(cmd.Env, "TSESSION_CONTROLPLANE_URL="+c.opts.BaseURL)
+	}
+	if c.opts.CollectorURL != "" {
+		cmd.Env = append(cmd.Env, "TSESSION_COLLECTOR_URL="+c.opts.CollectorURL)
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.stdin, c.stdout, c.stderr
 	code, outcome := exitCannotRun, ""
 	if err := cmd.Start(); err != nil {
@@ -139,7 +157,18 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	// Stop and seal, whatever the command did.
 	failed := false // the session could not be stopped, sealed or read
 	stopCtx, cancel := context.WithTimeout(waitCtx, *timeout)
-	_, err = s.StopAndWait(stopCtx)
+	for {
+		// A control plane that cannot be reached right now (a restart) is
+		// asked again until the time is up: giving up leaves the session
+		// active until its TTL.
+		if _, err = s.StopAndWait(stopCtx); err == nil || stopCtx.Err() != nil || !unreachable(err) {
+			break
+		}
+		select {
+		case <-stopCtx.Done():
+		case <-time.After(stopRetryEvery):
+		}
+	}
 	timedOut := stopCtx.Err() != nil && waitCtx.Err() == nil
 	cancel()
 	if err != nil {
@@ -147,8 +176,12 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		switch {
 		case waitCtx.Err() != nil:
 			err = errors.New("interrupted")
+		case timedOut && unreachable(err) && !errors.Is(err, context.DeadlineExceeded):
+			err = fmt.Errorf("not done within %s (state %s): %w", *timeout, s.Info().State, err)
 		case timedOut:
 			err = fmt.Errorf("not done within %s (state %s)", *timeout, s.Info().State)
+		case s.Info().State == "EXPIRED":
+			err = fmt.Errorf("%w: it ran past its TTL; give run a --ttl longer than the command takes", err)
 		}
 		fmt.Fprintf(c.stderr, "tracectl: session %s was not stopped and sealed: %v; what it recorded cannot be relied on\n", s.ID, err)
 	}
@@ -165,7 +198,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 			fmt.Fprintf(c.stderr, "tracectl: reading session %s: %v\n", s.ID, err)
 		}
 	}
-	if gateErr != nil {
+	if gateErr != nil && !failed { // the checks of a session that was not sealed or read say nothing
 		fmt.Fprintln(c.stderr, "tracectl:", gateErr)
 	}
 	if outcome != "" {
@@ -207,6 +240,17 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, repor
 	return gateErr, c.writeReportFile(reportPath, format, out)
 }
 
+// stopRetryEvery is the pause between attempts to stop the session while
+// the control plane cannot be reached.
+var stopRetryEvery = time.Second
+
+// unreachable reports whether err is a failure to reach the service at all,
+// as opposed to an answer from it.
+func unreachable(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET)
+}
+
 // exitStatus turns what exec.Cmd.Wait returned into the exit status a shell
 // would report and a line for the user; both are zero for a command that
 // succeeded.
@@ -225,10 +269,11 @@ func exitStatus(err error) (int, string) {
 	return ee.ExitCode(), fmt.Sprintf("the command failed: exit status %d", ee.ExitCode())
 }
 
-// signalRelay passes SIGINT and SIGTERM on to the command while it runs.
-// Once the command is gone the session is still stopped and sealed; a signal
-// then aborts that wait if it is not the first one run received, so one
-// signal (a CI job being cancelled) ends the command and still leaves a
+// signalRelay passes the signals run receives on to the command while it
+// runs; from the third one on the command is killed, since it has ignored
+// two. Once the command is gone the session is still stopped and sealed; a
+// signal then aborts that wait if it is not the first one run received, so
+// one signal (a CI job being cancelled) ends the command and still leaves a
 // sealed session, and a second one gets the user out.
 type signalRelay struct {
 	abort context.CancelFunc
@@ -248,6 +293,8 @@ func (r *signalRelay) run(sigs <-chan os.Signal, done <-chan struct{}) {
 			r.mu.Lock()
 			r.seen++
 			switch {
+			case r.child != nil && r.seen > 2:
+				killCommand(r.child)
 			case r.child != nil:
 				forward(r.child, sig)
 			case r.seen == 1:
@@ -270,12 +317,4 @@ func (r *signalRelay) attach(p *os.Process) {
 		forward(p, r.pending)
 	}
 	r.pending = nil
-}
-
-// forward sends sig to p. Where a process cannot be sent that signal
-// (Windows), it is killed instead.
-func forward(p *os.Process, sig os.Signal) {
-	if err := p.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		_ = p.Kill()
-	}
 }

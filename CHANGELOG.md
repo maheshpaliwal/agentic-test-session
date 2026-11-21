@@ -69,7 +69,10 @@ Rolling back:
   environment, stops and seals the session, prints the summary to stderr and can write a report (`--report FILE`).
   It exits with the command's status if that failed, else 1 if the session could not be sealed or read, else 3 if
   a `--fail-on-*` gate failed. The command must send the id itself as `x-tsession-id`; nothing reads the variable
-  automatically. Signal forwarding is untested on Windows.
+  automatically. The command runs in a process group of its own, so a terminal's Ctrl-C reaches it once; it
+  cannot read from the terminal. SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on, and the session is stopped
+  and sealed after them; a control plane that cannot be reached is asked again until `--timeout`. Signal
+  handling is untested on Windows.
 - **Delete and retention.** `DELETE /v1/sessions/{id}` on the control plane, `tracectl delete` and a two-click
   Delete in the dashboard remove a finished session with its events, seal and bundle. The collector's
   `--retention` (`TSESSION_COLLECTOR_RETENTION`, off by default) deletes a session that long after its seal, or
@@ -175,7 +178,9 @@ Rolling back:
 - Collector: a bare numeric key of 1,000,000 or more did not match in entity history.
 - Dashboard opened on an exported file showed a duration of 0 for a recording shorter than a second.
 - `tracectl diff` treated `HTTP 500` and `HTTP 503` (and differing SQLSTATE, MySQL error numbers and unnamed
-  gRPC codes) as the same failure and reported no differences. `tracectl report --fail-on-incomplete` now also
+  gRPC codes, `StatusCode: 500`, `error code N`, `exit status N`) as the same failure and reported no
+  differences. The rule is a guess from the words around a number: `status=503` without a space is still
+  normalised. `tracectl report --fail-on-incomplete` now also
   fails on a seal error alone, as `summary` already did.
 - `tsql`: a table whose primary key is not `id` was recorded as if an `UPDATE` wiped the row (every column
   `-> ∅`, no key). Primary keys are now read from the database catalog (Postgres, MySQL; the MySQL query has not

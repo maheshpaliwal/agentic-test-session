@@ -85,16 +85,21 @@ var (
 	reNumber = regexp.MustCompile(`\b\d+(?:\.\d+)?\b`)
 	reInList = regexp.MustCompile(`(?i)\bIN\s*\(\s*\?(?:\s*,\s*\?)*\s*\)`)
 	// Codes from a small fixed set, kept as they are: an HTTP status after
-	// "HTTP" or "status" ("HTTP 503", "HTTP/1.1 503", "status code: 503"), a
-	// SQLSTATE, a MySQL error number ("Error 1062 (23000)") and a gRPC code
-	// that has no name ("Code(17)"; named ones are words already). "status"
-	// must be followed by a space or a colon, so the SQL "status = 200" is
-	// still a literal.
-	reOutcome = regexp.MustCompile(`(?i)\b(?:HTTP(?:/\d(?:\.\d)?)?(?: status(?: code)?)?:? [1-5]\d\d\b` +
+	// "HTTP", "status" or "StatusCode" ("HTTP 503", "HTTP/1.1 503", "status
+	// code: 503"), a SQLSTATE, a database error number ("Error 1062 (23000)",
+	// "error code 40001", "mysql error 1213"), a process exit status, and a
+	// gRPC code that has no name ("Code(17)", "grpc status 14"; named ones are
+	// words already). "status" must be followed by a space or a colon, so the
+	// SQL "status = 200" is still a literal. The rule is a guess from the
+	// words around a number: "job status: 123 queued" is kept exact too, and
+	// "status=503" without a space is not.
+	reOutcome = regexp.MustCompile(`(?i)\b(?:HTTP(?:/\d(?:\.\d)?)?(?: status(?: code)?:?)? [1-5]\d\d\b` +
 		`|status(?: code)?:? [1-5]\d\d\b` +
-		`|SQLSTATE:? ?\(?[0-9A-Z]{5}\b` +
+		`|StatusCode:? ?[1-5]\d\d\b` +
+		`|SQLSTATE[:=]? ?\(?[0-9A-Z]{5}\b` +
 		`|Error \d{4} \([0-9A-Z]{5}\)` +
-		`|Code\(\d+\))`)
+		`|(?:mysql error|error code|exit status|exit code|grpc status) \d+\b` +
+		`|(?-i:Code)\(\d+\))`)
 )
 
 // Private-use runes stand in for the reOutcome matches while the other rules
@@ -111,13 +116,21 @@ func normalizeName(s string) string {
 	// step rather than risk restoring the wrong thing.
 	var outcomes []string
 	if !strings.ContainsFunc(s, isOutcomeMark) {
-		s = reOutcome.ReplaceAllStringFunc(s, func(m string) string {
-			if len(outcomes) > outcomeLast-outcomeFirst {
-				return m
+		var b strings.Builder
+		at := 0
+		for _, m := range reOutcome.FindAllStringIndex(s, -1) {
+			// "http 127.0.0.1": the number goes on, so it is not a code.
+			partOfMore := m[1]+1 < len(s) && s[m[1]] == '.' && s[m[1]+1] >= '0' && s[m[1]+1] <= '9'
+			if partOfMore || len(outcomes) > outcomeLast-outcomeFirst {
+				continue
 			}
-			outcomes = append(outcomes, m)
-			return string(rune(outcomeFirst + len(outcomes) - 1))
-		})
+			b.WriteString(s[at:m[0]])
+			b.WriteRune(rune(outcomeFirst + len(outcomes)))
+			outcomes = append(outcomes, s[m[0]:m[1]])
+			at = m[1]
+		}
+		b.WriteString(s[at:])
+		s = b.String()
 	}
 	s = reQuoted.ReplaceAllString(s, "${1}"+placeholder)
 	s = reUUID.ReplaceAllString(s, placeholder)
