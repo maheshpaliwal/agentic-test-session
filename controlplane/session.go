@@ -127,6 +127,12 @@ type ActiveSet struct {
 	// events of such a session and sends its final delivery report; SDKs that
 	// do not know the field keep recording as before.
 	Draining []string `json:"draining,omitempty"`
+	// DeliveryReports says that this control plane takes delivery reports
+	// (POST /v1/delivery). An SDK that reads it knows that a 404 to a report
+	// does not come from a control plane without the endpoint, but from
+	// something on the way: it keeps trying, and says so in its log. SDKs that
+	// do not know the field ignore it.
+	DeliveryReports bool `json:"delivery_reports,omitempty"`
 	// Generation counts the changes to the active set since the control plane
 	// started. Compare it with Subscriber.Generation to see which followers
 	// have been sent this version.

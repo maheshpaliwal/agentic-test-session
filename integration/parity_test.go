@@ -505,9 +505,12 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 		t.Errorf("paging the list one session at a time: %d and %d pages, %s", len(pages[0]), len(pages[1]), d)
 	}
 	// The active set: generation counts the changes the control plane made
-	// to it, and a file never had any.
+	// to it, and a file never had any. Nor does a file take delivery reports,
+	// which the control plane says of itself.
 	same(t, f.live, file, ofCP, "/v1/active", func(v any) any {
-		delete(v.(map[string]any), "generation")
+		for _, k := range []string{"generation", "delivery_reports", "delivery_heartbeat_ms"} {
+			delete(v.(map[string]any), k)
+		}
 		return v
 	})
 	for _, p := range []string{"/healthz"} {

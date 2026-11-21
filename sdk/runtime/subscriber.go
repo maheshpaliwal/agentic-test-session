@@ -22,6 +22,10 @@ type activeSet struct {
 	Bindings []core.Binding `json:"bindings"`
 	// Draining is optional too: the ids in Active that are DRAINING.
 	Draining []string `json:"draining"`
+	// DeliveryReports is optional as well: the control plane says that it
+	// takes delivery reports. One that does not say so may still take them
+	// (the first that did, did not say it).
+	DeliveryReports bool `json:"delivery_reports"`
 }
 
 type snapshot struct {
@@ -30,6 +34,9 @@ type snapshot struct {
 	exclusive string
 	kill      bool
 	bindings  core.BindingSet
+	// reports: the control plane said that it takes delivery reports. A 404
+	// to a report then does not mean "a control plane without the endpoint".
+	reports bool
 }
 
 // Subscriber tracks the control plane's active set and implements
@@ -53,8 +60,10 @@ type Subscriber struct {
 	snap         atomic.Pointer[snapshot]
 	ready        atomic.Bool
 	streaming    atomic.Bool
-	// connects counts the streams opened: a new one may lead to another
-	// control plane (a restart, an upgrade). opened is signalled for each.
+	// connects counts the streams that were opened and have delivered the
+	// active set: a new one may lead to another control plane (a restart, an
+	// upgrade), and what that one says of itself is in the set. opened is
+	// signalled for each.
 	connects atomic.Uint64
 	opened   chan struct{}
 
@@ -183,7 +192,7 @@ func (s *Subscriber) Close() {
 
 func (s *Subscriber) apply(a activeSet) {
 	sn := &snapshot{active: set.Of(a.Active...), draining: set.Of(a.Draining...), exclusive: a.Exclusive, kill: a.Kill,
-		bindings: core.NewBindingSet(a.Bindings)}
+		bindings: core.NewBindingSet(a.Bindings), reports: a.DeliveryReports}
 	s.snap.Store(sn)
 	s.ready.Store(true)
 }
@@ -261,11 +270,6 @@ func (s *Subscriber) stream(parent context.Context) bool {
 		return false
 	}
 	s.streaming.Store(true)
-	s.connects.Add(1)
-	select {
-	case s.opened <- struct{}{}:
-	default:
-	}
 	defer s.streaming.Store(false)
 
 	watchdog := time.AfterFunc(s.idle, cancel)
@@ -284,6 +288,16 @@ func (s *Subscriber) stream(parent context.Context) bool {
 				var a activeSet
 				if json.Unmarshal([]byte(data.String()), &a) == nil {
 					s.apply(a)
+					if !got {
+						// The first set of this stream: the reporter starts over
+						// with the control plane behind it, and knows from the set
+						// whether that one says that it takes reports.
+						s.connects.Add(1)
+						select {
+						case s.opened <- struct{}{}:
+						default:
+						}
+					}
 					got = true
 				}
 				data.Reset()

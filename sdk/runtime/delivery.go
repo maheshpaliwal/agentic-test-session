@@ -453,7 +453,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 		r.sub.setAnnounce(true)
 		r.up()
 		return true
-	case code == http.StatusNotFound || code == http.StatusMethodNotAllowed:
+	case r.noEndpoint(code):
 		// A control plane without the endpoint. It may know the older one; it
 		// does not expect to hear from this process either way, and one that
 		// knows the older endpoint only would take the stream's announcement
@@ -474,7 +474,7 @@ func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
 	case code/100 == 2:
 		st.sent, st.last, st.sentAt, st.resend = true, d, time.Now(), false
 		r.up()
-	case code == http.StatusNotFound || code == http.StatusMethodNotAllowed:
+	case r.noEndpoint(code):
 		// A control plane without the endpoint: say nothing, it is not an error.
 		r.mode = modeOff
 		return false
@@ -489,6 +489,18 @@ func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
 		return false
 	}
 	return true
+}
+
+// noEndpoint reports whether the answer code to a report means that the
+// control plane does not know the endpoint: 404 or 405 from one that has not
+// said that it takes reports (see snapshot.reports). From one that has, the
+// answer comes from something on the way (a proxy that passes the stream and
+// answers 404 to the POST) and is a refusal like any other: logged, retried,
+// and the sessions of this process end unconfirmed or incomplete. Taking it
+// for "no endpoint" would turn the reports off without a word, and a service
+// with a wrong collector URL behind such a proxy would leave no trace at all.
+func (r *reporter) noEndpoint(code int) bool {
+	return (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) && !r.sub.snap.Load().reports
 }
 
 // failed notes a report that did not arrive and pauses reporting: RetryBase
@@ -614,7 +626,7 @@ func (r *reporter) close(timeout time.Duration) {
 		if r.mode == modeBatch {
 			n = min(len(last), r.cfg.Batch)
 			code, _ = r.postBatch(deliveryBatch{Service: r.service, Instance: r.instance, DeliveredTotal: total, Reports: last[:n]}, min(left, r.cfg.Timeout))
-			if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+			if r.noEndpoint(code) {
 				r.mode = modeSingle
 				continue
 			}
@@ -623,8 +635,8 @@ func (r *reporter) close(timeout time.Duration) {
 			code = r.post(x.Session, deliveryReport{Service: r.service, Instance: r.instance, Recorded: x.Recorded, Delivered: x.Delivered,
 				Dropped: x.Dropped, DeliveredTotal: total, LastError: x.LastError, Final: true}, min(left, r.cfg.Timeout))
 		}
-		if code == 0 || code == http.StatusNotFound {
-			return // unreachable, or without the endpoint
+		if code == 0 || code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+			return // unreachable, without the endpoint, or refused on the way
 		}
 		last = last[n:]
 	}

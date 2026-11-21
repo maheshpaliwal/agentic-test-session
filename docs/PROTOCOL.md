@@ -106,7 +106,9 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `GET /v1/active` -> `{"active":["id",...],"exclusive":"id|","kill":false,"generation":n}` (active = ACTIVE+DRAINING)
   plus `"draining":["id",...]`, the ids in `active` that are DRAINING (omitted when there are none). An SDK that
   knows the field flushes the events of such a session and sends its final delivery report; one that does not
-  ignores it.
+  ignores it. And `"delivery_reports":true`: this control plane takes delivery reports. An SDK that reads it does
+  not take a `404` to a report for the answer of a control plane without the endpoint (see "Delivery
+  accounting"); one that does not know the field ignores it.
 - `GET /v1/active/stream` SSE; sends the same JSON as `data:` on connect and on every change (+ heartbeat comment every 15s)
   The SDK sends `X-Tsession-Service` and `X-Tsession-Instance` with the request (optional; shown to operators, not trusted),
   and `X-Tsession-Delivery-Instance` when it sends delivery reports: the instance name of those reports.
@@ -201,11 +203,15 @@ the session leaves the active set.
   within the drain's grace costs no session its report. The outage is logged once, at the first refusal or the
   second failure in a row, with the control plane's URL without credentials and the status, never the body; at
   most one outage and its recovery per minute.
-- **Older control planes.** `404`/`405` to the batch: the SDK sends one report per request to
-  `POST /v1/sessions/{id}/delivery` (at most 32 per 250ms) and opens the stream anew without
-  `X-Tsession-Delivery-Instance`; `404`/`405` there as well turns reporting off, silently. Both last until the
-  stream is opened again, when the batch is tried first. `409` from the per-session endpoint ends reporting for
-  that session.
+- **Older control planes.** A control plane that takes reports says so in the active set (`delivery_reports`,
+  see `GET /v1/active`). From one that does not say so, `404`/`405` to the batch means that it does not know the
+  endpoint: the SDK sends one report per request to `POST /v1/sessions/{id}/delivery` (at most 32 per 250ms) and
+  opens the stream anew without `X-Tsession-Delivery-Instance`; `404`/`405` there as well turns reporting off,
+  silently. Both last until the stream is opened again and has delivered the active set, when the batch is tried
+  first. `409` from the per-session endpoint ends reporting for that session. From a control plane that said
+  `delivery_reports`, `404`/`405` is not its answer but that of something on the way (a proxy without a route
+  for the POST): a failure like `403`, logged and retried as above, and the stream keeps announcing the instance,
+  so its sessions end `delivery_unconfirmed` or `incomplete` and not silently complete.
 - After a reconnect of the stream every report is sent again, changed or not: the control plane behind it may
   have restarted.
 
@@ -285,7 +291,8 @@ whoever can reach the control plane can make a session unconfirmed (see the limi
 | SDK without reports | sessions drain and seal as before; its undelivered events stay invisible |
 | SDK that reports but does not send `X-Tsession-Delivery-Instance` | its reports are judged against the collector like any other; its silence is not noticed |
 | control plane without `POST /v1/delivery` but with the per-session endpoint | the SDK sends one report per request and does not announce itself on the stream |
-| control plane without either endpoint | answers `404`, never sends `draining`: the SDK records and exports as before |
+| control plane without either endpoint | answers `404`, never sends `draining` or `delivery_reports`: the SDK records and exports as before, and sends no reports |
+| SDK that does not know `delivery_reports` | ignores it; a `404` to its reports turns them off, as before |
 | collector without `instances` in drain-status | every session with reports says so under `delivery_unconfirmed` (see above); a report that itself states a loss still makes the session `incomplete`. Upgrade the collector with, or before, the control plane |
 | collector without `instance-counts` | matters only for a session with more than 512 instances: see above |
 | control plane that does not know `instances` | ignores it |

@@ -667,3 +667,28 @@ func TestCollectorClientKeepsItsConnections(t *testing.T) {
 		}
 	}
 }
+
+// The third review's F4: the active set says that this control plane takes
+// delivery reports, in the snapshot and on the stream, with sessions or
+// without. An SDK that reads it does not take a 404 to its reports for "a
+// control plane without the endpoint".
+func TestActiveSetSaysThatReportsAreTaken(t *testing.T) {
+	m := NewManager(Config{Collector: newScriptCollector(), TimeUnit: 10 * time.Millisecond})
+	t.Cleanup(m.Close)
+	srv := httptest.NewServer(m.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/active")
+	if err != nil {
+		panic(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), `"delivery_reports":true`) {
+		panic(fmt.Sprintf("GET /v1/active: %s", b))
+	}
+	ch, cancel := m.Subscribe()
+	defer cancel()
+	if a := <-ch; !a.DeliveryReports {
+		panic(fmt.Sprintf("the set a follower is sent: %+v", a))
+	}
+}

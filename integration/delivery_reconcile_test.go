@@ -377,11 +377,26 @@ func TestDelivery_BacklogOfManySessionsIsNotFlagged(t *testing.T) {
 //
 // With a collector that the service reaches, the session is incomplete: see
 // TestDelivery_RefusedReportsOfAServiceThatTookPart.
+//
+// The same with a proxy that answers 404 (the third review's F4: one that
+// has no route for the POST). The control plane says in the active set that
+// it takes reports, so the SDK does not take the 404 for "a control plane
+// without the endpoint" and go quiet: such a session was complete, without a
+// line anywhere.
 func TestDelivery_RefusedReportsAndAWrongCollectorAreUnconfirmed(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusNotFound} {
+		t.Run(fmt.Sprintf("HTTP %d", code), func(t *testing.T) {
+			t.Parallel()
+			refusedReportsAndAWrongCollector(t, code)
+		})
+	}
+}
+
+func refusedReportsAndAWrongCollector(t *testing.T, code int) {
 	e := newDeliveryBase(t)
 	blocked := e.cpProxy(func(r *http.Request) int {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/delivery") {
-			return http.StatusForbidden
+			return code
 		}
 		return 0
 	})
@@ -389,7 +404,7 @@ func TestDelivery_RefusedReportsAndAWrongCollectorAreUnconfirmed(t *testing.T) {
 	orders := e.startSvc("orders-api", svcOpts{collector: "http://" + freeAddr(t), cp: blocked})
 	e.connected("inventory")
 	e.connected("orders-api")
-	runs := repeat(t, "report-403-wrong-url", deliveryRuns(), 8, func(int) deliveryRun {
+	runs := repeat(t, fmt.Sprintf("report-%d-wrong-url", code), deliveryRuns(), 8, func(int) deliveryRun {
 		s, err := e.begin(0)
 		if err != nil {
 			return failed(err)
@@ -425,7 +440,7 @@ func TestDelivery_RefusedReportsAndAWrongCollectorAreUnconfirmed(t *testing.T) {
 	}
 	orders.kill()
 	log := orders.out.String()
-	if n := strings.Count(log, "cannot send delivery reports to the control plane"); n != 1 || !strings.Contains(log, "HTTP 403") || strings.Contains(log, "blocked by policy") {
+	if n := strings.Count(log, "cannot send delivery reports to the control plane"); n != 1 || !strings.Contains(log, fmt.Sprintf("HTTP %d", code)) || strings.Contains(log, "blocked by policy") {
 		t.Errorf("the service's log should say once that its reports are refused, without the answer's body (%d lines):\n%s", n, log)
 	}
 }

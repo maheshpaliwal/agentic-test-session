@@ -495,3 +495,61 @@ func TestReporterSlowBatchEndsThePass(t *testing.T) {
 		panic(fmt.Sprintf("%d reports after three passes, want 3", n))
 	}
 }
+
+// The third review's F4: something between the service and the control plane
+// answers 404 to the reports (a proxy that passes the stream and has no route
+// for the POST). A control plane that said that it takes reports
+// ("delivery_reports" in the active set) cannot be the one that answered: the
+// reports are not turned off. The outage is logged once, the report is
+// retried in batches, and the stream keeps announcing this process, so the
+// control plane notices that nothing of it arrives. It used to read as "a
+// control plane without the endpoint": reporting went off without a word, and
+// a service with a wrong collector URL left a session complete.
+func TestReporterIsNotSilencedBy404FromAControlPlaneThatTakesReports(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		out := logTo(t)
+		cp := newReportCP(t, `{"active":["s1"],"delivery_reports":true}`)
+		cp.setStatus(code)
+		if code == http.StatusNotFound {
+			cp.set404(false, code)
+		}
+		e := newReportEnvOn(t, cp, nil)
+		e.record("s1", 2)
+		eventually(t, "several attempts", func() bool { return cp.postCount() >= 4 })
+		if s := cp.streams(); len(s) != 1 || s[0] != "svc-1-abcdef" {
+			panic(fmt.Sprintf("HTTP %d: streams %q, want one that announces the reports", code, s))
+		}
+		logged := out.String()
+		if strings.Count(logged, "cannot send delivery reports") != 1 || !strings.Contains(logged, fmt.Sprintf("HTTP %d", code)) {
+			panic(fmt.Sprintf("HTTP %d: log:\n%s", code, logged))
+		}
+		// The per-session endpoint was not tried: every request was a batch.
+		if got := cp.reports("s1"); len(got) != 0 {
+			panic(fmt.Sprintf("reports %+v", got))
+		}
+		cp.set404(false, 0)
+		e.settled("s1", deliveryReport{Recorded: 2, Delivered: 2})
+		if _, _, sizes := cp.seen(); len(sizes) == 0 {
+			panic("the report arrived, but not in a batch")
+		}
+		if logged := out.String(); strings.Count(logged, "delivery reports reach the control plane") != 1 {
+			panic(fmt.Sprintf("HTTP %d: log after the recovery:\n%s", code, logged))
+		}
+	}
+}
+
+// The reporter starts over with a control plane once the stream has delivered
+// the active set, not when the stream is opened: what the control plane says
+// of itself is in the set, and a 404 before it arrived would be read without it.
+func TestReporterWaitsForTheFirstSetOfAStream(t *testing.T) {
+	cp := newReportCP(t, `{"active":["s1"],"delivery_reports":true}`)
+	cp.set404(false, http.StatusNotFound)
+	e := newReportEnvOn(t, cp, nil)
+	eventually(t, "the first request", func() bool { return cp.postCount() >= 1 })
+	if !e.sub.snap.Load().reports {
+		panic("a report was sent before the active set of the stream was read")
+	}
+	if s := cp.streams(); len(s) != 1 {
+		panic(fmt.Sprintf("streams %q: the announcement was taken back", s))
+	}
+}

@@ -519,7 +519,7 @@ func (m *Manager) exclusiveLocked() string {
 }
 
 func (m *Manager) activeLocked() ActiveSet {
-	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen}
+	a := ActiveSet{Active: make([]string, 0, len(m.live)), Kill: m.kill, Generation: m.gen, DeliveryReports: true}
 	for _, s := range m.live {
 		a.Active = append(a.Active, s.ID)
 		if s.Mode == ModeExclusive {
