@@ -141,8 +141,18 @@ tracectl doctor                          # both services answer; which services 
                                          # (CI preflight: --require-services N exits 3 with fewer than N
                                          #  connected SDK instances; replicas count one each)
 ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
-curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
+curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders   # a request to YOUR service from step 2
 tracectl stop my-run --wait              # drains async work, then seals
+```
+
+No service wired yet? The repository has one that needs no database. Start it with the four variables of step 2
+and send it a request in place of the `curl` above:
+
+```bash
+(cd integration && DELIVERYAPP_LISTEN=127.0.0.1:8080 TSESSION_ENABLED=true TSESSION_SERVICE=sample \
+  TSESSION_CONTROLPLANE_URL=http://127.0.0.1:7070 TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
+  go run ./cmd/deliveryapp)
+curl -X POST -H "x-tsession-id: $ID" http://127.0.0.1:8080/work
 ```
 
 `stop`, `abort`, `rename` and `wait` print the session as JSON; `status` adds `name:` and `bindings:` lines after
