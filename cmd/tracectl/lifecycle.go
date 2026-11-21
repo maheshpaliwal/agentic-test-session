@@ -180,12 +180,25 @@ func (c *cli) list(ctx context.Context, args []string) error {
 		if b := formatBindings(i.Bindings); b != "" {
 			line += "  [" + b + "]"
 		}
-		fmt.Fprintln(c.stdout, line)
+		fmt.Fprintln(c.stdout, line+listMarks(i))
 	}
 	if more {
 		fmt.Fprintf(c.stderr, "tracectl: these are the newest %d sessions; there are older ones (raise --limit, or leave it out to list all)\n", len(list))
 	}
 	return nil
+}
+
+// listMarks says, at the end of a list line, that a session's record is known to be incomplete or that the
+// delivery of some instance could not be confirmed; empty for a session with neither.
+func listMarks(i client.Info) string {
+	var marks string
+	if i.Incomplete {
+		marks += "  INCOMPLETE"
+	}
+	if len(i.DeliveryUnconfirmed) > 0 {
+		marks += "  DELIVERY-UNCONFIRMED"
+	}
+	return marks
 }
 
 // listNewest returns the newest limit sessions (in state, if set), oldest

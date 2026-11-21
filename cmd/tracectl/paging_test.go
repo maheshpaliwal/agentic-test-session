@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/controlplane"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 // pagingEnv is a control plane holding prepared sessions, which records the
@@ -213,5 +214,22 @@ func TestListLimit(t *testing.T) {
 				panic(fmt.Sprintf("list --limit -1: exit %d %q", code, e))
 			}
 		})
+	}
+}
+
+func TestListMarks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info client.Info
+		want string
+	}{
+		{"complete", client.Info{}, ""},
+		{"incomplete", client.Info{Incomplete: true}, "  INCOMPLETE"},
+		{"unconfirmed", client.Info{DeliveryUnconfirmed: []string{"orders/a"}}, "  DELIVERY-UNCONFIRMED"},
+		{"both", client.Info{Incomplete: true, DeliveryUnconfirmed: []string{"orders/a"}}, "  INCOMPLETE  DELIVERY-UNCONFIRMED"},
+	} {
+		if got := listMarks(tc.info); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
