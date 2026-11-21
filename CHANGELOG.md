@@ -108,6 +108,13 @@ Rolling back:
 
 ### Added
 
+- The dashboard's entity view follows the diff the SDK recorded, so a field that changed under redaction reads
+  "changed · value hidden" (it read "no field changes"); `tracectl show`, `history` and `digest` say
+  `changed (value hidden)`. The session page lists the delivery reports per service instance, and every event
+  flag has help text.
+- An entity names the services that changed it (optional `services` on the collector's entity rows), shown by
+  `tracectl entities`, the `history` header and the dashboard: the same Redis key masked by two services is
+  two rows, and now says which is whose.
 - **Delivery accounting: a service that cannot deliver its events no longer passes the gates.** Each SDK
   instance reports to the control plane how many events it recorded per session (`POST /v1/delivery`, batched,
   plus one small request every 5 s while a session runs). When a drain ends, the control plane compares that
@@ -240,6 +247,7 @@ Rolling back:
 
 ### Changed
 
+- Collector and control plane log lines that carry an error are at error level (ten were warnings).
 - The dashboard binary panics on a start-up error (a refused listen address, an unreadable `-open` file) where
   it called `log.Fatalf`: the message is the same, followed by a stack trace, and the exit status is 2, not 1.
 - **gRPC failures follow the HTTP rule.** A call is a failed event when its status says the callee failed
