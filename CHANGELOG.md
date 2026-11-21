@@ -18,6 +18,9 @@ Before deploying:
   for an `UPDATE` whose row cannot be read back. Tests that assert on recorded keys or diffs of tables keyed by
   something other than `id` will see different values, and the database user needs to read the catalog
   (`pg_index`, `information_schema`); `WithPKLookup(false)` restores the old key choice.
+- `tsql` records binary and over-long primary-key values in a new form (`\xfffe0001`; beyond 64 bytes a
+  prefix plus `...[N bytes sha256:…]`), so that different rows no longer share a key. Events recorded earlier
+  show such keys as `<3 bytes>` and file under a different key.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -197,6 +200,15 @@ Rolling back:
 
 ### Fixed
 
+- `tsql` on Postgres: nothing is read inside a SERIALIZABLE transaction however the level was set (`BEGIN` or
+  `START TRANSACTION ... ISOLATION LEVEL`, `SET TRANSACTION`, session characteristics, a connection, role or
+  database default); it was only detected through `BeginTx`, and two concurrent inserting transactions that
+  commit untraced could fail with 40001 when traced. The autocommit capture's own transaction is READ COMMITTED.
+  Still true: under REPEATABLE READ a capture can take the transaction's snapshot a moment before the
+  application's first statement would have.
+- `tsql`: an `UPDATE` whose before image is missing records no diff (it listed every column as new). In one
+  failure path the capture fence rolled back to a savepoint it had not taken, which could undo the
+  application's own work; the savepoint is now named per connection (`ts_capture_<random>`).
 - SDK: one session the collector keeps failing no longer blocks delivery of the other sessions in the same
   process. Its events stay buffered and are retried on their own; once it has kept failing for a while as others
   were accepted, a full buffer drops its newest unsent events before another session loses any. Measured over
