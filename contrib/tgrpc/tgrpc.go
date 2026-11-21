@@ -119,10 +119,29 @@ func finish(span *core.Span, req, resp any, err error) {
 	}
 	code := status.Code(err)
 	span.SetAttr("grpc.code", code.String())
-	if err != nil && code != codes.OK {
+	switch {
+	case err == nil || code == codes.OK:
+	case failure(code):
 		span.SetErr(err)
+	default:
+		// The caller's doing, like an HTTP 4xx: recorded, not a failure.
+		span.SetAttr("grpc.message", core.RedactText(status.Convert(err).Message()))
 	}
 	span.End()
+}
+
+// failure reports whether a status means the callee failed, as an HTTP 5xx
+// does: the codes gRPC maps to 500, 501, 503 and 504, and Unknown, which is
+// also what an error that is not a status reads as. The others (NotFound,
+// InvalidArgument, PermissionDenied, Canceled, ...) answer what the caller
+// asked or did, as an HTTP 4xx does, and a session with such calls has not
+// failed for it.
+func failure(c codes.Code) bool {
+	switch c {
+	case codes.Unknown, codes.DeadlineExceeded, codes.Unimplemented, codes.Internal, codes.Unavailable, codes.DataLoss:
+		return true
+	}
+	return false
 }
 
 // finishStream is finish for a streaming call: req and resp are the message
@@ -195,6 +214,7 @@ func (l *msgLog) payload() any {
 // UnaryServerInterceptor records an api.in span per unary call.
 func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.UnaryServerInterceptor")
 		return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
 			return h(ctx, req)
 		}
@@ -250,6 +270,7 @@ func (s *serverStream) SendMsg(m any) error {
 // the (capped) sequences of received and sent messages as Req and Resp.
 func StreamServerInterceptor() grpc.StreamServerInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.StreamServerInterceptor")
 		return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, h grpc.StreamHandler) error {
 			return h(srv, ss)
 		}
@@ -288,6 +309,7 @@ func outgoing(ctx context.Context) context.Context {
 // the session context in metadata.
 func UnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.UnaryClientInterceptor")
 		return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, inv grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 			return inv(ctx, method, req, reply, cc, opts...)
 		}
@@ -397,6 +419,7 @@ func (s *clientStream) RecvMsg(m any) error {
 // cancellation) and carries its final status.
 func StreamClientInterceptor() grpc.StreamClientInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.StreamClientInterceptor")
 		return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, str grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 			return str(ctx, desc, cc, method, opts...)
 		}

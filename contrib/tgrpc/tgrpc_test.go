@@ -143,9 +143,26 @@ func TestUnaryErrorCode(t *testing.T) {
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("err %v", err)
 	}
+	// NotFound answers the caller, as an HTTP 404 does: the status is
+	// recorded and the event is not a failed one.
 	for _, e := range rec.Events() {
-		if e.Attrs["grpc.code"] != "NotFound" || e.Err == "" {
+		if e.Attrs["grpc.code"] != "NotFound" || e.Attrs["grpc.message"] == "" || e.Err != "" {
 			t.Fatalf("event %s: %+v", e.Kind, e)
+		}
+	}
+}
+
+// Which statuses make a call a failed event: those that say the callee
+// failed, as an HTTP 5xx does.
+func TestFailureCodes(t *testing.T) {
+	for c := codes.OK; c <= codes.Unauthenticated; c++ {
+		want := false
+		switch c {
+		case codes.Unknown, codes.DeadlineExceeded, codes.Unimplemented, codes.Internal, codes.Unavailable, codes.DataLoss:
+			want = true
+		}
+		if got := failure(c); got != want {
+			t.Errorf("failure(%s) = %v, want %v", c, got, want)
 		}
 	}
 }

@@ -1,6 +1,10 @@
 package redisx
 
-import "strings"
+import (
+	"maps"
+	"slices"
+	"strings"
+)
 
 // Spec describes one Redis command: whether it mutates state and where its
 // keys live in the argument vector (args[0] is the command name). It follows
@@ -34,6 +38,7 @@ var commands = map[string]Spec{
 	"exists": rN, "ttl": r1, "pttl": r1, "expiretime": r1, "pexpiretime": r1, "type": r1,
 	"dump": r1, "touch": rN, "object": r(2, 2, 1), "randomkey": r(0, 0, 0),
 	"keys": r(0, 0, 0), "scan": r(0, 0, 0), "dbsize": r(0, 0, 0),
+	"watch": rN, "unwatch": r(0, 0, 0),
 	"del": wN, "unlink": wN, "expire": w1, "pexpire": w1, "expireat": w1, "pexpireat": w1,
 	"persist": w1, "rename": w(1, 2, 1), "renamenx": w(1, 2, 1), "copy": w(1, 2, 1),
 	"move": w1, "restore": w1,
@@ -73,7 +78,8 @@ var commands = map[string]Spec{
 	// geo / hll
 	"geopos": r1, "geodist": r1, "geohash": r1, "geosearch": r1, "pfcount": rN,
 	"geoadd": w1, "pfadd": w1, "pfmerge": wN, "geosearchstore": w(1, 2, 1),
-	// pub/sub: the channel stands in for the key
+	// pub/sub: the channel stands in for the key in the span name; a message
+	// changes no key, see IsPublish
 	"publish": w1, "spublish": w1,
 	// scripting: keys are located via numkeys, see KeysOf
 	"eval": w(0, 0, 0), "evalsha": w(0, 0, 0), "eval_ro": r(0, 0, 0), "evalsha_ro": r(0, 0, 0),
@@ -198,6 +204,18 @@ var popCmds = map[string]bool{
 	"lmpop": true, "blmpop": true, "zmpop": true, "bzmpop": true,
 }
 
+// IsPublish reports whether the named command sends a pub/sub message. It is
+// recorded as a write command without a mutation: no key changes. It is not a
+// queue.publish span either, because the collector waits for a worker to
+// finish each of those, and a pub/sub message has no such end.
+func IsPublish(name string) bool {
+	switch strings.ToLower(name) {
+	case "publish", "spublish":
+		return true
+	}
+	return false
+}
+
 // IsPop reports whether the named command pops from one of several keys and
 // names that key in its reply.
 func IsPop(name string) bool { return popCmds[strings.ToLower(name)] }
@@ -262,3 +280,6 @@ func atoi(v any) int {
 	}
 	return n
 }
+
+// Names returns the names of the commands in the classification table, sorted.
+func Names() []string { return slices.Sorted(maps.Keys(commands)) }

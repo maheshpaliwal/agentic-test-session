@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,8 +84,8 @@ func Start(cfg Config) error {
 		cfg.Exporter.Encoder = cfg.Encoder
 	}
 
-	if w := core.WrappedWhileDisabled(); w != "" {
-		log.Printf("tsession: %s was called before the SDK started, so what it wrapped records nothing; start the SDK first (import sdk/autoinit in that package, or wrap inside main)", w)
+	if w := core.WrappersWhileDisabled(); len(w) > 0 {
+		log.Printf("tsession: %s called before the SDK started, so what was wrapped records nothing; start the SDK first (import sdk/autoinit in that package, or wrap inside main)", strings.Join(w, ", "))
 	}
 	core.Configure(core.Config{Service: cfg.Service, Instance: cfg.Instance, Enabled: true, BindPriority: cfg.BindPriority,
 		OverwriteTraceparent: cfg.OverwriteTraceparent})

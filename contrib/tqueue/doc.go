@@ -4,6 +4,25 @@
 // extracts it, emits worker.start / worker.end (and retry/dlq) and runs the
 // handler under the continued trace.
 //
+//	// producer: headers travel with the message and carry the session
+//	headers := core.MapCarrier{}
+//	job := tqueue.Message{System: "kafka", Queue: "orders", JobName: "fulfil", Params: params}
+//	err := tqueue.Publish(ctx, job, headers, func(ctx context.Context) error {
+//		return send(ctx, body, headers)
+//	})
+//
+//	// consumer: the handler runs under the publisher's trace
+//	d := tqueue.Delivery{System: "kafka", Queue: "orders", JobName: "fulfil", Attempt: attempt, MaxAttempts: 3}
+//	err = tqueue.Consume(ctx, headers, d, func(ctx context.Context) error {
+//		return handle(ctx, body)
+//	})
+//
+// ProduceMessages and ConsumeMessage (kafka-go), SendMessage and
+// ConsumeSQSMessage (SQS), PublishAMQP and ConsumeDelivery (AMQP) do this
+// with the client's own headers. A queue whose messages carry no headers
+// uses PublishVia, ConsumeVia and WrapHandler with a SideChannel. All of them
+// look the SDK up on every call, so they may be set up before it starts.
+//
 // No-session behaviour: tracing is strictly best effort. A consumer whose
 // carrier holds no active session (and with no exclusive session configured),
 // a publish whose context carries no session, or tracing disabled, all run

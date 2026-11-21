@@ -253,7 +253,8 @@ var schemaWords = []string{"search_path", "schema", "role", "authorization", "di
 // USE). Inside a transaction the change may be undone when it ends, so the
 // keys are dropped again then.
 func (c *conn) noteSchema(in mutation.Info) {
-	hit := in.Kind == mutation.DDL || slices.Contains(in.Idents, "search_path") || slices.Contains(in.Idents, "set_config")
+	// A routine can do anything a statement can, changing a key included.
+	hit := in.Kind == mutation.DDL || in.Kind == mutation.Routine || slices.Contains(in.Idents, "search_path") || slices.Contains(in.Idents, "set_config")
 	if !hit && in.Kind == mutation.Other {
 		hit = slices.ContainsFunc(schemaWords, func(w string) bool { return slices.Contains(in.Idents, w) })
 	}

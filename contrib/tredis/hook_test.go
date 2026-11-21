@@ -2,6 +2,7 @@ package tredis
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -13,13 +14,49 @@ import (
 
 func setup(t *testing.T, opts ...Option) (redis.UniversalClient, *core.MemRecorder, context.Context) {
 	t.Helper()
-	mr := miniredis.RunT(t)
+	return setupAt(t, miniredis.RunT(t).Addr(), opts...)
+}
+
+// realAddr names the environment variable holding the address of a real Redis
+// server to run the servers tests against as well. They use its database 15
+// and flush it, so point it at a throwaway server.
+const realAddr = "TSESSION_TEST_REDIS_ADDR"
+
+const testDB = 15
+
+// servers runs a test against miniredis and, when realAddr is set, against
+// the real server.
+func servers(t *testing.T, run func(t *testing.T, addr string)) {
+	t.Run("miniredis", func(t *testing.T) { run(t, miniredis.RunT(t).Addr()) })
+	t.Run("redis", func(t *testing.T) { realServer(t, run) })
+}
+
+// realServer runs a test against the real server only, or skips it.
+func realServer(t *testing.T, run func(t *testing.T, addr string)) {
+	addr := os.Getenv(realAddr)
+	if addr == "" {
+		t.Skip(realAddr + " not set")
+	}
+	c := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
+	flush := func() {
+		if err := c.FlushDB(context.Background()).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush()
+	t.Cleanup(func() { flush(); c.Close() })
+	run(t, addr)
+}
+
+func setupAt(t *testing.T, addr string, opts ...Option) (redis.UniversalClient, *core.MemRecorder, context.Context) {
+	t.Helper()
 	rec := &core.MemRecorder{}
 	core.Configure(core.Config{Service: "svc", Enabled: true})
 	core.SetRecorder(rec)
 	core.SetSessions(core.StaticSessions{Active: map[string]bool{"s1": true}})
 	t.Cleanup(func() { core.Configure(core.Config{}); core.SetRecorder(nil); core.SetSessions(nil) })
-	c := Wrap(redis.NewClient(&redis.Options{Addr: mr.Addr()}), opts...)
+	c := Wrap(redis.NewClient(&redis.Options{Addr: addr, DB: testDB}), opts...)
+	t.Cleanup(func() { c.Close() })
 	ctx := core.ContextWith(context.Background(), core.SpanContext{SessionID: "s1", TraceID: core.NewTraceID()})
 	return c, rec, ctx
 }
@@ -129,7 +166,7 @@ func TestErrorAndAuthRedaction(t *testing.T) {
 	if ev[1].Err == "" || len(ev[1].Mutations) != 0 {
 		t.Fatalf("%+v", ev[1])
 	}
-	got := (&redisx.Redactor{Capture: true}).MaskArgs("AUTH", []any{"AUTH", "user", "hunter2"}, nil)
+	got, _ := (&redisx.Redactor{Capture: true}).MaskArgs("AUTH", []any{"AUTH", "user", "hunter2"}, nil)
 	if got[2] != "[REDACTED]" {
 		t.Fatal(got)
 	}

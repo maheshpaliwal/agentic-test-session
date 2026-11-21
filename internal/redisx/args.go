@@ -3,6 +3,7 @@
 package redisx
 
 import (
+	"encoding"
 	"fmt"
 	"strings"
 )
@@ -18,6 +19,11 @@ func Str(v any) string {
 		return string(t)
 	case nil:
 		return ""
+	case encoding.BinaryMarshaler:
+		if b, err := t.MarshalBinary(); err == nil {
+			return string(b)
+		}
+		return masked
 	default:
 		return fmt.Sprint(t)
 	}
@@ -32,14 +38,15 @@ func CapArgs(in []string) []string {
 	return append(out, fmt.Sprintf("...(%d more)", len(in)-maxReqArgs))
 }
 
-// SpanName builds "GET key" style names, capped in length.
-func SpanName(args []any, keys []int) string {
+// SpanName builds "GET key" style names, capped in length. key is the
+// command's first key as it is recorded, "" when it has none.
+func SpanName(args []any, key string) string {
 	if len(args) == 0 {
 		return "redis"
 	}
 	n := strings.ToUpper(Str(args[0]))
-	if len(keys) > 0 {
-		n += " " + Str(args[keys[0]])
+	if key != "" {
+		n += " " + key
 	}
 	if len(n) > 200 {
 		n = n[:200]
@@ -47,13 +54,23 @@ func SpanName(args []any, keys []int) string {
 	return n
 }
 
-// KeyPattern collapses id-like segments so mutations of user:1, user:2 group
-// under one entity "user:*". The exact key is always kept in Mutation.PK.
+// KeyPattern collapses id-like and masked segments so mutations of user:1,
+// user:2 group under one entity "user:*". The key is kept in Mutation.PK. A
+// segment is id-like when it is all digits, or 8 or more characters of hex
+// digits and '-'. A masked part that follows a name inside a segment
+// ("session_#a1b2c3d4e5f6", "{#a1b2c3d4e5f6}") collapses alone: "session_*".
+// The rule is documented in contrib/tredis: keep them in step.
 func KeyPattern(key string) string {
 	parts := strings.Split(key, ":")
 	for i, p := range parts {
 		if idLike(p) {
 			parts[i] = "*"
+			continue
+		}
+		lead := len(p) - len(strings.TrimLeft(p, "{"))
+		inner := strings.TrimRight(p[lead:], "}")
+		if from, ok := maskedEnd(inner); ok {
+			parts[i] = p[:lead+from] + "*" + p[lead+len(inner):]
 		}
 	}
 	return strings.Join(parts, ":")

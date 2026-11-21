@@ -129,7 +129,7 @@ func TestRealRedis(t *testing.T) {
 	core.SetRecorder(rec)
 	core.SetSessions(core.StaticSessions{Active: map[string]bool{"s1": true}})
 	t.Cleanup(func() { core.Configure(core.Config{}); core.SetRecorder(nil); core.SetSessions(nil) })
-	raw := redis.NewClient(&redis.Options{Addr: addr})
+	raw := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
 	c := Wrap(raw, WithBeforeImage("user:*"))
 	ctx := core.ContextWith(context.Background(), core.SpanContext{SessionID: "s1", TraceID: core.NewTraceID()})
 	raw.FlushDB(context.Background())

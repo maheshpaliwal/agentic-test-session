@@ -161,6 +161,7 @@ tracectl summary my-run                      # counts, mutations, failures
 tracectl events my-run --kind 'db.*' --errors
 tracectl entities my-run                     # what the session changed; "N uncertain" = incomplete key or image
 tracectl history my-run postgres orders 42   # every change to one row, with diffs and the event's flags
+tracectl history my-run redis 'user:*' user:1   # a Redis key; diffs need tredis.WithBeforeImage (see its doc comment)
 tracectl history my-run postgres items order_id=7,sku=a   # composite key; or the JSON that entities prints
 tracectl history my-run postgres orders --unknown-key     # changes recorded without a key
 tracectl trace my-run --errors               # call tree, only branches that failed
@@ -170,7 +171,9 @@ tracectl list --limit 20                     # the newest sessions
 ```
 
 A failed event is one that returned an error or an HTTP status of 500 or above; a 4xx response is recorded
-but does not count as a failure.
+but does not count as a failure. A gRPC call follows the same line: the
+statuses that say the callee failed count (`Internal`, `Unavailable`, `Unknown`, `DeadlineExceeded`,
+`Unimplemented`, `DataLoss`), `NotFound` or `Canceled` do not (see the `contrib/tgrpc` doc comment).
 
 Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
 `3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
