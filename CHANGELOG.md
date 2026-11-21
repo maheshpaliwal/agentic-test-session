@@ -190,6 +190,18 @@ Rolling back:
 
 ### Fixed
 
+- SDK: one session the collector keeps failing no longer blocks delivery of the other sessions in the same
+  process. Its events stay buffered and are retried on their own; once it has kept failing for a while as others
+  were accepted, a full buffer drops its newest unsent events before another session loses any. Measured over
+  30 s with three healthy sessions and one failing at 100 events/s each: healthy events lost went from 3780 to 0.
+  Until that point is reached, and for a failing session that alone fills the buffer, healthy sessions can still
+  lose events, fewer than before. Failures the collector does not attribute to a session (timeouts, proxy
+  errors) remain whole-request outages. With the buffer full and a session held, recording an event costs up to
+  about 30 µs instead of tens of nanoseconds.
+- Collector: a failed ingest request names the sessions it failed (`failed_sessions`, at most 32, and
+  `failed_sessions_truncated`), and a failed session counts no accepted events. New counters
+  `tsession_collector_ingest_failed_sessions_total{cause}` and `tsession_collector_ingest_partial_failures_total`.
+  An older SDK ignores the new fields and behaves as before.
 - `sdk/client` and `tracectl`: an error or `doctor` line that names a service URL no longer shows the URL's user
   name, password or query (a token there ended up in CI logs). New `client.DisplayURL` and
   `client.ScrubURLError` for callers that print such errors themselves.
