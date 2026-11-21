@@ -194,19 +194,28 @@ func (s *Span) End() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	if s.ended {
-		s.mu.Unlock()
+	ev, ok := s.end()
+	if !ok {
 		return
+	}
+	defer Recover() // never let recording break the host app
+	record(ev)
+}
+
+// end marks the span ended and returns its event; ok is false when it had
+// ended before. The unlock is deferred: a wrapper recovers a panic of End,
+// and a second End of the span must not then wait for the lock for good.
+func (s *Span) end() (ev Event, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ended {
+		return Event{}, false
 	}
 	s.ended = true
 	s.ev.EndNs = time.Now().UnixNano()
 	s.ev.EndHLC = HLCNow()
 	s.ev.LocalSeq = nextLocalSeq()
-	ev := s.ev
-	s.mu.Unlock()
-	defer Recover() // never let recording break the host app
-	record(ev)
+	return s.ev, true
 }
 
 // matchBinding returns key.Name=="?" when the set cannot say which key matched.

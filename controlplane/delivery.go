@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 	"github.com/maheshpaliwal/agentic-test-session/internal/scrub"
 )
@@ -121,6 +122,12 @@ type DeliveryBatch struct {
 	DeliveredTotal int64  `json:"delivered_total,omitempty"`
 	// Reports holds at most MaxDeliveryBatch entries of at most 4 KiB each.
 	Reports []json.RawMessage `json:"reports"`
+	// Stopped is set by an instance that stopped recording after an internal
+	// error (a loop of its SDK panicked), and says how. Every session that is
+	// ACTIVE or DRAINING when it arrives is incomplete for it, whether the
+	// instance had recorded events for it or not: from then on it recorded
+	// none, and nothing else would show that (see stoppedLocked).
+	Stopped string `json:"stopped,omitempty"`
 }
 
 // SessionDelivery is one entry of DeliveryBatch.Reports.
@@ -222,6 +229,10 @@ type deliveryState struct {
 	// of which no report had arrived when the reports were closed (see
 	// silentLocked).
 	silent []Subscriber
+	// stopped holds, per instance that said that it stopped recording while
+	// the session ran, the reason the session is incomplete for (see
+	// stoppedLocked). At most maxDeliveryRefused of them.
+	stopped map[string]string
 }
 
 // instanceProgress is when an instance was last seen to deliver events of any
@@ -305,6 +316,9 @@ func (m *Manager) ReportDeliveries(b DeliveryBatch) ([]DeliveryResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.heardLocked(deliveryKey(service, instance), now, len(reports) > 0)
+	if why := cleanDeliveryError(b.Stopped); why != "" {
+		m.stoppedLocked(service, instance, why)
+	}
 	for i, r := range reports {
 		if out[i].Status != "" {
 			continue
@@ -348,6 +362,31 @@ func (m *Manager) heardLocked(key string, now time.Time, reports bool) {
 			m.subs[ch] = sub
 		}
 	}
+}
+
+// stoppedLocked notes that an instance said that it stopped recording after
+// an internal error: every session that runs now is incomplete for it. The
+// instance may have taken no part in a session; that cannot be known, since
+// what it would have recorded from now on is what is missing. A session that
+// starts later is not marked: the instance says again when it stops again,
+// and one that stays stopped records nothing and follows no session, like a
+// service that was never connected.
+func (m *Manager) stoppedLocked(service, instance, why string) {
+	key := deliveryKey(service, instance)
+	reason := who(service, instance) + " stopped recording after an internal error (" + why +
+		"), so events of this session it would have recorded since are missing; this is a bug in tsession, and the log of that service has the panic"
+	for id := range m.live {
+		st := m.deliveryStateLocked(id)
+		if _, known := st.stopped[key]; !known && len(st.stopped) >= maxDeliveryRefused {
+			continue // the session is incomplete for a thousand others already
+		}
+		if st.stopped == nil {
+			st.stopped = map[string]string{}
+		}
+		st.stopped[key] = reason
+	}
+	m.log.Error("a service stopped recording after an internal error; the sessions that run now are marked incomplete",
+		"service", service, "instance", instance, "sessions", len(m.live), "why", why)
 }
 
 // heartbeatPeriod is how often an instance that follows the active set is
@@ -746,21 +785,26 @@ func (m *Manager) countsFor(ctx context.Context, id string, st DrainStatus, ok b
 			ask = append(ask, InstanceCount{Service: service, Instance: instance})
 		}
 	}
-	m.mu.Lock()
-	for _, d := range m.live[id].Delivery {
-		add(d.Service, d.Instance)
-	}
-	if st := m.delivery[id]; st != nil {
-		for _, d := range st.refused {
+	// The unlock is deferred: a drain is started again after a panic, and
+	// one in here that left the lock held would stop the whole control plane.
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		faultpoint.Hit("countsFor.locked")
+		for _, d := range m.live[id].Delivery {
 			add(d.Service, d.Instance)
 		}
-	}
-	for _, sub := range m.subs {
-		if sub.stream && sub.DeliveryInstance != "" {
-			add(sub.Service, sub.DeliveryInstance)
+		if st := m.delivery[id]; st != nil {
+			for _, d := range st.refused {
+				add(d.Service, d.Instance)
+			}
 		}
-	}
-	m.mu.Unlock()
+		for _, sub := range m.subs {
+			if sub.stream && sub.DeliveryInstance != "" {
+				add(sub.Service, sub.DeliveryInstance)
+			}
+		}
+	}()
 	for chunk := range slices.Chunk(ask, MaxInstanceCountsAsk) {
 		got, err := ic.InstanceCounts(ctx, id, chunk)
 		if err != nil || len(got) != len(chunk) {
@@ -967,7 +1011,9 @@ func unreported(service, instance string, have int64) string {
 //     collector has, and of which no report for the session arrived in the
 //     time it had (see silentLocked): it took part, and nothing says whether
 //     those events are all it recorded (see unreported);
-//   - a report beyond the ones that are kept that said that events were lost.
+//   - a report beyond the ones that are kept that said that events were lost;
+//   - an instance that said, while the session ran, that it stopped recording
+//     after an internal error (see stoppedLocked).
 //
 // It is unconfirmed (delivery_unconfirmed, a warning) for what deliveryVerdict
 // lists as such, and for:
@@ -1046,6 +1092,9 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 		if n := m.uncountedLocked(*s, st, counts); n > 0 {
 			unconfirmed = append(unconfirmed, fmt.Sprintf("the collector's list of instances was cut short and it did not answer for %d connected instance(s) that sent no report, so whether they took part is unknown", n))
 		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(st.stopped)) {
+		shortfalls = append(shortfalls, st.stopped[key])
 	}
 	if st.refusedShort {
 		shortfalls = append(shortfalls, fmt.Sprintf("more than %d instances reported, and a report of one beyond that said that events were dropped or left undelivered; which instance is not kept",

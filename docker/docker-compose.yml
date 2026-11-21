@@ -52,6 +52,8 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+    # The collector exits 1 when its background loops keep panicking (see "Health and panics" in docs/CONFIG.md).
+    restart: "on-failure:5"
 
   controlplane:
     build: {context: .., dockerfile: docker/Dockerfile.controlplane, args: {VERSION: "${TSESSION_VERSION:-}"}}
@@ -67,6 +69,8 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+    # The control plane exits 1 when its sweep keeps panicking (see "Health and panics" in docs/CONFIG.md).
+    restart: "on-failure:5"
 
   dashboard:
     build: {context: .., dockerfile: docker/Dockerfile.dashboard, args: {VERSION: "${TSESSION_VERSION:-}"}}

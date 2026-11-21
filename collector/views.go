@@ -396,15 +396,10 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	if si != nil {
 		sealedNs = si.SealedAt.UnixNano() | 1
 	}
-	c.vmu.Lock()
-	old, gen := c.views[id], c.vgen
-	if old != nil && old.head == head && old.sealedNs == sealedNs {
-		c.vtick++
-		old.used = c.vtick
-		c.vmu.Unlock()
+	old, gen, fresh := c.cachedView(id, head, sealedNs)
+	if fresh {
 		return old, nil
 	}
-	c.vmu.Unlock()
 
 	evs, err := c.extend(ctx, id, old, head)
 	if err != nil {
@@ -420,12 +415,34 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 	} else {
 		e.head = 0
 	}
+	c.cacheView(id, e, gen)
+	return e, nil
+}
+
+// cachedView returns the cached view of id and the generation it was read
+// in; fresh says that it is current for head and sealedNs. The unlocks of
+// c.vmu are deferred: a delete by the retention loop, which is started again
+// after a panic, waits for it, and so does every read.
+func (c *Collector) cachedView(id string, head uint64, sealedNs int64) (old *viewEntry, gen uint64, fresh bool) {
 	c.vmu.Lock()
+	defer c.vmu.Unlock()
+	old, gen = c.views[id], c.vgen
+	if old != nil && old.head == head && old.sealedNs == sealedNs {
+		c.vtick++
+		old.used = c.vtick
+		return old, gen, true
+	}
+	return old, gen, false
+}
+
+// cacheView caches e, built since generation gen, and makes room for it.
+func (c *Collector) cacheView(id string, e *viewEntry, gen uint64) {
+	c.vmu.Lock()
+	defer c.vmu.Unlock()
 	if c.vgen != gen {
 		// A session was deleted while this view was being built; it may be
 		// this one, so the view is returned but not cached.
-		c.vmu.Unlock()
-		return e, nil
+		return
 	}
 	c.vtick++
 	e.used = c.vtick
@@ -440,6 +457,4 @@ func (c *Collector) viewOf(ctx context.Context, id string) (*viewEntry, error) {
 		}
 		delete(c.views, oldID)
 	}
-	c.vmu.Unlock()
-	return e, nil
 }

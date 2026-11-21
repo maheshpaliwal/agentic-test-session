@@ -73,6 +73,10 @@ func newActor(id string, s *Sequencer) *sessionActor {
 	a := &sessionActor{id: id, seqr: s, st: s.st, window: s.window,
 		ch: make(chan func(*sessionActor)), quit: make(chan struct{}), done: make(chan struct{})}
 	a.lastActive.Store(time.Now().UnixNano())
+	// Bare on purpose: a panic here must end the process. The callers of run
+	// wait for the actor, and its state (next Seq, the dedupe set, the buffer)
+	// may be half changed: recovered, it would acknowledge events it lost.
+	// The process gone, the SDKs send again and the actor loads from the store.
 	go a.loop()
 	return a
 }

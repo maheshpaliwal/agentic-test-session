@@ -138,7 +138,7 @@ func (m *Mem) GetSeal(_ context.Context, sid string) (*SealInfo, error) {
 // PutSeal implements Store.
 func (m *Mem) PutSeal(_ context.Context, sid string, si SealInfo) error {
 	m.mu.Lock()
-	m.seal[sid] = si
+	m.seal[sid] = si // seal is made with the store, never nil: cannot panic
 	m.mu.Unlock()
 	return nil
 }
@@ -146,7 +146,7 @@ func (m *Mem) PutSeal(_ context.Context, sid string, si SealInfo) error {
 // DeleteSession implements Store.
 func (m *Mem) DeleteSession(_ context.Context, sid string) error {
 	m.mu.Lock()
-	delete(m.ev, sid)
+	delete(m.ev, sid) // two deletes: cannot panic
 	delete(m.seal, sid)
 	m.mu.Unlock()
 	return nil

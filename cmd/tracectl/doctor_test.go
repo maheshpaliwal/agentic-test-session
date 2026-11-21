@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,67 @@ func TestCLIDoctor(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "UNREACHABLE") || !strings.Contains(out, "connected services  2") ||
 		!strings.Contains(e, "unreachable") {
 		panic(fmt.Sprintf("doctor with the collector down: %d %s\n%s", code, e, out))
+	}
+}
+
+// A service whose /healthz answers 503 with a reason (a background goroutine
+// of it panicked and waits for its restart) is shown as degraded, with the
+// reason, cleaned; the rest of the report is still made, and the command
+// fails.
+func TestCLIDoctorShowsADegradedService(t *testing.T) {
+	env := newResultsEnv(t)
+	sick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "degraded: a background goroutine panicked and waits to be restarted: janitor; the log has the panic \x1b[31m http://u:hunter2@h/\n")
+	}))
+	defer sick.Close()
+	env.col = sick.URL
+	code, out, e := env.tc("doctor")
+	if code != 1 || !strings.Contains(out, "collector      "+env.col+"  DEGRADED  a background goroutine panicked and waits to be restarted: janitor") ||
+		!strings.Contains(out, "control plane  "+env.cp+"  ok") || !strings.Contains(out, "connected services  0") ||
+		!strings.Contains(e, "a service is degraded") || strings.Contains(e, "unreachable") {
+		panic(fmt.Sprintf("doctor with a degraded collector: %d %s\n%s", code, e, out))
+	}
+	if strings.Contains(out, "hunter2") || strings.Contains(out, "\x1b") {
+		panic("the reason is printed as it came:\n" + out)
+	}
+	if code, out, _ := env.tc("doctor", "--json"); code != 1 || !strings.Contains(out, `"degraded": "a background goroutine panicked`) {
+		panic(fmt.Sprintf("doctor --json: %d\n%s", code, out))
+	}
+
+	// A degraded control plane still answers: its part of the report is made.
+	env = newResultsEnv(t)
+	real := env.cp
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "degraded: a background goroutine panicked and waits to be restarted: sweep; the log has the panic\n")
+			return
+		}
+		resp, err := http.Get(real + r.URL.RequestURI())
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	defer front.Close()
+	env.cp = front.URL
+	code, out, e = env.tc("doctor")
+	if code != 1 || !strings.Contains(out, "DEGRADED  a background goroutine panicked and waits to be restarted: sweep") ||
+		!strings.Contains(out, "active sessions  0") || !strings.Contains(e, "a service is degraded") {
+		panic(fmt.Sprintf("doctor with a degraded control plane: %d %s\n%s", code, e, out))
+	}
+
+	// A 503 without the reason is not a degraded service: it is not ours.
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusServiceUnavailable)
+	}))
+	defer other.Close()
+	env.col = other.URL
+	if code, out, e := env.tc("doctor"); code != 1 || !strings.Contains(out, "UNREACHABLE  GET /healthz: 503") || !strings.Contains(e, "unreachable") {
+		panic(fmt.Sprintf("doctor behind a failing proxy: %d %s\n%s", code, e, out))
 	}
 }
 

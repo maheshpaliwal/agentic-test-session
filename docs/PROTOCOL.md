@@ -91,6 +91,15 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   more than 4 KiB), with `error`; `failed` (it could not be stored: send it again). The request itself is `400`
   without `instance` or with more than 256 reports, and `413` over 1 MiB. `reports` may be empty: the request then
   says only that the instance's reports arrive.
+  An optional `stopped` (text, at most 256 bytes are kept) says that the instance stopped recording after an internal
+  error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. Every session that
+  is `ACTIVE` or `DRAINING` when the request arrives is then `incomplete`, with an `incomplete_reasons` entry that
+  names the service and the instance (`... stopped recording after an internal error (...)`), whether the instance
+  had recorded events for it or not: what it would have recorded since is what is missing. The SDK sends it at the
+  panic, every second while its subscriber is being restarted, and once when recording has resumed; when the
+  subscriber stays stopped it sends it once. Sessions started after the last such request are not marked. A control plane that does not know the field ignores it. Like the reports it is the caller's own
+  word: anyone who can reach the control plane can make every running session incomplete with it, as with reports
+  they can one by one.
 - `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,delivered_total,last_error,final} ->
   `{"accepted":true|false}`: one report, for clients that send one session at a time (SDKs use the batch).
   `400` for a body that is not such a report, `413` for one over 4 KiB, `404` unknown session, `409` when the
@@ -429,7 +438,8 @@ used to export as with `no events`. Only a session without events that the contr
 still exports as an empty file, which does not open (`no events, and no session`).
 
 ### Control plane hardening
-- Every endpoint except `GET /healthz` (static `ok`, any Host) passes `core.LoopbackGuard`: Host must be loopback or in
+- Every endpoint except `GET /healthz` (any Host; `ok`, or `503` and `degraded: <reason>` while a background goroutine
+  that panicked waits for its restart, see "Health and panics" in [`CONFIG.md`](CONFIG.md)) passes `core.LoopbackGuard`: Host must be loopback or in
   `--allowed-hosts`/`TSESSION_CP_ALLOWED_HOSTS` (e.g. `controlplane:7070`); a request with an `Origin` header is rejected
   unless listed in `--allowed-origins`/`TSESSION_CP_ALLOWED_ORIGINS` (default none; includes `Origin: null`); a request with a
   body needs `Content-Type: application/json`. Non-browser clients (SDK, tracectl, SSE subscriber) send no Origin and are unaffected.
@@ -644,7 +654,8 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
   store (deleted by another process) rebuilds its state from the store instead of failing on Seq conflicts.
 - **Seal** is serialised on the session (concurrent calls write the bundle once; files are written via temp+rename)
   and idempotent.
-- **Access control**: the whole API except `GET /healthz` is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
+- **Access control**: the whole API except `GET /healthz` (`ok`, or `503` and `degraded: <reason>`, see "Health and
+  panics" in [`CONFIG.md`](CONFIG.md)) is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
   `--allowed-hosts` / `TSESSION_COLLECTOR_ALLOWED_HOSTS`, comma-separated; browser `Origin` must be listed in
   `--allowed-origins` / `TSESSION_COLLECTOR_ALLOWED_ORIGINS`; the POST bodies the collector accepts are
   `application/x-protobuf` (ingest, which refuses anything else) and `application/json` (the internal

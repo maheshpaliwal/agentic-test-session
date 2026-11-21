@@ -34,7 +34,8 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 
 	hc := cmp.Or(c.opts.HTTPClient, http.DefaultClient)
 	rep := doctorReport{ControlPlane: probe(ctx, hc, cp), Collector: probe(ctx, hc, col), Subscribers: []client.Subscriber{}}
-	if rep.ControlPlane.OK {
+	// A degraded control plane still answers: what it knows is shown.
+	if rep.ControlPlane.OK || rep.ControlPlane.Degraded != "" {
 		if active, err := client.List(ctx, c.opts, "ACTIVE"); err == nil {
 			rep.ActiveSessions = len(active)
 		} else {
@@ -65,8 +66,11 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 	} else {
 		rep.print(c.stdout)
 	}
-	if !rep.ControlPlane.OK || !rep.Collector.OK {
+	switch unreachable := func(p probeResult) bool { return !p.OK && p.Degraded == "" }; {
+	case unreachable(rep.ControlPlane) || unreachable(rep.Collector):
 		return fmt.Errorf("doctor: a service is unreachable")
+	case !rep.ControlPlane.OK || !rep.Collector.OK:
+		return fmt.Errorf("doctor: a service is degraded: it answers, and says that a background goroutine of it panicked; its log has the panic")
 	}
 	if n := len(rep.Subscribers); n < *need {
 		return checkError{msg: fmt.Sprintf("check failed: %d service(s) connected, --require-services wants %d", n, *need)}
@@ -123,6 +127,10 @@ type probeResult struct {
 	URL   string `json:"url"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Degraded is why a service that answers says it is not healthy (its
+	// /healthz answered 503 with a reason): a background goroutine of it
+	// panicked and waits for its restart, or it is about to exit.
+	Degraded string `json:"degraded,omitempty"`
 }
 
 type doctorReport struct {
@@ -150,9 +158,15 @@ func probe(ctx context.Context, hc *http.Client, base string) probeResult {
 		return res
 	}
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	if resp.StatusCode != http.StatusOK {
 		res.Error = "GET /healthz: " + resp.Status
+		// The service says why. It is another process's word, printed into a
+		// terminal or a CI log: cleaned and cut like a delivery error.
+		if why, ok := strings.CutPrefix(strings.TrimSpace(string(body)), "degraded:"); ok && resp.StatusCode == http.StatusServiceUnavailable {
+			res.Degraded = clip(scrub.Text(ident.CleanN(strings.TrimSpace(why), 1024)), 300)
+		}
 		return res
 	}
 	res.OK = true
@@ -162,14 +176,17 @@ func probe(ctx context.Context, hc *http.Client, base string) probeResult {
 func (r doctorReport) print(w io.Writer) {
 	line := func(name string, p probeResult) {
 		status := "ok"
-		if !p.OK {
+		switch {
+		case p.Degraded != "":
+			status = "DEGRADED  " + p.Degraded
+		case !p.OK:
 			status = "UNREACHABLE  " + p.Error
 		}
 		fmt.Fprintf(w, "%-14s %s  %s\n", name, p.URL, status)
 	}
 	line("control plane", r.ControlPlane)
 	line("collector", r.Collector)
-	if !r.ControlPlane.OK {
+	if !r.ControlPlane.OK && r.ControlPlane.Degraded == "" {
 		return
 	}
 	if r.KillSwitch {

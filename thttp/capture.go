@@ -153,7 +153,7 @@ func (l *limitBuf) body(contentType string) any {
 	}
 	// Work on a private copy: the buffer may still be written to.
 	l.mu.Lock()
-	b, truncated, total := bytes.Clone(l.buf.Bytes()), l.truncated, l.total
+	b, truncated, total := bytes.Clone(l.buf.Bytes()), l.truncated, l.total // a copy and two reads: cannot panic
 	l.mu.Unlock()
 	if len(b) == 0 {
 		return nil

@@ -174,6 +174,9 @@ type reportCP struct {
 	sizes  []int    // the reports of every accepted batch
 	// announced is the X-Tsession-Delivery-Instance of every stream opened.
 	announced []string
+	// stopped is what the accepted batches said about recording having
+	// stopped (deliveryBatch.Stopped), in order.
+	stopped []string
 }
 
 func newReportCP(t *testing.T, state string) *reportCP {
@@ -243,6 +246,9 @@ func (cp *reportCP) batch(w http.ResponseWriter, r *http.Request) {
 		cp.hellos++
 	} else {
 		cp.posts++
+	}
+	if b.Stopped != "" {
+		cp.stopped = append(cp.stopped, b.Stopped)
 	}
 	cp.sizes = append(cp.sizes, len(b.Reports))
 	results := make([]map[string]string, len(b.Reports))

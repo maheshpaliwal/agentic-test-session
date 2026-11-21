@@ -142,6 +142,8 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	relay := &signalRelay{abort: abort}
 	relayDone := make(chan struct{})
 	defer close(relayDone)
+	// Bare on purpose: tracectl is a command, and one that went on without its
+	// signal relay could not be interrupted; a panic must end it, loudly.
 	go relay.run(sigs, relayDone)
 
 	// The id, and where tracectl found the services if it was told on the

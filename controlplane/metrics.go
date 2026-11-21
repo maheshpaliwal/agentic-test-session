@@ -17,6 +17,8 @@ type telemetry struct {
 	sealRetries    *metrics.CounterVec // result: success | failure
 	sealsAbandoned *metrics.Counter
 	deleted        *metrics.Counter
+	// Panics recovered in the control plane's own goroutines.
+	panics *metrics.CounterVec // goroutine: sweep | drain | seal_retry | compaction
 }
 
 func newTelemetry(m *Manager) *telemetry {
@@ -79,5 +81,7 @@ func newTelemetry(m *Manager) *telemetry {
 		sealsAbandoned: r.Counter("tsession_controlplane_seals_abandoned_total",
 			"Sessions whose pending seal was given up after the pending budget (seal_error stays)."),
 		deleted: r.Counter("tsession_controlplane_sessions_deleted_total", "Sessions deleted through the API."),
+		panics: r.CounterVec("tsession_controlplane_goroutine_panics_total",
+			"Panics recovered in a background goroutine, by goroutine (each is logged with its stack; sweep and drain are restarted with backoff, and /healthz answers 503 meanwhile).", "goroutine"),
 	}
 }

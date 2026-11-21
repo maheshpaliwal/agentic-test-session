@@ -113,7 +113,7 @@ func Start(cfg Config) error {
 // Flush synchronously exports buffered events (bounded). No-op if not started.
 func Flush(timeout time.Duration) bool {
 	mu.Lock()
-	s := cur
+	s := cur // one read: cannot panic
 	mu.Unlock()
 	if s == nil {
 		return true
@@ -124,7 +124,7 @@ func Flush(timeout time.Duration) bool {
 // Stop flushes, shuts down background work and restores core to disabled.
 func Stop() {
 	mu.Lock()
-	s := cur
+	s := cur // a read and an assignment: cannot panic
 	cur = nil
 	mu.Unlock()
 	if s == nil {

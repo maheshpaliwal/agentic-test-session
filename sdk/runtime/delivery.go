@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 )
 
@@ -54,6 +55,11 @@ type deliveryBatch struct {
 	Instance       string        `json:"instance"`
 	DeliveredTotal uint64        `json:"delivered_total"`
 	Reports        []batchReport `json:"reports"`
+	// Stopped is set when this process stopped recording after an internal
+	// error, and says how (see Subscriber.panicked). The control plane marks
+	// the sessions that run when it hears this incomplete; one that does not
+	// know the field ignores it.
+	Stopped string `json:"stopped,omitempty"`
 }
 
 // batchReport is one report of a batch: a deliveryReport without what the
@@ -174,6 +180,10 @@ type reporter struct {
 	retryAt  time.Time // no report before this, after a failed one (see paused)
 	kickedAt time.Time
 	urgentOf *snapshot // the active set whose draining sessions the exporter was told of
+	// toldAt is when the control plane last took a batch that said that
+	// recording stopped; wasBlind: the set was unknown at the last pass.
+	toldAt   time.Time
+	wasBlind bool
 	// down, outageLogged and lastOutageLog make the reporter say once when
 	// its reports stop arriving and once when they arrive again, at most one
 	// such pair per outageLogGap.
@@ -227,12 +237,13 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	// reach it trimmed, and a report must name the same instance.
 	r := &reporter{cfg: cfg, rec: rec, exp: exp, sub: sub, service: ident.Clean(service), instance: ident.Clean(instance),
 		sessions: map[string]*reportState{}, stop: make(chan struct{}), done: make(chan struct{})}
-	go r.loop()
+	startLoop("delivery reporter", "the control plane no longer hears what this process delivered, and names it in its sessions",
+		r.stop, r.loop, func() { close(r.done) }, nil)
 	return r
 }
 
+// loop may be started again after a panic (startLoop): it closes nothing.
 func (r *reporter) loop() {
-	defer close(r.done)
 	t := time.NewTicker(r.cfg.Tick)
 	defer t.Stop()
 	for {
@@ -310,7 +321,14 @@ type due struct {
 //
 // The set read here is the raw one: under the kill switch IsActive is false
 // for every session, and what was recorded before must still be accounted.
+//
+// When the subscriber panicked this process has stopped recording and does
+// not know the set (snapshot.blind). The control plane is told (see
+// Subscriber.panicked), also when nothing else is due. Until the set is
+// known again no account is forgotten, and what was recorded before is
+// reported on like that of a running session.
 func (r *reporter) pass() {
+	faultpoint.Hit("reporter.pass")
 	accts := r.rec.accounts()
 	sn := r.sub.snap.Load()
 	if sn != r.urgentOf {
@@ -325,6 +343,7 @@ func (r *reporter) pass() {
 	}
 	streaming := r.sub.streaming.Load()
 	now := time.Now()
+	r.renote(sn, now)
 	if busy := len(sn.active) > 0; busy != r.busy {
 		// The first session after none: the control plane expects to hear of
 		// this process now, so a pause that refused requests left behind (there
@@ -333,7 +352,7 @@ func (r *reporter) pass() {
 			r.retryAt = time.Time{}
 		}
 	}
-	hello := streaming && r.mode == modeBatch && (r.hello || r.beat(sn, now))
+	hello := r.mode == modeBatch && (streaming && (r.hello || r.beat(sn, now)) || r.sub.stopNote.Load() != nil)
 	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
 		return
 	}
@@ -341,7 +360,7 @@ func (r *reporter) pass() {
 	stuck, turned, urgent := false, false, false
 	var todo []due
 	for sid, a := range accts {
-		if _, live := sn.active[sid]; !live {
+		if _, live := sn.active[sid]; !live && !sn.blind {
 			r.rec.forget(sid)
 			delete(accts, sid)
 			continue
@@ -397,6 +416,26 @@ func (r *reporter) pass() {
 		r.kickedAt = now
 		r.exp.kick()
 	}
+}
+
+// renote makes the control plane hear again that this process does not
+// record, while that is so and passing: every KickEvery while the subscriber
+// is being started again, and once when it has the set again. The control
+// plane marks the sessions that run when it is told, so one telling at the
+// panic would miss a session that began during the restarts, which take up
+// to half a minute. A subscriber that stays stopped is told once (see
+// Subscriber.panicked): from then on this process is like a service that is
+// not connected, and takes no part in later sessions.
+func (r *reporter) renote(sn *snapshot, now time.Time) {
+	switch {
+	case sn.blind && !r.sub.gaveUp.Load():
+		if r.sub.stopNote.Load() == nil && now.Sub(r.toldAt) >= r.cfg.KickEvery {
+			r.sub.note(noteRestarting)
+		}
+	case r.wasBlind && !sn.blind:
+		r.sub.note(noteResumed)
+	}
+	r.wasBlind = sn.blind
 }
 
 // beat reports whether a heartbeat is due: the active set names a session,
@@ -475,6 +514,10 @@ const (
 // failed, or the control plane does not know the endpoint.
 func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 	b := deliveryBatch{Service: r.service, Instance: r.instance, DeliveredTotal: total, Reports: make([]batchReport, len(chunk))}
+	note := r.sub.stopNote.Load()
+	if note != nil {
+		b.Stopped = *note
+	}
 	for i, x := range chunk {
 		b.Reports[i] = batchReport{Session: x.sid, Recorded: x.d.Recorded, Delivered: x.d.Delivered, Dropped: x.d.Dropped,
 			Buffered: x.d.Buffered, LastError: x.d.LastError, Final: x.d.Final}
@@ -501,6 +544,10 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 			}
 		}
 		r.hello, r.beatAt = false, time.Now()
+		if note != nil {
+			r.toldAt = r.beatAt
+		}
+		r.sub.stopNote.CompareAndSwap(note, nil) // told; a newer note stays
 		r.sub.setAnnounce(true)
 		r.up()
 		return true
@@ -663,7 +710,7 @@ func (r *reporter) close(timeout time.Duration) {
 	var last []batchReport
 	for sid, a := range r.rec.accounts() {
 		st := r.sessions[sid]
-		if _, live := sn.active[sid]; !live || st != nil && st.closed {
+		if _, live := sn.active[sid]; !live && !sn.blind || st != nil && st.closed {
 			continue
 		}
 		d := r.report(a, true, total)
