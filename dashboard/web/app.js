@@ -1770,17 +1770,17 @@
         const r = await col('/v1/sessions/' + encodeURIComponent(D.id) + '/entities/' + encodeURIComponent(x.store) + '/' + encodeURIComponent(x.entity) + '/' + encodeURIComponent(U.pkRaw(x.pk)));
         if (my !== seqNo) return;
         clear(detail);
-        const ms = asList(r, 'mutations');
-        const rbN = ms.filter((it) => (it.effective !== undefined ? it.effective : (it.mutation || {}).effective) === false).length;
+        /* The collector's history: {store, entity, pk, mutations: [{seq, op, before, after, diff, effective, flags, ...}]}
+           (docs/PROTOCOL.md). Demo mode and opened files answer with the same document. */
+        const ms = r && Array.isArray(r.mutations) ? r.mutations : [];
+        const rbN = ms.filter((it) => it.effective === false).length;
         const unN = U.uncertainCount(ms);
         detail.appendChild(h('div', { class: 'edetail-head' }, tag(x.store), h('h2', { text: x.entity }), span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }),
           tag(ms.length + (ms.length === 1 ? ' mutation' : ' mutations')), rbN ? tag(rbN + ' rolled back', 't-warn', null, 'retry') : null, unN ? tag(unN + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null));
         if (!ms.length) detail.appendChild(emptyState('events', 'No mutations', 'Nothing recorded for this entity.'));
         const rail = h('ol', { class: 'rail', 'aria-label': 'Mutation history, oldest first' });
         ms.forEach((it) => {
-          const m = Object.assign({}, it.mutation || {}, it);
-          delete m.mutation;
-          const eff = it.effective !== undefined ? it.effective : (it.mutation || {}).effective;
+          const m = it, eff = it.effective;
           const ev = it.seq !== undefined ? D.bySeq.get(it.seq) : null;
           const lead = [span('mono', '#' + it.seq), ev ? h('button', { type: 'button', class: 'linkbtn', text: 'open event', onclick: () => openDrawer(D, ev, { focus: false }) }) : null];
           const mu = Object.assign({ store: x.store, entity: x.entity, pk: x.pk }, m, { effective: eff });

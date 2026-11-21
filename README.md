@@ -181,7 +181,9 @@ tracectl report my-run --format junit -o tsession-junit.xml
 
 # keep a run after the job is gone: export it, then open the file without the services
 tracectl export my-run -o run.ndjson
-go run ./cmd/dashboard -open run.ndjson
+go run ./cmd/dashboard -open run.ndjson      # the UI, and it prints the flags for the next line
+# the same commands as on a live session (summary, events, trace, entities, history, show, report, digest, diff)
+tracectl --cp http://127.0.0.1:7072/api/cp --collector http://127.0.0.1:7072/api/col digest run
 
 # or let failed Go tests save theirs
 TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
@@ -189,7 +191,7 @@ TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
 
 An export holds recorded payloads, masked by field name only. Treat it like test data, not as something safe to
 share; whether it may go to CI storage is a question for your own data-handling policy. The opened session is
-named after the file.
+named after the file (`run` above), keeps its id, and is read-only: stop, rename and delete are refused.
 
 ## The session is empty?
 
