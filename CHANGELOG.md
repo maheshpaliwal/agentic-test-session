@@ -81,6 +81,11 @@ Rolling back:
   sessions could not be read into a response. `client.ListPage`; `tracectl list --limit N`; `tracectl` resolves
   a name with the filter instead of listing everything; the dashboard loads the newest 200 sessions with
   "Load more", and its search covers the sessions that are loaded.
+- **Session counts by id.** The collector's `GET /v1/sessions` takes `ids=<comma-separated session ids>` (at most
+  1000) and answers `[{id,event_count,sealed}]` for those sessions from one head and one seal lookup each,
+  instead of listing every stored session (a table scan on DynamoDB). Ids the store could not answer are counted
+  in `X-Tsession-Unanswered`. Without `ids` the endpoint is unchanged. The dashboard asks only for the sessions
+  it is showing; before, it fetched the collector's whole list every 3 seconds.
 - **Dashboard.** "Copy as curl" on HTTP events; a link from a mutation to its entity history; the call tree
   shows each trigger's status and summary; a "seal retrying" label.
 - **Control plane.** A seal that failed past its 30s budget is retried in the background (backoff up to 1m, for
