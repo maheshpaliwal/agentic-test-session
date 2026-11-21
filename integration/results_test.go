@@ -130,7 +130,7 @@ func TestClientTypesMatchCollector(t *testing.T) {
 			PendingIDs: []string{"p"}, Flags: map[string]int{"f": 1}, Mutations: map[string]map[string]int{"s": {"e": 1}},
 			Quarantined: 1, Incomplete: true, Sealed: true, DroppedEvents: 2, DurationNs: 3, PendingAsync: 1, EventCount: 4,
 			ByService: map[string]int{"svc": 1}}, &client.Summary{}},
-		"entity": {collector.Entity{Store: "s", Entity: "e", PK: "p", MutationCount: 1}, &client.Entity{}},
+		"entity": {collector.Entity{Store: "s", Entity: "e", PK: "p", MutationCount: 1, Uncertain: 1, Services: []string{"svc"}}, &client.Entity{}},
 		"history": {collector.EntityHistory{Store: "s", Entity: "e", PK: "p", Mutations: []collector.EntityMutation{
 			{Seq: 1, SpanID: "sp", Service: "svc", Kind: "db.write", TxID: "t", EndNs: 1, Op: "update", Source: "sdk", Effective: &yes}}},
 			&client.EntityHistory{}},

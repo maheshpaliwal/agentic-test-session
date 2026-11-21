@@ -14,6 +14,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
@@ -289,6 +290,9 @@ func printEntities(w io.Writer, ents []client.Entity) {
 		if e.Uncertain > 0 { // the key or row image of that many is incomplete: "history" shows the flags
 			line += fmt.Sprintf(", %d uncertain", e.Uncertain)
 		}
+		if len(e.Services) > 0 { // absent from an older collector
+			line += "  by " + clip(strings.Join(e.Services, ", "), 60)
+		}
 		fmt.Fprintln(w, line)
 	}
 	fmt.Fprintf(w, "%d entities\n", len(ents))
@@ -344,6 +348,16 @@ func printHistory(w io.Writer, h client.EntityHistory) {
 	head := fmt.Sprintf("%s/%s %s: %d mutation(s)", h.Store, h.Entity, h.PK, len(h.Mutations))
 	if n := uncertainCount(h.Mutations); n > 0 {
 		head += fmt.Sprintf(", %d uncertain (see the flags)", n)
+	}
+	// Who wrote it, as "entities" says it; each line below names its own.
+	services := set.Set[string]{}
+	for _, m := range h.Mutations {
+		if m.Service != "" {
+			services.Add(m.Service)
+		}
+	}
+	if len(services) > 0 {
+		head += "  by " + clip(strings.Join(set.Sorted(services), ", "), 60)
 	}
 	fmt.Fprintln(w, head)
 	for _, m := range h.Mutations {

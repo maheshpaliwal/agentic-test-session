@@ -486,12 +486,14 @@ still exports as an empty file, which does not open (`no events, and no session`
     (`from_seq` is inclusive; `limit` is at most 10000)
   - `GET /v1/sessions/{id}/trace` -> tree: `{"session_id","roots":[Node]}` where
     `Node={"event":Event,"children":[Node],"linked":[Node]}` (`linked` = worker spans whose LinkIDs contain this span)
-  - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count,uncertain}`; `pk` is the key as
+  - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count,uncertain,services}`; `pk` is the key as
     canonical JSON (`{}` when it is not known). `uncertain` (optional, omitted when 0) counts the mutations whose
     event carries a flag saying the recorded key or row image is incomplete or uncertain: `pk_unknown`,
     `pk_not_unique`, `pk_lookup_failed`, `upsert_unknown`, `after_unavailable`, `after_from_args`, `after_failed`,
     `image_skipped`, `image_timeout`, `image_failed`, `image_truncated`, `diff_truncated`, `diff_concurrent` (a flag with a reason,
-    `image_skipped:deadline`, counts as its base name; `core.UncertainFlag`)
+    `image_skipped:deadline`, counts as its base name; `core.UncertainFlag`). `services` (optional, omitted when no
+    event names one) are the services whose events changed the entity, sorted: two services that mask one Redis key
+    each with its own secret record two entities, and this tells them apart
   - `GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}` ->
     `{"store","entity","pk","mutations":[{seq,span_id,service,kind,tx_id,end_ns,op,before,after,diff,source,effective,flags}]}`
     in Seq order; `{pk}` is the canonical JSON key (`{}` for the unknown key; an empty segment is not a route) or,

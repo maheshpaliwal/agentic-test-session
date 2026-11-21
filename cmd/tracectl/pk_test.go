@@ -192,7 +192,7 @@ func TestCLIHistoryAndEntitiesShowUncertainty(t *testing.T) {
 	}
 
 	code, out, e = env.tc("history", "run-1", "postgres", "stock", "w")
-	want := `postgres/stock {"sku":"w"}: 4 mutation(s), 2 uncertain (see the flags)
+	want := `postgres/stock {"sku":"w"}: 4 mutation(s), 2 uncertain (see the flags)  by api
 #2     update   effective    api          db.write
        flags: pk_not_unique, after_unavailable
        after image unavailable: the new values were not captured
@@ -219,10 +219,10 @@ func TestCLIHistoryAndEntitiesShowUncertainty(t *testing.T) {
 		panic(fmt.Sprintf("a change without flags must not carry the field: %v", h.Mutations[3]))
 	}
 
-	// A history without flags (an older collector) prints as it always did.
+	// A history without flags (an older collector) prints none, and no count of uncertain changes.
 	env.hist = nil
 	if _, out, _ := env.tc("history", "run-1", "postgres", "orders", "42"); strings.Contains(out, "flags") || strings.Contains(out, "uncertain") ||
-		!strings.HasPrefix(out, `postgres/orders {"id":42}: 2 mutation(s)`+"\n") {
+		!strings.HasPrefix(out, `postgres/orders {"id":42}: 2 mutation(s)  by api, worker`+"\n") {
 		panic(fmt.Sprintf("history without flags:\n%s", out))
 	}
 }

@@ -1769,7 +1769,7 @@
   function mkEntities(D, root) {
     const list = h('div', { class: 'elist', role: 'listbox', 'aria-label': 'Entities' });
     const detail = h('div', { class: 'card pad' }, emptyState('events', 'Select an entity', 'Pick an entity on the left to see its ordered mutation history.'));
-    const q = h('input', { class: 'field', type: 'search', placeholder: 'Filter store, entity, pk', 'aria-label': 'Filter entities', value: D.entQ || '', oninput: (e) => { D.entQ = e.target.value.toLowerCase(); paintList(); } });
+    const q = h('input', { class: 'field', type: 'search', placeholder: 'Filter store, entity, pk, service', 'aria-label': 'Filter entities', value: D.entQ || '', oninput: (e) => { D.entQ = e.target.value.toLowerCase(); paintList(); } });
     S.search = q;
     root.appendChild(h('div', { class: 'toolbar' }, h('div', { class: 'search' }, icon('search', 'sm'), q, span('kbd', '/'))));
     root.appendChild(h('div', { class: 'split' }, h('div', { class: 'card' }, list), detail));
@@ -1778,11 +1778,12 @@
     const keyOf = (x) => [x.store, x.entity, U.pkRaw(x.pk)].join('\u0000');
     function paintList() {
       clear(list); items = [];
-      const vis = (D.ents || []).filter((x) => !D.entQ || [x.store, x.entity, U.pkLabel(x.pk)].join(' ').toLowerCase().indexOf(D.entQ) >= 0);
+      const vis = (D.ents || []).filter((x) => !D.entQ || [x.store, x.entity, U.pkLabel(x.pk)].concat(U.entityServices(x)).join(' ').toLowerCase().indexOf(D.entQ) >= 0);
       if (!vis.length) { list.appendChild(h('div', { class: 'empty' }, h('p', { text: D.ents ? (D.ents.length ? 'No entities match.' : 'No mutations recorded in this session.') : 'Loading entities…' }))); return; }
       vis.forEach((x) => {
         const b = h('button', { type: 'button', class: 'elist-item', role: 'option', 'aria-current': D.entSel === keyOf(x) ? 'true' : null, onclick: () => selectEnt(x) },
-          h('div', { class: 'l1' }, tag(x.store), h('strong', { text: x.entity })),
+          h('div', { class: 'l1' }, tag(x.store), h('strong', { text: x.entity }), h('span', { class: 'grow' }),
+            U.entityServices(x).map((sv) => tag(sv, 't-mono', 'a service that changed this entity'))),
           h('div', { class: 'l2' }, span('mono', U.pkLabel(x.pk)), h('span', { class: 'grow' }), x.uncertain > 0 ? tag(x.uncertain + ' uncertain', 't-warn', UNCERTAIN_HELP, 'warn') : null,
             span('note', x.mutation_count + (x.mutation_count === 1 ? ' mutation' : ' mutations'))));
         b._x = x; items.push(b); list.appendChild(b);

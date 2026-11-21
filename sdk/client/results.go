@@ -71,6 +71,11 @@ type Entity struct {
 	// "pk_not_unique"); History shows which. Zero also from a collector that
 	// predates the field.
 	Uncertain int `json:"uncertain,omitempty"`
+	// Services are the services whose events changed the entity, sorted. Two
+	// services that mask one Redis key each with its own secret record two
+	// entities, told apart by this. Empty also from a collector that predates
+	// the field.
+	Services []string `json:"services,omitempty"`
 }
 
 // EntityMutation is one change to an entity.

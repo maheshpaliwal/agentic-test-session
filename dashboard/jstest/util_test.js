@@ -126,6 +126,11 @@ assert.deepStrictEqual(U.sessionWarnings({ delivery_unconfirmed: ['x'] }), []);
   assert.deepStrictEqual(U.deliveryRows(null), []);
   assert.deepStrictEqual(U.deliveryRows({ delivery: 'x' }), []);
 }
+// The services of an entity row; a row of an older collector has none.
+assert.deepStrictEqual(U.entityServices({ services: ['api', '', 3, 'worker'] }), ['api', 'worker']);
+assert.deepStrictEqual(U.entityServices({ store: 'redis' }), []);
+assert.deepStrictEqual(U.entityServices({ services: 'api' }), []);
+assert.deepStrictEqual(U.entityServices(null), []);
 // The flags that mark a change uncertain (the Go test holds the whole list against core.UncertainFlag).
 assert.ok(U.uncertainFlag('diff_concurrent') && U.uncertainFlag('image_skipped:deadline') && !U.uncertainFlag('truncated'));
 assert.strictEqual(U.kindGroup('api.in'), 'api');

@@ -125,6 +125,9 @@
   // How many entries of an entity history carry such a flag (entries of an older collector have no flags: 0).
   const uncertainCount = (ms) => (ms || []).filter((m) => m && Array.isArray(m.flags) && m.flags.some(uncertainFlag)).length;
 
+  // The services that changed an entity, as the entities list names them (none from an older collector).
+  const entityServices = (x) => x && Array.isArray(x.services) ? x.services.filter((s) => typeof s === 'string' && s) : [];
+
   const unresolvedMut = (e) => !!e && (e.mutations || []).some((m) => m.effective === null || m.effective === undefined);
   const hasUnresolved = (events) => events.some(unresolvedMut);
   const effSig = (e) => (e.mutations || []).map((m) => m.effective === true ? 'T' : m.effective === false ? 'F' : 'N').join('') + '|' + (e.flags || []).join(',');
@@ -638,7 +641,7 @@
       ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
   }
 
-  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flatten, diffRows, HIDDEN_CHANGE, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flatten, diffRows, HIDDEN_CHANGE, flagBase, uncertainFlag, uncertainCount, entityServices, unresolvedMut, hasUnresolved,
     mergeEvents, ndjson, sessionWarnings, deliveryUnconfirmed, deliveryRows, deliverySummary, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
