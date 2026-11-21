@@ -76,7 +76,7 @@
 // ("image_skipped" with its reason, "image_timeout" or "image_failed"; see
 // the caveats below) and the mutation has the after image only.
 //
-// Three flags mark a write whose key or new values are not known (a fourth,
+// These flags mark a write whose key or new values are not known (one more,
 // "upsert_unknown", is described under Upserts):
 //
 //   - "pk_unknown": no value for the key columns was found in the row images,
