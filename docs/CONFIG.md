@@ -15,8 +15,17 @@ Run a binary with `-h` for the authoritative list.
 | `TSESSION_PROPAGATE_HOSTS` | all hosts | Comma-separated host suffixes the patched default HTTP transport sends session headers to. |
 | `TSESSION_NO_PROPAGATE_HOSTS` | none | Host suffixes it never sends them to; wins over the list above. |
 | `TSESSION_BIND_PRIORITY` | none | Order in which binding attributes are tried; see [`BINDING.md`](BINDING.md). |
+| `TSESSION_OVERWRITE_TRACEPARENT` | off | Only the exact value `true` switches it on. Replace a `traceparent` the application set on an outgoing request or message with tsession's. For a rollout only; see below. |
 
 The two propagation lists apply to `http.DefaultTransport` as patched by `autoinit`, not to `thttp.Client`.
+
+`TSESSION_OVERWRITE_TRACEPARENT` applies to every carrier (HTTP, gRPC, queues). By default tsession sends its trace
+context in `x-tsession-traceparent` and leaves the application's `traceparent` alone. A service downstream whose SDK
+predates that key reads `traceparent`, so behind an upstream that runs application tracing (OpenTelemetry, for
+example) its events are recorded in the session with a wrong parent. Setting the variable on the upstream restores
+those links and breaks the application's own trace on that hop, as before. Unset it once the downstream services
+are upgraded. Services that start the SDK with `runtime.Start` set `Config.OverwriteTraceparent`. Details:
+[`PROTOCOL.md`](PROTOCOL.md), "Trace context propagation".
 
 ## Collector (`collector/cmd/collector`)
 
