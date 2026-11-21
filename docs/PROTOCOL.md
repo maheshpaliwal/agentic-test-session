@@ -321,15 +321,25 @@ together, replacing values already there. `traceparent` is set to the same trace
    headers, a proxy that forwards headers, a message value produced twice. Or
 3. `TSESSION_OVERWRITE_TRACEPARENT=true` (`runtime.Config.OverwriteTraceparent`); see the compatibility note.
 
+"Has no `traceparent`" is a question about the key, not its value. A `traceparent` that is empty or not text (an SQS
+attribute of type Binary, an AMQP header holding a number) is the application's and is left. So is an HTTP header
+stored under a key that is not in canonical form (`req.Header["traceparent"] = ...`) and an AMQP header named
+`Traceparent`: tsession does not add a second one beside it. SQS attribute names are compared exactly.
+
+Rule 2 cannot tell who made the copy. A `traceparent` that a proxy filled from `x-tsession-traceparent`, or that the
+application's tracing passed on unchanged from a request on which tsession had written it (a propagator without a
+tracer does that), equals tsession's own value and is replaced on the next write like tsession's own. A
+`traceparent` with ids of the application's own is never equal to it.
+
 So a system without application tracing has the wire it had before, plus one key. The test client
 (`sdk/client`, `Session.Inject`) follows the same rule.
 
 **Reading** (`core.ExtractSpanContext`). The session comes from `x-tsession-id`; without it nothing is read. The trace
 and parent span come from `x-tsession-traceparent` when that key is current: the clock value after its `;` equals
 the carrier's `x-tsession-hlc`, or the carrier has no `x-tsession-hlc`. Otherwise, and when the key is absent or
-its trace context does not parse (four `-`-separated fields, a 32-character trace id and a 16-character span id),
-they come from `traceparent`, judged the same way. If neither parses, the event still joins the session, with a new
-trace id and no parent.
+its trace context does not parse, they come from `traceparent`. A trace context parses when it has four
+`-`-separated fields of which the second is a trace id of 32 hex digits and the third a span id of 16, neither all
+zeros. If neither key parses, the event still joins the session, with a new trace id and no parent.
 
 The clock value is what ties `x-tsession-traceparent` to the hop that wrote it. A service on an SDK that predates
 the key and passes a carrier on with its keys copied (a retry or dead-letter topic, a forwarded request) writes its
@@ -413,6 +423,28 @@ What follows from the tables:
   application's. The old receiver then links to the first sender, or reads the ids of the first sender's
   application tracing. The setting on the forwarder restores these links too.
 
+**Software between sender and receiver** must deliver `x-tsession-traceparent` as it was sent. When it does not,
+the receiver falls back to `traceparent`, which is right only where no application tracing wrote it:
+
+| What happens on the way | What the receiver reads |
+|---|---|
+| The key is dropped: a gateway, load balancer or service mesh that passes only listed request headers | `traceparent`, as from an old sender: correct without application tracing on the sender, otherwise the application's trace id and a parent that no recorded event has |
+| The value is changed: two `x-tsession-traceparent` headers joined into one with a comma, a truncated value | the same; a value that does not parse is never used in part |
+| `x-tsession-hlc` is dropped and `x-tsession-traceparent` is not | `x-tsession-traceparent`; the receiver's clock is not advanced by the sender's |
+| `x-tsession-hlc` is changed | `traceparent`: the key is taken for one copied by an old SDK |
+| `x-tsession-id` is dropped | nothing; the request is not part of the session, as before |
+
+What to configure:
+- **Gateways, load balancers and proxies that allow-list request headers**: add `x-tsession-traceparent` next to
+  `x-tsession-id` and `x-tsession-hlc`.
+- **Browsers.** A page that sends these headers on a cross-origin request needs `x-tsession-traceparent` in the
+  server's `Access-Control-Allow-Headers`, with the other three. Without it the preflight fails and the browser
+  does not send the request at all.
+- **SQS consumers that call `ReceiveMessage` themselves** with a list of `MessageAttributeNames` (instead of
+  `tqueue.ReceiveMessage`, which adds them, or `All`) must add `x-tsession-traceparent` to the list, next to
+  `traceparent`, `x-tsession-id`, `x-tsession-hlc`, `x-tsession-ctx` and `ts`. SQS does not return an attribute
+  that is not asked for, and the consumer then reads `traceparent`.
+
 ### Bindings
 Implements `docs/BINDING.md` (control plane half).
 - `POST /v1/sessions` accepts and Session responses carry `"bindings":[{"source","name","value"}]` (omitted when none).
@@ -461,14 +493,22 @@ SQS allows ten message attributes. The carrier uses the first form that fits:
 1. Full: `x-tsession-traceparent`, `x-tsession-id`, `x-tsession-hlc`, and `traceparent` when the message has none.
    Four free slots, or three when the application set `traceparent`.
 2. Compact: one `x-tsession-ctx` attribute holding all four keys (`k=v&k=v`, URL-encoded), when at least one slot
-   is free. No other attribute is written; a `traceparent` attribute next to it is the application's. An
-   application attribute that happens to be named `x-tsession-ctx` is not overwritten.
+   is free. No other attribute is written; a `traceparent` attribute next to it is the application's, and is
+   replaced only with `TSESSION_OVERWRITE_TRACEPARENT=true`. An application attribute that happens to be named
+   `x-tsession-ctx` is not overwritten.
 3. The side channel, when `SQSOptions.SideChannel` is set; otherwise propagation is skipped and the publish span is
    flagged `propagation_skipped:attr_limit`.
 
 A message with seven application attributes used the full form (three attributes) before `x-tsession-traceparent`
-existed and uses the compact form now. A consumer reads the context from where `x-tsession-id` is: the attributes,
-or else the compact attribute (the older name `ts` is still read), or else the side channel.
+existed and uses the compact form now. A consumer reads the context from where `x-tsession-id` is: the attributes
+alone when it is among them, or else the compact attribute (the older name `ts` is still read), or else the side
+channel.
+
+Carrier attributes on a message that is sent again with the attributes it was received with are replaced, or
+removed when this publish uses another form or none, and do not count against the limit: the three `x-tsession-`
+attributes, a `traceparent` that equals the trace context in `x-tsession-traceparent`, `x-tsession-ctx`, and a `ts`
+written by an older SDK. `x-tsession-ctx` and `ts` are recognised by their value (a compact context that holds a
+session id); an application attribute of either name is left as it is.
 
 Additional wrappers: `contrib/tredisv8` (go-redis v8 `Hook()` / `Wrap` / `WrapAny` for clients held behind an
 internal wrapper; same behaviour as tredis) and `contrib/tkafkaconfluent` (confluent-kafka-go `Produce` /

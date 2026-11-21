@@ -19,13 +19,20 @@ Run a binary with `-h` for the authoritative list.
 
 The two propagation lists apply to `http.DefaultTransport` as patched by `autoinit`, not to `thttp.Client`.
 
-`TSESSION_OVERWRITE_TRACEPARENT` applies to every carrier (HTTP, gRPC, queues). By default tsession sends its trace
-context in `x-tsession-traceparent` and leaves the application's `traceparent` alone. A service downstream whose SDK
-predates that key reads `traceparent`, so behind an upstream that runs application tracing (OpenTelemetry, for
-example) its events are recorded in the session with a wrong parent. Setting the variable on the upstream restores
-those links and breaks the application's own trace on that hop, as before. Unset it once the downstream services
-are upgraded. Services that start the SDK with `runtime.Start` set `Config.OverwriteTraceparent`. Details:
-[`PROTOCOL.md`](PROTOCOL.md), "Trace context propagation".
+`TSESSION_OVERWRITE_TRACEPARENT` applies to every carrier that puts the context in the request or message: HTTP,
+gRPC, Kafka, AMQP, and SQS in both its attribute forms. (With the SQS side channel the context is not in the
+message and nothing is replaced.) By default tsession sends its trace context in `x-tsession-traceparent` and leaves
+the application's `traceparent` alone. A service downstream whose SDK predates that key reads `traceparent`, so
+behind an upstream that runs application tracing (OpenTelemetry, for example) its events are recorded in the
+session with a wrong parent. Setting the variable on the upstream restores those links and breaks the application's
+own trace on that hop, as before. It cannot help where the application's tracing writes `traceparent` after
+tsession. Unset it once the downstream services are upgraded. Services that start the SDK with `runtime.Start` set
+`Config.OverwriteTraceparent`.
+
+The setting is not needed when receivers (servers, consumers) are upgraded before the services that call them:
+behind any sender, old or new, an upgraded receiver links at least as well as the old one did. The full table of version combinations, and
+what gateways, CORS configurations and hand-written SQS consumers must let through (`x-tsession-traceparent`), are
+in [`PROTOCOL.md`](PROTOCOL.md), "Trace context propagation".
 
 ## Collector (`collector/cmd/collector`)
 

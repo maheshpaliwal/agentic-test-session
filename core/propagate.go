@@ -220,13 +220,36 @@ func ownTraceparent(own, hlc string) string {
 	return tp
 }
 
-// parseTraceparent returns the ids in a traceparent value.
+// parseTraceparent returns the ids in a traceparent value: four "-"-separated
+// fields, of which the second is a trace id of 32 hex digits and the third a
+// span id of 16, neither all zeros (which W3C Trace Context defines as
+// invalid). The version and flags fields are not interpreted.
 func parseTraceparent(v string) (trace, span string, ok bool) {
 	parts := strings.Split(v, "-")
-	if len(parts) != 4 || len(parts[1]) != 32 || len(parts[2]) != 16 {
+	if len(parts) != 4 || !validID(parts[1], 32) || !validID(parts[2], 16) {
 		return "", "", false
 	}
 	return parts[1], parts[2], true
+}
+
+// validID reports whether s is n hex digits that are not all zeros. Upper
+// case is accepted: the ids are recorded as they arrive, as before.
+func validID(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	zero := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '0':
+		case '1' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+			zero = false
+		default:
+			return false
+		}
+	}
+	return !zero
 }
 
 // ExtractSpanContext parses c without validating the session is active.

@@ -183,6 +183,40 @@ func TestExtractSpanContextSources(t *testing.T) {
 	}
 }
 
+// A trace context whose ids are not hex digits, or are all zeros, is not one:
+// in x-tsession-traceparent it falls back to traceparent, in traceparent to a
+// new trace.
+func TestExtractRejectsInvalidIDs(t *testing.T) {
+	const trace, span = "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331"
+	zeros := strings.Repeat("0", 32)
+	for name, tp := range map[string]string{
+		"trace id not hex":    "00-" + strings.Repeat("z", 32) + "-" + span + "-01",
+		"span id not hex":     "00-" + trace + "-" + strings.Repeat("!", 16) + "-01",
+		"trace id all zeros":  "00-" + zeros + "-" + span + "-01",
+		"span id all zeros":   "00-" + trace + "-" + zeros[:16] + "-01",
+		"trace id too short":  "00-" + trace[:31] + "-" + span + "-01",
+		"span id too long":    "00-" + trace + "-" + span + "0-01",
+		"three fields":        "00-" + trace + "-" + span,
+		"five fields":         "00-" + trace + "-" + span + "-01-x",
+		"spaces around an id": "00- " + trace[:30] + " -" + span + "-01",
+	} {
+		c := MapCarrier{KeySession: "s1", KeyTSessionTraceparent: tp + ";7", KeyHLC: "7", KeyTraceparent: appTP}
+		if sc, _ := ExtractSpanContext(c); tpOf(sc) != appTP {
+			t.Errorf("%s in the own key: got %s, want the fallback to traceparent", name, tpOf(sc))
+		}
+		c = MapCarrier{KeySession: "s1", KeyTraceparent: tp}
+		if sc, ok := ExtractSpanContext(c); !ok || sc.SpanID != "" || len(sc.TraceID) != 32 || strings.Contains(tp, sc.TraceID) {
+			t.Errorf("%s in traceparent: got %+v, want a new trace and no parent", name, sc)
+		}
+	}
+	// Upper-case hex and other version and flags fields are accepted.
+	for _, tp := range []string{"00-" + strings.ToUpper(trace) + "-" + strings.ToUpper(span) + "-01", "ff-" + trace + "-" + span + "-00"} {
+		if sc, _ := ExtractSpanContext(MapCarrier{KeySession: "s1", KeyTraceparent: tp}); !strings.EqualFold(sc.TraceID, trace) || !strings.EqualFold(sc.SpanID, span) {
+			t.Errorf("%s: got %+v", tp, sc)
+		}
+	}
+}
+
 // The defect the clock binding exists for: a new sender, then a service on an
 // old SDK that passes the carrier on with its keys copied (a retry topic, a
 // reverse proxy), then a new receiver. The old SDK writes its own span into
