@@ -13,8 +13,10 @@ const masked = core.RedactedValue
 // Redactor masks command arguments and replies. The zero value redacts by
 // core's sensitive-key list only and captures nothing.
 type Redactor struct {
-	Keys    []string // WithRedactKeys globs forcing a key to be treated as sensitive
-	Capture bool     // record values at all; false drops non-scalar replies
+	Keys     []string // WithRedactKeys globs forcing a key to be treated as sensitive
+	Capture  bool     // record values at all; false drops non-scalar replies
+	MaskKeys []string // WithMaskKeys globs whose wildcard segments hold a secret
+	KeyMask  KeyMask  // how the secret part of a key name is recorded
 }
 
 // KeySensitive reports whether the key holds sensitive data: forced by a

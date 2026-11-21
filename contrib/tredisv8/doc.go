@@ -53,6 +53,37 @@
 // is not read: it has no diff, and its span says so with the attribute
 // diff_skipped=sensitive_key, because whether the value changed is unknown.
 //
+// Secret key names. A key can hold a secret in its name: session:<token>,
+// auth:token:<jwt>. The part that holds it is recorded as a short hash,
+// "session:#a1b2c3d4", everywhere the key appears: the span name, the
+// arguments, the mutation's key and the replies of KEYS, RANDOMKEY and
+// multi-key pops. Redis is still sent the real key, and image reads use it. A
+// ':' separated segment is masked when
+//
+//   - it is not a plain lower-case word (letters joined by '_', '-' or '.')
+//     and comes after a segment that names a secret: a sensitive name of
+//     core.SetRedactKeys (token, auth, secret, password, ...) or session,
+//     sessions, sess, sid. "auth:user:42:profile" is recorded as
+//     "auth:user:#a1b2c3d4:profile";
+//   - it is not a plain lower-case word and holds a sensitive name itself
+//     ("cache:tok_SECRET123"), or it is a JWT;
+//   - it falls under a wildcard of a WithMaskKeys glob: "cart:*:items".
+//
+// The hash is an HMAC of the segment keyed by the session id, cut to 32 bits:
+// one key reads the same in every service of a session, so its commands still
+// form one entity history, and differently in another session. It hides a
+// long random token. It does not hide a short or guessable one (a phone
+// number, a six-digit code) from someone who can read the session and try
+// candidates; for those use WithKeyMask(KeyMaskFlat), which records
+// "session:[REDACTED]" and so merges all such keys into one history.
+// WithKeyMask(KeyMaskOff) records key names as they are.
+//
+// These rules are a heuristic over key names. They mask keys that hold no
+// secret ("auth:user:42") and miss secrets they cannot recognise: one under a
+// prefix that is not listed, or one made of lower-case letters only. Which
+// keys are sensitive in your environment is for your Security team to decide;
+// list them with WithMaskKeys.
+//
 // Clients obtained through an internal wrapper. When the *redis.Client is
 // hidden behind a wrapper type (for example one that embeds a Cmdable
 // interface and already installs its own hooks), hook the concrete client the

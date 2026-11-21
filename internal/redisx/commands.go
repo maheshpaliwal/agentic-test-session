@@ -34,6 +34,7 @@ var commands = map[string]Spec{
 	"exists": rN, "ttl": r1, "pttl": r1, "expiretime": r1, "pexpiretime": r1, "type": r1,
 	"dump": r1, "touch": rN, "object": r(2, 2, 1), "randomkey": r(0, 0, 0),
 	"keys": r(0, 0, 0), "scan": r(0, 0, 0), "dbsize": r(0, 0, 0),
+	"watch": rN, "unwatch": r(0, 0, 0),
 	"del": wN, "unlink": wN, "expire": w1, "pexpire": w1, "expireat": w1, "pexpireat": w1,
 	"persist": w1, "rename": w(1, 2, 1), "renamenx": w(1, 2, 1), "copy": w(1, 2, 1),
 	"move": w1, "restore": w1,

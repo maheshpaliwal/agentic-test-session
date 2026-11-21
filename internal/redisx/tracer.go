@@ -72,16 +72,17 @@ func Skipped(ctx context.Context) bool {
 
 // Op is one in-flight command span plus what is needed to build mutations.
 type Op struct {
-	span   *core.Span
-	spec   Spec
-	args   []any
-	masked []string // args with credentials/values masked, index-aligned
-	name   string
-	keys   []int
-	before map[int]core.PayloadRef // before-images, by arg index
-	snaps  map[int]*snap           // what the before-image reads saw, for the diff
-	imaged []int                   // arg indices of keys under image capture
-	after  []int                   // subset of imaged whose after-image this op reads
+	span    *core.Span
+	session string // keys the hash of masked key names
+	spec    Spec
+	args    []any
+	masked  []string // args with credentials/values masked, index-aligned
+	name    string
+	keys    []int
+	before  map[int]core.PayloadRef // before-images, by arg index
+	snaps   map[int]*snap           // what the before-image reads saw, for the diff
+	imaged  []int                   // arg indices of keys under image capture
+	after   []int                   // subset of imaged whose after-image this op reads
 }
 
 // batch is the image-read allowance of one pipeline, or of one command
@@ -200,16 +201,31 @@ func (t *Tracer) begin(ctx context.Context, cmd Cmd, pipeline bool, b *batch) *O
 	if s.Write {
 		kind = core.KindCacheWrite
 	}
-	_, span := core.Begin(ctx, kind, SpanName(args, keys))
+	sc, _ := core.FromContext(ctx)
+	first := ""
+	if len(keys) > 0 {
+		first = t.ShowKey(sc.SessionID, Str(args[keys[0]]))
+	}
+	_, span := core.Begin(ctx, kind, SpanName(args, first))
 	if span == nil {
 		return nil
 	}
 	masked := t.MaskArgs(cmd.Name(), args, keys)
+	for _, k := range keys {
+		if k < len(masked) {
+			masked[k] = t.ShowKey(sc.SessionID, masked[k])
+		}
+	}
+	if _, known := Lookup(cmd.Name()); !known {
+		for i := 1; i < len(masked); i++ { // any argument may be a key
+			masked[i] = t.ShowKey(sc.SessionID, masked[i])
+		}
+	}
 	span.SetReq(CapArgs(masked))
 	if pipeline {
 		span.SetAttr("pipeline", "true")
 	}
-	o := &Op{span: span, spec: s, args: args, keys: keys, masked: masked, name: cmd.Name()}
+	o := &Op{span: span, session: sc.SessionID, spec: s, args: args, keys: keys, masked: masked, name: cmd.Name()}
 	if s.Write && b != nil {
 		t.beforeImages(ctx, o, b)
 	}
@@ -296,7 +312,7 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 	}
 	defer o.span.End()
 	if err != nil && !errors.Is(err, t.Nil) {
-		o.span.SetErr(err)
+		o.span.SetErr(o.maskErr(err))
 		return
 	}
 	var reply any
@@ -304,7 +320,7 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 		if v, scalar, ok := t.Reply(cmd); ok {
 			reply = v
 			if v, ok := t.MaskReply(o.name, o.args, o.keys, v, scalar); ok {
-				o.span.SetResp(v)
+				o.span.SetResp(o.replyKeys(t, v))
 			}
 		}
 	}
@@ -319,10 +335,11 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 	truncated := false // the span is flagged once
 	for _, i := range WrittenKeys(name, o.args, o.keys, popped) {
 		key := Str(o.args[i])
+		shown := t.ShowKey(o.session, key)
 		m := core.Mutation{
 			Store:  "redis",
-			Entity: KeyPattern(key),
-			PK:     map[string]any{"key": key},
+			Entity: KeyPattern(shown),
+			PK:     map[string]any{"key": shown},
 			Op:     name,
 			Source: "sdk",
 		}
@@ -354,6 +371,51 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 		}
 		o.span.AddMutation(m)
 	}
+}
+
+// maskErr masks in err's text the arguments that are recorded masked: a
+// server error can quote them ("unknown command ..., with args beginning
+// with: ...").
+func (o *Op) maskErr(err error) error {
+	text := err.Error()
+	for i := 1; i < len(o.args) && i < len(o.masked); i++ {
+		if raw := Str(o.args[i]); len(raw) >= 4 && raw != o.masked[i] {
+			text = strings.ReplaceAll(text, raw, o.masked[i])
+		}
+	}
+	if text == err.Error() {
+		return err
+	}
+	return errors.New(text)
+}
+
+// replyKeys masks the key names a redacted reply v carries: KEYS and RANDOMKEY
+// return key names, and a multi-key pop names the key it popped from first.
+func (o *Op) replyKeys(t *Tracer, v any) any {
+	show := func(k string) string { return t.ShowKey(o.session, k) }
+	name := strings.ToLower(o.name)
+	switch l := v.(type) {
+	case string:
+		if name == "randomkey" {
+			return show(l)
+		}
+	case []string:
+		switch {
+		case name == "keys":
+			for i := range l {
+				l[i] = show(l[i])
+			}
+		case IsPop(name) && len(l) > 0:
+			l[0] = show(l[0])
+		}
+	case []any:
+		if IsPop(name) && len(l) > 0 {
+			if s, ok := l[0].(string); ok {
+				l[0] = show(s)
+			}
+		}
+	}
+	return v
 }
 
 // afterArgs extracts the value-ish arguments that belong to the key at index i.

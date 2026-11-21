@@ -30,6 +30,32 @@ func WithRedactKeys(globs ...string) Option {
 	return func(h *hook) { h.Keys = append(h.Keys, globs...) }
 }
 
+// KeyMask says how the secret part of a key name is recorded, see WithKeyMask.
+type KeyMask = redisx.KeyMask
+
+const (
+	// KeyMaskHash records a short hash keyed by the session, "session:#a1b2c3d4"
+	// (the default): one key reads the same throughout a session.
+	KeyMaskHash = redisx.KeyMaskHash
+	// KeyMaskFlat records "session:[REDACTED]": all such keys read alike.
+	KeyMaskFlat = redisx.KeyMaskFlat
+	// KeyMaskOff records key names as they are.
+	KeyMaskOff = redisx.KeyMaskOff
+)
+
+// WithKeyMask sets how the secret part of a key name is recorded in span
+// names, arguments, mutations and replies that list keys. See the package
+// comment for which part of a key counts as secret.
+func WithKeyMask(m KeyMask) Option { return func(h *hook) { h.KeyMask = m } }
+
+// WithMaskKeys adds keys whose name holds a secret: globs matched one ':'
+// separated segment at a time, the last segment taking the rest of the key.
+// The segments under a wildcard are masked: "auth:token:*" records
+// auth:token:<jwt> as "auth:token:#a1b2c3d4".
+func WithMaskKeys(globs ...string) Option {
+	return func(h *hook) { h.MaskKeys = append(h.MaskKeys, globs...) }
+}
+
 // WithValueCapture controls whether values are recorded. With false, all
 // values (arguments, replies, images) are dropped from recorded events; keys,
 // command names and counts are still recorded.
