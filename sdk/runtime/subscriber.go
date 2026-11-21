@@ -168,7 +168,9 @@ func (s *Subscriber) setAnnounce(on bool) {
 	if s.reportsAs == "" || s.announce.Swap(on) == on {
 		return
 	}
-	s.reopen()
+	if cancel := s.streamCancel.Load(); cancel != nil {
+		(*cancel)()
+	}
 }
 
 // reopen ends the stream that is open; the loop opens another at once,
