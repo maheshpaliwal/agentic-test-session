@@ -3,7 +3,6 @@ package redisx
 import (
 	"context"
 	"errors"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -43,7 +42,7 @@ type Reader interface {
 // The go-redis v8 and v9 wrappers embed it and supply the version-specific pieces.
 type Tracer struct {
 	Redactor
-	Patterns      []string // keys under before/after image capture (path.Match globs)
+	Patterns      []string // keys under before/after image capture (globs, see Match)
 	Ignore        []string // commands whose keys all match are not traced
 	PipelineCap   int      // keys imaged per pipeline, and per command outside one
 	ImageTimeout  time.Duration
@@ -284,13 +283,6 @@ func (t *Tracer) ignored(args []any, keys []int) bool {
 		}
 	}
 	return true
-}
-
-func matchAny(globs []string, key string) bool {
-	return slices.ContainsFunc(globs, func(p string) bool {
-		ok, _ := path.Match(p, key)
-		return ok
-	})
 }
 
 // beforeImages reads the before-image of every key o writes that matches an

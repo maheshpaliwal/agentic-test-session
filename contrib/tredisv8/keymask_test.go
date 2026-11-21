@@ -17,7 +17,7 @@ const (
 	sidKey   = "sess:Abc123Def456" // a secret name, a value that is not sensitive: its images are read
 )
 
-var hashedKey = regexp.MustCompile(`^(session|auth:token|sess):#[0-9a-f]{8}$`)
+var hashedKey = regexp.MustCompile(`^(session|auth:token|sess):#[0-9a-f]{12}$`)
 
 func TestSecretKeyNamesAreMasked(t *testing.T) {
 	servers(t, func(t *testing.T, addr string) {

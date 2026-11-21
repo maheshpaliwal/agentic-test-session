@@ -51,12 +51,20 @@ func SpanName(args []any, key string) string {
 // KeyPattern collapses id-like and masked segments so mutations of user:1,
 // user:2 group under one entity "user:*". The key is kept in Mutation.PK. A
 // segment is id-like when it is all digits, or 8 or more characters of hex
-// digits and '-'. The rule is documented in contrib/tredis: keep them in step.
+// digits and '-'. A masked part that follows a name inside a segment
+// ("session_#a1b2c3d4e5f6", "{#a1b2c3d4e5f6}") collapses alone: "session_*".
+// The rule is documented in contrib/tredis: keep them in step.
 func KeyPattern(key string) string {
 	parts := strings.Split(key, ":")
 	for i, p := range parts {
-		if idLike(p) || maskedSegment(p) {
+		if idLike(p) {
 			parts[i] = "*"
+			continue
+		}
+		lead := len(p) - len(strings.TrimLeft(p, "{"))
+		inner := strings.TrimRight(p[lead:], "}")
+		if from, ok := maskedEnd(inner); ok {
+			parts[i] = p[:lead+from] + "*" + p[lead+len(inner):]
 		}
 	}
 	return strings.Join(parts, ":")

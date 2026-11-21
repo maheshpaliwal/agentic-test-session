@@ -15,8 +15,9 @@ import (
 type Option func(*hook)
 
 // WithBeforeImage enables before/after image capture for keys matching any of
-// the glob patterns (path.Match syntax, e.g. "user:*"; note * does not cross
-// '/').
+// the glob patterns, e.g. "user:*". The syntax of every glob of this package
+// is that of path.Match, except that '*' and '?' match any byte, '/'
+// included, as in a Redis KEYS pattern.
 func WithBeforeImage(patterns ...string) Option {
 	return func(h *hook) { h.Patterns = append(h.Patterns, patterns...) }
 }
@@ -24,9 +25,12 @@ func WithBeforeImage(patterns ...string) Option {
 // WithReader sets the client used to read images. Wrap does this itself.
 func WithReader(c redis.Cmdable) Option { return func(h *hook) { h.Reader = asReader(c) } }
 
-// WithRedactKeys force-masks the values of keys matching any glob (path.Match
-// syntax), in addition to keys whose name segments are sensitive per core.
+// WithRedactKeys force-masks the values of keys matching any glob, in addition
+// to keys whose name segments are sensitive per core. It panics on a
+// malformed glob, which would otherwise match nothing and leave the values
+// it was written for unmasked.
 func WithRedactKeys(globs ...string) Option {
+	redisx.MustGlobs("tredisv8.WithRedactKeys", globs)
 	return func(h *hook) { h.Keys = append(h.Keys, globs...) }
 }
 
@@ -34,25 +38,35 @@ func WithRedactKeys(globs ...string) Option {
 type KeyMask = redisx.KeyMask
 
 const (
-	// KeyMaskHash records a short hash keyed by the session, "session:#a1b2c3d4"
-	// (the default): one key reads the same throughout a session.
+	// KeyMaskHash records a short hash, "session:#a1b2c3d4e5f6" (the default).
+	// It is keyed by a random secret of the process that is never exported:
+	// one key reads the same for as long as the process runs, and the secret
+	// cannot be found by hashing candidates. Another process (another
+	// service, this one after a restart) records the same key differently.
 	KeyMaskHash = redisx.KeyMaskHash
+	// KeyMaskSession records a short hash keyed by the session id: one key
+	// reads the same in every service of a session, and whoever reads an
+	// export can hash candidates to find or confirm the secret.
+	KeyMaskSession = redisx.KeyMaskSession
 	// KeyMaskFlat records "session:[REDACTED]": all such keys read alike.
 	KeyMaskFlat = redisx.KeyMaskFlat
 	// KeyMaskOff records key names as they are.
 	KeyMaskOff = redisx.KeyMaskOff
 )
 
-// WithKeyMask sets how the secret part of a key name is recorded in span
-// names, arguments, mutations and replies that list keys. See the package
-// comment for which part of a key counts as secret.
+// WithKeyMask sets how the secret part of a key name is recorded, wherever a
+// name is recorded: span names, arguments, mutations, images, diffs, replies.
+// See "Secret key names" in the package comment for which part of a name
+// counts as secret and what each mode does and does not hide.
 func WithKeyMask(m KeyMask) Option { return func(h *hook) { h.KeyMask = m } }
 
 // WithMaskKeys adds keys whose name holds a secret: globs matched one ':'
 // separated segment at a time, the last segment taking the rest of the key.
 // The segments under a wildcard are masked: "auth:token:*" records
-// auth:token:<jwt> as "auth:token:#a1b2c3d4".
+// auth:token:<jwt> as "auth:token:#a1b2c3d4e5f6". It panics on a malformed
+// glob, which would otherwise match nothing and leave the names unmasked.
 func WithMaskKeys(globs ...string) Option {
+	redisx.MustGlobs("tredisv8.WithMaskKeys", globs)
 	return func(h *hook) { h.MaskKeys = append(h.MaskKeys, globs...) }
 }
 

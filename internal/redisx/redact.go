@@ -2,7 +2,6 @@ package redisx
 
 import (
 	"encoding/json"
-	"path"
 	"strings"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -23,12 +22,7 @@ type Redactor struct {
 // WithRedactKeys glob, or any ':' '.' '/' '_' '-' delimited segment (or the
 // whole key) is a sensitive name per core.IsSensitiveKey.
 func (h *Redactor) KeySensitive(key string) bool {
-	for _, p := range h.Keys {
-		if ok, _ := path.Match(p, key); ok {
-			return true
-		}
-	}
-	return NameSensitive(key)
+	return matchAny(h.Keys, key) || NameSensitive(key)
 }
 
 // NameSensitive checks a key or field name and its delimited segments.
