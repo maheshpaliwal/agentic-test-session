@@ -54,15 +54,24 @@ func (c sqsCarrier) compact(key string) string {
 	return ""
 }
 
-// Get reads key from where the session id is. A message whose session id is
-// in the compact attribute was sent in the compact form, which writes no other
-// attribute: one named like a carrier key (traceparent) is then the
-// application's, and the compact value is used. Otherwise the attribute is
-// used, and the compact value only when there is none.
+// Get reads key from where the session id is.
+//
+// A message with x-tsession-id among its attributes was sent in the full
+// form, and only the attributes are read. A compact attribute beside them is
+// left over from an earlier publish: a service on an older SDK republished
+// the message with its attributes copied and does not remove a compact
+// attribute it has no use for.
+//
+// Otherwise the message was sent in the compact form, which carries every
+// key: an attribute named like a carrier key (traceparent) is then the
+// application's, and the compact value is used.
 func (c sqsCarrier) Get(key string) string {
 	key = strings.ToLower(key)
-	d, k := c.direct(key), c.compact(key)
-	if d == "" || (k != "" && c.direct(core.KeySession) == "") {
+	d := c.direct(key)
+	if c.direct(core.KeySession) != "" {
+		return d
+	}
+	if k := c.compact(key); k != "" {
 		return k
 	}
 	return d

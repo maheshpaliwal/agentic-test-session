@@ -482,6 +482,39 @@ func TestSQSReadByOlderConsumer(t *testing.T) {
 	}
 }
 
+// A service on an older SDK republishes a message that a new SDK sent in the
+// compact form, attributes copied. With room for them it writes its context
+// as three attributes and leaves the compact attribute, which it would only
+// replace when writing the compact form itself. The fresh context is the one
+// in the attributes.
+func TestSQSConsumerPrefersAttributesToLeftoverCompact(t *testing.T) {
+	const trace = "11111111111111111111111111111111"
+	fresh, stale := "00-"+trace+"-aaaaaaaaaaaaaaaa-01", "00-"+trace+"-bbbbbbbbbbbbbbbb-01"
+	for name, compact := range map[string]string{
+		"from a new SDK": encodeTS(core.MapCarrier{core.KeyTraceparent: stale, core.KeyTSessionTraceparent: stale + ";1",
+			core.KeySession: "s1", core.KeyHLC: "1"}),
+		// The clock values happen to be equal: only where the session id is
+		// tells the two contexts apart.
+		"from a new SDK, same clock value": encodeTS(core.MapCarrier{core.KeyTraceparent: stale, core.KeyTSessionTraceparent: stale + ";2",
+			core.KeySession: "s1", core.KeyHLC: "2"}),
+		"from an older SDK": encodeTS(core.MapCarrier{core.KeyTraceparent: stale, core.KeySession: "s1", core.KeyHLC: "1"}),
+	} {
+		for _, attr := range []string{ctxAttr, legacyCtxAttr} {
+			t.Run(name+", "+attr, func(t *testing.T) {
+				rec, _ := setup(t, true)
+				attrs := fill(3)
+				attrs[attr] = strAttr(compact)
+				attrs[core.KeyTraceparent], attrs[core.KeySession], attrs[core.KeyHLC] = strAttr(fresh), strAttr("s1"), strAttr("2")
+				if _, _, span := oldExtract(oldSQSGet(attrs)); span != "aaaaaaaaaaaaaaaa" {
+					t.Fatalf("test setup: an older consumer reads %s", span)
+				}
+				sqsConsume(t, attrs, SQSOptions{})
+				assertLastWorker(t, rec, core.Event{TraceID: trace, SpanID: "aaaaaaaaaaaaaaaa"})
+			})
+		}
+	}
+}
+
 // The overwrite setting exists so that a consumer on an older SDK links to
 // the publish span although the application set traceparent. It must hold in
 // every form that carries the context in the message: at every attribute
