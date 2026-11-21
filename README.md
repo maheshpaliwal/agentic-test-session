@@ -135,6 +135,19 @@ object (schema `tsession.digest/v1`); `summary`, `events`, `entities`, `history`
 take `--json`. Exit statuses are those above: `0` from the `digest` line means no failed events, complete, not
 empty. A live session works too and says so. Details: [`docs/DIGEST.md`](docs/DIGEST.md).
 
+| `tracectl run` exits | It means | Next |
+|---|---|---|
+| `0` | the command passed and every gate held | nothing |
+| `3` | a gate failed: failed events, an incomplete or an empty session | read "Verdict" and "Failures" in the digest, then `show <seq>` |
+| `1` | the session could not be stopped, sealed or read | `tracectl doctor`; the recording cannot be relied on |
+| `2` | wrong usage of `tracectl` | fix the command line |
+| anything else | the command's own status (`128+n`: killed by signal `n`) | the command's output; the digest is still written |
+
+A command that itself exits 1, 2 or 3 looks the same; the line `tracectl: the command failed: exit status N` on
+stderr tells them apart. Do not assert on a mutation marked `UNCERTAIN`: its key or values were not fully
+captured. The follow-up commands print everything unless bounded (`events --limit N`, `trace --depth N`). The
+gates only see what reached the collector (see the limit under "Go tests and CI").
+
 ## Go tests and CI
 
 `sdk/client/tsessiontest` ties a session to a test and asserts on what it recorded:
