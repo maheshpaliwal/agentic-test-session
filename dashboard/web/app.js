@@ -258,37 +258,6 @@
   }
 
   // ---------- diff ----------
-  function flatten(v, prefix, out) {
-    if (v !== null && typeof v === 'object') {
-      const keys = Object.keys(v);
-      if (!keys.length) { out[prefix || '(root)'] = Array.isArray(v) ? '[]' : '{}'; return out; }
-      keys.forEach((k) => flatten(v[k], prefix ? prefix + (Array.isArray(v) ? '[' + k + ']' : '.' + k) : k, out));
-    } else out[prefix || '(root)'] = JSON.stringify(v);
-    return out;
-  }
-  function diffRows(mu) {
-    const hasB = mu.before && mu.before.inline !== undefined, hasA = mu.after && mu.after.inline !== undefined;
-    const rows = [];
-    if (hasB || hasA) {
-      const b = hasB ? flatten(mu.before.inline, '', {}) : {};
-      const a = hasA ? flatten(mu.after.inline, '', {}) : {};
-      const keys = Object.keys(b);
-      Object.keys(a).forEach((k) => { if (!(k in b)) keys.push(k); });
-      keys.forEach((k) => {
-        let kind = 'same';
-        if (!(k in b)) kind = 'add'; else if (!(k in a)) kind = 'del';
-        else if (a[k] !== b[k]) kind = 'chg';
-        rows.push({ field: k, old: b[k], nw: a[k], kind: kind });
-      });
-      return rows;
-    }
-    (mu.diff || []).forEach((d) => {
-      const o = d.old === undefined || d.old === null ? undefined : JSON.stringify(d.old);
-      const n = d.new === undefined || d.new === null ? undefined : JSON.stringify(d.new);
-      rows.push({ field: d.field, old: o, nw: n, kind: o === undefined ? 'add' : n === undefined ? 'del' : 'chg' });
-    });
-    return rows;
-  }
   function valCell(cls, sign, v) {
     const td = h('td', { class: 'dv ' + cls });
     if (cls) td.appendChild(h('span', { class: 'sg', 'aria-hidden': 'true', text: sign }));
@@ -302,6 +271,12 @@
       h('thead', null, h('tr', null, h('th', { text: 'Field' }), h('th', { text: 'Before' }), h('th', { text: 'After' }))));
     const tb = h('tbody');
     rows.forEach((r) => {
+      if (r.kind === 'hid') {
+        // Changed under redaction: the SDK listed the field, and neither value may be shown.
+        tb.appendChild(h('tr', { class: 'chg' }, h('td', { class: 'f', text: r.field }),
+          h('td', { class: 'dv hid', colspan: '2', title: 'the SDK recorded that this field changed; both values are redacted' }, redChip(), span('faint', ' ' + U.HIDDEN_CHANGE))));
+        return;
+      }
       tb.appendChild(h('tr', { class: r.kind === 'same' ? 'same' : 'chg' },
         h('td', { class: 'f', text: r.field }),
         valCell(r.kind === 'del' || r.kind === 'chg' ? 'del' : '', '\u2212', r.old),
@@ -313,13 +288,13 @@
   function diffView(mu) {
     if (U.afterUnavailable(mu)) {
       // The row was not read back: its fields are what they were before the update, not removed.
-      const rows = flatten(mu.before.inline === undefined ? {} : mu.before.inline, '', {});
+      const rows = U.flatten(mu.before.inline === undefined ? {} : mu.before.inline, '', {});
       const box = h('div', { class: 'sec' }, h('div', { class: 'note', text: 'After image unavailable: the new values were not captured, so no changes can be shown.' }));
       const fields = Object.keys(rows).map((k) => ({ field: k, old: rows[k], nw: undefined, kind: 'same' }));
       if (fields.length) box.appendChild(h('details', { class: 'more' }, h('summary', { text: 'Values before the update (' + fields.length + ' field' + (fields.length === 1 ? '' : 's') + ')' }), diffTable(fields)));
       return box;
     }
-    const rows = diffRows(mu);
+    const rows = U.diffRows(mu);
     const changed = rows.filter((r) => r.kind !== 'same'), same = rows.filter((r) => r.kind === 'same');
     const box = h('div', { class: 'sec' });
     if (changed.length) box.appendChild(diffTable(changed));

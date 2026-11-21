@@ -382,6 +382,7 @@ pre.code{margin:0;padding:12px;font:12.5px/1.6 var(--mono);white-space:pre-wrap;
 .diff td .sg{display:inline-block;width:12px;font-weight:700}
 .diff td.del .sg{color:var(--err)}.diff td.add .sg{color:var(--ok)}
 .diff tr.same td{color:var(--faint)}
+.diff td.hid{background:var(--warn-soft);color:var(--text)}
 details.more>summary{cursor:pointer;color:var(--muted);font-size:12px;padding:4px 0;list-style:none;display:flex;align-items:center;gap:4px}
 details.more>summary::-webkit-details-marker{display:none}
 details.more>summary::before{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform var(--t);margin:0 4px 0 2px}

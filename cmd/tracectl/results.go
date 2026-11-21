@@ -365,7 +365,7 @@ func printHistory(w io.Writer, h client.EntityHistory) {
 			continue
 		}
 		for _, d := range m.Diff {
-			fmt.Fprintf(w, "       %s: %s -> %s\n", d.Field, compact(d.Old), compact(d.New))
+			fmt.Fprintf(w, "       %s\n", diffLine(d))
 		}
 	}
 }

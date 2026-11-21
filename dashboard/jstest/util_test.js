@@ -22,6 +22,49 @@ assert.strictEqual(U.afterUnavailable({ op: 'update' }), false);
 assert.strictEqual(U.afterUnavailable({ op: 'delete', before: img }), false);
 assert.strictEqual(U.afterUnavailable(undefined), false);
 assert.strictEqual(U.pkRaw({ b: 1, a: 2 }), '{"a":2,"b":1}');
+// The diff table follows the diff the SDK recorded. A value that changed under redaction looks the same in both
+// images: the recorded entry is what says it changed, and the row carries neither value.
+{
+  const red = { op: 'update', before: { inline: { id: 1, password: '[REDACTED]' } }, after: { inline: { id: 1, password: '[REDACTED]' } },
+    diff: [{ field: 'password', old: '[REDACTED]', new: '[REDACTED]' }] };
+  assert.deepStrictEqual(U.diffRows(red), [{ field: 'password', old: undefined, nw: undefined, kind: 'hid' },
+    { field: 'id', old: '1', nw: '1', kind: 'same' }]);
+  assert.ok(!JSON.stringify(U.diffRows(red)).includes(U.MARK), 'a hidden change shows neither value');
+  // The same images without a recorded diff (an older SDK): nothing to tell, so the images are compared.
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: red.before, after: red.after }).map((r) => r.kind), ['same', 'same']);
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: red.before, after: red.after, diff: [] }).map((r) => r.kind), ['same', 'same']);
+  // A redacted value on one side only is an added or a removed field, not a hidden change.
+  assert.deepStrictEqual(U.diffRows({ op: 'insert', after: { inline: { token: '[REDACTED]' } }, diff: [{ field: 'token', new: '[REDACTED]' }] }),
+    [{ field: 'token', old: undefined, nw: '"[REDACTED]"', kind: 'add' }]);
+  // A Redis set: the images are two member lists, the diff names what was added and removed. The members are not
+  // compared by position, so none is reported as unchanged or changed beside the recorded rows.
+  const set = { op: 'update', before: { inline: ['a', 'b', 'c'] }, after: { inline: ['a', 'c', 'd'] },
+    diff: [{ field: 'added', new: ['d'] }, { field: 'removed', old: ['b'] }] };
+  assert.deepStrictEqual(U.diffRows(set), [{ field: 'added', old: undefined, nw: '["d"]', kind: 'add' },
+    { field: 'removed', old: '["b"]', nw: undefined, kind: 'del' }]);
+  // A list: the recorded indexes are the changes; the image rows they name are not repeated.
+  const list = { op: 'update', before: { inline: ['x', 'y'] }, after: { inline: ['x', 'z'] }, diff: [{ field: '[1]', old: 'y', new: 'z' }] };
+  assert.deepStrictEqual(U.diffRows(list).map((r) => r.field + ':' + r.kind), ['[1]:chg']);
+  // A Redis string that changed under redaction: one hidden change, and no "unchanged" row for the value itself.
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: { inline: '[REDACTED]' }, after: { inline: '[REDACTED]' },
+    diff: [{ field: 'value', old: '[REDACTED]', new: '[REDACTED]' }] }), [{ field: 'value', old: undefined, nw: undefined, kind: 'hid' }]);
+  // A nested field the diff names as a whole is not listed again leaf by leaf.
+  const nested = { op: 'update', before: { inline: { id: 1, addr: { city: 'A', zip: '1' } } }, after: { inline: { id: 1, addr: { city: 'B', zip: '1' } } },
+    diff: [{ field: 'addr', old: { city: 'A', zip: '1' }, new: { city: 'B', zip: '1' } }] };
+  assert.deepStrictEqual(U.diffRows(nested).map((r) => r.field + ':' + r.kind), ['addr:chg', 'id:same']);
+  // The diff omits a null value: the image tells "was null" from "was not there".
+  const nul = { op: 'update', before: { inline: { note: null } }, after: { inline: { note: 'x' } }, diff: [{ field: 'note', new: 'x' }] };
+  assert.deepStrictEqual(U.diffRows(nul), [{ field: 'note', old: 'null', nw: '"x"', kind: 'chg' }]);
+  // A diff the SDK cut short is shown as recorded: the images do not add changes of their own.
+  const cut = { op: 'update', before: { inline: { a: 1, b: 1 } }, after: { inline: { a: 2, b: 2 } }, diff: [{ field: 'a', old: 1, new: 2 }] };
+  assert.deepStrictEqual(U.diffRows(cut).map((r) => r.field + ':' + r.kind), ['a:chg']);
+  // No recorded diff: image against image, as before.
+  assert.deepStrictEqual(U.diffRows({ op: 'update', before: { inline: { a: 1, b: 2 } }, after: { inline: { a: 1, c: 3 } } }).map((r) => r.field + ':' + r.kind),
+    ['a:same', 'b:del', 'c:add']);
+  assert.deepStrictEqual(U.diffRows({ op: 'delete' }), []);
+  assert.deepStrictEqual(U.flatten({ a: { b: 1 }, c: [2], d: {} }, '', {}), { 'a.b': '1', 'c[0]': '2', d: '{}' });
+}
+
 assert.strictEqual(U.pkRaw('{"id":1}'), '{"id":1}');
 
 assert.ok(U.isRedactedValue('[REDACTED]'));

@@ -243,11 +243,14 @@ type dChange struct {
 }
 
 // dField is one changed field. Before and After are the values as compact
-// JSON text, clipped; null stands for no value.
+// JSON text, clipped; null stands for no value. Hidden marks a value that
+// changed under redaction: both sides hold the marker, and a reader must not
+// take the two equal texts for no change.
 type dField struct {
 	Field  string  `json:"field"`
 	Before *string `json:"before"`
 	After  *string `json:"after"`
+	Hidden bool    `json:"hidden,omitempty"`
 }
 
 // dNode is one line of the call tree, which is listed in pre-order.
@@ -568,7 +571,7 @@ func changedFields(m *core.Mutation) []dField {
 	}
 	var out []dField
 	for _, d := range m.Diff {
-		out = append(out, dField{Field: dataText(d.Field, 60), Before: value(d.Old), After: value(d.New)})
+		out = append(out, dField{Field: dataText(d.Field, 60), Before: value(d.Old), After: value(d.New), Hidden: hiddenChange(d)})
 	}
 	if len(out) > 0 || m.Before.IsZero() == m.After.IsZero() {
 		return out
@@ -1025,6 +1028,10 @@ func mdEntity(b *strings.Builder, e *dEntity) {
 		}
 		for i, f := range c.Fields {
 			b.WriteString(map[bool]string{true: ": ", false: "; "}[i == 0])
+			if f.Hidden {
+				fmt.Fprintf(b, "%s %s", mdQuote(f.Field), hiddenChangeText)
+				continue
+			}
 			fmt.Fprintf(b, "%s %s -> %s", mdQuote(f.Field), value(f.Before), value(f.After))
 		}
 		if c.FieldsOmitted > 0 {

@@ -56,6 +56,57 @@
   /* An update whose row could not be read back: the before image is known, the new values are not. Its diff, if an
      older SDK sent one, lists every field as removed and must not be shown. Mirrors core.Mutation.AfterUnavailable. */
   const afterUnavailable = (mu) => !!mu && mu.op === 'update' && hasPayload(mu.before) && !hasPayload(mu.after);
+  // One row per leaf of a JSON value: {"a":{"b":1},"c":[2]} -> {"a.b":"1","c[0]":"2"} (values as JSON text).
+  function flatten(v, prefix, out) {
+    if (v !== null && typeof v === 'object') {
+      const keys = Object.keys(v);
+      if (!keys.length) { out[prefix || '(root)'] = Array.isArray(v) ? '[]' : '{}'; return out; }
+      keys.forEach((k) => flatten(v[k], prefix ? prefix + (Array.isArray(v) ? '[' + k + ']' : '.' + k) : k, out));
+    } else out[prefix || '(root)'] = JSON.stringify(v);
+    return out;
+  }
+  const HIDDEN_CHANGE = 'changed \u00b7 value hidden';
+  /* The rows of a mutation's diff table: {field, old, nw, kind}, old and nw as JSON text (undefined: absent), kind one of
+     add, del, chg, same, hid. The diff the SDK recorded is the source of truth: it says what the images cannot (a value
+     that changed under redaction, the members a Redis set gained and lost, list indexes), so the images only add the
+     fields of a row or a hash that are equal in both and that the diff does not name. A field recorded with the redaction marker on both
+     sides changed, and is a 'hid' row with no values. Only a mutation without a recorded diff (an older SDK) is
+     compared image against image. */
+  function diffRows(mu) {
+    const hasB = !!mu.before && mu.before.inline !== undefined, hasA = !!mu.after && mu.after.inline !== undefined;
+    const b = hasB ? flatten(mu.before.inline, '', {}) : {};
+    const a = hasA ? flatten(mu.after.inline, '', {}) : {};
+    const rows = [];
+    const rec = Array.isArray(mu.diff) ? mu.diff : [];
+    if (rec.length) {
+      const text = (v) => v === undefined || v === null ? undefined : JSON.stringify(v);
+      rec.forEach((d) => {
+        let o = text(d.old), n = text(d.new);
+        // The diff leaves out a null value; the image tells a field that was null from one that was not there.
+        if (o === undefined && b[d.field] === 'null') o = 'null';
+        if (n === undefined && a[d.field] === 'null') n = 'null';
+        if (isRedactedValue(o) && isRedactedValue(n)) { rows.push({ field: String(d.field), old: undefined, nw: undefined, kind: 'hid' }); return; }
+        rows.push({ field: String(d.field), old: o, nw: n, kind: o === undefined ? 'add' : n === undefined ? 'del' : 'chg' });
+      });
+      const named = (k) => rec.some((d) => { const f = String(d.field); return k === f || k.indexOf(f + '.') === 0 || k.indexOf(f + '[') === 0; });
+      // Only rows and hashes have fields to list as unchanged: the members of a set or a list are not compared by
+      // position, and a plain value is the one thing the diff is about.
+      const fields = (p) => p !== null && typeof p === 'object' && !Array.isArray(p);
+      if (hasB && hasA && fields(mu.before.inline) && fields(mu.after.inline)) {
+        Object.keys(a).forEach((k) => { if (k in b && a[k] === b[k] && !named(k)) rows.push({ field: k, old: b[k], nw: a[k], kind: 'same' }); });
+      }
+      return rows;
+    }
+    const keys = Object.keys(b);
+    Object.keys(a).forEach((k) => { if (!(k in b)) keys.push(k); });
+    keys.forEach((k) => {
+      let kind = 'same';
+      if (!(k in b)) kind = 'add'; else if (!(k in a)) kind = 'del';
+      else if (a[k] !== b[k]) kind = 'chg';
+      rows.push({ field: k, old: b[k], nw: a[k], kind: kind });
+    });
+    return rows;
+  }
   // Canonical form used in URL paths (the collector accepts the canonical JSON string).
   function pkRaw(pk) {
     if (pk === undefined || pk === null) return '';
@@ -567,7 +618,7 @@
       ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
   }
 
-  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, afterUnavailable, flatten, diffRows, HIDDEN_CHANGE, flagBase, uncertainFlag, uncertainCount, unresolvedMut, hasUnresolved,
     mergeEvents, ndjson, sessionWarnings, deliveryUnconfirmed, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
