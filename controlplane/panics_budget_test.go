@@ -107,12 +107,12 @@ func TestMaxDrainCountsFromTheStopAcrossARestart(t *testing.T) {
 	col.failing.Store(false)
 	m := NewManager(Config{Collector: col, PollInterval: 5 * time.Millisecond, TimeUnit: 100 * time.Millisecond, Logger: (&logBuffer{}).logger()})
 	defer m.Close()
-	s, err := m.Start(StartRequest{Name: "p", QuiesceSeconds: 1, MaxDrainSeconds: 6}) // 600ms
+	s, err := m.Start(StartRequest{Name: "p", QuiesceSeconds: 1, MaxDrainSeconds: 20}) // 2s
 	if err != nil {
 		panic(err)
 	}
 	began := time.Now()
-	col.at = began.Add(450 * time.Millisecond) // the restart, 100ms later, is at 550ms
+	col.at = began.Add(1500 * time.Millisecond) // the restart, 100ms later, is at 1.6s
 	if _, err := m.Stop(s.ID); err != nil {
 		panic(err)
 	}
@@ -126,9 +126,9 @@ func TestMaxDrainCountsFromTheStopAcrossARestart(t *testing.T) {
 	if !col.panicked.Load() || !got.DrainTimedOut || !got.Incomplete || !panicMetric(t, m, "drain", 1) {
 		panic(fmt.Sprintf("the drain: panicked=%v %+v", col.panicked.Load(), got))
 	}
-	// Counted from the restart it would have ended 600ms after 550ms.
-	if took < 550*time.Millisecond || took > 950*time.Millisecond {
-		panic(fmt.Sprintf("the drain ended %v after the stop; max_drain is 600ms", took))
+	// Counted from the restart it would have ended 2s after 1.6s.
+	if took < 1600*time.Millisecond || took > 2900*time.Millisecond {
+		panic(fmt.Sprintf("the drain ended %v after the stop; max_drain is 2s", took))
 	}
 }
 

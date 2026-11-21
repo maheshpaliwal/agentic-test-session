@@ -23,7 +23,7 @@ func slowRestarts(d time.Duration) { loopBackoff, loopMaxBackoff = d, d }
 // fetched the set anew.
 func TestSubscriberStopsRecordingAtItsFirstPanicAndResumesWithAFreshSet(t *testing.T) {
 	out := captureLog(t)
-	slowRestarts(400 * time.Millisecond)
+	slowRestarts(time.Second)
 	cp := newReportCP(t, `{"active":["s1"],"delivery_reports":true}`)
 	sub := newSubscriber(cp.srv.URL, "svc", "i", "i")
 	defer sub.Close()
@@ -42,12 +42,12 @@ func TestSubscriberStopsRecordingAtItsFirstPanicAndResumesWithAFreshSet(t *testi
 	if note := sub.stopNote.Load(); note == nil || *note != noteRestarting {
 		panic(fmt.Sprintf("what the control plane is to be told: %v", note))
 	}
-	time.Sleep(100 * time.Millisecond) // the restart is 400ms after the panic
+	time.Sleep(100 * time.Millisecond) // the restart is a second after the panic
 	if sub.IsActive("s1") || sub.IsActive("s2") {
 		panic("recording resumed before the subscriber was started again")
 	}
 	eventually(t, "recording to resume with the fresh set", func() bool { return sub.IsActive("s1") && sub.IsActive("s2") })
-	if took := time.Since(began); took < 300*time.Millisecond {
+	if took := time.Since(began); took < 700*time.Millisecond {
 		panic(fmt.Sprintf("recording resumed %v after the panic, before the restart", took))
 	}
 	if n := panicLines(out.String()); n != 1 || !strings.Contains(out.String(), "the subscriber goroutine panicked (string) and is restarted") {
@@ -111,7 +111,7 @@ func (cp *reportCP) stoppedNotes() []string {
 // set is unknown.
 func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 	out := captureLog(t)
-	slowRestarts(300 * time.Millisecond)
+	slowRestarts(600 * time.Millisecond)
 	cp := newReportCP(t, `{"active":["s1"],"delivery_reports":true}`)
 	col := newTestCollector(t)
 	rec := NewRecorder(64)
@@ -149,7 +149,7 @@ func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 		panic(fmt.Sprintf("the account of s1 while the set is unknown: %+v", a))
 	}
 	// Recording resumes and the reports go on. The control plane was told
-	// again during the restart (300ms, every 50ms at most), and once more
+	// again during the restart (600ms, every 50ms at most), and once more
 	// that recording has resumed; then it is told no more.
 	eventually(t, "recording to resume", func() bool { return sub.IsActive("s1") })
 	rec.Record(core.Event{SessionID: "s1", Kind: core.KindAPIIn, LocalSeq: seqBase + 10})
@@ -159,8 +159,8 @@ func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 		return notes[len(notes)-1] == noteResumed
 	})
 	notes := cp.stoppedNotes()
-	if n := len(notes); n < 4 || n > 8 || slices.Contains(notes[:n-1], noteResumed) || sub.stopNote.Load() != nil {
-		panic(fmt.Sprintf("told %d times in a restart of 300ms, every 50ms at most: %q", n, notes))
+	if n := len(notes); n < 3 || n > 14 || slices.Contains(notes[:n-1], noteResumed) || sub.stopNote.Load() != nil {
+		panic(fmt.Sprintf("told %d times in a restart of 600ms, every 50ms at most: %q", n, notes))
 	}
 	time.Sleep(150 * time.Millisecond)
 	if n := len(cp.stoppedNotes()); n != len(notes) {

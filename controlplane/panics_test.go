@@ -97,10 +97,11 @@ func TestCloseDoesNotWaitForADrainThatWaitsForItsRestart(t *testing.T) {
 			panic("the drain was not restarted")
 		}
 	}
-	began := time.Now() // the second restart is 200ms away
+	// The second restart is 200ms away. A Close that waited for it would
+	// return only after the drain had run, and panicked, a third time.
 	m.Close()
-	if took := time.Since(began); took > 120*time.Millisecond {
-		panic(fmt.Sprintf("Close took %v", took))
+	if runs := 1<<30 - col.drainPanics.Load(); runs != 2 {
+		panic(fmt.Sprintf("the drain ran %d times: Close waited for its restart", runs))
 	}
 }
 
