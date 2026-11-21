@@ -61,6 +61,13 @@ func (w *Watch) Cover(interval time.Duration) {
 	w.window = max(w.window, time.Duration(w.budget+1)*interval)
 }
 
+// Window is the time within which PanicBudget panics end the service.
+func (w *Watch) Window() time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.window
+}
+
 // Degraded says why the service is not healthy, "" when it is: a goroutine
 // waits for its restart after a panic, or the panic budget is spent.
 func (w *Watch) Degraded() string {

@@ -217,8 +217,8 @@ func TestCoverWidensTheWindowForALoopThatRunsSeldom(t *testing.T) {
 			panic(fmt.Sprintf("panic %d of a loop that runs every %s: spent=%v", i+1, every, got))
 		}
 	}
-	if !strings.Contains(w.Degraded(), "5 panics of background goroutines within 1h0m0s") {
-		panic(w.Degraded())
+	if !strings.Contains(w.Degraded(), "5 panics of background goroutines within 1h0m0s") || w.Window() != time.Hour {
+		panic(fmt.Sprintf("%s (window %s)", w.Degraded(), w.Window()))
 	}
 }
 

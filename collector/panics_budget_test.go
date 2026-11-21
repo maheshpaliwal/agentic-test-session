@@ -13,6 +13,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 )
 
 // healthz asks GET /healthz, from a Host the guard would refuse.
@@ -97,6 +98,24 @@ func TestACollectorWithoutAnOwnerStaysDegraded(t *testing.T) {
 	}
 	if n := spy.pages.Load(); n != 5 {
 		panic(fmt.Sprintf("%d sweeps, want the 5 of the budget", n))
+	}
+}
+
+// A retention loop that sweeps every ten minutes (the default for a
+// retention of days) and panics every time has a panic every ten minutes:
+// the window of the panic budget covers five of them, or the collector
+// would stay up for good and delete nothing.
+func TestThePanicBudgetCoversARetentionLoopThatRunsSeldom(t *testing.T) {
+	c := New(store.NewMem(), Config{Retention: 7 * 24 * time.Hour, Logger: slog.New(slog.NewTextHandler(&syncBuf{}, nil))})
+	defer c.Close()
+	if c.cfg.RetentionInterval != 10*time.Minute || c.watch.Window() < gosafe.PanicBudget*c.cfg.RetentionInterval+time.Minute {
+		panic(fmt.Sprintf("sweeps every %s, and %d panics must fall within %s to end the service", c.cfg.RetentionInterval, gosafe.PanicBudget, c.watch.Window()))
+	}
+	// Without a retention loop the window is the usual one.
+	c2 := New(store.NewMem(), Config{Logger: slog.New(slog.NewTextHandler(&syncBuf{}, nil))})
+	defer c2.Close()
+	if c2.watch.Window() != gosafe.PanicBudgetWindow {
+		panic(c2.watch.Window().String())
 	}
 }
 
