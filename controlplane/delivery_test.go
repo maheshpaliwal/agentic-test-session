@@ -396,12 +396,13 @@ func TestDrainEventsRecordedAfterTheFinalReport(t *testing.T) {
 		}
 	})
 	// A report sent before the instance knew of the drain cannot take back a
-	// final one, and one with lower counters is an old one: ignored.
+	// final one of the same events, and one that names fewer events, or as
+	// many and less delivered, is an old one: ignored.
 	t.Run("old reports", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
-		e.report(final(rep("svc", "i", 8, 8, 0)))
+		e.report(final(rep("svc", "i", 9, 8, 0)))
 		e.report(rep("svc", "i", 9, 9, 0))
-		for _, old := range []Delivery{rep("svc", "i", 8, 8, 0), rep("svc", "i", 10, 7, 0)} {
+		for _, old := range []Delivery{rep("svc", "i", 8, 8, 0), rep("svc", "i", 9, 7, 0)} {
 			if ok, err := e.m.ReportDelivery(e.id, old); ok || err != nil {
 				panic(fmt.Sprintf("report %+v behind the stored one: accepted=%v err=%v", old, ok, err))
 			}
@@ -574,9 +575,10 @@ func TestDeliveryEndpointBounds(t *testing.T) {
 	}
 }
 
-// At most MaxDeliveryInstances instances per session: further ones get 409
-// (the SDK stops reporting that session), known ones can still update, and
-// the session says that it does not account for everyone.
+// At most MaxDeliveryInstances instances are stored per session: further
+// ones get 409, known ones can still update. The report of a further one
+// counts for the verdict all the same (here: with a collector that gives no
+// counts, among the instances that could not be checked).
 func TestDeliveryInstanceLimit(t *testing.T) {
 	e := newDeliveryEnv(t, testGrace, nil)
 	for i := range MaxDeliveryInstances {
@@ -587,8 +589,8 @@ func TestDeliveryInstanceLimit(t *testing.T) {
 	}
 	e.report(rep("svc", "i007", 2, 2, 0))
 	s, _ := e.stop()
-	if len(s.Delivery) != MaxDeliveryInstances || s.Incomplete || len(s.DeliveryUnconfirmed) != 2 ||
-		!strings.Contains(s.DeliveryUnconfirmed[1], "more than 256 instances reported; the reports of 1 others were refused") {
+	if len(s.Delivery) != MaxDeliveryInstances || s.Incomplete || len(s.DeliveryUnconfirmed) != 1 ||
+		!strings.Contains(s.DeliveryUnconfirmed[0], "the delivery reports of 257 instance(s) could not be checked") {
 		panic(fmt.Sprintf("delivery %d incomplete=%v unconfirmed=%q", len(s.Delivery), s.Incomplete, s.DeliveryUnconfirmed))
 	}
 }

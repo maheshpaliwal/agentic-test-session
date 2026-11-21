@@ -127,7 +127,7 @@ func TestDrainAsksTheCollectorByName(t *testing.T) {
 		e, col := newAskEnv(t, false, map[string]int64{deliveryKey("orders-api", "o-1"): 3})
 		defer follow(e.m, "orders-api", "o-1")()
 		s, took := e.stop()
-		wantShortfall(t, s, "service orders-api (instance o-1): the collector has 3 events from it, but none of its delivery reports for the session arrived")
+		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
 		if took < testGrace-20*time.Millisecond || !col.askedFor("orders-api", "o-1") {
 			panic(fmt.Sprintf("sealed after %v, asked %d times", took, len(col.asked)))
 		}
@@ -167,12 +167,12 @@ func TestDrainDoesNotAskWithoutNeed(t *testing.T) {
 	}
 }
 
-// The review's F3 (e): a caller fills the 256 places a session has for
-// reporting instances, so that the report of the instance with the shortfall
-// is refused. A refused report is judged by what it said: one that said that
-// events were lost makes the session incomplete, naming the instance. The
-// others are counted in delivery_unconfirmed.
-func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
+// The review's F3 (e), and the third review's F1: a caller fills the 256
+// places a session has for reporting instances, so that the report of the
+// instance with the shortfall is not stored. Such a report is answered "full"
+// and kept for the verdict all the same: it is replaced, waited for and held
+// against the collector's count like a stored one.
+func TestDeliveryReportsBeyondTheCapAreJudgedLikeTheOthers(t *testing.T) {
 	fill := func(e *deliveryEnv) {
 		e.col.counting()
 		for i := range MaxDeliveryInstances {
@@ -180,69 +180,188 @@ func TestDeliveryRefusedReportsAreJudgedByTheirWord(t *testing.T) {
 			e.col.has("f", fmt.Sprintf("f-%03d", i), 1)
 		}
 	}
-	refused := func(e *deliveryEnv, d Delivery) {
+	full := func(e *deliveryEnv, d Delivery) {
 		e.t.Helper()
 		if ok, err := e.m.ReportDelivery(e.id, d); ok || !errors.Is(err, ErrBadState) || !errors.Is(err, errDeliveryFull) {
-			panic(fmt.Sprintf("report %+v: accepted=%v err=%v, want it refused for the cap", d, ok, err))
+			panic(fmt.Sprintf("report %+v: accepted=%v err=%v, want it answered full", d, ok, err))
 		}
+	}
+	verdict := func(s Session) string {
+		return fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
 	}
 	t.Run("dropped events", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		fill(e)
-		refused(e, final(rep("real", "real-1", 10, 0, 10)))
-		refused(e, rep("fine", "fine-1", 4, 4, 0))
+		full(e, final(rep("real", "real-1", 10, 0, 10)))
+		full(e, rep("fine", "fine-1", 4, 4, 0))
+		e.col.has("fine", "fine-1", 4)
 		s, took := e.stop()
 		if !s.Incomplete || len(s.IncompleteReasons) != 1 ||
-			s.IncompleteReasons[0] != "service real (instance real-1): its delivery report said that events were dropped or left undelivered; the report was refused because the session already keeps reports of 256 instances" ||
-			len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != "more than 256 instances reported; the reports of 1 others were refused and are not accounted for" {
-			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
+			s.IncompleteReasons[0] != "service real (instance real-1): 0 of 10 recorded events reached the collector, 10 dropped by the SDK" ||
+			len(s.DeliveryUnconfirmed) != 0 || len(s.Delivery) != MaxDeliveryInstances {
+			panic(verdict(s))
 		}
 		if took >= testGrace {
 			panic(fmt.Sprintf("drain %v", took))
 		}
 	})
-	t.Run("a final report that still held events, and a later one that takes it back", func(t *testing.T) {
+	// The third review's c3: the instance is killed after a report that was
+	// not final and still held everything. Its word used to be dropped, and
+	// the session ended unconfirmed where it is incomplete without the crowd.
+	t.Run("a report that is not final and holds events the collector does not have", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		fill(e)
-		refused(e, rep("real", "real-1", 10, 0, 0)) // periodic: it may still deliver
-		refused(e, final(rep("real", "real-1", 10, 4, 0)))
-		refused(e, final(rep("real", "real-1", 10, 10, 0)))
-		s, _ := e.stop()
-		if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "service real (instance real-1)") || len(s.DeliveryUnconfirmed) != 0 {
-			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
+		full(e, rep("real", "real-1", 10, 0, 0))
+		s, took := e.stop()
+		if !s.Incomplete || len(s.IncompleteReasons) != 1 || len(s.DeliveryUnconfirmed) != 0 ||
+			s.IncompleteReasons[0] != "service real (instance real-1): 0 of 10 recorded events reached the collector; the instance stopped reporting before the session ended" {
+			panic(verdict(s))
+		}
+		if took < testGrace-20*time.Millisecond {
+			panic(fmt.Sprintf("sealed after %v: an instance that owes events is waited for, stored or not", took))
 		}
 	})
-	// A connected instance whose report was refused is not taken for one whose
-	// reports do not arrive.
-	t.Run("refused and connected, with its events at the collector", func(t *testing.T) {
+	t.Run("a final report that still held events, and a later one that takes it back", func(t *testing.T) {
+		for _, c := range []struct {
+			have int64
+			want string
+		}{{4, "service real (instance real-1): 4 of 10 recorded events reached the collector"}, {10, ""}} {
+			e := newDeliveryEnv(t, testGrace, nil)
+			fill(e)
+			full(e, rep("real", "real-1", 10, 0, 0)) // periodic: it may still deliver
+			full(e, final(rep("real", "real-1", 10, 4, 0)))
+			full(e, final(rep("real", "real-1", 10, 10, 0)))
+			e.col.has("real", "real-1", c.have)
+			s, _ := e.stop()
+			if c.want == "" {
+				wantComplete(t, s)
+			} else if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != c.want || len(s.DeliveryUnconfirmed) != 0 {
+				panic(fmt.Sprintf("collector has %d: %s", c.have, verdict(s)))
+			}
+		}
+	})
+	// An old report of such an instance is stale, like one of a stored instance.
+	t.Run("an old report", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		fill(e)
+		full(e, final(rep("real", "real-1", 10, 10, 0)))
+		if ok, err := e.m.ReportDelivery(e.id, rep("real", "real-1", 9, 9, 0)); ok || err != nil {
+			panic(fmt.Sprintf("an older report: accepted=%v err=%v, want it stale", ok, err))
+		}
+		e.col.has("real", "real-1", 10)
+		s, _ := e.stop()
+		wantComplete(t, s)
+	})
+	// A connected instance whose report is kept that way is not taken for one
+	// whose reports do not arrive.
+	t.Run("connected, with its events at the collector", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		fill(e)
 		defer follow(e.m, "fine", "fine-1")()
 		e.col.has("fine", "fine-1", 4)
-		refused(e, final(rep("fine", "fine-1", 4, 4, 0)))
+		full(e, final(rep("fine", "fine-1", 4, 4, 0)))
 		s, took := e.stop()
-		if s.Incomplete || len(s.IncompleteReasons) != 0 || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "the reports of 1 others were refused") {
-			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
-		}
+		wantComplete(t, s)
 		if took >= testGrace/2 {
 			panic(fmt.Sprintf("the drain waited %v for an instance that reported", took))
 		}
 	})
-	// What is remembered of the refused is bounded too. Beyond the bound a
-	// connected instance with events and no stored report reads as one whose
+	// What is kept beside the session is bounded too. Beyond the bound a
+	// connected instance with events and no kept report reads as one whose
 	// reports do not arrive: filling the bound cannot make a session complete.
-	t.Run("more refused instances than are remembered", func(t *testing.T) {
+	t.Run("more instances than are kept", func(t *testing.T) {
 		e := newDeliveryEnv(t, testGrace, nil)
 		fill(e)
 		for i := range maxDeliveryRefused {
-			refused(e, final(rep("g", fmt.Sprintf("g-%04d", i), 1, 1, 0)))
+			full(e, final(rep("g", fmt.Sprintf("g-%04d", i), 1, 1, 0)))
+			e.col.has("g", fmt.Sprintf("g-%04d", i), 1)
 		}
 		defer follow(e.m, "real", "real-1")()
 		e.col.has("real", "real-1", 4)
-		refused(e, final(rep("real", "real-1", 10, 4, 6)))
+		full(e, rep("late", "late-1", 10, 4, 0)) // not final, holds events: nothing is kept of it
 		s, _ := e.stop()
-		if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "service real (instance real-1): the collector has 4 events from it, but none of its delivery reports") ||
-			len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "the reports of more than 1024 others were refused") {
+		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != "the collector has 4 events from real/real-1, which did not report how many it recorded" ||
+			len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != "more than 1280 instances reported; the reports of the ones beyond that are not accounted for" {
+			panic(verdict(s))
+		}
+		// One of them that says that events were lost: the session is incomplete,
+		// without the instance's name.
+		e = newDeliveryEnv(t, testGrace, nil)
+		fill(e)
+		for i := range maxDeliveryRefused {
+			full(e, final(rep("g", fmt.Sprintf("g-%04d", i), 1, 1, 0)))
+			e.col.has("g", fmt.Sprintf("g-%04d", i), 1)
+		}
+		full(e, final(rep("real", "real-1", 10, 4, 6)))
+		s, _ = e.stop()
+		if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.HasPrefix(s.IncompleteReasons[0], "more than 1280 instances reported, and a report of one beyond that said that events were dropped or left undelivered") ||
+			len(s.DeliveryUnconfirmed) != 1 {
+			panic(verdict(s))
+		}
+	})
+}
+
+// The third review's F1 (c1, c1b): a report in a real instance's name that
+// arrives before its own, with a low recorded and a high dropped, made every
+// report of the real instance stale (its dropped was lower), and the session
+// complete with the collector holding as much as the forged report named. A
+// report that names more events is a later one.
+func TestDeliveryPreloadedReportDoesNotHideTheRealOnes(t *testing.T) {
+	t.Run("recorded 1, dropped 1, final; then the real instance loses 10 of 100", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("real", "real-1", 90)
+		e.report(final(rep("real", "real-1", 1, 0, 1)))
+		e.report(final(rep("real", "real-1", 100, 90, 0)))
+		s, _ := e.stop()
+		wantShortfall(t, s, "service real (instance real-1): 90 of 100 recorded events reached the collector")
+	})
+	t.Run("recorded 11, dropped 11, final; then the real instance drops 10 of 100", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("real", "real-1", 90)
+		e.report(final(rep("real", "real-1", 11, 0, 11)))
+		e.report(final(rep("real", "real-1", 100, 90, 10)))
+		s, _ := e.stop()
+		wantShortfall(t, s, "service real (instance real-1): 90 of 100 recorded events reached the collector, 10 dropped by the SDK")
+	})
+	// A report that names as many events and less delivered or dropped is an
+	// old one, as before; so is one that names fewer events.
+	t.Run("what is stale", func(t *testing.T) {
+		for _, c := range []struct {
+			prev, next Delivery
+			stale      bool
+		}{
+			{rep("a", "i", 10, 5, 0), rep("a", "i", 9, 9, 0), true},
+			{rep("a", "i", 10, 5, 0), rep("a", "i", 10, 4, 0), true},
+			{rep("a", "i", 10, 5, 2), rep("a", "i", 10, 6, 1), true},
+			{rep("a", "i", 10, 5, 0), rep("a", "i", 10, 5, 0), false},
+			{rep("a", "i", 10, 5, 0), rep("a", "i", 10, 6, 0), false},
+			{rep("a", "i", 10, 5, 5), rep("a", "i", 11, 0, 0), false},
+			{rep("a", "i", 1, 0, 1), rep("a", "i", 100, 90, 0), false},
+		} {
+			if got := staleReport(c.next, c.prev); got != c.stale {
+				panic(fmt.Sprintf("%+v after %+v: stale=%v, want %v", c.next, c.prev, got, c.stale))
+			}
+		}
+	})
+	// Final is kept across a report that names the same events (an older one
+	// that arrived late), and not across one that names more: a final report
+	// in the instance's name by somebody else does not make its own final.
+	t.Run("final", func(t *testing.T) {
+		e := newDeliveryEnv(t, testGrace, nil)
+		e.col.counting().has("real", "real-1", 12)
+		e.report(final(rep("real", "real-1", 10, 10, 0)))
+		e.report(rep("real", "real-1", 10, 10, 0))
+		if s, _ := e.m.Get(e.id); len(s.Delivery) != 1 || !s.Delivery[0].Final {
+			panic(fmt.Sprintf("final was taken back by a report of the same events: %+v", s.Delivery))
+		}
+		e.report(rep("real", "real-1", 11, 11, 0))
+		if s, _ := e.m.Get(e.id); len(s.Delivery) != 1 || s.Delivery[0].Final {
+			panic(fmt.Sprintf("a later report that is not final was stored as final: %+v", s.Delivery))
+		}
+		// The collector has more than its last report names: the instance
+		// recorded on and stopped reporting.
+		s, _ := e.stop()
+		if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "the collector has 12 events, more than the 11 of the instance's last report") {
 			panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 		}
 	})

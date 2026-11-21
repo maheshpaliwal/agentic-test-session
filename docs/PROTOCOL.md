@@ -161,9 +161,13 @@ from the instance.
 - `last_error` (optional) is why the instance's last request to the collector failed, empty once one succeeded;
   sent only while events are buffered or dropped. `final` marks a report sent after the instance saw the session
   in `draining` and had delivered everything or had 2s to try, or sent while the process shuts down.
-- A later report replaces the earlier one of the same service and instance. One whose `recorded`, `delivered` or
-  `dropped` is lower than what is stored is an old one and is ignored (`stale`); `final` is never taken back. The
-  control plane adds `at`, the time it received the report. A report with `recorded` 0 is accepted and not stored.
+- A later report replaces the earlier one of the same service and instance. Which of two is the later one is
+  read from `recorded`, which rises with every event: a report with a lower `recorded` than the one kept is an
+  old one and is ignored (`stale`), and so is one with the same `recorded` and a lower `delivered` or `dropped`.
+  A report with a higher `recorded` replaces the one kept whatever its other counters are. `final` is kept when
+  the report that replaces it names the same `recorded` (a report sent before the instance knew of the drain,
+  arriving late); one that names more events speaks for itself. The control plane adds `at`, the time it received
+  the report. A report with `recorded` 0 is accepted and not stored.
 - What is stored is self-reported and cleaned: `service` and `instance` printable ASCII without leading or
   trailing spaces, at most 128 bytes, the same way on the stream's headers, in a report and for the names the
   collector counts events by, so that the three compare (a service named `"orders-api "` is `orders-api`
@@ -239,10 +243,10 @@ instance's own word does not condemn it and does not acquit it:
 | `have > R.recorded`, not `final`, `R.dropped = 0` | `delivery_unconfirmed`: the instance recorded after its last report and stopped reporting; nothing says how much more |
 | otherwise `R.dropped > 0` | `incomplete`, with a reason |
 | otherwise (`have < R.recorded`) | `incomplete`, with a reason, whether `R` is `final` or the instance went silent |
-| no report for the session, `have > 0`, the instance follows the stream, announced that it reports, had the grace (drain rule 2) and is still connected | `incomplete`, with a reason: it took part and its report did not arrive, so nothing says whether what the collector has is all it recorded |
+| no report for the session, `have > 0`, the instance follows the stream, announced that it reports, had the grace (drain rule 2) and is still connected | `incomplete`, with the reason `the collector has N events from <service>/<instance>, which did not report how many it recorded`: it took part and its report did not arrive, so nothing says whether what the collector has is all it recorded (see "Incomplete with nothing missing" below) |
 | no report for the session, `have = 0` | nothing, with one exception: an instance that follows the stream, announced that it reports, and of which **no report at all** has arrived since it connected (1s ago or longer: a tenth of the grace) is `delivery_unconfirmed`. Something refuses its reports, and whether it took part cannot be known |
 | the collector has events from an instance that never reported and does not announce reports (an older SDK), or that is no longer connected | nothing |
-| a report refused because the session already keeps 256 instances (`full`) | judged by its own word: `incomplete`, naming the instance, if it said `dropped > 0`, or was `final` with `buffered > 0` (not taken back by a later one); otherwise counted in one `delivery_unconfirmed` line, "more than 256 instances reported; the reports of N others were refused" |
+| a report answered `full` (`409` from the per-session endpoint), because the session already stores the reports of 256 instances | the same as for a stored report, by every line above: the control plane keeps the last report of up to 1024 such instances for the verdict (replaced by later ones, waited for in the drain, held against the collector's count) without storing it with the session, so it is not in `delivery`. Of the instances beyond those nothing is kept: one `delivery_unconfirmed` line, "more than 1280 instances reported; the reports of the ones beyond that are not accounted for", and `incomplete` when one of their reports said `dropped > 0`, or was `final` with `buffered > 0` |
 
 Without a collector count for an instance that reported, its word is all there is, and a word alone never makes a
 session complete: `dropped > 0`, or `final` with `buffered > 0`, is `incomplete`; everything else that recorded
@@ -314,17 +318,18 @@ name. The collector's `/v1/internal/` endpoints (drain-status, instance-counts, 
 
 | A caller that can reach | can | cannot |
 |---|---|---|
-| the control plane | make any running session `incomplete`: a report in a real instance's name with counters ahead of the real ones (counters only rise, so the real reports are then `stale`), or of a made-up instance that owes events | make an incomplete session complete: a report is held against the collector's count for the instance, asked for by name when the collector's list is crowded with other instances |
+| the control plane | make any running session `incomplete`: a report in a real instance's name with `recorded` ahead of the real one (the real reports are then `stale`), or of a made-up instance that owes events | make a session complete that is incomplete for an instance **whose own reports arrive**. A report in its name is held against the collector's count for the instance (asked for by name when the collector's list is crowded with other instances), so it must name no more events than the collector has; and the instance's own report then names more and replaces it, whenever the forged one was sent and whatever its other counters say (`{recorded 1, dropped 1, final}` sent first does not make the real reports stale) |
+| the control plane | **make a session complete that is incomplete for an instance whose own reports do not arrive** (it took part, the collector has some of its events, something refuses its reports): one `final` report in its name that names as many events as the collector has. The report and the count agree, and nothing says that the instance recorded more | |
 | the control plane | hold a drain up to `max_drain_seconds`, by reporting a rising `delivered` or `delivered_total` for an instance that owes events (the session then ends `incomplete`, timed out) | hold a drain by opening the stream and announcing reports: an instance without events at the collector is not waited for |
 | the control plane | put a line into `delivery_unconfirmed` of every session, by following the stream with `X-Tsession-Delivery-Instance` and never reporting, and so fail every run that uses the strict gate | fail a session that way with the default gate |
-| the control plane | take a line out of `delivery_unconfirmed`: one request in the name of a connected instance whose own reports do not arrive makes it look like one that is merely idle | hide a shortfall by filling the 256 instances of a session: a refused report that states a loss makes the session `incomplete` (one that claims all is well is counted under `delivery_unconfirmed`) |
-| the control plane | make a session `delivery_unconfirmed` by filling its 256 instances before the real ones report | touch a finished session: reports are `closed` once the drain stops looking |
+| the control plane | take a line out of `delivery_unconfirmed`: one request in the name of a connected instance whose own reports do not arrive makes it look like one that is merely idle | hide a shortfall, or turn it into `delivery_unconfirmed`, by filling the 256 instances of a session before the real ones report: a report answered `full` is judged like a stored one, `final` or not |
+| the control plane | with 1280 reports of made-up instances (five requests), keep the report of an instance that reports for the first time after them from being judged. The session then says "more than 1280 instances reported" under `delivery_unconfirmed`, where it would be `incomplete` for an instance that is killed after a report that was not `final` and held events. (A report that names dropped events, or is `final` and holds some, makes the session `incomplete` all the same; and an instance on the stream with events at the collector is `incomplete` as one that did not report) | touch a finished session: reports are `closed` once the drain stops looking |
 | the collector's ingest | **make an incomplete session complete**: events sent in the name (`service`, `instance`) of an instance that lost its own make the collector's count match the instance's report. A count cannot tell forged events from real ones | |
 | the collector's ingest and the control plane's stream | make a session `incomplete` and hold its drain for the grace: events in the name of an instance it announces on the stream and never reports for | |
 | the collector's ingest | crowd the collector's list of instances (more than 512 per session): the control plane then asks by name | make the control plane miss an instance that reported or is connected that way |
 
-A report is at most 4 KiB, a batch 256 reports, and a session remembers at most 1024 instances whose reports it
-refused. Whether running without authentication is acceptable for an environment is not something this document
+A report is at most 4 KiB, a batch 256 reports, and a session keeps the reports of at most 1024 instances beside
+the 256 it stores. Whether running without authentication is acceptable for an environment is not something this document
 decides.
 
 ### Export file

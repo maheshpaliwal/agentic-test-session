@@ -387,8 +387,8 @@ func TestDelivery_RefusedReportsOfAServiceThatTookPart(t *testing.T) {
 		if r.short() {
 			t.Errorf("test setup: the collector should have every event: %s", r)
 		}
-		if !r.info.Incomplete || len(r.info.IncompleteReasons) != 1 || !strings.Contains(r.info.IncompleteReasons[0], "service orders-api (instance ") ||
-			!strings.Contains(r.info.IncompleteReasons[0], "the collector has 6 events from it, but none of its delivery reports for the session arrived") {
+		if !r.info.Incomplete || len(r.info.IncompleteReasons) != 1 || !strings.Contains(r.info.IncompleteReasons[0], "the collector has 6 events from orders-api/") ||
+			!strings.Contains(r.info.IncompleteReasons[0], ", which did not report how many it recorded") {
 			t.Errorf("want the session incomplete for orders-api: %s", r)
 		}
 		if len(r.info.DeliveryUnconfirmed) != 1 || !strings.Contains(r.info.DeliveryUnconfirmed[0], "service idle-0 (instance ") ||

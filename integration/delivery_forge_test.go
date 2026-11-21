@@ -215,7 +215,7 @@ func TestDeliveryForgery(t *testing.T) {
 			f.honest(id)
 			f.ingest(id, "ghost", "ghost-1", 2)
 		})
-		all(t, infos, "with a silent stream that has events", incompleteFor("service ghost (instance ghost-1): the collector has 2 events from it, but none of its delivery reports for the session arrived"))
+		all(t, infos, "with a silent stream that has events", incompleteFor("the collector has 2 events from ghost/ghost-1, which did not report how many it recorded"))
 		if longest > healthyDrain+time.Second {
 			t.Errorf("the drain was held for %v, the grace is 1s", longest)
 		}
@@ -262,23 +262,81 @@ func TestDeliveryForgery(t *testing.T) {
 	})
 
 	// (e) The caller fills the 256 places a session has for reporting
-	// instances, so that the real report (ten events dropped) is refused.
-	// The refused report is judged by its word. This left the session
-	// delivery_unconfirmed only.
+	// instances, so that the real report is not stored (409). It is kept for
+	// the verdict all the same and held against the collector's count like a
+	// stored one: ten events dropped, and (the third review's c3) a report
+	// that is not final and still holds everything, of an instance that is
+	// killed before a final one. The first left the session
+	// delivery_unconfirmed only, then the second did.
 	t.Run("e: the instance cap filled before the real report", func(t *testing.T) {
 		t.Parallel()
 		f := &forgeEnv{t, newInfra(t, store.NewMem())}
-		infos, _ := f.each(n, func(id string) {
+		fill := func(id string) {
 			for k := range 256 {
 				inst := fmt.Sprintf("f-%03d", k)
 				f.ingest(id, "f", inst, 1)
 				f.report(id, forgedReport{"service": "f", "instance": inst, "recorded": 1, "delivered": 1, "final": true})
 			}
+		}
+		infos, _ := f.each(n, func(id string) {
+			fill(id)
 			if code, body := f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 10, "delivered": 0, "dropped": 10, "final": true}); code != http.StatusConflict {
 				t.Errorf("the real report at the cap: %d %s, want 409", code, body)
 			}
 		})
-		all(t, infos, "a real shortfall refused at the cap", incompleteFor("service real (instance real-1): its delivery report said that events were dropped or left undelivered; the report was refused"))
+		all(t, infos, "a real shortfall at the cap", incompleteFor("service real (instance real-1): 0 of 10 recorded events reached the collector, 10 dropped by the SDK"))
+		infos, _ = f.each(n, func(id string) {
+			fill(id)
+			if code, body := f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 10, "buffered": 10}); code != http.StatusConflict {
+				t.Errorf("the real report at the cap: %d %s, want 409", code, body)
+			}
+		})
+		all(t, infos, "a report at the cap that is not final and holds everything",
+			incompleteFor("service real (instance real-1): 0 of 10 recorded events reached the collector; the instance stopped reporting before the session ended"))
+		// An honest instance behind the same crowd is still complete.
+		infos, _ = f.each(n, func(id string) {
+			fill(id)
+			f.ingest(id, "real", "real-1", 10)
+			f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 10, "delivered": 10, "final": true})
+		})
+		all(t, infos, "an honest instance at the cap", complete)
+	})
+
+	// (f) The third review's c1: the caller posts a report in the real
+	// instance's name before its own, with one event recorded and dropped. The
+	// real reports name more events, so they are later ones and replace it.
+	// They used to be stale (their dropped was lower), and a session that lost
+	// ten events of a hundred was complete.
+	t.Run("f: a report in the instance's name before its own", func(t *testing.T) {
+		t.Parallel()
+		f := &forgeEnv{t, newInfra(t, store.NewMem())}
+		infos, _ := f.each(n, func(id string) {
+			f.ingest(id, "real", "real-1", 90)
+			f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 1, "dropped": 1, "final": true})
+			if code, body := f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 100, "delivered": 90, "buffered": 10, "final": true}); code != http.StatusOK || !strings.Contains(body, `"accepted":true`) {
+				t.Errorf("the real report after a forged one that names fewer events: %d %s", code, body)
+			}
+		})
+		all(t, infos, "a forged report before the real ones", incompleteFor("service real (instance real-1): 90 of 100 recorded events reached the collector"))
+	})
+
+	// (g) What the counts cannot defend against either, pinned so that the
+	// docs stay true (the third review's c2b): an instance took part, half of
+	// its events arrived, and its own reports do not arrive at all. The session
+	// is incomplete for it. A caller that posts a final report in its name
+	// that names what the collector has makes the session complete: the report
+	// and the count agree, and nothing says that the instance recorded more.
+	t.Run("g: a final report in the name of an instance whose own do not arrive (not defended)", func(t *testing.T) {
+		t.Parallel()
+		f := &forgeEnv{t, newInfra(t, store.NewMem())}
+		f.stream("victim", "v-1")
+		infos, _ := f.each(n, func(id string) { f.ingest(id, "victim", "v-1", 5) })
+		all(t, infos, "an instance that took part and did not report", incompleteFor("the collector has 5 events from victim/v-1, which did not report how many it recorded"))
+		infos, _ = f.each(n, func(id string) {
+			f.ingest(id, "victim", "v-1", 5)
+			f.report(id, forgedReport{"service": "victim", "instance": "v-1", "recorded": 5, "delivered": 5, "final": true})
+		})
+		all(t, infos, "the documented limit (a final report forged for an instance whose own do not arrive)", complete)
 	})
 
 	// (d) What the counts cannot defend against, pinned so that the docs

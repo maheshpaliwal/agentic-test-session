@@ -85,15 +85,16 @@ type DeliveryResult struct {
 // The statuses of a DeliveryResult.
 const (
 	DeliveryAccepted = "accepted"
-	// DeliveryStale: the counters lie behind the ones already stored (an old
-	// report that arrived late); ignored.
+	// DeliveryStale: the report lies behind the one already kept for the
+	// instance (an old one that arrived late, see staleReport); ignored.
 	DeliveryStale = "stale"
 	// DeliveryClosed: the session is finished or about to be sealed.
 	DeliveryClosed = "closed"
 	// DeliveryUnknown: no such session.
 	DeliveryUnknown = "unknown"
 	// DeliveryFull: the session already keeps reports of MaxDeliveryInstances
-	// instances. The report is judged by its own word (see refusedInstance).
+	// instances, so this one is not stored with it. It counts all the same:
+	// it is kept for the verdict like a stored one (see deliveryState.refused).
 	DeliveryFull    = "full"
 	DeliveryInvalid = "invalid"
 	// DeliveryFailed: the report could not be stored; send it again.
@@ -109,8 +110,8 @@ const (
 	maxDeliveryBatchBody = MaxDeliveryBatch*maxDeliveryBody + 1<<10
 	// MaxDeliveryInstances bounds the instances one session keeps reports of.
 	MaxDeliveryInstances = 256
-	// maxDeliveryRefused bounds the instances a session remembers having
-	// refused a report of, for MaxDeliveryInstances.
+	// maxDeliveryRefused bounds the instances whose reports a session keeps
+	// for its verdict without storing them, beyond MaxDeliveryInstances.
 	maxDeliveryRefused = 1024
 	maxDeliveryError   = 256
 	// maxDeliveryCount bounds a counter of a report (2^53: exact in JSON).
@@ -145,24 +146,21 @@ type deliveryState struct {
 	// closed is set when the drain stops looking at reports: the verdict is
 	// made from what is stored then, and later reports are refused.
 	closed bool
-	// refused are the instances whose reports were refused because the session
-	// already kept MaxDeliveryInstances; at most maxDeliveryRefused of them,
-	// and refusedMore when there were more.
-	refused     map[string]refusedInstance
-	refusedMore bool
+	// refused holds the last report of every instance whose reports are not
+	// stored with the session because it already kept MaxDeliveryInstances
+	// (the instance is answered "full"). They are replaced, waited for and
+	// judged against the collector's count like the stored ones: a session
+	// whose list someone filled must not lose the word of the instance that
+	// came after. At most maxDeliveryRefused of them; refusedMore when there
+	// were more. Of those nothing is kept but refusedShort: one of them said
+	// that events were dropped, or was final and still held some.
+	refused      map[string]Delivery
+	refusedMore  bool
+	refusedShort bool
 	// silent names the connected instances whose events the collector has and
 	// of which no report had arrived when the reports were closed (see
 	// silentLocked).
 	silent []Subscriber
-}
-
-// refusedInstance is an instance whose report a session refused for
-// MaxDeliveryInstances. Nothing is stored of it but what its reports said in
-// their own words: short is set once one said that events were dropped, or
-// was final and still held some. That is not taken back.
-type refusedInstance struct {
-	service, instance string
-	short             bool
 }
 
 // instanceProgress is when an instance was last seen to deliver events of any
@@ -194,13 +192,14 @@ func cleanDeliveryError(s string) string {
 }
 
 // ReportDelivery records what an SDK instance says about its events of a
-// running session. It reports false, without an error, for a report whose
-// counters lie behind the ones already stored for that instance (an old
-// report that arrived late): it is ignored. The errors are ErrNotFound,
+// running session. It reports false, without an error, for a report that
+// lies behind the one already kept for that instance (an old report that
+// arrived late, see staleReport): it is ignored. The errors are ErrNotFound,
 // ErrInvalid, and ErrBadState for a session that takes no reports (any more):
-// one that is finished or about to be sealed, or one that already keeps
+// one that is finished or about to be sealed, or one that already stores
 // MaxDeliveryInstances instances and is told of another (an instance it
-// keeps can still report).
+// stores can still report). The report of such an instance is not stored
+// with the session, and counts for the verdict all the same.
 //
 // A report that says nothing was recorded is accepted and not stored.
 func (m *Manager) ReportDelivery(id string, d Delivery) (bool, error) {
@@ -284,6 +283,47 @@ func (m *Manager) heardLocked(key string, now time.Time) {
 	}
 }
 
+// staleReport reports whether d, a report of the instance prev is of, is an
+// older one: the instance had recorded less when it sent d, or as much and
+// had delivered or dropped less. The counters of an instance only rise, and
+// recorded rises with every event, so recorded alone orders two reports that
+// differ in it.
+//
+// A lower delivered or dropped next to a higher recorded does not make a
+// report stale. Nothing an instance sends looks like that, but a report in
+// its name by somebody else may, sent before its own: {recorded 1, dropped 1,
+// final} would otherwise make every report of the real instance stale, and
+// the session complete with the collector holding that one event.
+func staleReport(d, prev Delivery) bool {
+	if d.Recorded != prev.Recorded {
+		return d.Recorded < prev.Recorded
+	}
+	return d.Delivered < prev.Delivered || d.Dropped < prev.Dropped
+}
+
+// reportOf is the report kept for an instance: the one stored with the
+// session, or the one kept beside it (see deliveryState.refused).
+func (st *deliveryState) reportOf(s Session, service, instance string) (Delivery, bool) {
+	if i := slices.IndexFunc(s.Delivery, func(x Delivery) bool { return x.Service == service && x.Instance == instance }); i >= 0 {
+		return s.Delivery[i], true
+	}
+	d, ok := st.refused[deliveryKey(service, instance)]
+	return d, ok
+}
+
+// reports lists every report kept for the session: the stored ones in their
+// order, then the ones kept beside them, by service and instance.
+func (st *deliveryState) reports(s Session) []Delivery {
+	if len(st.refused) == 0 {
+		return s.Delivery
+	}
+	list := slices.Clone(s.Delivery)
+	for _, key := range slices.Sorted(maps.Keys(st.refused)) {
+		list = append(list, st.refused[key])
+	}
+	return list
+}
+
 // reportLocked is ReportDelivery for a report whose names are clean.
 func (m *Manager) reportLocked(id string, d Delivery, now time.Time) (bool, error) {
 	d.LastError = cleanDeliveryError(d.LastError)
@@ -311,28 +351,49 @@ func (m *Manager) reportLocked(id string, d Delivery, now time.Time) (bool, erro
 	key := deliveryKey(d.Service, d.Instance)
 	m.noteProgressLocked(key, d.DeliveredTotal, now)
 	i := slices.IndexFunc(s.Delivery, func(x Delivery) bool { return x.Service == d.Service && x.Instance == d.Instance })
-	var prev Delivery
-	switch {
-	case i >= 0:
+	prev, known := Delivery{}, i >= 0
+	if known {
 		prev = s.Delivery[i]
-		if d.Recorded < prev.Recorded || d.Delivered < prev.Delivered || d.Dropped < prev.Dropped {
+	}
+	// beside: the report is kept for the verdict, not stored with the session.
+	beside := false
+	if !known {
+		prev, known = st.refused[key]
+		beside = known
+	}
+	switch {
+	case known:
+		if staleReport(d, prev) {
 			return false, nil
 		}
 		// A report sent before the instance knew of the drain cannot take back
-		// one sent after.
-		d.Final = d.Final || prev.Final
+		// one sent after: the two name the same events. One that names more is
+		// a later one and speaks for itself, so a final report in the instance's
+		// name by somebody else does not make its later ones final.
+		d.Final = d.Final || prev.Final && d.Recorded == prev.Recorded
 		d.DeliveredTotal = max(d.DeliveredTotal, prev.DeliveredTotal)
 	case d.Recorded == 0:
 		return true, nil
 	case len(s.Delivery) >= MaxDeliveryInstances:
-		st.refuseLocked(key, d)
-		return false, errDeliveryFull
+		if len(st.refused) >= maxDeliveryRefused {
+			st.refusedMore = true
+			st.refusedShort = st.refusedShort || d.Dropped > 0 || d.Final && d.Buffered > 0
+			return false, errDeliveryFull
+		}
+		beside = true
 	}
-	if i < 0 || prev.Buffered == 0 || d.Delivered > prev.Delivered {
+	if !known || prev.Buffered == 0 || d.Delivered > prev.Delivered {
 		st.progress[key] = now
 	}
 	if d.Final && d.Buffered > 0 {
 		st.short[key] = struct{}{}
+	}
+	if beside {
+		if st.refused == nil {
+			st.refused = map[string]Delivery{}
+		}
+		st.refused[key] = d
+		return false, errDeliveryFull
 	}
 	// The stored slice is shared with copies of the session: never changed in place.
 	list := make([]Delivery, 0, len(s.Delivery)+1)
@@ -350,26 +411,6 @@ func (m *Manager) reportLocked(id string, d Delivery, now time.Time) (bool, erro
 		return false, err
 	}
 	return true, nil
-}
-
-// refuseLocked remembers that the report d of the instance behind key was
-// refused for MaxDeliveryInstances, and whether it said that events were lost.
-func (st *deliveryState) refuseLocked(key string, d Delivery) {
-	short := d.Dropped > 0 || d.Final && d.Buffered > 0
-	r, known := st.refused[key]
-	switch {
-	case known:
-		r.short = r.short || short
-	case len(st.refused) >= maxDeliveryRefused:
-		st.refusedMore = true
-		return
-	default:
-		if st.refused == nil {
-			st.refused = map[string]refusedInstance{}
-		}
-		r = refusedInstance{service: d.Service, instance: d.Instance, short: short}
-	}
-	st.refused[key] = r
 }
 
 // noteProgressLocked records that the instance behind key reported total
@@ -432,15 +473,12 @@ func (m *Manager) silentLocked(s Session, st *deliveryState, begin, now time.Tim
 			continue
 		}
 		key := deliveryKey(sub.Service, sub.DeliveryInstance)
-		if _, refused := st.refused[key]; refused {
-			continue
-		}
 		have, ok := cur.of(sub.Service, sub.DeliveryInstance)
 		if !ok || have == 0 {
 			continue
 		}
-		i := slices.IndexFunc(s.Delivery, func(d Delivery) bool { return d.Service == sub.Service && d.Instance == sub.DeliveryInstance })
-		if i >= 0 && (s.Delivery[i].Final || have <= s.Delivery[i].Recorded) {
+		d, reported := st.reportOf(s, sub.Service, sub.DeliveryInstance)
+		if reported && (d.Final || have <= d.Recorded) {
 			continue
 		}
 		since := begin
@@ -453,7 +491,7 @@ func (m *Manager) silentLocked(s Session, st *deliveryState, begin, now time.Tim
 			wait = true
 			continue
 		}
-		if _, dup := seen[key]; !dup && i < 0 {
+		if _, dup := seen[key]; !dup && !reported {
 			seen[key] = struct{}{}
 			silent = append(silent, sub)
 		}
@@ -502,12 +540,11 @@ func (m *Manager) uncountedLocked(s Session, st *deliveryState, counts collector
 		if !sub.stream || sub.DeliveryInstance == "" {
 			continue
 		}
-		key := deliveryKey(sub.Service, sub.DeliveryInstance)
-		if _, refused := st.refused[key]; refused || slices.ContainsFunc(s.Delivery, func(d Delivery) bool { return deliveryKey(d.Service, d.Instance) == key }) {
+		if _, reported := st.reportOf(s, sub.Service, sub.DeliveryInstance); reported {
 			continue
 		}
 		if _, ok := counts.of(sub.Service, sub.DeliveryInstance); !ok {
-			seen[key] = struct{}{}
+			seen[deliveryKey(sub.Service, sub.DeliveryInstance)] = struct{}{}
 		}
 	}
 	return len(seen)
@@ -602,6 +639,11 @@ func (m *Manager) countsFor(ctx context.Context, id string, st DrainStatus, ok b
 	for _, d := range m.live[id].Delivery {
 		add(d.Service, d.Instance)
 	}
+	if st := m.delivery[id]; st != nil {
+		for _, d := range st.refused {
+			add(d.Service, d.Instance)
+		}
+	}
 	for _, sub := range m.subs {
 		if sub.stream && sub.DeliveryInstance != "" {
 			add(sub.Service, sub.DeliveryInstance)
@@ -651,7 +693,7 @@ func (m *Manager) deliverySettled(id string, begin time.Time, cur collectorCount
 	now := time.Now()
 	wait := false
 	if m.cfg.DeliveryGrace > 0 {
-		for _, d := range s.Delivery {
+		for _, d := range st.reports(s) {
 			key := deliveryKey(d.Service, d.Instance)
 			if have, ok := cur.of(d.Service, d.Instance); ok {
 				if prev, seen := st.have[key]; seen && have > prev {
@@ -786,6 +828,19 @@ func capReasons(list []string) []string {
 	return list
 }
 
+// unreported is the reason for an instance whose events the collector has
+// and of which no report for the session arrived: it took part, and nothing
+// says how many events it recorded. The session is incomplete for it although
+// nothing may be missing, which the control plane cannot know without the
+// report.
+func unreported(service, instance string, have int64) string {
+	from := instance
+	if service != "" {
+		from = service + "/" + instance
+	}
+	return fmt.Sprintf("the collector has %d events from %s, which did not report how many it recorded", have, from)
+}
+
 // judgeDeliveryLocked writes the verdict on the delivery of a session that is
 // being finished into it and forgets the session's delivery state. counts is
 // what the collector had once the reports were closed. It reports whether the
@@ -794,13 +849,13 @@ func capReasons(list []string) []string {
 // The session is incomplete (incomplete_reasons) for:
 //
 //   - an instance whose last report and the collector's count show a
-//     shortfall (see deliveryVerdict);
+//     shortfall (see deliveryVerdict). The reports that are not stored with
+//     the session, for MaxDeliveryInstances, are judged like the stored ones;
 //   - an instance that is connected, whose events of the session the
 //     collector has, and of which no report for the session arrived in the
-//     time it had (see silentLocked): its reports do not get through, so
-//     nothing says whether those events are all it recorded;
-//   - an instance whose report was refused for MaxDeliveryInstances and said
-//     that events were lost.
+//     time it had (see silentLocked): it took part, and nothing says whether
+//     those events are all it recorded (see unreported);
+//   - a report beyond the ones that are kept that said that events were lost.
 //
 // It is unconfirmed (delivery_unconfirmed, a warning) for what deliveryVerdict
 // lists as such, and for:
@@ -808,8 +863,9 @@ func capReasons(list []string) []string {
 //   - a connected instance of which no report has ever arrived (see
 //     unheardLocked) and no event of the session either: whether it took part
 //     cannot be known;
-//   - the instances whose reports were refused for MaxDeliveryInstances
-//     without saying that events were lost.
+//   - the instances beyond the MaxDeliveryInstances whose reports are stored
+//     and the maxDeliveryRefused whose reports are kept: nothing is known of
+//     them.
 //
 // Each list names at most maxDeliveryReasons instances. With the check turned
 // off (DeliveryGrace < 0) shortfalls are listed as unconfirmed, and the
@@ -819,7 +875,7 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 	if st == nil {
 		st = &deliveryState{}
 	}
-	shortfalls, unconfirmed := deliveryVerdict(s.Delivery, counts, st.short)
+	shortfalls, unconfirmed := deliveryVerdict(st.reports(*s), counts, st.short)
 	silent := map[string]struct{}{}
 	for _, sub := range st.silent {
 		key := deliveryKey(sub.Service, sub.DeliveryInstance)
@@ -830,17 +886,7 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 			continue
 		}
 		silent[key] = struct{}{}
-		shortfalls = append(shortfalls, fmt.Sprintf("%s: the collector has %d events from it, but none of its delivery reports for the session arrived (its log says why), so whether that is all it recorded is unknown",
-			who(sub.Service, sub.DeliveryInstance), have))
-	}
-	more := 0
-	for _, key := range slices.Sorted(maps.Keys(st.refused)) {
-		if r := st.refused[key]; r.short {
-			shortfalls = append(shortfalls, fmt.Sprintf("%s: its delivery report said that events were dropped or left undelivered; the report was refused because the session already keeps reports of %d instances",
-				who(r.service, r.instance), MaxDeliveryInstances))
-		} else {
-			more++
-		}
+		shortfalls = append(shortfalls, unreported(sub.Service, sub.DeliveryInstance, have))
 	}
 	if m.cfg.DeliveryGrace >= 0 {
 		for _, sub := range m.unheardLocked(time.Now(), func(key string) bool {
@@ -863,12 +909,12 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 			unconfirmed = append(unconfirmed, fmt.Sprintf("the collector's list of instances was cut short and it did not answer for %d connected instance(s) that sent no report, so whether they took part is unknown", n))
 		}
 	}
-	if more > 0 || st.refusedMore {
-		n := fmt.Sprint(more)
-		if st.refusedMore {
-			n = "more than " + n
-		}
-		unconfirmed = append(unconfirmed, fmt.Sprintf("more than %d instances reported; the reports of %s others were refused and are not accounted for", MaxDeliveryInstances, n))
+	if st.refusedShort {
+		shortfalls = append(shortfalls, fmt.Sprintf("more than %d instances reported, and a report of one beyond that said that events were dropped or left undelivered; which instance is not kept",
+			MaxDeliveryInstances+maxDeliveryRefused))
+	}
+	if st.refusedMore {
+		unconfirmed = append(unconfirmed, fmt.Sprintf("more than %d instances reported; the reports of the ones beyond that are not accounted for", MaxDeliveryInstances+maxDeliveryRefused))
 	}
 	if m.cfg.DeliveryGrace < 0 {
 		shortfalls, unconfirmed = nil, append(shortfalls, unconfirmed...)

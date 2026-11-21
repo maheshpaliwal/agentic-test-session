@@ -273,8 +273,9 @@ func TestForgedReportCannotClearAShortfall(t *testing.T) {
 	if ok, err := e.m.ReportDelivery(e.id, failing(final(rep("orders-api", "o-1", 21, 0, 0)), "connection refused")); ok || err != nil {
 		panic(fmt.Sprintf("the real report, behind the forged one: accepted=%v err=%v", ok, err))
 	}
-	// Lower counters never replace higher ones.
-	for _, lower := range []Delivery{rep("orders-api", "o-1", 499, 499, 0), rep("orders-api", "o-1", 600, 400, 0), rep("orders-api", "o-1", 0, 0, 0)} {
+	// A report that names fewer events, or as many and less delivered, never
+	// replaces one.
+	for _, lower := range []Delivery{rep("orders-api", "o-1", 499, 499, 0), rep("orders-api", "o-1", 500, 400, 0), rep("orders-api", "o-1", 0, 0, 0)} {
 		if ok, err := e.m.ReportDelivery(e.id, lower); ok || err != nil {
 			panic(fmt.Sprintf("report %+v behind the stored one: accepted=%v err=%v", lower, ok, err))
 		}
@@ -283,9 +284,9 @@ func TestForgedReportCannotClearAShortfall(t *testing.T) {
 	wantShortfall(t, s, "service orders-api (instance o-1): 0 of 500 recorded events reached the collector")
 }
 
-// At the instance cap an instance the session keeps can still report, a new
-// one is refused, and the session then says that it does not account for
-// everyone. Reports of "nothing recorded" take no place.
+// At the instance cap an instance the session stores can still report, and a
+// new one is answered "full": its report is not stored with the session and
+// is judged all the same. Reports of "nothing recorded" take no place.
 func TestDeliveryInstanceLimitKeepsKnownInstances(t *testing.T) {
 	e := newDeliveryEnv(t, testGrace, nil)
 	e.col.counting()
@@ -304,6 +305,7 @@ func TestDeliveryInstanceLimitKeepsKnownInstances(t *testing.T) {
 	if ok, err := e.m.ReportDelivery(e.id, rep("svc", "one-too-many", 1, 1, 0)); ok || !errors.Is(err, ErrBadState) {
 		panic(fmt.Sprintf("instance %d: accepted=%v err=%v, want ErrBadState (409)", MaxDeliveryInstances+1, ok, err))
 	}
+	e.col.has("svc", "one-too-many", 1)
 	s := func() Session {
 		if _, err := e.m.Stop(e.id); err != nil {
 			panic(err)
@@ -311,7 +313,7 @@ func TestDeliveryInstanceLimitKeepsKnownInstances(t *testing.T) {
 		return e.sealed()
 	}()
 	if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "instance i007): 1 of 9") ||
-		len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "more than 256 instances reported; the reports of 1 others were refused") {
+		len(s.DeliveryUnconfirmed) != 0 || len(s.Delivery) != MaxDeliveryInstances {
 		panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
 	}
 }
@@ -348,7 +350,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.report(final(rep("inventory", "i-1", 2, 2, 0)))
 		e.col.has("inventory", "i-1", 2)
 		s, took := e.stop()
-		wantShortfall(t, s, "service orders-api (instance o-1): the collector has 3 events from it, but none of its delivery reports for the session arrived")
+		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
 		if took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
 			panic(fmt.Sprintf("sealed after %v, want the grace (%v)", took, testGrace))
 		}
