@@ -135,3 +135,33 @@ func TestDeliveryUnconfirmedLinesACallerCanRemove(t *testing.T) {
 		}
 	})
 }
+
+// A judgement indexes the reports of the session by instance, and the first
+// report of an instance is the one that counts: the one stored with the
+// session, which is also what the drain went by (reportOf), before one kept
+// beside it. Nothing puts a report of the same instance in both places today,
+// so the state is built by hand; the test pins that the two readers agree.
+// (The fifth review: "the last one wins" in the index failed no test.)
+func TestJudgementGoesByTheStoredReportOfAnInstance(t *testing.T) {
+	e := newDeliveryEnv(t, testGrace, nil)
+	e.col.counting().has("orders-api", "o-1", 3)
+	defer follow(e.m, "orders-api", "o-1")()
+	e.report(rep("orders-api", "o-1", 3, 3, 0)) // stored, in order, not final
+	func() {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		st := e.m.deliveryStateLocked(e.id)
+		st.refused = map[string]Delivery{deliveryKey("orders-api", "o-1"): final(rep("orders-api", "o-1", 3, 3, 0))}
+		if d, ok := st.reportOf(e.m.live[e.id], "orders-api", "o-1"); !ok || d.Final {
+			panic(fmt.Sprintf("test setup: the drain goes by %+v, want the stored report", d))
+		}
+	}()
+	time.Sleep(testGrace + testGrace/4)
+	s, _ := e.stop()
+	// By the stored report the instance stopped reporting before the session
+	// ended, and is silent: unconfirmed. By the other it said all there is.
+	if s.Incomplete || len(s.DeliveryUnconfirmed) != 1 ||
+		!strings.HasSuffix(s.DeliveryUnconfirmed[0], "its last report for this session, of 3 events, was not final, so whether it recorded more since is unknown") {
+		panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
+	}
+}
