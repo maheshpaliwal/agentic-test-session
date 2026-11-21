@@ -920,3 +920,22 @@ func TestSubscribersCarryPendingDelivery(t *testing.T) {
 		panic(fmt.Sprintf("after it delivered: %+v", o))
 	}
 }
+
+// An instance that said it stopped recording, sent no report and is gone:
+// only its count ties it to the session. With the collector's list cut
+// short it is asked for by name, like the reporting instances are.
+func TestDrainAsksTheCollectorAboutAnInstanceThatStoppedRecording(t *testing.T) {
+	gone := deliveryKey("gone", "gone-1")
+	e, col := newAskEnv(t, false, map[string]int64{gone: 3})
+	if _, err := e.m.ReportDeliveries(DeliveryBatch{Service: "gone", Instance: "gone-1", Stopped: "its subscriber panicked"}); err != nil {
+		panic(err)
+	}
+	s, _ := e.stop()
+	if !col.askedFor("gone", "gone-1") {
+		panic(fmt.Sprintf("the collector was not asked about the instance that stopped: %v", col.asked))
+	}
+	if !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "gone-1") ||
+		!strings.Contains(s.IncompleteReasons[0], "stopped recording") {
+		panic(fmt.Sprintf("incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed))
+	}
+}

@@ -110,6 +110,11 @@ const (
 // reporterConfig tunes a reporter. Zero values get defaults.
 type reporterConfig struct {
 	Tick time.Duration // how often the accounts are looked at (default 250ms)
+	// RetellDown and RetellUp are how long after the control plane was told
+	// that this process cannot, or can, reach its collector it is told the
+	// same again (see reachNews). Defaults: the exporter's ReachCheck, and
+	// reachRetell times that; nothing is told again when that is zero.
+	RetellDown, RetellUp time.Duration
 	// Interval is the least time between two reports of a session that is
 	// not draining (default 5s). A draining one is reported whenever it
 	// changed.
@@ -228,6 +233,9 @@ type reporter struct {
 	// reachTold is what the control plane was last told, on this stream,
 	// about whether this process reaches its collector; nil when nothing yet.
 	reachTold *collectorReach
+	// reachToldAt is when it was told that: what the control plane holds is
+	// said again from time to time (see reachNews).
+	reachToldAt time.Time
 	// down, outageLogged and lastOutageLog make the reporter say once when
 	// its reports stop arriving and once when they arrive again, at most one
 	// such pair per outageLogGap.
@@ -270,6 +278,10 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	def(&cfg.RetryBase, time.Second)
 	def(&cfg.DrainRetry, 200*time.Millisecond)
 	def(&cfg.ReopenGap, 5*time.Second)
+	if exp != nil {
+		def(&cfg.RetellDown, exp.cfg.ReachCheck)
+		def(&cfg.RetellUp, reachRetell*exp.cfg.ReachCheck)
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -525,10 +537,31 @@ func (r *reporter) renote(sn *snapshot, now time.Time) {
 // reachNews reports whether the exporter knows something about reaching the
 // collector that the control plane was not told on this stream: that it can
 // or cannot, or another reason why not.
+//
+// What was told is also told again: the endpoint takes a report from any
+// caller, and one that named this instance and said the opposite would
+// otherwise stand until something changed here. A process that cannot reach
+// its collector says so again every check period, so that a forged "it can"
+// hides a wrong collector URL for that long at most; one that can says so
+// every reachRetell periods, which keeps an idle fleet nearly silent.
 func (r *reporter) reachNews() bool {
 	cur := r.exp.reach.Load()
-	return cur != nil && (r.reachTold == nil || *cur != *r.reachTold)
+	if cur == nil {
+		return false
+	}
+	if r.reachTold == nil || *cur != *r.reachTold {
+		return true
+	}
+	every := r.cfg.RetellDown
+	if cur.ok {
+		every = r.cfg.RetellUp
+	}
+	return every > 0 && r.cfg.Now().Sub(r.reachToldAt) >= every
 }
+
+// reachRetell is how many check periods pass before a process that reaches
+// its collector tells the control plane so again.
+const reachRetell = 10
 
 // beat reports whether a heartbeat is due: the active set names a session,
 // and the control plane has not answered a batch of this process for the
@@ -641,7 +674,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 		}
 		r.hello, r.beatAt = false, r.cfg.Now()
 		if reach != nil {
-			r.reachTold = reach
+			r.reachTold, r.reachToldAt = reach, r.beatAt
 		}
 		if note != nil {
 			r.toldAt = r.beatAt

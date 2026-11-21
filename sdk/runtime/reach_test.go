@@ -215,7 +215,8 @@ func TestReporterTellsTheControlPlaneWhetherTheCollectorIsReached(t *testing.T) 
 	exp := NewExporter(rec, ExporterConfig{CollectorURL: col.srv.URL, FlushInterval: 2 * time.Millisecond, ReachCheck: 5 * time.Millisecond})
 	sub := newSubscriber(cp.srv.URL, "svc", "i", "i")
 	sub.maxBackoff = 20 * time.Millisecond
-	rep := newReporter(rec, exp, sub, "svc", "i", reporterConfig{Tick: 2 * time.Millisecond})
+	// Saying the same again after a time is another test's: here it would blur the counts.
+	rep := newReporter(rec, exp, sub, "svc", "i", reporterConfig{Tick: 2 * time.Millisecond, RetellDown: time.Hour, RetellUp: time.Hour})
 	defer func() { exp.Close(time.Second); rep.close(time.Second); sub.Close() }()
 	told := func() []collectorNote {
 		cp.mu.Lock()
@@ -269,5 +270,57 @@ func TestReporterSaysNothingOfTheCollectorWithoutACheck(t *testing.T) {
 	defer cp.mu.Unlock()
 	if cp.hellos != 1 || len(cp.reach) != 0 || cp.bare != 1 {
 		panic(fmt.Sprintf("%d hellos, %d of them about the collector: %+v", cp.hellos, len(cp.reach), cp.reach))
+	}
+}
+
+// What the control plane was told is told again after a time: a report from
+// another caller that named this instance and said the opposite does not
+// stand for good. Often while the collector is not reached, seldom while it
+// is.
+func TestReporterTellsTheControlPlaneAgainAfterATime(t *testing.T) {
+	cp := newReportCP(t, `{"active":[],"delivery_reports":true}`)
+	col := newHealthCollector(t, http.StatusBadGateway, "no upstream")
+	rec := NewRecorder(16)
+	exp := NewExporter(rec, ExporterConfig{CollectorURL: col.srv.URL, FlushInterval: 2 * time.Millisecond, ReachCheck: 5 * time.Millisecond})
+	sub := newSubscriber(cp.srv.URL, "svc", "i", "i")
+	rep := newReporter(rec, exp, sub, "svc", "i", reporterConfig{Tick: 2 * time.Millisecond, RetellDown: 40 * time.Millisecond, RetellUp: time.Hour})
+	defer func() { exp.Close(time.Second); rep.close(time.Second); sub.Close() }()
+	told := func() []collectorNote {
+		cp.mu.Lock()
+		defer cp.mu.Unlock()
+		return append([]collectorNote(nil), cp.reach...)
+	}
+	start := time.Now()
+	eventually(t, "the control plane to be told three times that the collector is not reached", func() bool { return len(told()) >= 3 })
+	for _, n := range told() {
+		if n.Reachable {
+			panic(fmt.Sprintf("%+v", told()))
+		}
+	}
+	// Not more often than the period: at most one more than the periods that went by.
+	if got, most := len(told()), int(time.Since(start)/(40*time.Millisecond))+1; got > most {
+		panic(fmt.Sprintf("told %d times in %v, the period is 40ms", got, time.Since(start)))
+	}
+	// Reached again: said once, and with RetellUp an hour away not again.
+	col.answer(http.StatusOK, "ok\n")
+	eventually(t, "the control plane to be told that the collector is reached", func() bool { got := told(); return got[len(got)-1].Reachable })
+	n := len(told())
+	checks := col.checks.Load()
+	eventually(t, "more checks", func() bool { return col.checks.Load() >= checks+10 })
+	if got := told(); len(got) != n {
+		panic(fmt.Sprintf("told %d more times while the collector is reached", len(got)-n))
+	}
+}
+
+func TestReporterRetellDefaults(t *testing.T) {
+	rec := NewRecorder(1)
+	exp := NewExporter(rec, ExporterConfig{CollectorURL: "http://127.0.0.1:1", ReachCheck: 30 * time.Second})
+	defer exp.Close(time.Second)
+	sub := newSubscriber("http://127.0.0.1:1", "svc", "i", "i")
+	defer sub.Close()
+	rep := newReporter(rec, exp, sub, "svc", "i", reporterConfig{})
+	defer rep.close(time.Second)
+	if rep.cfg.RetellDown != 30*time.Second || rep.cfg.RetellUp != 5*time.Minute {
+		panic(fmt.Sprintf("down %v, up %v", rep.cfg.RetellDown, rep.cfg.RetellUp))
 	}
 }

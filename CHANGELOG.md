@@ -389,6 +389,17 @@ Rolling back:
 
 ### Fixed
 
+- Delivery accounting, two silent misses from its fifth review: an instance with an old stream that lingers behind
+  a proxy and a new one that was never heard of is judged by the newest connection, and is named again; a stream
+  on which a report got no answer or a 5xx is opened anew once after the grace (never two within a grace, one
+  extra stream per outage), so a service whose first report's answer was lost is named again.
+- What an SDK told the control plane about reaching its collector is told again after a time: every check
+  period (30 s) while it cannot, every ten periods while it can. A report from another caller that named the
+  instance and said the opposite stood until the SDK's own state changed, so `tracectl doctor` could pass for a
+  service whose collector did not answer.
+- An instance that said it stopped recording, sent no report and is gone is asked for by name when the
+  collector's list of instances is cut short: its events then make the session incomplete, where it was
+  "unconfirmed".
 - The `stopped` note of one instance on one session is replaced by one that says something else at most 8 times
   (`changes` on the note). A caller that varied the text made the control plane write every running session on
   every request: about 113 MB of journal from 300 small requests against 10 sessions, by the reviewer's count.

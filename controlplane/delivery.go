@@ -951,6 +951,12 @@ func (m *Manager) countsFor(ctx context.Context, id string, st DrainStatus, ok b
 				add(d.Service, d.Instance)
 			}
 		}
+		// An instance that said it stopped recording may be gone by now and
+		// may never have reported: whether its events tie it to the session
+		// is only known from its count.
+		for _, n := range m.live[id].StoppedInstances {
+			add(n.Service, n.Instance)
+		}
 		for _, sub := range m.subs {
 			if sub.stream && sub.DeliveryInstance != "" {
 				add(sub.Service, sub.DeliveryInstance)
