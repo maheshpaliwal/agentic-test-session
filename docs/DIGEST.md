@@ -34,7 +34,9 @@ name by the SDK, like everything recorded).
    normalised name, see `tracectl diff`, and the same calls below them) are one line with a count: 40 queries
    that differ only in a literal show as `40x`, which is how an N+1 looks. Such a line carries the normalised
    name, the first and last `seq`, and the total and longest duration; the lines below it are those of the
-   first of the run. A span on a failed branch is never merged.
+   first of the run. Siblings merge only when their outcome is the same too: the same error (normalised), the
+   same status code and the same flags. Requests that fail the same way are one line; one that returned
+   `NotFound` is not merged with one that returned `OK`.
 5. **Omitted**: what was left out to fit the budget, each with the commands that print it.
 6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`).
 
@@ -106,7 +108,7 @@ Failed events that did the same thing in the same place (same service, kind, nor
 the same chain of ancestors) are one entry with `count` (above 1) and `last_seq`; its `seq` and `path` are those
 of the first, and its `name` and `error` are normalised. `counts.failures` is still the number of failed events.
 In Markdown such an entry reads `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`. The call tree
-is unaffected: there a span on a failed branch is never merged.
+merges them the same way, by its own rule (consecutive siblings).
 
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
@@ -115,7 +117,8 @@ many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of e
 compact JSON text, clipped, or `null` for no value.
 
 A tree line: `depth` (0 for a root; a line's parent is the nearest line above it with a smaller depth), `seq`,
-`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `hidden` (lines below it that were left
+`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome that is not an
+error: a gRPC status other than `OK`), `flags` (the event's flags), `hidden` (lines below it that were left
 out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`; its `duration_ns` and
 `mutations` are totals and its `name` is normalised.
 

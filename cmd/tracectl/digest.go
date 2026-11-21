@@ -259,7 +259,13 @@ type dNode struct {
 	MaxDurationNs int64  `json:"max_duration_ns,omitempty"`
 	Mutations     int    `json:"mutations,omitempty"`
 	Error         string `json:"error,omitempty"`
-	Hidden        int    `json:"hidden,omitempty"` // lines below this one that were left out
+	// Code is an outcome that is not an error: a gRPC status such as
+	// NotFound, which the call's line would otherwise not show.
+	Code string `json:"code,omitempty"`
+	// Flags are the event's flags (the first few), so that a count under
+	// "flags" in the verdict can be traced to its events.
+	Flags  []string `json:"flags,omitempty"`
+	Hidden int      `json:"hidden,omitempty"` // lines below this one that were left out
 }
 
 type dOmitted struct {
@@ -332,8 +338,20 @@ func (src *digestSource) buildTree(tr client.Trace) {
 	}
 }
 
+// outcomeCode is what a call returned when that is not in its error: a gRPC
+// status other than OK.
+func outcomeCode(e *core.Event) string {
+	if c := e.Attrs["grpc.code"]; c != "" && c != "OK" {
+		return c
+	}
+	return ""
+}
+
 // groupSiblings turns sibling spans into lines, merging neighbours that did
-// the same thing. A span on a failed branch is never merged.
+// the same thing: the same service, kind and normalised name, the same
+// outcome (error text normalised, status code, flags) and the same calls
+// below. Three hundred requests that fail the same way are one line; one
+// that returned NotFound is not merged with one that returned OK.
 func groupSiblings(nodes []*client.TraceNode, async bool) []*treeGroup {
 	var out []*treeGroup
 	for _, n := range nodes {
@@ -346,14 +364,15 @@ func groupSiblings(nodes []*client.TraceNode, async bool) []*treeGroup {
 			failed: e.Err != "", norm: normalizeName(e.Name)}
 		g.kids = append(groupSiblings(n.Children, false), groupSiblings(n.Linked, true)...)
 		h := sha256.New()
-		fmt.Fprintf(h, "%t\x00%s\x00%s\x00%s\x00", async, e.Service, e.Kind, g.norm)
+		fmt.Fprintf(h, "%t\x00%s\x00%s\x00%s\x00%s\x00%s\x00%q\x00", async, e.Service, e.Kind, g.norm,
+			normalizeName(e.Err), outcomeCode(e), e.Flags)
 		for _, k := range g.kids {
 			g.failed = g.failed || k.failed
 			_ = binary.Write(h, binary.BigEndian, int64(k.count))
 			h.Write(k.sig[:])
 		}
 		h.Sum(g.sig[:0])
-		if last := len(out) - 1; last >= 0 && !g.failed && !out[last].failed && out[last].sig == g.sig {
+		if last := len(out) - 1; last >= 0 && out[last].sig == g.sig {
 			p := out[last]
 			p.count++
 			p.lastSeq = e.Seq
@@ -371,8 +390,13 @@ func (src *digestSource) flatten(g *treeGroup, depth int) {
 	e := g.ev
 	n := dNode{Depth: depth, Seq: e.Seq, Async: g.async, Service: dataText(e.Service, 40), Kind: dataText(string(e.Kind), 40),
 		Name: dataText(e.Name, digestNameMax), DurationNs: g.dur, Mutations: g.muts, Error: dataText(e.Err, digestNameMax)}
+	n.Code = dataText(outcomeCode(e), 40)
+	for _, f := range e.Flags[:min(len(e.Flags), digestFlagsMax)] {
+		n.Flags = append(n.Flags, dataText(f, 40))
+	}
 	if g.count > 1 {
 		n.Count, n.LastSeq, n.MaxDurationNs, n.Name = g.count, g.lastSeq, g.maxDur, dataText(g.norm, digestNameMax)
+		n.Error = dataText(normalizeName(e.Err), digestNameMax)
 	}
 	at := len(src.lines)
 	src.lines = append(src.lines, n)
@@ -1003,6 +1027,12 @@ func mdNode(b *strings.Builder, n *dNode) {
 	}
 	if n.Mutations > 0 {
 		fmt.Fprintf(b, " [%s]", plural(n.Mutations, "mutation"))
+	}
+	if n.Code != "" {
+		b.WriteString(" code " + mdToken(n.Code))
+	}
+	if len(n.Flags) > 0 {
+		b.WriteString(" [" + strings.Join(slicex.Map(n.Flags, mdToken), ", ") + "]")
 	}
 	if n.Error != "" {
 		b.WriteString(" ERR " + mdQuote(n.Error))

@@ -131,6 +131,8 @@ Rolling back:
   output, not a model's judgement of what the text says.
   Failures that did the same thing in the same place are listed once with a count, so 300 requests failing
   the same way take one line, not the whole budget.
+  The call tree merges them the same way, keeps apart calls that ended differently (a gRPC `NotFound` is not
+  folded into the `OK` calls next to it) and shows a call's status code and an event's flags on its line.
 - **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
   entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
   `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;
