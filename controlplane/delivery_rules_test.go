@@ -127,7 +127,7 @@ func TestDrainAsksTheCollectorByName(t *testing.T) {
 		e, col := newAskEnv(t, false, map[string]int64{deliveryKey("orders-api", "o-1"): 3})
 		defer follow(e.m, "orders-api", "o-1")()
 		s, took := e.stop()
-		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
+		wantShortfall(t, s, "the collector has 3 event(s) from orders-api/o-1, which did not report how many it recorded")
 		if took < testGrace-20*time.Millisecond || !col.askedFor("orders-api", "o-1") {
 			panic(fmt.Sprintf("sealed after %v, asked %d times", took, len(col.asked)))
 		}
@@ -280,7 +280,7 @@ func TestDeliveryReportsBeyondTheCapAreJudgedLikeTheOthers(t *testing.T) {
 		e.col.has("real", "real-1", 4)
 		full(e, rep("late", "late-1", 10, 4, 0)) // not final, holds events: nothing is kept of it
 		s, _ := e.stop()
-		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != "the collector has 4 events from real/real-1, which did not report how many it recorded" ||
+		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != "the collector has 4 event(s) from real/real-1, which did not report how many it recorded; its log says why its reports do not arrive" ||
 			len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != "more than 1280 instances reported; the reports of the ones beyond that are not accounted for" {
 			panic(verdict(s))
 		}
@@ -727,7 +727,7 @@ func TestDeliveryUnheardIsJudgedByTheTimeSinceTheLastWord(t *testing.T) {
 		hello(t, e.m, "orders-api", "o-1")
 		time.Sleep(silence)
 		s, _ := e.stop()
-		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
+		wantShortfall(t, s, "the collector has 3 event(s) from orders-api/o-1, which did not report how many it recorded")
 		if len(s.DeliveryUnconfirmed) != 0 {
 			panic(fmt.Sprintf("named twice: unconfirmed=%q", s.DeliveryUnconfirmed))
 		}

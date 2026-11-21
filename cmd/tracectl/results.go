@@ -73,6 +73,14 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 	}
 	switch {
 	case !g.onUnconfirmed:
+	case !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != ""):
+		// The stricter gate on its own: a session known to have lost events
+		// must not pass where one that is merely unconfirmed fails.
+		msg := "session is incomplete"
+		if len(info.IncompleteReasons) > 0 {
+			msg += " (" + strings.Join(info.IncompleteReasons, "; ") + ")"
+		}
+		failed = append(failed, msg)
 	case len(info.DeliveryUnconfirmed) > 0:
 		failed = append(failed, "delivery is unconfirmed ("+strings.Join(info.DeliveryUnconfirmed, "; ")+")")
 	case info.State == "" && !g.onIncomplete:

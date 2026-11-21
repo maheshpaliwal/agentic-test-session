@@ -373,7 +373,7 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	}
 	if len(info.DeliveryUnconfirmed) > 0 {
 		// A warning, not a failure: but "Passed" alone would hide it.
-		verdict += " Whether every event arrived could not be confirmed for " + plural(len(info.DeliveryUnconfirmed), "service instance") + " (see below)."
+		verdict += " Whether every event arrived could not be confirmed (see below)."
 	}
 	b.WriteString(verdict + "\n\n")
 	mdTable(&b, []string{"State", "Events", "Duration", "Services"}, [][]string{{

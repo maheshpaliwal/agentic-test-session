@@ -329,10 +329,15 @@ func RequireDeliveryConfirmed(t testing.TB, s *client.Session) {
 	t.Helper()
 	Stop(t, s)
 	info := s.Info()
+	// The stricter check includes the plain one: a session known to have
+	// lost events does not pass it.
+	for _, w := range info.IncompleteReasons {
+		t.Errorf("tsession: session %s is incomplete: %s", s.ID, w)
+	}
 	for _, w := range info.DeliveryUnconfirmed {
 		t.Errorf("tsession: session %s: delivery unconfirmed: %s", s.ID, w)
 	}
-	if len(info.DeliveryUnconfirmed) > 0 {
+	if len(info.DeliveryUnconfirmed) > 0 || len(info.IncompleteReasons) > 0 || info.Incomplete {
 		t.FailNow()
 	}
 }

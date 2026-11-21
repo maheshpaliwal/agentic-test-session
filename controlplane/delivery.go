@@ -827,7 +827,8 @@ func deliveryVerdict(list []Delivery, counts collectorCounts, short map[string]s
 			tail += "; the instance stopped reporting before the session ended"
 		}
 		if d.LastError != "" {
-			tail += " (last error: " + d.LastError + ")"
+			// The remedy with the finding: the reader may never have seen this product.
+			tail += " (last error: " + d.LastError + "; check the TSESSION_COLLECTOR_URL of that service)"
 		}
 		have, ok := counts.of(d.Service, d.Instance)
 		switch {
@@ -865,7 +866,7 @@ func deliveryVerdict(list []Delivery, counts collectorCounts, short map[string]s
 		}
 	}
 	if unchecked > 0 {
-		unconfirmed = append(unconfirmed, fmt.Sprintf("the collector does not count events per instance (an older collector), so the delivery reports of %d instance(s) could not be checked against it", unchecked))
+		unconfirmed = append(unconfirmed, fmt.Sprintf("the collector does not count events per instance (an older collector), so the delivery reports of %d instance(s) could not be checked against it; upgrade the collector to the control plane's version", unchecked))
 	}
 	return shortfalls, unconfirmed
 }
@@ -888,7 +889,7 @@ func unreported(service, instance string, have int64) string {
 	if service != "" {
 		from = service + "/" + instance
 	}
-	return fmt.Sprintf("the collector has %d events from %s, which did not report how many it recorded", have, from)
+	return fmt.Sprintf("the collector has %d event(s) from %s, which did not report how many it recorded; its log says why its reports do not arrive", have, from)
 }
 
 // judgeDeliveryLocked writes the verdict on the delivery of a session that is

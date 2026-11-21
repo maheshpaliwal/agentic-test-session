@@ -219,7 +219,7 @@ func TestDeliveryForgery(t *testing.T) {
 			f.honest(id)
 			f.ingest(id, "ghost", "ghost-1", 2)
 		})
-		all(t, infos, "with a silent stream that has events", incompleteFor("the collector has 2 events from ghost/ghost-1, which did not report how many it recorded"))
+		all(t, infos, "with a silent stream that has events", incompleteFor("the collector has 2 event(s) from ghost/ghost-1, which did not report how many it recorded"))
 		if longest > healthyDrain+time.Second {
 			t.Errorf("the drain was held for %v, the grace is 1s", longest)
 		}
@@ -388,7 +388,7 @@ func TestDeliveryForgery(t *testing.T) {
 		f := &forgeEnv{t, newInfra(t, store.NewMem())}
 		f.stream("victim", "v-1")
 		infos, _ := f.each(n, func(id string) { f.ingest(id, "victim", "v-1", 5) })
-		all(t, infos, "an instance that took part and did not report", incompleteFor("the collector has 5 events from victim/v-1, which did not report how many it recorded"))
+		all(t, infos, "an instance that took part and did not report", incompleteFor("the collector has 5 event(s) from victim/v-1, which did not report how many it recorded"))
 		infos, _ = f.each(n, func(id string) {
 			f.ingest(id, "victim", "v-1", 5)
 			f.report(id, forgedReport{"service": "victim", "instance": "v-1", "recorded": 5, "delivered": 5, "final": true})

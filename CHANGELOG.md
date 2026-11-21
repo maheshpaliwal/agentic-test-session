@@ -51,7 +51,8 @@ Before deploying:
   `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
 - Delivery accounting: upgrade the collector with or before the control plane, otherwise every session with
   reports is `delivery_unconfirmed`. A proxy between services and control plane must pass `POST /v1/delivery`;
-  if it answers 404 the service's sessions end `delivery_unconfirmed`. Sessions whose services recorded events
+  if it answers 404 or 403 a session the service took part in ends `incomplete`, and one it did not take part in
+  `delivery_unconfirmed`. Sessions whose services recorded events
   the collector lacks are now `incomplete`, so a gate that passed may fail. An older control plane rewriting
   `--store-file` keeps `incomplete` but drops the reasons. The export of a session without events is one line,
   not an empty file, and an older `dashboard -open` refuses it. `tracectl summary` prints `(SEALED, incomplete)`
@@ -118,6 +119,7 @@ Rolling back:
     session is `delivery_unconfirmed`: shown by `summary`, `report`, `digest`, `run` and the dashboard, and
     failed only by the new `--fail-on-unconfirmed` (and `tsessiontest.RequireDeliveryConfirmed`). Use that gate
     where every connected service is yours; in a shared environment another team's service can trip it.
+    The strict gate includes the plain one: on its own it also fails a session that is known to be incomplete.
   - Measured with real binaries, 50 to 2,000 runs per scenario: no false `incomplete` on healthy systems
     (parallel sessions, 500 sessions stopping together, slow or briefly unreachable collector and report
     endpoint, idle services frozen or half-open); healthy drain time unchanged.

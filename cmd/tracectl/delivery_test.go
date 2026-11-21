@@ -75,7 +75,7 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 	if err != nil || rep.incomplete {
 		panic(fmt.Sprintf("report: incomplete=%v %v", rep.incomplete, err))
 	}
-	wantAll(t, string(md), "**Passed**: no failed events. Whether every event arrived could not be confirmed for 1 service instance (see below).",
+	wantAll(t, string(md), "**Passed**: no failed events. Whether every event arrived could not be confirmed (see below).",
 		"### Delivery not confirmed", "- service batch (instance b-1): the collector has 9 events")
 	junit, err := renderJUnit(rep)
 	if err != nil {
@@ -95,12 +95,12 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 		`<property name="delivery_unconfirmed" value="`+warn+`">`)
 	// A reason that does not say that events are missing is not introduced as
 	// one that does.
-	bad.IncompleteReasons = []string{"the collector has 6 events from orders-api/o-1, which did not report how many it recorded"}
+	bad.IncompleteReasons = []string{"the collector has 6 event(s) from orders-api/o-1, which did not report how many it recorded"}
 	junit, err = renderJUnit(buildReport(bad, sum, client.Trace{}, nil))
 	if err != nil {
 		panic(err)
 	}
-	wantAll(t, string(junit), `<property name="incomplete_reason" value="Delivery is not accounted for: the collector has 6 events from orders-api/o-1, which did not report how many it recorded">`)
+	wantAll(t, string(junit), `<property name="incomplete_reason" value="Delivery is not accounted for: the collector has 6 event(s) from orders-api/o-1, which did not report how many it recorded">`)
 
 	// The digest: in the verdict section and in the JSON, within the smallest
 	// budget however many instances there are, and the same every time.

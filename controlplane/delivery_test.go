@@ -228,12 +228,12 @@ func TestDeliveryVerdict(t *testing.T) {
 		final(rep("", "bare", 4, 2, 1)),
 	}, collectorCounts{})
 	want := []string{
-		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events were delivered by the instance's own count (the collector gave none), 7 still undelivered (last error: Post http://127.0.0.1:1/v1/ingest: connection refused)",
+		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events were delivered by the instance's own count (the collector gave none), 7 still undelivered (last error: Post http://127.0.0.1:1/v1/ingest: connection refused; check the TSESSION_COLLECTOR_URL of that service)",
 		"instance bare: 2 of 4 recorded events were delivered by the instance's own count (the collector gave none), 1 still undelivered, 1 dropped by the SDK",
 	}
 	// The reports that could not be checked are one line, not one each.
 	if !reflect.DeepEqual(short, want) || len(unc) != 1 ||
-		unc[0] != "the collector does not count events per instance (an older collector), so the delivery reports of 1 instance(s) could not be checked against it" {
+		unc[0] != "the collector does not count events per instance (an older collector), so the delivery reports of 1 instance(s) could not be checked against it; upgrade the collector to the control plane's version" {
 		panic(fmt.Sprintf("reasons\n got %q\nwant %q\nunconfirmed %q", short, want, unc))
 	}
 }

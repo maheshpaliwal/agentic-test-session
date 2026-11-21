@@ -79,7 +79,7 @@ func TestDeliveryVerdictAgainstTheCollector(t *testing.T) {
 		rep("billing", "host-3", 2, 2, 0),
 	}, counts(false, "inventory", "host-2-ef34ab", 3, "", "bare", 2, "billing", "host-3", 6))
 	want := []string{
-		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events reached the collector (last error: dial tcp 127.0.0.1:1: connect: connection refused)",
+		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events reached the collector (last error: dial tcp 127.0.0.1:1: connect: connection refused; check the TSESSION_COLLECTOR_URL of that service)",
 		"service inventory (instance host-2-ef34ab): 3 of 5 recorded events reached the collector; the instance stopped reporting before the session ended",
 		"instance bare: 2 of 4 recorded events reached the collector, 1 dropped by the SDK",
 	}
@@ -350,7 +350,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 		e.report(final(rep("inventory", "i-1", 2, 2, 0)))
 		e.col.has("inventory", "i-1", 2)
 		s, took := e.stop()
-		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
+		wantShortfall(t, s, "the collector has 3 event(s) from orders-api/o-1, which did not report how many it recorded")
 		if took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
 			panic(fmt.Sprintf("sealed after %v, want the grace (%v)", took, testGrace))
 		}
@@ -496,7 +496,7 @@ func TestDrainSilentParticipant(t *testing.T) {
 			}
 		}()
 		s := e.sealed()
-		wantShortfall(t, s, "the collector has 3 events from orders-api/o-1, which did not report how many it recorded")
+		wantShortfall(t, s, "the collector has 3 event(s) from orders-api/o-1, which did not report how many it recorded")
 		if took := time.Since(began); took < testGrace-20*time.Millisecond || took > testGrace+2*time.Second {
 			panic(fmt.Sprintf("sealed after %v, want the grace (%v)", took, testGrace))
 		}
