@@ -529,7 +529,10 @@
     let rows = null, next = '', total = null, unreadNew = 0, unreadOld = 0, loadingMore = false, filterGen = 0, liveBusy = false;
     let liveAt = 0;  // where the by-id refresh of running rows below the first page goes on
     let below = 0;   // loaded rows below the first page: the periodic refresh does not reach them
-    let counts = {}, svcs = {};
+    /* counts: the collector's numbers for the loaded sessions, id -> {event_count, service_count}. They are asked
+       for by id, a page at a time. missing: loaded sessions whose counts the collector could not give when asked;
+       they are asked again by the refresh. */
+    let counts = new Map(), missing = new Set();
     let loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
     const pendingNames = new Map();
     const q = h('input', { class: 'field', type: 'search', placeholder: 'Search id, name, binding, entry point', 'aria-label': 'Search sessions', value: query.get('q') || '', oninput: (e) => { f.q = e.target.value.toLowerCase(); paint(true); } });
@@ -570,12 +573,36 @@
       if (f.state === val) return;
       f.state = val; filterGen++;
       rows = null; next = ''; total = null; unreadNew = unreadOld = 0; loadingMore = false; loadErr = null; lastSig = '';
+      missing = new Set();
       paintChips();
       sub.textContent = '';
       clear(body).appendChild(skeletonRows(4));
       load();
     }
-    const decorate = (s) => { const pn = pendingNames.get(s.id); return Object.assign({}, s, { event_count: counts[s.id], service_count: svcs[s.id] }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); };
+    const decorate = (s) => { const pn = pendingNames.get(s.id), c = counts.get(s.id) || {}; return Object.assign({}, s, { event_count: c.event_count, service_count: c.service_count }, pn && pn.n !== s.name ? { name: pn.n, name_auto: pn.a } : null); };
+    /* The collector's counts for the given sessions: one request for up to a page of ids (U.idChunks), never one
+       per session. It resolves to what applyCounts takes and does not fail: without the collector the list is
+       shown with the counts it has. */
+    async function fetchCounts(ids) {
+      const out = [];
+      for (const chunk of U.idChunks(ids)) {
+        let list = null, un = null;
+        try {
+          const r = await request('/api/col/v1/sessions' + U.idsQuery(chunk));
+          list = asList(r.body, 'sessions'); un = U.headerCount(r.headers.get('X-Tsession-Unanswered'));
+        } catch (e) { /* the ids are asked again by the next refresh */ }
+        out.push({ ids: chunk, list: list, un: un });
+      }
+      return out;
+    }
+    function applyCounts(res) {
+      res.forEach((r) => {
+        const m = U.mergeCounts(counts, r.ids, r.list, r.un);
+        counts = m.counts;
+        r.ids.forEach((id) => missing.delete(id));
+        m.missing.forEach((id) => missing.add(id));
+      });
+    }
     function moreBar() {
       const left = total !== null ? Math.max(0, total - rows.length) : null;
       return h('div', { class: 'list-more' },
@@ -702,16 +729,18 @@
     // An error from a row action stays visible for a while; the periodic refresh must not wipe it at once.
     let actionErrUntil = 0;
     function actionError(msg) { actionErrUntil = Date.now() + 10000; showError(msg); }
-    /* load fetches the newest page and merges it into the loaded rows: what the refresh costs does not grow with
-       the number of sessions recorded, nor with the number loaded here. */
+    /* load fetches the newest page, and the collector's counts for the sessions on it, and merges both into the
+       loaded rows: what the refresh costs does not grow with the number of sessions recorded, nor with the
+       number loaded here. */
     async function load() {
       const gen = filterGen;
       let fresh = null; // stays null when the load fails
       try {
-        const [p, b] = await Promise.all([cpSessions({ limit: PAGE, state: f.state }), col('/v1/sessions').catch(() => [])]);
+        const p = await cpSessions({ limit: PAGE, state: f.state });
         if (token !== S.token || gen !== filterGen) return;
-        counts = {}; svcs = {};
-        asList(b, 'sessions').forEach((x) => { counts[x.id] = x.event_count; if (x.service_count !== undefined) svcs[x.id] = x.service_count; });
+        const c = await fetchCounts(p.list.map((s) => s.id));
+        if (token !== S.token || gen !== filterGen) return;
+        applyCounts(c);
         fresh = p.list;
         const m = U.mergeFirstPage(rows, fresh, !!p.next);
         // With nothing loaded below this page, its cursor is where "Load more" goes on; otherwise that is still
@@ -724,6 +753,10 @@
         // changed state) elsewhere. They are never refreshed, so start over from the page rather than show them.
         if (m.older && !next && p.total !== null && p.total !== rows.length) { rows = fresh.map(decorate); next = p.next; unreadOld = 0; below = 0; }
         total = p.total !== null ? p.total : next ? null : rows.length;
+        // Counts are kept for the loaded sessions only.
+        const loaded = new Set(rows.map((s) => s.id));
+        counts.forEach((v, id) => { if (!loaded.has(id)) counts.delete(id); });
+        missing.forEach((id) => { if (!loaded.has(id)) missing.delete(id); });
         pendingNames.forEach((v, k) => { const r = rows.find((x) => x.id === k); if (!r || r.name === v.n) pendingNames.delete(k); });
         loadErr = null; if (Date.now() > actionErrUntil) showError('');
         setLive(rows.some((s) => s.state === 'ACTIVE'));
@@ -740,9 +773,12 @@
       try {
         const p = await cpSessions({ limit: PAGE, state: f.state, before: sent });
         if (token !== S.token || gen !== filterGen) return;
+        const c = await fetchCounts(p.list.map((s) => s.id));
+        if (token !== S.token || gen !== filterGen) return;
         // A refresh may have started the list over while this was in flight; the reply then continues a list
         // that is gone, and appending it would leave a hole between the new rows and these.
         if (next === sent) {
+          applyCounts(c);
           rows = U.mergeRows(rows, p.list.map(decorate));
           below += p.list.length;
           next = p.next; unreadOld += p.unreadable;
@@ -755,7 +791,9 @@
       loadEntries();
     }
     /* A session that is still running and sits below the newest page is not covered by the refresh: it is
-       asked for by id, a few at a time, so that its state does not go stale. */
+       asked for by id, a few at a time, so that its state does not go stale. Their counts, and those the
+       collector could not give earlier for rows below the page, are asked for in one request (at most a page
+       of ids), and only when there are such rows. */
     async function refreshOlderLive(fresh) {
       if (liveBusy || !rows || !fresh) return;
       const gen = filterGen, onPage = new Set(fresh.map((s) => s.id));
@@ -766,6 +804,15 @@
         if (liveAt >= live.length) liveAt = 0;
         const batch = live.slice(liveAt, liveAt + 10);
         liveAt += batch.length;
+        // The ones that went unanswered come first: they leave the set once answered, so the others get their turn.
+        const ask = U.idChunks(Array.from(missing).filter((id) => !onPage.has(id)).concat(batch.map((s) => s.id)), PAGE)[0];
+        if (ask) {
+          const c = await fetchCounts(ask);
+          if (token !== S.token || gen !== filterGen || !rows) return;
+          applyCounts(c);
+          rows = rows.map(decorate);
+          paint();
+        }
         for (const s of batch) {
           let cur = null;
           try { cur = await cp('/v1/sessions/' + encodeURIComponent(s.id)); } catch (e) { if (e.status !== 404) continue; }

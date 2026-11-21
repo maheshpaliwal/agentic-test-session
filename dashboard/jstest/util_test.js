@@ -385,6 +385,48 @@ assert.strictEqual(U.headerCount('12'), 12);
 assert.strictEqual(U.headerCount('0'), 0);
 for (const bad of [null, undefined, '', '-1', '1.5', 'x', '12abc']) assert.strictEqual(U.headerCount(bad), null);
 
+// event counts are asked for by id: one request per page, never more ids than the collector takes
+assert.deepStrictEqual(U.idChunks([], 200), []);
+assert.deepStrictEqual(U.idChunks(['a', 'b', 'a', 'c'], 200), [['a', 'b', 'c']]);
+assert.deepStrictEqual(U.idChunks(['a', 'b', 'c'], 2), [['a', 'b'], ['c']]);
+{
+  const many = Array.from({ length: 2500 }, (_, i) => 'ts_' + i);
+  for (const size of [1000, 5000, 0, undefined]) assert.deepStrictEqual(U.idChunks(many, size).map((c) => c.length), [1000, 1000, 500]);
+  assert.strictEqual(U.idChunks(many.slice(0, 200), 200).length, 1);
+  // a page of 200 ids of 30 characters is about 6 KB of query
+  const page = Array.from({ length: 200 }, (_, i) => 'ts_' + String(i).padStart(27, '0'));
+  const q = U.idsQuery(page);
+  assert.ok(q.length > 6000 && q.length < 6400, String(q.length));
+  assert.strictEqual(q.split(',').length, 200);
+}
+assert.strictEqual(U.idsQuery(['ts_a', 'ts_b.c-d']), '?ids=ts_a,ts_b.c-d');
+assert.strictEqual(U.idsQuery(['a b', 'c,d']), '?ids=a%20b,c%2Cd');
+{
+  const had = new Map([['a', { event_count: 1 }], ['b', { event_count: 2 }], ['z', { event_count: 9 }]]);
+  // answered for every id: the answer's numbers; an id that is missing has no events; ids not asked keep theirs
+  let m = U.mergeCounts(had, ['a', 'b', 'c'], [{ id: 'a', event_count: 5, sealed: true }, { id: 'c', event_count: 0, service_count: 2 }], 0);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 5 }], ['z', { event_count: 9 }], ['c', { event_count: 0, service_count: 2 }]]);
+  assert.deepStrictEqual(m.missing, []);
+  assert.strictEqual(had.get('a').event_count, 1, 'the input is not modified');
+  // a collector without the ids parameter: no header, every session it holds; the extra ones are ignored
+  m = U.mergeCounts(had, ['a', 'b'], [{ id: 'x', event_count: 7 }, { id: 'a', event_count: 3 }, { id: 'y', event_count: 8 }], null);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 3 }], ['z', { event_count: 9 }]]);
+  assert.deepStrictEqual(m.missing, []);
+  // some ids could not be looked up: a missing id keeps what it had and is asked again
+  m = U.mergeCounts(had, ['a', 'b', 'c'], [{ id: 'a', event_count: 4 }], 1);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 4 }], ['b', { event_count: 2 }], ['z', { event_count: 9 }]]);
+  assert.deepStrictEqual(m.missing, ['b', 'c']);
+  // the request failed: nothing changes, everything is asked again
+  for (const bad of [null, undefined, 'bad gateway', { error: 'x' }]) {
+    m = U.mergeCounts(had, ['a', 'c', 'a'], bad, null);
+    assert.deepStrictEqual(Array.from(m.counts), Array.from(had));
+    assert.deepStrictEqual(m.missing, ['a', 'c']);
+  }
+  // junk in the answer is skipped
+  m = U.mergeCounts(new Map(), ['a'], [null, 3, { event_count: 1 }, { id: 'a', event_count: 2 }], 0);
+  assert.deepStrictEqual(Array.from(m.counts), [['a', { event_count: 2 }]]);
+}
+
 // order: newest first; fractions of a second of any length; the id decides a tie
 const row = (id, at, extra) => Object.assign({ id: id, created_at: at }, extra);
 const ordered = [

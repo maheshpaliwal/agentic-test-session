@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -459,6 +461,36 @@ func (d *Demo) controlPlane() http.Handler {
 	return mux
 }
 
+// The by-id contract of the collector's GET /v1/sessions.
+const (
+	headerUnanswered = "X-Tsession-Unanswered"
+	maxListIDs       = 1000
+)
+
+var demoSessionID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$`)
+
+// demoListIDs reads the ids parameter the way the collector does: comma
+// separated, empty elements skipped, repeats counted once, at most
+// maxListIDs valid session ids.
+func demoListIDs(vals []string) ([]string, error) {
+	var ids []string
+	for _, v := range vals {
+		for id := range strings.SplitSeq(v, ",") {
+			if id == "" || slices.Contains(ids, id) {
+				continue
+			}
+			if !demoSessionID.MatchString(id) {
+				return nil, errors.New("ids: invalid session id")
+			}
+			if len(ids) == maxListIDs {
+				return nil, fmt.Errorf("ids: more than %d session ids", maxListIDs)
+			}
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // Collector returns the fake collector read API (paths without /api/col).
 func (d *Demo) Collector() http.Handler {
 	mux := http.NewServeMux()
@@ -477,6 +509,26 @@ func (d *Demo) Collector() http.Handler {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		out := []m{}
+		if raw, ok := r.URL.Query()["ids"]; ok {
+			// By id, as the collector answers it (docs/PROTOCOL.md): the asked
+			// sessions that have events, in the order asked, without first_ns
+			// and last_ns.
+			ids, err := demoListIDs(raw)
+			if err != nil {
+				writeJSON(w, 400, m{"error": err.Error()})
+				return
+			}
+			for _, id := range ids {
+				if s := d.find(id); s != nil {
+					if v, evs := d.view(s); len(evs) > 0 {
+						out = append(out, m{"id": v.ID, "event_count": len(evs), "sealed": v.State == "SEALED" || v.State == "ABORTED"})
+					}
+				}
+			}
+			w.Header().Set(headerUnanswered, "0")
+			writeJSON(w, 200, out)
+			return
+		}
 		for _, s := range d.sess {
 			v, evs := d.view(s)
 			e := m{"id": v.ID, "event_count": len(evs), "sealed": v.State == "SEALED" || v.State == "ABORTED"}

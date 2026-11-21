@@ -451,6 +451,37 @@
   }
   // A count sent in a response header: a non-negative integer, or null when absent or malformed.
   function headerCount(v) { return typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null; }
+  /* The collector's event counts are asked for by session id (GET /v1/sessions?ids=, docs/PROTOCOL.md): what a
+     refresh costs the collector follows the sessions shown, not everything it stores.
+     idChunks: the distinct ids, split into the requests they take. One request carries at most PAGE_MAX ids,
+     the collector's limit and the largest page, so a page is always one request. */
+  function idChunks(ids, size) {
+    const n = size >= 1 ? Math.min(size, PAGE_MAX) : PAGE_MAX, uniq = Array.from(new Set(ids)), out = [];
+    for (let i = 0; i < uniq.length; i += n) out.push(uniq.slice(i, i + n));
+    return out;
+  }
+  // Query string of a count request for ids (one chunk of idChunks).
+  function idsQuery(ids) { return '?ids=' + ids.map(encodeURIComponent).join(','); }
+  /* The counts (a Map of id -> {event_count, service_count}) after the answer to a request for the ids in asked.
+     list is the answer's array, or null when the request failed. unanswered is its X-Tsession-Unanswered header:
+     how many of the ids the collector could not look up (null when the header is absent).
+     An asked id in the answer takes the answer's numbers. One that is missing has no events when the collector
+     answered for every id; when it did not (or the request failed) the id keeps what it had and is returned in
+     missing, to be asked again. Sessions in the answer that were not asked for are ignored: a collector older
+     than the ids parameter answers with every session it holds. */
+  function mergeCounts(counts, asked, list, unanswered) {
+    const out = new Map(counts), missing = [];
+    if (!Array.isArray(list)) return { counts: out, missing: Array.from(new Set(asked)) };
+    const got = new Map();
+    list.forEach((x) => { if (x && typeof x.id === 'string') got.set(x.id, x); });
+    new Set(asked).forEach((id) => {
+      const x = got.get(id);
+      if (x) out.set(id, x.service_count === undefined ? { event_count: x.event_count } : { event_count: x.event_count, service_count: x.service_count });
+      else if (unanswered > 0) missing.push(id);
+      else out.delete(id);
+    });
+    return { counts: out, missing: missing };
+  }
   // created_at as [milliseconds, nanoseconds below the second]. The fraction is compared by itself:
   // timestamps come with zero to nine fractional digits, which neither Date nor a string compare orders.
   function createdParts(v) {
@@ -512,7 +543,7 @@
       ' missing from this list. The control plane log names the first one; tsession_controlplane_store_read_errors_total counts them.';
   }
 
-  const api = { pageSize, listQuery, headerCount, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
+  const api = { pageSize, listQuery, headerCount, idChunks, idsQuery, mergeCounts, sessionOrder, mergeFirstPage, mergeRows, listSummary, unreadableText, entryOf, entryText, bindingText, sessionHay, cmpStart, groupEvents, groupTitle, mutationText, chipsText, httpStatus, fmtClock, kindGroup, fmtAgo, opClass, MARK, isRedactedValue, isoFromNs, unsafeNs, fmtNs, relNs, parsePK, pkLabel, pkRaw, unresolvedMut, hasUnresolved,
     mergeEvents, ndjson, sessionWarnings, curlFor, connectedText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TSUtil = api;
