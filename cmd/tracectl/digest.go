@@ -508,8 +508,11 @@ func (src *digestSource) buildEntities(evs []core.Event) {
 	for k := range byKey {
 		keys = append(keys, k)
 	}
+	// The most changed first: when the budget cuts the list, what goes is
+	// the entities touched once, not the one row the run kept rewriting.
 	slices.SortFunc(keys, func(a, b key) int {
-		return cmp.Or(cmp.Compare(a.store, b.store), cmp.Compare(a.entity, b.entity), cmp.Compare(a.pk, b.pk))
+		return cmp.Or(cmp.Compare(byKey[b].Count, byKey[a].Count),
+			cmp.Compare(a.store, b.store), cmp.Compare(a.entity, b.entity), cmp.Compare(a.pk, b.pk))
 	})
 	for _, k := range keys {
 		src.entities = append(src.entities, *byKey[k])

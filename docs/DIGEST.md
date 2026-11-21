@@ -38,8 +38,8 @@ name by the SDK, like everything recorded).
 5. **Omitted**: what was left out to fit the budget, each with the commands that print it.
 6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`).
 
-The output for the same recorded session is the same, byte for byte: entities are sorted by store, entity and
-key, failures and changes by `seq`, counts by size and then name (in JSON: by name).
+The output for the same recorded session is the same, byte for byte: entities are sorted by the number of their
+mutations, most first (so that a cut drops the least changed), then by store, entity and key, failures and changes by `seq`, counts by size and then name (in JSON: by name).
 
 ## The budget
 

@@ -331,12 +331,12 @@ func TestDigestMutations(t *testing.T) {
 	_, out, _ := env.tc("digest", reportID)
 	sec := checkDigestMarkdown(t, out)
 	want := "```text\n" +
-		"entity postgres/carts (key unknown): 1 mutation\n" +
-		"  #4 delete effective UNCERTAIN [pk_unknown]: \"sku\" \"a\" -> ∅\n" +
-		"entity postgres/orders {\"id\":42}: 3 mutations\n" +
+		"entity postgres/orders {\"id\":42}: 3 mutations\n" + // the most changed entity comes first
 		"  #1 insert effective: \"id\" ∅ -> 42; \"status\" ∅ -> \"new\"\n" +
 		"  #2 update ROLLED BACK: \"status\" \"new\" -> \"paid\"; \"note\" ∅ -> \"" + strings.Repeat("n", 58) + "…\n" +
 		"  #3 update outcome unknown UNCERTAIN [after_unavailable, pk_not_unique, redacted]: new values not captured\n" +
+		"entity postgres/carts (key unknown): 1 mutation\n" +
+		"  #4 delete effective UNCERTAIN [pk_unknown]: \"sku\" \"a\" -> ∅\n" +
 		"entity redis/cart:* {\"key\":\"cart:1\"}: 1 mutation\n" +
 		"  #5 set effective [truncated]\n" +
 		"```\n\nUNCERTAIN: a flag of the event says the key or the row image is incomplete; do not take its values as fact.\n"
@@ -346,7 +346,7 @@ func TestDigestMutations(t *testing.T) {
 
 	_, out, _ = env.tc("digest", reportID, "--json")
 	d := checkDigestJSON(t, out)
-	orders := d.Mutations[1]
+	orders := d.Mutations[0]
 	if orders.Count != 3 || orders.Effective != 1 || orders.RolledBack != 1 || orders.Unknown != 1 || orders.Uncertain != 1 || len(orders.Changes) != 3 {
 		t.Fatalf("orders: %+v", orders)
 	}
@@ -359,8 +359,8 @@ func TestDigestMutations(t *testing.T) {
 	if c := d.Mutations[2].Changes[0]; c.Uncertain || d.Mutations[2].Uncertain != 0 {
 		t.Errorf("a flag that does not concern the row image marks the change uncertain: %+v", c)
 	}
-	if d.Mutations[0].Key != "" || !d.Mutations[0].Changes[0].Uncertain {
-		t.Errorf("change without a key: %+v", d.Mutations[0])
+	if d.Mutations[1].Key != "" || !d.Mutations[1].Changes[0].Uncertain {
+		t.Errorf("change without a key: %+v", d.Mutations[1])
 	}
 
 	// More changes to one entity, and more fields in one change, than a digest lists.
