@@ -17,6 +17,9 @@ starts its own throwaway Postgres and Redis from local binaries (`integration/sc
 - Servers bind loopback by default; do not add defaults that listen on all interfaces.
 - Keep Redis-client-independent logic in `internal/redisx`, not duplicated across `tredis` and `tredisv8`.
 - Binaries share plumbing from `internal/svc` (env defaults, CSV lists, graceful `Serve`); wrappers guard recording code with `defer core.Recover()`.
+- Start goroutines with `internal/gosafe` (in the SDK: `startLoop` in `sdk/runtime`), not a bare `go`: a panic is logged
+  at error level and the goroutine is restarted with backoff or ends, as its `Options` say. A bare `go` that must stay
+  (its panic has to end the process, or it has a recover of its own) carries a one-line comment that says why.
 - Use synthetic data in tests and examples: no real credentials, hostnames, customer data or employer-specific names.
 
 ## Pull requests

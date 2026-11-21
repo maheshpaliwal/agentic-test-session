@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"unicode"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
@@ -1514,9 +1515,31 @@ func (f *FileStore) maybeCompactLocked() {
 		f.MemStore.mu.RUnlock()
 		done := make(chan struct{})
 		f.compacting = done
-		go f.compactInBackground(hot, f.journalSize, f.archiveUnsynced, done)
+		upto, syncArchive := f.journalSize, f.archiveUnsynced
+		// One compaction: not run again by the helper, the journal growing
+		// starts the next.
+		gosafe.Go(gosafe.Options{Name: "compaction", OnPanic: func(p gosafe.Panic) {
+			gosafe.Slog(f.log, nil)(p)
+			f.compactionPanicked(done, syncArchive)
+		}}, func() { f.compactInBackground(hot, upto, syncArchive, done) })
 		f.archiveUnsynced = false
 	}
+}
+
+// compactionPanicked puts right what a compaction that panicked before its
+// last step left undone: it is over (Close waits for that), the next one
+// waits for the journal to grow, and the archive is still to be synced. The
+// journal was not cut, so nothing is lost.
+func (f *FileStore) compactionPanicked(done chan struct{}, syncArchive bool) {
+	f.wmu.Lock()
+	defer f.wmu.Unlock()
+	if f.compacting != done {
+		return // it panicked in its last step, which had ended it already
+	}
+	f.compacting = nil
+	close(done)
+	f.compactAt = f.journalSize + max(f.compactMin, f.snapSize)
+	f.archiveUnsynced = f.archiveUnsynced || syncArchive
 }
 
 // compactInBackground writes hot, the hot set as of journal offset upto, as

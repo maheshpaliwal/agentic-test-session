@@ -1,6 +1,9 @@
 package collector
 
 import (
+	"log/slog"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/metrics"
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 )
@@ -21,6 +24,14 @@ type telemetry struct {
 	deleted         *metrics.CounterVec // cause: api | retention
 	quarantined     *metrics.Counter
 	appendFailures  *metrics.Counter
+	// Panics recovered in the collector's own loops.
+	panics *metrics.CounterVec // goroutine: janitor | retention | retention_stop
+}
+
+// onPanic is what the collector's loops do with a recovered panic: log it
+// at error level and count it.
+func (t *telemetry) onPanic(log *slog.Logger) func(gosafe.Panic) {
+	return gosafe.Slog(log, func(name string) { t.panics.With(name).Inc() })
 }
 
 func newTelemetry() *telemetry {
@@ -47,6 +58,8 @@ func newTelemetry() *telemetry {
 			"Poison events isolated and dropped because the store kept rejecting them."),
 		appendFailures: r.Counter("tsession_collector_store_append_failures_total",
 			"Failed attempts to append a batch of events to the store (each is retried)."),
+		panics: r.CounterVec("tsession_collector_goroutine_panics_total",
+			"Panics recovered in a background loop, by goroutine (each is logged with its stack, and the loop is restarted with backoff).", "goroutine"),
 	}
 }
 

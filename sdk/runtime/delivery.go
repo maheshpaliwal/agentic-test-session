@@ -227,12 +227,13 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	// reach it trimmed, and a report must name the same instance.
 	r := &reporter{cfg: cfg, rec: rec, exp: exp, sub: sub, service: ident.Clean(service), instance: ident.Clean(instance),
 		sessions: map[string]*reportState{}, stop: make(chan struct{}), done: make(chan struct{})}
-	go r.loop()
+	startLoop("delivery reporter", "the control plane no longer hears what this process delivered, and names it in its sessions",
+		r.stop, r.loop, func() { close(r.done) }, nil)
 	return r
 }
 
+// loop may be started again after a panic (startLoop): it closes nothing.
 func (r *reporter) loop() {
-	defer close(r.done)
 	t := time.NewTicker(r.cfg.Tick)
 	defer t.Stop()
 	for {

@@ -59,6 +59,8 @@ func Listen(addr, setting string) (net.Listener, error) {
 // ServeOn is Serve on a listener obtained from Listen.
 func ServeOn(ctx context.Context, srv *http.Server, ln net.Listener, timeout time.Duration, beforeShutdown func()) error {
 	done := make(chan struct{})
+	// Bare on purpose: recovered, a panic in beforeShutdown would leave a
+	// server that never shuts down; the process must end instead.
 	go func() {
 		defer close(done)
 		<-ctx.Done()

@@ -20,6 +20,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
@@ -130,7 +131,10 @@ func New(st store.Store, cfg Config) *Collector {
 	c.seq = newSequencer(st, cfg, c.tel)
 	c.tel.observe(c.seq)
 	if cfg.Retention > 0 {
-		go c.retentionLoop()
+		// Started again after a panic (a store that panics on one session,
+		// say), without limit: without it nothing is ever deleted for age.
+		gosafe.Go(gosafe.Options{Name: "retention", Restarts: -1, Stop: c.stop, Done: func() { close(c.retention) }, OnPanic: c.tel.onPanic(c.log)},
+			c.retentionLoop)
 	} else {
 		close(c.retention)
 	}
@@ -384,8 +388,8 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	return nil
 }
 
+// retentionLoop may be started again after a panic: it closes nothing.
 func (c *Collector) retentionLoop() {
-	defer close(c.retention)
 	t := time.NewTicker(c.cfg.RetentionInterval)
 	defer t.Stop()
 	for {
@@ -393,26 +397,32 @@ func (c *Collector) retentionLoop() {
 		case <-c.stop:
 			return
 		case now := <-t.C:
-			// A sweep in flight ends when the collector is closed.
-			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.StoreTimeout)
-			swept := make(chan struct{})
-			go func() {
-				select {
-				case <-c.stop:
-					cancel()
-				case <-swept:
-				}
-			}()
-			n, err := c.PurgeExpired(ctx, now)
-			close(swept)
-			cancel()
-			if err != nil {
-				c.log.Error("retention sweep", "err", err)
-			}
-			if n > 0 {
-				c.log.Info("retention sweep deleted expired sessions", "sessions", n, "retention", c.cfg.Retention)
-			}
+			c.retentionSweep(now)
 		}
+	}
+}
+
+// retentionSweep is one sweep. What it started ends with it, also when the
+// store panics.
+func (c *Collector) retentionSweep(now time.Time) {
+	// A sweep in flight ends when the collector is closed.
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.StoreTimeout)
+	defer cancel()
+	swept := make(chan struct{})
+	defer close(swept)
+	gosafe.Go(gosafe.Options{Name: "retention_stop", OnPanic: c.tel.onPanic(c.log)}, func() {
+		select {
+		case <-c.stop:
+			cancel()
+		case <-swept:
+		}
+	})
+	n, err := c.PurgeExpired(ctx, now)
+	if err != nil {
+		c.log.Error("retention sweep", "err", err)
+	}
+	if n > 0 {
+		c.log.Info("retention sweep deleted expired sessions", "sessions", n, "retention", c.cfg.Retention)
 	}
 }
 

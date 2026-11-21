@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 )
 
 // sealRetry is the in-memory backoff state of one pending seal: a session
@@ -66,11 +68,28 @@ func (m *Manager) retrySealsLocked(now time.Time) {
 		ctx, cancel := context.WithTimeout(m.rootCtx, m.cfg.SealRetryBudget)
 		r.cancel, r.done = cancel, make(chan struct{})
 		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			m.retrySeal(ctx, id, r)
-		}()
+		// One attempt: not run again by the helper, the next sweep that finds
+		// it due starts another.
+		gosafe.Go(gosafe.Options{Name: "seal_retry", Done: m.wg.Done, OnPanic: m.onPanic(func() { m.sealRetryPanicked(r) })},
+			func() { m.retrySeal(ctx, id, r) })
 	}
+}
+
+// sealRetryPanicked puts right what a seal attempt that panicked left
+// undone: the attempt is over (a Delete may be waiting for that) and the
+// next one is due after the backoff, like after a failure. An attempt that
+// panics every time is so retried for good, at SealRetryMaxInterval at most:
+// the budget is looked at only once the collector has answered.
+func (m *Manager) sealRetryPanicked(r *sealRetry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r.cancel != nil { // it panicked before it took the lock
+		r.cancel()
+		r.cancel = nil
+		close(r.done)
+	}
+	r.next = time.Now().Add(r.delay)
+	r.delay = min(r.delay*2, m.cfg.SealRetryMaxInterval)
 }
 
 // retrySeal makes one seal attempt for a pending seal and records the

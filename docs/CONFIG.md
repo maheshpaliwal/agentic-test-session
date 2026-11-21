@@ -127,6 +127,7 @@ value.
 | `tsession_build_info` | gauge | `service` (`collector`), `version`, `goversion` | Build information; the value is always 1. |
 | `tsession_collector_buffered_events` | gauge | none | Events waiting in reorder windows, not yet in the store. |
 | `tsession_collector_deleted_sessions_total` | counter | `cause`: `api`, `retention` | Sessions deleted, by cause (api or retention). |
+| `tsession_collector_goroutine_panics_total` | counter | `goroutine`: `janitor`, `retention`, `retention_stop` | Panics recovered in a background loop, by goroutine (each is logged with its stack, and the loop is restarted with backoff). |
 | `tsession_collector_ingest_errors_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Ingest requests that failed, by cause (backpressure, shutdown or storage). |
 | `tsession_collector_ingest_failed_sessions_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Sessions whose events an ingest request could not take, by cause (backpressure, shutdown or storage). |
 | `tsession_collector_ingest_partial_failures_total` | counter | none | Ingest requests that failed for some of their sessions and were accepted for the others. |
@@ -142,6 +143,7 @@ value.
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
 | `tsession_build_info` | gauge | `service` (`controlplane`), `version`, `goversion` | Build information; the value is always 1. |
+| `tsession_controlplane_goroutine_panics_total` | counter | `goroutine`: `sweep`, `drain`, `seal_retry` | Panics recovered in a background goroutine, by goroutine (each is logged with its stack; sweep and drain are restarted with backoff). |
 | `tsession_controlplane_kill_switch` | gauge | none | 1 while the global kill switch is on. |
 | `tsession_controlplane_seal_failures_total` | counter | none | Sessions whose collector seal failed after all retries (recorded incomplete). |
 | `tsession_controlplane_seal_retries_total` | counter | `result`: `success`, `failure` | Background attempts to seal a session whose seal failed past its budget, by result. |

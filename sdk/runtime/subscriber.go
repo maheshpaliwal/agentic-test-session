@@ -107,7 +107,10 @@ func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscr
 	}
 	s.snap.Store(&snapshot{})
 	s.announce.Store(reportsAs != "")
-	go s.run(ctx)
+	// Without it the last active set would stand for good: stopped for good,
+	// the subscriber says that nothing is active, and recording ends.
+	startLoop("subscriber", "nothing more is recorded", ctx.Done(), func() { s.run(ctx) },
+		func() { close(s.done) }, func() { s.snap.Store(&snapshot{}) })
 	return s
 }
 
@@ -217,8 +220,9 @@ func (s *Subscriber) wake() {
 	}
 }
 
+// run follows the active set until ctx ends. It may be started again after
+// a panic (startLoop), so it closes nothing itself.
 func (s *Subscriber) run(ctx context.Context) {
-	defer close(s.done)
 	backoff := 200 * time.Millisecond
 	for ctx.Err() == nil {
 		got := s.stream(ctx)

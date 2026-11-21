@@ -68,7 +68,7 @@ func main() {
 
 	ctx, stop := svc.SignalContext()
 	defer stop()
-	go m.Run(ctx)
+	m.RunInBackground(ctx)
 
 	// No WriteTimeout: /v1/active/stream is a long-lived SSE response.
 	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}

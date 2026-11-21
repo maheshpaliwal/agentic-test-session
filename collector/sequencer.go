@@ -11,6 +11,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
@@ -59,15 +60,17 @@ func newSequencer(st store.Store, cfg Config, tel *telemetry) *Sequencer {
 		stop: make(chan struct{}), jd: make(chan struct{})}
 	s.bg, s.cancel = context.WithCancel(context.Background())
 	if s.idle > 0 {
-		go s.janitor()
+		// Started again after a panic, without limit: without it no idle
+		// actor is ever evicted, and the collector's memory only grows.
+		gosafe.Go(gosafe.Options{Name: "janitor", Restarts: -1, Stop: s.stop, Done: func() { close(s.jd) }, OnPanic: tel.onPanic(s.log)}, s.janitor)
 	} else {
 		close(s.jd)
 	}
 	return s
 }
 
+// janitor may be started again after a panic: it closes nothing.
 func (s *Sequencer) janitor() {
-	defer close(s.jd)
 	iv := min(max(s.idle/4, 5*time.Millisecond), 30*time.Second)
 	t := time.NewTicker(iv)
 	defer t.Stop()

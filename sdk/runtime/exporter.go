@@ -142,7 +142,8 @@ func NewExporter(rec *Recorder, cfg ExporterConfig) *Exporter {
 		failing:  map[string]*failingSession{},
 		drops:    map[string]core.Event{},
 	}
-	go e.loop()
+	startLoop("exporter", "recorded events are no longer sent to the collector (they are dropped as the buffer fills)",
+		e.stop, e.loop, func() { close(e.done) }, nil)
 	return e
 }
 
@@ -153,8 +154,10 @@ func newPlainTransport() *http.Transport {
 	return &http.Transport{}
 }
 
+// loop may be started again after a panic (startLoop): it closes nothing.
+// Every pass builds its requests from the ring anew, so a pass that panicked
+// half way loses no event.
 func (e *Exporter) loop() {
-	defer close(e.done)
 	t := time.NewTicker(e.cfg.FlushInterval)
 	defer t.Stop()
 	for {

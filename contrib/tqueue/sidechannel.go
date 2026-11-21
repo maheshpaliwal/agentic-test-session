@@ -220,6 +220,7 @@ func putBounded(ctx context.Context, sc SideChannel, key string, c map[string]st
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d)
 	defer cancel()
 	done := make(chan error, 1)
+	// Bare, with a recover of its own: the panic is the caller's result.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -247,6 +248,7 @@ func getBounded(ctx context.Context, sc SideChannel, key string, d time.Duration
 		err error
 	}
 	done := make(chan res, 1)
+	// Bare, with a recover of its own: the panic is the caller's result.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

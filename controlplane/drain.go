@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 )
 
 // signature is the change-detection tuple of a drain-status response.
@@ -15,10 +17,32 @@ func (m *Manager) startDrainLocked(id string) {
 	ctx, cancel := context.WithCancel(m.rootCtx)
 	m.cancels[id] = cancel
 	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		m.drain(ctx, id)
-	}()
+	// A drain that panicked is started again, for as long as it takes: it
+	// reads everything it needs anew, as it does after a restart of the
+	// process, and a session nobody drains would stay DRAINING, and in every
+	// SDK's active set, for good. Its max_drain counts from the restart.
+	gosafe.Go(gosafe.Options{Name: "drain", Restarts: -1, Stop: ctx.Done(), Done: m.wg.Done, OnPanic: m.onPanic(nil)},
+		func() { m.drain(ctx, id) })
+}
+
+// onPanic is what the control plane's goroutines do with a recovered panic:
+// log it at error level, count it (tsession_controlplane_goroutine_panics_total)
+// and then run after, if any, to put right what the goroutine left undone.
+func (m *Manager) onPanic(after func()) func(gosafe.Panic) {
+	report := gosafe.Slog(m.log, func(name string) { m.tel.panics.With(name).Inc() })
+	return func(p gosafe.Panic) {
+		report(p)
+		if after != nil {
+			after()
+		}
+	}
+}
+
+// RunInBackground is Run on a goroutine of its own that a panic in a sweep
+// does not end: the sweep is started again with backoff, without limit, since
+// without it no session expires and no pending seal is retried.
+func (m *Manager) RunInBackground(ctx context.Context) {
+	gosafe.Go(gosafe.Options{Name: "sweep", Restarts: -1, Stop: ctx.Done(), OnPanic: m.onPanic(nil)}, func() { m.Run(ctx) })
 }
 
 // drain polls the collector until the session is quiet or max_drain elapses,
