@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,7 +21,7 @@ import (
 
 const (
 	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] " +
-		"[--report FILE [--format markdown|junit]] [--timeout D] -- <command> [args...]"
+		"[--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.
 	sessionEnv = client.SessionEnv
@@ -67,6 +68,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	g.register(fl)
 	reportPath := fl.String("report", "", "write a report of the session to this file")
 	format := fl.String("format", "", "format of --report: markdown (default) or junit")
+	digestPath := fl.String("digest", "", "write a digest of the session to this file: Markdown, or JSON if the name ends in .json")
 	timeout := fl.Duration("timeout", 2*time.Minute, "how long to wait for the session to stop and seal")
 	if err := fl.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -83,9 +85,17 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return runUsage("--timeout must be more than zero: the session has to be stopped and sealed")
 	case *reportPath == "-":
 		return runUsage("--report needs a file: standard output belongs to the command")
+	case *digestPath == "-":
+		return runUsage("--digest needs a file: standard output belongs to the command")
 	case *reportPath == "" && *format != "":
 		return runUsage("--format needs --report FILE")
-	case *reportPath != "":
+	}
+	if *digestPath != "" {
+		if st, err := os.Stat(filepath.Dir(*digestPath)); err != nil || !st.IsDir() {
+			return runUsage("--digest %s: its directory does not exist", *digestPath)
+		}
+	}
+	if *reportPath != "" {
 		if *format == "" {
 			*format = "markdown"
 		}
@@ -194,6 +204,9 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		// In header mode without bindings only what carries the id is recorded.
 		byID := opts.Mode != "exclusive" && len(opts.Bindings) == 0
 		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render)
+		if err == nil && *digestPath != "" {
+			err = c.runDigest(readCtx, s, *digestPath)
+		}
 		cancel()
 		if err != nil {
 			failed = true
@@ -243,6 +256,27 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 		return gateErr, err
 	}
 	return gateErr, c.writeReportFile(reportPath, format, out)
+}
+
+// runDigest writes the digest of the session run recorded to path.
+func (c *cli) runDigest(ctx context.Context, s *client.Session, path string) error {
+	format := "markdown"
+	if strings.HasSuffix(path, ".json") {
+		format = "json"
+	}
+	render, err := digestRenderer(format)
+	if err != nil {
+		return err
+	}
+	src, err := loadDigest(ctx, s)
+	if err != nil {
+		return err
+	}
+	out, err := src.fit(render, digestDefaultBytes)
+	if err != nil {
+		return err
+	}
+	return c.writeDigestFile(path, out)
 }
 
 // hintUntagged says, for an empty session that records by id, what most
