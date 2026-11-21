@@ -704,7 +704,7 @@ func (m *Manager) countsFor(ctx context.Context, id string, st DrainStatus, ok b
 		got, err := ic.InstanceCounts(ctx, id, chunk)
 		if err != nil || len(got) != len(chunk) {
 			if ctx.Err() == nil {
-				m.log.Warn("instance counts failed", "id", id, "err", err)
+				m.log.Error("instance counts failed", "id", id, "err", err)
 			}
 			break
 		}

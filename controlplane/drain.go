@@ -53,7 +53,7 @@ func (m *Manager) drain(ctx context.Context, id string) {
 			return
 		}
 		if err != nil {
-			m.log.Warn("drain-status failed", "id", id, "err", err)
+			m.log.Error("drain-status failed", "id", id, "err", err)
 		} else {
 			last = st
 			if !haveStatus || st.signature() != prev.signature() {
@@ -141,7 +141,7 @@ func (m *Manager) sealWithRetry(ctx context.Context, id string) (SealResult, err
 		if err == nil || ctx.Err() != nil {
 			return res, err
 		}
-		m.log.Warn("seal failed", "id", id, "err", err)
+		m.log.Error("seal failed", "id", id, "err", err)
 		if !time.Now().Add(delay).Before(end) {
 			return res, fmt.Errorf("seal failed after retries: %w", err)
 		}

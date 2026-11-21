@@ -565,6 +565,6 @@ func (a *sessionActor) quarantine(e *core.Event, err error) {
 	if len(msg) > 200 {
 		msg = msg[:200]
 	}
-	a.seqr.log.Warn("quarantined poison event", "session", a.id, "span", e.SpanID, "kind", e.Kind,
+	a.seqr.log.Error("quarantined poison event", "session", a.id, "span", e.SpanID, "kind", e.Kind,
 		"instance", e.Instance, "local_seq", e.LocalSeq, "err", msg)
 }

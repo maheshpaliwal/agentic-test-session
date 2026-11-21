@@ -125,7 +125,7 @@ func (m *Manager) retrySeal(ctx context.Context, id string, r *sealRetry) {
 		m.log.Error("seal still failing, giving up", "id", id, "budget", m.cfg.SealPendingBudget, "err", err)
 	default:
 		m.tel.sealRetries.With("failure").Inc()
-		m.log.Warn("seal retry failed", "id", id, "err", err, "next_in", r.delay)
+		m.log.Error("seal retry failed", "id", id, "err", err, "next_in", r.delay)
 		// The last attempt is made at the deadline, not a full backoff later.
 		if r.next = now.Add(r.delay); r.next.After(deadline) {
 			r.next = deadline

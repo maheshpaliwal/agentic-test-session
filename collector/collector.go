@@ -377,7 +377,7 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 		// validID admits no path separators and no leading dot, so the join
 		// cannot leave BundleDir.
 		if err := os.RemoveAll(filepath.Join(c.cfg.BundleDir, id)); err != nil {
-			c.log.Warn("session deleted but its bundle could not be removed", "session", id, "err", err)
+			c.log.Error("session deleted but its bundle could not be removed", "session", id, "err", err)
 		}
 	}
 	c.tel.deleted.With(cause).Inc()
@@ -407,7 +407,7 @@ func (c *Collector) retentionLoop() {
 			close(swept)
 			cancel()
 			if err != nil {
-				c.log.Warn("retention sweep", "err", err)
+				c.log.Error("retention sweep", "err", err)
 			}
 			if n > 0 {
 				c.log.Info("retention sweep deleted expired sessions", "sessions", n, "retention", c.cfg.Retention)

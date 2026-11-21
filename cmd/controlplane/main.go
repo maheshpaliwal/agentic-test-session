@@ -45,10 +45,10 @@ func main() {
 		// release the archive file.
 		defer func() {
 			if err := fs.Compact(); err != nil {
-				log.Warn("compact store", "err", err)
+				log.Error("compact store", "err", err)
 			}
 			if err := fs.Close(); err != nil {
-				log.Warn("close store", "err", err)
+				log.Error("close store", "err", err)
 			}
 		}()
 	}

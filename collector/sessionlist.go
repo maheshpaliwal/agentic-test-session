@@ -166,7 +166,7 @@ func (c *Collector) sessionCounts(ctx context.Context, ids []string) (out []sess
 		}
 	}
 	if firstErr != nil && ctx.Err() == nil {
-		c.log.Warn("session list by id: store lookups failed", "unanswered", unanswered, "asked", len(ids), "err", firstErr)
+		c.log.Error("session list by id: store lookups failed", "unanswered", unanswered, "asked", len(ids), "err", firstErr)
 	}
 	return out, unanswered
 }
