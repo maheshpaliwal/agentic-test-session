@@ -782,7 +782,18 @@ func (m *Manager) silentLocked(s Session, st *deliveryState, begin, now time.Tim
 // unheardLocked lists the instances of which nothing has arrived for too
 // long (see unheard). skip names the ones that are accounted for otherwise.
 // An instance with several connections is unheard when all of them are, and
-// is listed with the one heard of last.
+// is listed with the one it opened last.
+//
+// The newest, not the one heard of last: a request marks every connection the
+// instance has at that moment (see heardLocked), so the connections that were
+// heard of all say the same, and one that says something else is a later one
+// on which nothing has arrived. That is the stream an SDK opens anew when its
+// reports keep failing, so as to be named; behind a proxy that keeps the
+// stream it ended open for a while, the old connection is still here, and
+// going by it the instance was "heard of, and silent now", which is not named
+// where nothing ties it to the session (the fifth review: 0 of 5 sessions
+// named behind such a proxy, 4 of 4 without it). A healthy instance with a
+// stream that lingers is not listed: what arrives of it is noted on both.
 func (m *Manager) unheardLocked(now time.Time, skip func(key string) bool) []Subscriber {
 	var out []Subscriber
 	best := map[string]Subscriber{}
@@ -796,7 +807,7 @@ func (m *Manager) unheardLocked(now time.Time, skip func(key string) bool) []Sub
 			heardOf[key] = struct{}{}
 			continue
 		}
-		if b, ok := best[key]; !ok || sub.heard.After(b.heard) {
+		if b, ok := best[key]; !ok || sub.since.After(b.since) {
 			best[key] = sub
 		}
 	}
