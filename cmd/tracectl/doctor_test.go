@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -111,5 +112,21 @@ func TestCLIKill(t *testing.T) {
 	}
 	if _, out, _ := env.tc("kill", "status"); !strings.HasPrefix(out, "kill switch: off") {
 		t.Fatalf("bad arguments changed the switch: %s", out)
+	}
+}
+
+// doctor prints the URLs it was given, often into a CI log: what may be a
+// credential in them stays out.
+func TestDoctorHidesCredentialsInURLs(t *testing.T) {
+	var out, errb bytes.Buffer
+	code := run([]string{"--cp", "http://ciuser:hunter2@127.0.0.1:1/?token=tok123", "--collector", "http://ciuser:hunter2@127.0.0.1:1", "doctor"}, &out, &errb)
+	all := out.String() + errb.String()
+	if code != 1 || !strings.Contains(all, "http://127.0.0.1:1") {
+		t.Fatalf("exit %d\n%s", code, all)
+	}
+	for _, secret := range []string{"ciuser", "hunter2", "tok123"} {
+		if strings.Contains(all, secret) {
+			t.Errorf("doctor shows %q:\n%s", secret, all)
+		}
 	}
 }

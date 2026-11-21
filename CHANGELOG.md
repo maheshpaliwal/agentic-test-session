@@ -175,6 +175,9 @@ Rolling back:
 
 ### Fixed
 
+- `sdk/client` and `tracectl`: an error or `doctor` line that names a service URL no longer shows the URL's user
+  name, password or query (a token there ended up in CI logs). New `client.DisplayURL` and
+  `client.ScrubURLError` for callers that print such errors themselves.
 - Collector: a bare numeric key of 1,000,000 or more did not match in entity history.
 - Dashboard opened on an exported file showed a duration of 0 for a recording shorter than a second.
 - `tracectl diff` treated `HTTP 500` and `HTTP 503` (and differing SQLSTATE, MySQL error numbers and unnamed

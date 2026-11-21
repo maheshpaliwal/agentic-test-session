@@ -51,7 +51,7 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		}
 		if err == nil && len(subs) == 0 {
 			rep.Notes = append(rep.Notes, "no service is connected, so nothing can be recorded: check that the service runs with "+
-				"TSESSION_ENABLED=true and that its TSESSION_CONTROLPLANE_URL points at "+cp)
+				"TSESSION_ENABLED=true and that its TSESSION_CONTROLPLANE_URL points at "+client.DisplayURL(cp))
 		}
 	}
 	if *asJSON {
@@ -87,7 +87,7 @@ type doctorReport struct {
 
 // probe asks a service's /healthz.
 func probe(ctx context.Context, hc *http.Client, base string) probeResult {
-	res := probeResult{URL: base}
+	res := probeResult{URL: client.DisplayURL(base)} // printed, and often into a CI log
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
 	if err != nil {
 		res.Error = err.Error()
@@ -95,7 +95,7 @@ func probe(ctx context.Context, hc *http.Client, base string) probeResult {
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		res.Error = err.Error()
+		res.Error = client.ScrubURLError(err).Error()
 		return res
 	}
 	defer resp.Body.Close()

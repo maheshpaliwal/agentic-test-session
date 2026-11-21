@@ -157,6 +157,33 @@ func baseURL(explicit, env, def string) string {
 	return strings.TrimRight(explicit, "/")
 }
 
+// scrubURL removes what may be a credential from the URL a transport error
+// names: the user name and password of the URL and its query. Such errors
+// are printed by tracectl and by tests, and end up in CI logs. The error is
+// changed in place, so it still unwraps to the cause.
+func scrubURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		ue.URL = DisplayURL(ue.URL)
+	}
+	return err
+}
+
+// ScrubURLError is for callers that make their own requests to the services
+// and print the error: it removes the user name, password and query from the
+// URL a transport error names, in place, and returns err.
+func ScrubURLError(err error) error { return scrubURL(err) }
+
+// DisplayURL is raw as it may be printed: scheme, host and path only. A user
+// name, a password and a query may each be a credential.
+func DisplayURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<unparseable URL>"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
+
 func newSession(o Options, info Info) *Session {
 	hc := o.HTTPClient
 	if hc == nil {
@@ -369,7 +396,7 @@ func (s *Session) callHeader(ctx context.Context, base, method, path string, in,
 	}
 	resp, err := s.hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, scrubURL(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
