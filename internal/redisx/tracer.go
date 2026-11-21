@@ -30,10 +30,11 @@ type Reader interface {
 	Type(ctx context.Context, key string) (string, error)
 	Get(ctx context.Context, key string) (string, error)
 	// HScan returns up to about count entries as field, value, field, value, ...
-	HScan(ctx context.Context, key string, count int64) ([]string, error)
+	// more reports that the hash holds entries the scan did not reach.
+	HScan(ctx context.Context, key string, count int64) (kv []string, more bool, err error)
 	// LRange returns elements 0..stop.
 	LRange(ctx context.Context, key string, stop int64) ([]string, error)
-	SScan(ctx context.Context, key string, count int64) ([]string, error)
+	SScan(ctx context.Context, key string, count int64) (members []string, more bool, err error)
 	// ZRange returns members 0..stop with their scores.
 	ZRange(ctx context.Context, key string, stop int64) ([]Z, error)
 }
@@ -78,6 +79,7 @@ type Op struct {
 	name   string
 	keys   []int
 	before map[int]core.PayloadRef // before-images, by arg index
+	snaps  map[int]*snap           // what the before-image reads saw, for the diff
 	imaged []int                   // arg indices of keys under image capture
 	after  []int                   // subset of imaged whose after-image this op reads
 }
@@ -237,7 +239,7 @@ func matchAny(globs []string, key string) bool {
 // image pattern. Inside a pipeline only the first write of a key gets one:
 // later writes of the same key would read the same stale value.
 func (t *Tracer) beforeImages(ctx context.Context, o *Op, b *batch) {
-	o.before = map[int]core.PayloadRef{}
+	o.before, o.snaps = map[int]core.PayloadRef{}, map[int]*snap{}
 	for _, i := range WrittenKeys(o.name, o.args, o.keys, "") {
 		k := Str(o.args[i])
 		if !matchAny(t.Patterns, k) {
@@ -249,7 +251,7 @@ func (t *Tracer) beforeImages(ctx context.Context, o *Op, b *batch) {
 			}
 			continue
 		}
-		ref, ok := t.beforeImage(ctx, o.span, k, b)
+		ref, seen, ok := t.beforeImage(ctx, o.span, k, b)
 		if b.pipeline {
 			if b.imaged == nil {
 				b.imaged = map[string]bool{}
@@ -258,29 +260,32 @@ func (t *Tracer) beforeImages(ctx context.Context, o *Op, b *batch) {
 		}
 		if ok {
 			o.before[i] = ref
+			o.snaps[i] = seen
 			o.imaged = append(o.imaged, i)
 		}
 	}
 }
 
-func (t *Tracer) beforeImage(ctx context.Context, span *core.Span, key string, b *batch) (core.PayloadRef, bool) {
+// beforeImage returns the before-image of key and what the read saw (nil for
+// a sensitive key, which is not read).
+func (t *Tracer) beforeImage(ctx context.Context, span *core.Span, key string, b *batch) (core.PayloadRef, *snap, bool) {
 	if t.KeySensitive(key) { // never read a sensitive value just to mask it
-		return core.Payload(core.RedactedValue), true
+		return core.Payload(core.RedactedValue), nil, true
 	}
 	if b.reads <= 0 {
 		span.SetAttr("image_skipped", "cap")
-		return core.PayloadRef{}, false
+		return core.PayloadRef{}, nil, false
 	}
 	b.reads--
 	if expired(b.deadline) {
 		span.SetAttr("image_skipped", "deadline")
-		return core.PayloadRef{}, false
+		return core.PayloadRef{}, nil, false
 	}
-	ref, ok := t.image(ctx, key, b.deadline)
+	ref, seen, ok := t.image(ctx, key, b.deadline)
 	if !ok {
 		span.SetAttr("image_skipped", "error")
 	}
-	return ref, ok
+	return ref, seen, ok
 }
 
 // finish records the reply and the mutations and ends the span. deadline
@@ -311,6 +316,7 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 	if IsPop(name) {
 		popped = t.PoppedKey(cmd)
 	}
+	truncated := false // the span is flagged once
 	for _, i := range WrittenKeys(name, o.args, o.keys, popped) {
 		key := Str(o.args[i])
 		m := core.Mutation{
@@ -329,8 +335,13 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 				m.After = core.Payload(core.RedactedValue)
 			} else if expired(deadline) {
 				o.span.SetAttr("image_skipped", "deadline")
-			} else if ref, ok := t.image(ctx, key, deadline); ok {
+			} else if ref, seen, ok := t.image(ctx, key, deadline); ok {
 				m.After = ref
+				var cut bool
+				if m.Diff, cut = diffSnaps(o.snaps[i], seen); cut && !truncated {
+					truncated = true
+					o.span.AddFlag("diff_truncated")
+				}
 			} else {
 				o.span.SetAttr("image_skipped", "error")
 			}
@@ -366,9 +377,10 @@ const ImageLimit = 1000
 
 // image reads the current value of key by its type, bounded by the image
 // timeout and the phase deadline, with redaction applied. Collections are
-// capped at about ImageLimit elements. ok=false means the read failed or
-// timed out: image capture must never affect the host call.
-func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (core.PayloadRef, bool) {
+// capped at about ImageLimit elements. It returns the image and what the read
+// saw, for the diff. ok=false means the read failed or timed out: image
+// capture must never affect the host call.
+func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (core.PayloadRef, *snap, bool) {
 	ctx = context.WithValue(ctx, skipKey{}, true)
 	if t.ImageCtx != nil {
 		ctx = t.ImageCtx(ctx)
@@ -385,25 +397,32 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 	}
 	typ, err := t.Reader.Type(ctx, key)
 	if err != nil {
-		return core.PayloadRef{}, false
+		return core.PayloadRef{}, nil, false
 	}
+	seen := &snap{typ: typ}
 	var v any
 	switch typ {
 	case "string":
 		var s string
 		if s, err = t.Reader.Get(ctx, key); err == nil {
-			v = RedactStr(s)
+			seen.items = []item{{shown: RedactStr(s)}}
+			v = seen.items[0].shown
 		}
 	case "hash":
 		var kv []string // field, value, field, value, ...
-		if kv, err = t.Reader.HScan(ctx, key, ImageLimit); err == nil {
+		if kv, seen.capped, err = t.Reader.HScan(ctx, key, ImageLimit); err == nil {
 			m := make(map[string]string, len(kv)/2)
-			for i := 0; i+1 < len(kv) && len(m) < ImageLimit; i += 2 {
-				if f := kv[i]; NameSensitive(f) {
-					m[f] = core.RedactedValue
-				} else {
-					m[f] = RedactStr(kv[i+1])
+			for i := 0; i+1 < len(kv); i += 2 {
+				if len(m) == ImageLimit {
+					seen.capped = true
+					break
 				}
+				f, shown := kv[i], core.RedactedValue
+				if !NameSensitive(f) {
+					shown = RedactStr(kv[i+1])
+				}
+				m[f] = shown
+				seen.items = append(seen.items, item{name: f, shown: shown})
 			}
 			v = m
 		}
@@ -411,34 +430,42 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 		var l []string
 		if typ == "list" {
 			l, err = t.Reader.LRange(ctx, key, ImageLimit-1)
+			seen.capped = len(l) >= ImageLimit // the list may go on
 		} else {
-			l, err = t.Reader.SScan(ctx, key, ImageLimit)
+			l, seen.capped, err = t.Reader.SScan(ctx, key, ImageLimit)
 		}
 		if len(l) > ImageLimit {
-			l = l[:ImageLimit]
+			l, seen.capped = l[:ImageLimit], true
 		}
 		for i := range l {
 			l[i] = RedactStr(l[i])
+			seen.items = append(seen.items, item{shown: l[i]})
+			if typ == "set" {
+				seen.items[i].name = l[i]
+			}
 		}
 		v = l
 	case "zset":
 		var z []Z
 		if z, err = t.Reader.ZRange(ctx, key, ImageLimit-1); err == nil {
+			seen.capped = len(z) >= ImageLimit
 			m := make(map[string]float64, len(z))
 			for _, e := range z {
-				m[RedactStr(Str(e.Member))] = e.Score
+				member := RedactStr(Str(e.Member))
+				m[member] = e.Score
+				seen.items = append(seen.items, item{name: member, shown: member, score: e.Score})
 			}
 			v = m
 		}
 	case "none":
-		return core.PayloadRef{}, true
+		return core.PayloadRef{}, seen, true
 	default:
 		v = "<" + typ + ">"
 	}
 	if err != nil {
-		return core.PayloadRef{}, false
+		return core.PayloadRef{}, nil, false
 	}
-	return core.Payload(v), true
+	return core.Payload(v), seen, true
 }
 
 // IsHandshake reports connection-setup commands issued by the client library

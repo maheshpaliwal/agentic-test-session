@@ -161,6 +161,7 @@ tracectl summary my-run                      # counts, mutations, failures
 tracectl events my-run --kind 'db.*' --errors
 tracectl entities my-run                     # what the session changed; "N uncertain" = incomplete key or image
 tracectl history my-run postgres orders 42   # every change to one row, with diffs and the event's flags
+tracectl history my-run redis 'user:*' user:1   # a Redis key; diffs need tredis.WithBeforeImage (see its doc comment)
 tracectl history my-run postgres items order_id=7,sku=a   # composite key; or the JSON that entities prints
 tracectl history my-run postgres orders --unknown-key     # changes recorded without a key
 tracectl trace my-run --errors               # call tree, only branches that failed

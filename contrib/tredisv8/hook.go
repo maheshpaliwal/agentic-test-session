@@ -86,18 +86,18 @@ func (r reader) Get(ctx context.Context, key string) (string, error) {
 	return r.c.Get(ctx, key).Result()
 }
 
-func (r reader) HScan(ctx context.Context, key string, count int64) ([]string, error) {
-	kv, _, err := r.c.HScan(ctx, key, 0, "", count).Result()
-	return kv, err
+func (r reader) HScan(ctx context.Context, key string, count int64) ([]string, bool, error) {
+	kv, cursor, err := r.c.HScan(ctx, key, 0, "", count).Result()
+	return kv, cursor != 0, err
 }
 
 func (r reader) LRange(ctx context.Context, key string, stop int64) ([]string, error) {
 	return r.c.LRange(ctx, key, 0, stop).Result()
 }
 
-func (r reader) SScan(ctx context.Context, key string, count int64) ([]string, error) {
-	l, _, err := r.c.SScan(ctx, key, 0, "", count).Result()
-	return l, err
+func (r reader) SScan(ctx context.Context, key string, count int64) ([]string, bool, error) {
+	l, cursor, err := r.c.SScan(ctx, key, 0, "", count).Result()
+	return l, cursor != 0, err
 }
 
 func (r reader) ZRange(ctx context.Context, key string, stop int64) ([]redisx.Z, error) {

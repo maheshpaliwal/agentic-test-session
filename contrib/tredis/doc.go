@@ -23,4 +23,26 @@
 // read is flagged with the attribute image_skipped (cap, deadline or error).
 // When a pipeline writes a key more than once, the first write carries the
 // before-image and the last successful one the after-image.
+//
+// A mutation that has both images also carries a Diff, computed from the two
+// reads (no further round trip) and redacted like them:
+//
+//   - string: one change, field "value";
+//   - hash: one change per field added, removed or changed;
+//   - sorted set: the same per member, the values being the scores;
+//   - set: the members added (field "added") and removed (field "removed");
+//   - list: one change per index "[i]" between the unchanged head and the
+//     unchanged tail of the list;
+//   - a key that changed type: one change, field "type".
+//
+// A created key has only new values, a deleted key only old ones. The diff
+// lists at most 50 changes (and 50 members per added/removed list) and cuts
+// values at 256 bytes. A collection of more than about 1000 elements is read
+// in part, and two partial reads cannot tell an added element from one the
+// other read did not reach: such a diff lists only hash fields and sorted-set
+// members that both reads returned with different values, and nothing for a
+// list or a set. Every cut or partial diff flags the event diff_truncated.
+// The images hold no TTL, so EXPIRE and PERSIST have an empty diff, and a
+// key whose value is masked as a whole (a sensitive key, see WithRedactKeys)
+// is not read and has none either.
 package tredis
