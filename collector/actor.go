@@ -53,15 +53,15 @@ type sessionActor struct {
 	sealed     atomic.Bool
 	bufLen     atomic.Int64
 
-	loaded   bool
-	next     uint64 // next Seq to assign
-	seen     map[evKey]struct{}
-	buf      []buffered
-	timer    *time.Timer
-	open     map[string]struct{} // queue.publish span ids awaiting a closing worker event
-	closed   map[string]struct{} // ids closed before their publish was seen
-	dropped  int64
-	count    int
+	loaded  bool
+	next    uint64 // next Seq to assign
+	seen    map[evKey]struct{}
+	buf     []buffered
+	timer   *time.Timer
+	open    map[string]struct{} // queue.publish span ids awaiting a closing worker event
+	closed  map[string]struct{} // ids closed before their publish was seen
+	dropped int64
+	count   int
 	// inst counts the stored events by the service and instance that recorded
 	// them (see instKey), for the delivery check of the control plane.
 	inst     map[instKey]int

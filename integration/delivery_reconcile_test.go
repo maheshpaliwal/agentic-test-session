@@ -284,13 +284,19 @@ func TestDelivery_BlipThenKillIsNotFlagged(t *testing.T) {
 		return e.finish(s, 21)
 	})
 	wantAllComplete(t, runs)
+	stale := 0
 	for _, r := range runs {
-		if len(r.info.Delivery) != 1 || r.info.Delivery[0].Final || r.info.Delivery[0].Delivered != 0 || r.info.Delivery[0].LastError == "" {
-			t.Errorf("test setup: the last report should be the stale, failing one: %s", r)
+		// Nearly every run: now and then the first report is sent only after
+		// the collector is back, and then there is nothing stale about it.
+		if len(r.info.Delivery) == 1 && !r.info.Delivery[0].Final && r.info.Delivery[0].Delivered == 0 && r.info.Delivery[0].LastError != "" {
+			stale++
 		}
 		if r.drain > 6*time.Second {
 			t.Errorf("the drain waited for an instance that owed nothing: %s", r)
 		}
+	}
+	if stale*2 < len(runs) {
+		t.Errorf("test setup: only %d of %d runs ended on the stale, failing report this test is about", stale, len(runs))
 	}
 }
 
