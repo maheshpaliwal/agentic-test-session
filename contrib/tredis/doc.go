@@ -35,6 +35,11 @@
 //     unchanged tail of the list;
 //   - a key that changed type: one change, field "type".
 //
+// A value that changed under redaction is listed too, with the redacted
+// text on both sides (password: "[REDACTED]" -> "[REDACTED]"): the diff lists
+// only what changed, so being listed is what says so. The stored values are
+// compared in memory by a per-process fingerprint that is never recorded.
+//
 // A created key has only new values, a deleted key only old ones. The diff
 // lists at most 50 changes (and 50 members per added/removed list) and cuts
 // values at 256 bytes. A collection of more than about 1000 elements is read
@@ -44,5 +49,6 @@
 // list or a set. Every cut or partial diff flags the event diff_truncated.
 // The images hold no TTL, so EXPIRE and PERSIST have an empty diff, and a
 // key whose value is masked as a whole (a sensitive key, see WithRedactKeys)
-// is not read and has none either.
+// is not read: it has no diff, and its span says so with the attribute
+// diff_skipped=sensitive_key, because whether the value changed is unknown.
 package tredis

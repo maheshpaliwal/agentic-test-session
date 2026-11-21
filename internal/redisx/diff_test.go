@@ -6,11 +6,14 @@ import (
 )
 
 func TestDiffSnaps(t *testing.T) {
-	str := func(v string) *snap { return &snap{typ: "string", items: []item{{shown: v}}} }
+	str := func(v string) *snap { return &snap{typ: "string", items: []item{{shown: v, sum: sumOf(v)}}} }
+	masked := func(raw string) *snap {
+		return &snap{typ: "string", items: []item{{shown: "[REDACTED]", sum: sumOf(raw)}}}
+	}
 	list := func(capped bool, vs ...string) *snap {
 		s := &snap{typ: "list", capped: capped}
 		for _, v := range vs {
-			s.items = append(s.items, item{shown: v})
+			s.items = append(s.items, item{shown: v, sum: sumOf(v)})
 		}
 		return s
 	}
@@ -23,6 +26,8 @@ func TestDiffSnaps(t *testing.T) {
 	}{
 		{"no before read", nil, str("x"), "[]", false},
 		{"absent on both sides", none, none, "[]", false},
+		{"redacted and unchanged", masked("hunter2"), masked("hunter2"), "[]", false},
+		{"redacted and changed", masked("hunter2"), masked("hunter3"), "[{value [REDACTED] [REDACTED]}]", false},
 		{"type changed", str("x"), list(false, "x"), "[{type string list}]", false},
 		{"a type that is not imaged", &snap{typ: "stream"}, &snap{typ: "stream"}, "[]", false},
 		{"list: middle replaced", list(false, "a", "b", "c", "d"), list(false, "a", "X", "Y", "Z", "d"),

@@ -332,7 +332,9 @@ func (o *Op) finish(ctx context.Context, t *Tracer, cmd Cmd, err error, deadline
 		switch {
 		case slices.Contains(o.after, i):
 			if t.KeySensitive(key) {
+				// Not read, so whether the value changed is not known.
 				m.After = core.Payload(core.RedactedValue)
+				o.span.SetAttr("diff_skipped", "sensitive_key")
 			} else if expired(deadline) {
 				o.span.SetAttr("image_skipped", "deadline")
 			} else if ref, seen, ok := t.image(ctx, key, deadline); ok {
@@ -405,7 +407,7 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 	case "string":
 		var s string
 		if s, err = t.Reader.Get(ctx, key); err == nil {
-			seen.items = []item{{shown: RedactStr(s)}}
+			seen.items = []item{{shown: RedactStr(s), sum: sumOf(s)}}
 			v = seen.items[0].shown
 		}
 	case "hash":
@@ -422,7 +424,7 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 					shown = RedactStr(kv[i+1])
 				}
 				m[f] = shown
-				seen.items = append(seen.items, item{name: f, shown: shown})
+				seen.items = append(seen.items, item{name: f, shown: shown, sum: sumOf(kv[i+1])})
 			}
 			v = m
 		}
@@ -438,11 +440,9 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 			l, seen.capped = l[:ImageLimit], true
 		}
 		for i := range l {
+			sum := sumOf(l[i])
 			l[i] = RedactStr(l[i])
-			seen.items = append(seen.items, item{shown: l[i]})
-			if typ == "set" {
-				seen.items[i].name = l[i]
-			}
+			seen.items = append(seen.items, item{shown: l[i], sum: sum})
 		}
 		v = l
 	case "zset":
@@ -451,9 +451,10 @@ func (t *Tracer) image(ctx context.Context, key string, deadline time.Time) (cor
 			seen.capped = len(z) >= ImageLimit
 			m := make(map[string]float64, len(z))
 			for _, e := range z {
-				member := RedactStr(Str(e.Member))
+				raw := Str(e.Member)
+				member := RedactStr(raw)
 				m[member] = e.Score
-				seen.items = append(seen.items, item{name: member, shown: member, score: e.Score})
+				seen.items = append(seen.items, item{name: member, shown: member, score: e.Score, sum: sumOf(raw)})
 			}
 			v = m
 		}

@@ -2,6 +2,7 @@ package redisx
 
 import (
 	"cmp"
+	"hash/maphash"
 	"maps"
 	"slices"
 	"strconv"
@@ -22,7 +23,17 @@ type item struct {
 	name  string  // hash field or sorted-set member; "" otherwise
 	shown string  // the value as recorded, redaction applied
 	score float64 // sorted sets only
+	sum   uint64  // fingerprint of the value as stored, see sumOf
 }
+
+var sumSeed = maphash.MakeSeed()
+
+// sumOf fingerprints a stored value. Redaction can make two different values
+// look the same ("[REDACTED]"), so the diff compares fingerprints as well: a
+// changed secret is then reported as changed without the tracer holding the
+// old secret while the command runs. The seed is per process and the
+// fingerprint is never recorded.
+func sumOf(raw string) uint64 { return maphash.String(sumSeed, raw) }
 
 // snap is what one image read saw of a key. It lives from the before-read to
 // the after-read of one command and is only used to compute the diff.
@@ -35,7 +46,7 @@ type snap struct {
 func (s *snap) absent() bool { return s.typ == "none" }
 
 // same reports whether two items hold the same value.
-func (a item) same(b item) bool { return a.shown == b.shown && a.score == b.score }
+func (a item) same(b item) bool { return a.sum == b.sum && a.shown == b.shown && a.score == b.score }
 
 // value is the item as it appears in a diff.
 func (a item) value(typ string) any {
@@ -62,7 +73,9 @@ func clip(s string) string {
 //     unchanged tail of the list;
 //   - a key that changed type: one change, field "type".
 //
-// A created key has only new values and a deleted key only old ones. truncated
+// A value that changed under redaction is listed with the redacted text on
+// both sides: being listed is what says it changed. A created key has only
+// new values and a deleted key only old ones. truncated
 // reports that the list is incomplete: it was cut at maxDiff, or a collection
 // was read up to ImageLimit only. Two partial reads of one collection cannot
 // tell an added element from one the other read did not reach, so then only
@@ -140,10 +153,13 @@ func diffNamed(typ string, b, a map[string]item, common bool) []core.FieldChange
 // diffSet lists the members only one side has.
 func diffSet(b, a *snap) []core.FieldChange {
 	only := func(x, y *snap) []string {
-		in := named(y, "")
+		in := set.Set[uint64]{}
+		for _, it := range y.items {
+			in.Add(it.sum)
+		}
 		var out []string
 		for _, it := range x.items {
-			if _, ok := in[it.name]; !ok {
+			if !in.Has(it.sum) {
 				out = append(out, clip(it.shown))
 			}
 		}
