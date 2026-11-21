@@ -24,14 +24,20 @@ type scriptCollector struct {
 	sealHold chan struct{} // non-nil: Seal waits until it is closed
 	sealing  chan struct{} // closed when the first Seal call arrives
 	once     sync.Once
+	// after, when set, changes what DrainStatus answers.
+	after func(DrainStatus) DrainStatus
 }
 
 func newScriptCollector() *scriptCollector { return &scriptCollector{sealing: make(chan struct{})} }
 
 func (c *scriptCollector) DrainStatus(context.Context, string) (DrainStatus, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.st, nil
+	st, after := c.st, c.after
+	c.mu.Unlock()
+	if after != nil {
+		st = after(st)
+	}
+	return st, nil
 }
 
 // arrived makes drain-status change, as it does when events reach the
@@ -179,16 +185,17 @@ func wantShortfall(t *testing.T, s Session, parts ...string) {
 	}
 }
 
-// What the verdict says for every kind of last report. The rule is
-// conservative on purpose: "incomplete" needs evidence from the instance.
+// What the verdict says for every kind of last report when the collector
+// gives no counts (an older one). The instance's word is all there is: it can
+// make a session incomplete, never complete.
 func TestDeliveryVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		d    Delivery
 		want string // "", "incomplete" or "unconfirmed"
 	}{
-		{"everything delivered, final", final(rep("a", "i", 5, 5, 0)), ""},
-		{"everything delivered, periodic report (instance gone since)", rep("a", "i", 5, 5, 0), ""},
+		{"everything delivered, final", final(rep("a", "i", 5, 5, 0)), "unconfirmed"},
+		{"everything delivered, periodic report (instance gone since)", rep("a", "i", 5, 5, 0), "unconfirmed"},
 		{"nothing recorded", final(rep("a", "i", 0, 0, 0)), ""},
 		{"final with undelivered events", final(rep("a", "i", 5, 3, 0)), "incomplete"},
 		{"final, nothing delivered", failing(final(rep("a", "i", 5, 0, 0)), "connection refused"), "incomplete"},
@@ -200,7 +207,7 @@ func TestDeliveryVerdict(t *testing.T) {
 		{"went silent holding events after delivering some", failing(rep("a", "i", 5, 3, 0), "timeout"), "unconfirmed"},
 		{"went silent holding events, no error seen", rep("a", "i", 5, 0, 0), "unconfirmed"},
 	} {
-		short, unc := deliveryVerdict([]Delivery{tc.d}, collectorCounts{})
+		short, unc := verdict([]Delivery{tc.d}, collectorCounts{})
 		got := ""
 		switch {
 		case len(short) == 1 && len(unc) == 0:
@@ -215,7 +222,7 @@ func TestDeliveryVerdict(t *testing.T) {
 		}
 	}
 
-	short, unc := deliveryVerdict([]Delivery{
+	short, unc := verdict([]Delivery{
 		failing(final(rep("orders-api", "host-1-ab12cd", 7, 0, 0)), "Post http://127.0.0.1:1/v1/ingest: connection refused"),
 		final(rep("inventory", "host-2-ef34ab", 3, 3, 0)),
 		final(rep("", "bare", 4, 2, 1)),
@@ -224,17 +231,22 @@ func TestDeliveryVerdict(t *testing.T) {
 		"service orders-api (instance host-1-ab12cd): 0 of 7 recorded events were delivered by the instance's own count (the collector gave none), 7 still undelivered (last error: Post http://127.0.0.1:1/v1/ingest: connection refused)",
 		"instance bare: 2 of 4 recorded events were delivered by the instance's own count (the collector gave none), 1 still undelivered, 1 dropped by the SDK",
 	}
-	if !reflect.DeepEqual(short, want) || len(unc) != 0 {
+	// The reports that could not be checked are one line, not one each.
+	if !reflect.DeepEqual(short, want) || len(unc) != 1 ||
+		unc[0] != "the collector does not count events per instance (an older collector), so the delivery reports of 1 instance(s) could not be checked against it" {
 		t.Fatalf("reasons\n got %q\nwant %q\nunconfirmed %q", short, want, unc)
 	}
+}
 
-	// Many instances: the list is bounded.
-	var many []Delivery
-	for i := range 40 {
-		many = append(many, final(rep("svc", fmt.Sprintf("i%02d", i), 1, 0, 0)))
-	}
-	if short, _ := deliveryVerdict(many, collectorCounts{}); len(short) != maxDeliveryReasons+1 || short[maxDeliveryReasons] != "and 24 more instance(s)" {
-		t.Fatalf("%d reasons, last %q", len(short), short[len(short)-1])
+// wantUnchecked is wantComplete for a session whose collector gives no
+// counts: nothing is wrong by the reports, and the session says that they
+// could not be checked.
+func wantUnchecked(t *testing.T, s Session) {
+	t.Helper()
+	if s.State != StateSealed || s.Incomplete || len(s.IncompleteReasons) > 0 || s.DrainTimedOut || len(s.DeliveryUnconfirmed) != 1 ||
+		!strings.Contains(s.DeliveryUnconfirmed[0], "the collector does not count events per instance") {
+		t.Fatalf("want a session complete by its reports, unchecked: incomplete=%v reasons=%q unconfirmed=%q timed_out=%v delivery=%+v",
+			s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed, s.DrainTimedOut, s.Delivery)
 	}
 }
 
@@ -246,7 +258,7 @@ func TestDrainHealthyDeliveryIsNotFlagged(t *testing.T) {
 	e.report(rep("orders-api", "o-1", 4, 4, 0))
 	e.report(final(rep("inventory", "i-1", 2, 2, 0)))
 	s, took := e.stop()
-	wantComplete(t, s)
+	wantUnchecked(t, s)
 	if took >= testGrace {
 		t.Fatalf("a healthy drain took %v: it must not wait the grace (%v)", took, testGrace)
 	}
@@ -298,7 +310,7 @@ func TestDrainWaitsForSlowAndRecoveringDelivery(t *testing.T) {
 			}
 		}()
 		s, took := e.stop()
-		wantComplete(t, s)
+		wantUnchecked(t, s)
 		if took < 2*testGrace {
 			t.Fatalf("sealed after %v, before the last events arrived", took)
 		}
@@ -317,7 +329,7 @@ func TestDrainWaitsForSlowAndRecoveringDelivery(t *testing.T) {
 			_, _ = e.m.ReportDelivery(e.id, final(rep("svc", "i", 3, 3, 0)))
 		}()
 		s, took := e.stop()
-		wantComplete(t, s)
+		wantUnchecked(t, s)
 		if took < testGrace/2 {
 			t.Fatalf("sealed after %v, before the events arrived", took)
 		}
@@ -334,7 +346,7 @@ func TestDrainWaitsForSlowAndRecoveringDelivery(t *testing.T) {
 			_, _ = e.m.ReportDelivery(e.id, final(rep("svc", "i", 3, 3, 0)))
 		}()
 		s, took := e.stop()
-		wantComplete(t, s)
+		wantUnchecked(t, s)
 		if took < testGrace/2 {
 			t.Fatalf("sealed after %v", took)
 		}
@@ -364,7 +376,7 @@ func TestDrainEventsRecordedAfterTheFinalReport(t *testing.T) {
 		e.col.arrived()
 		e.report(final(rep("worker", "w", 8, 8, 0)))
 		s := e.sealed()
-		wantComplete(t, s)
+		wantUnchecked(t, s)
 		if d := s.Delivery[0]; d.Recorded != 8 || d.Delivered != 8 || !d.Final {
 			t.Fatalf("delivery %+v", d)
 		}
@@ -408,9 +420,9 @@ func TestDrainJudgesVanishedInstanceOnItsLastReport(t *testing.T) {
 	e.report(rep("gone", "g", 5, 3, 0))
 	e.report(rep("fine", "f", 5, 5, 0))
 	s, took := e.stop()
-	if s.Incomplete || len(s.IncompleteReasons) > 0 || len(s.DeliveryUnconfirmed) != 1 ||
+	if s.Incomplete || len(s.IncompleteReasons) > 0 || len(s.DeliveryUnconfirmed) != 2 ||
 		!strings.Contains(s.DeliveryUnconfirmed[0], "service gone (instance g): 3 of 5 recorded events") ||
-		!strings.Contains(s.DeliveryUnconfirmed[0], "unknown") {
+		!strings.Contains(s.DeliveryUnconfirmed[0], "unknown") || !strings.Contains(s.DeliveryUnconfirmed[1], "reports of 1 instance(s) could not be checked") {
 		t.Fatalf("a periodic report that left events open: incomplete=%v reasons=%q unconfirmed=%q", s.Incomplete, s.IncompleteReasons, s.DeliveryUnconfirmed)
 	}
 	if took < 80*time.Millisecond {
@@ -575,7 +587,8 @@ func TestDeliveryInstanceLimit(t *testing.T) {
 	}
 	e.report(rep("svc", "i007", 2, 2, 0))
 	s, _ := e.stop()
-	if len(s.Delivery) != MaxDeliveryInstances || s.Incomplete || len(s.DeliveryUnconfirmed) != 1 || !strings.Contains(s.DeliveryUnconfirmed[0], "more than 256 instances") {
+	if len(s.Delivery) != MaxDeliveryInstances || s.Incomplete || len(s.DeliveryUnconfirmed) != 2 ||
+		!strings.Contains(s.DeliveryUnconfirmed[1], "more than 256 instances reported; the reports of 1 others were refused") {
 		t.Fatalf("delivery %d incomplete=%v unconfirmed=%q", len(s.Delivery), s.Incomplete, s.DeliveryUnconfirmed)
 	}
 }
@@ -602,7 +615,7 @@ func TestDeliveryReportsAfterTheDrainGet409(t *testing.T) {
 	}
 	close(hold)
 	s := e.sealed()
-	wantComplete(t, s) // the late report was not let in, so it cannot flag the session either
+	wantUnchecked(t, s) // the late report was not let in, so it cannot flag the session either
 	if code, resp := postDelivery(t, srv.URL, e.id, "application/json", body); code != http.StatusConflict || !strings.Contains(resp, "SEALED") {
 		t.Fatalf("report after the seal: %d %s, want 409", code, resp)
 	}

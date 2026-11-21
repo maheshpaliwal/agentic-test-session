@@ -39,12 +39,14 @@ type Config struct {
 	HeartbeatPeriod   time.Duration // SSE heartbeat; default 15s
 	// DeliveryGrace is how long a drain waits for an SDK instance that still
 	// owes the collector events and gets nowhere, and for the report of a
-	// connected instance (see delivery.go); after it the session is sealed
-	// and marked incomplete for them. It must be
-	// longer than an SDK needs to notice that its collector is back (an
-	// exporter pass and its cooldown). Default 10 TimeUnits; negative turns
-	// the check off: reports are stored, nothing is waited for and no session
-	// is marked incomplete because of them.
+	// connected instance whose events the collector has (see delivery.go);
+	// after it the session is sealed and marked incomplete for them. It must
+	// be longer than an SDK needs to notice that its collector is back (an
+	// exporter pass and its cooldown). A connected instance of which no report
+	// has arrived a tenth of it after it connected is named in
+	// delivery_unconfirmed. Default 10 TimeUnits; negative turns the check
+	// off: reports are stored, nothing is waited for and no session is marked
+	// incomplete because of them.
 	DeliveryGrace time.Duration
 	// Retention is how long terminal sessions stay in the hot in-memory set
 	// before being evicted from it (still readable if the Store archives them,
@@ -547,10 +549,16 @@ type Subscriber struct {
 	Instance string `json:"instance,omitempty"`
 	// DeliveryInstance is the instance name the follower sends its delivery
 	// reports under (the one its events carry, unique to its process); empty
-	// for an SDK that sends no reports. A follower that names it reports every
-	// draining session, also one it recorded nothing for.
+	// for an SDK that sends no reports. A follower that names it reports the
+	// sessions it recorded events for, and says once, when it connects, that
+	// its reports arrive (see LastDeliveryReport).
 	DeliveryInstance string    `json:"delivery_instance,omitempty"`
 	ConnectedAt      time.Time `json:"connected_at"`
+	// LastDeliveryReport is when a delivery report of the follower last
+	// arrived, for any session or for none (it sends one when it connects);
+	// zero when none has since it connected. A follower that names a
+	// DeliveryInstance and stays at zero cannot get its reports through.
+	LastDeliveryReport time.Time `json:"last_delivery_report,omitzero"`
 	// Generation is the newest ActiveSet.Generation written to this follower's
 	// connection. A follower at or past the generation in which a session
 	// became active has been sent that session (sent, not necessarily applied).
@@ -559,6 +567,10 @@ type Subscriber struct {
 	// as they are written. An in-process follower (Subscribe) receives every
 	// version through its channel and is reported as up to date.
 	stream bool
+	// since and heard are ConnectedAt and LastDeliveryReport as the drain
+	// counts from them: with the monotonic clock reading, which a step of the
+	// wall clock does not move.
+	since, heard time.Time
 }
 
 // Subscribers lists the current followers of the active set, by service and
@@ -592,7 +604,8 @@ func (m *Manager) SubscribeAs(service, instance string) (<-chan ActiveSet, func(
 
 func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
-	sub.ConnectedAt = time.Now().UTC()
+	sub.since = time.Now()
+	sub.ConnectedAt = sub.since.UTC()
 	m.mu.Lock()
 	m.subs[ch] = sub
 	ch <- m.activeLocked()

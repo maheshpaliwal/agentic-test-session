@@ -55,9 +55,11 @@ const ownSep = ";"
 //
 // HeaderDeliveryInstance is sent as well by an SDK that sends delivery
 // reports: the instance name those reports (and its events) carry, which is
-// unique to the process, unlike HeaderInstance. With it the SDK promises a
-// report for every draining session, also one it recorded nothing for, so
-// the control plane can tell an instance whose reports do not arrive.
+// unique to the process, unlike HeaderInstance. With it the control plane
+// knows which connected process a report, or the events the collector has,
+// belong to: an instance that took part in a session and is connected is
+// expected to report it. The SDK does not send the header to a control plane
+// that turned out not to take its reports.
 const (
 	HeaderService          = "X-Tsession-Service"
 	HeaderInstance         = "X-Tsession-Instance"

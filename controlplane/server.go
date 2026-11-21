@@ -7,10 +7,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 )
 
 // Handler returns the REST + SSE API.
@@ -24,6 +24,7 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", m.transition(m.Stop))
 	mux.HandleFunc("POST /v1/sessions/{id}/abort", m.transition(m.Abort))
 	mux.HandleFunc("POST /v1/sessions/{id}/delivery", m.hDelivery)
+	mux.HandleFunc("POST /v1/delivery", m.hDeliveryBatch)
 	mux.HandleFunc("GET /v1/active", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, m.Active())
 	})
@@ -209,24 +210,6 @@ func (m *Manager) hKill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m.Active())
 }
 
-// identity cleans a self-reported service or instance name: printable ASCII
-// only, at most 128 bytes. It is shown to operators, never trusted.
-func identity(s string) string { return identityN(s, 128) }
-
-// identityN is identity with another length limit.
-func identityN(s string, limit int) string {
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r > 0x7e {
-			return -1
-		}
-		return r
-	}, s)
-	if len(s) > limit {
-		s = s[:limit]
-	}
-	return s
-}
-
 func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -235,8 +218,8 @@ func (m *Manager) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	ch, cancel := m.subscribe(Subscriber{Service: identity(r.Header.Get(core.HeaderService)), Instance: identity(r.Header.Get(core.HeaderInstance)),
-		DeliveryInstance: identity(r.Header.Get(core.HeaderDeliveryInstance)), stream: true})
+	ch, cancel := m.subscribe(Subscriber{Service: ident.Clean(r.Header.Get(core.HeaderService)), Instance: ident.Clean(r.Header.Get(core.HeaderInstance)),
+		DeliveryInstance: ident.Clean(r.Header.Get(core.HeaderDeliveryInstance)), stream: true})
 	defer cancel()
 	sent := uint64(0) // generation written but not yet flushed
 	hb := time.NewTicker(m.cfg.HeartbeatPeriod)

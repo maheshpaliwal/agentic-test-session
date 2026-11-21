@@ -102,12 +102,17 @@ type Session struct {
 	Delivery []Delivery `json:"delivery,omitempty"`
 	// IncompleteReasons says why the control plane itself marked the session
 	// incomplete, beyond what SealError and DrainTimedOut say: one line per
-	// instance whose events did not all reach the collector. A session with a
-	// reason is Incomplete whatever the collector's seal says.
+	// instance whose events did not all reach the collector, or whose events
+	// the collector has while no report of it for the session arrived (see
+	// judgeDeliveryLocked). A session with a reason is Incomplete whatever the
+	// collector's seal says. At most 16 instances are named.
 	IncompleteReasons []string `json:"incomplete_reasons,omitempty"`
-	// DeliveryUnconfirmed names the instances whose last report left events
-	// undelivered without evidence that they were lost. It is a warning: the
-	// session is not Incomplete because of it.
+	// DeliveryUnconfirmed names the instances of which the control plane
+	// could not tell whether all their events arrived: nothing shows that
+	// events were lost, and nothing that they were not. It is a warning: the
+	// session is not Incomplete because of it. A gate that wants every
+	// delivery confirmed fails on it (tracectl --fail-on-unconfirmed,
+	// tsessiontest.RequireDeliveryConfirmed).
 	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
 }
 

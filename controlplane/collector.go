@@ -24,7 +24,8 @@ type DrainStatus struct {
 	// every SDK instance, stored or still in its reorder window; the delivery
 	// reports are held against it (see deliveryVerdict). Nil from a collector
 	// that does not send it. With InstancesTruncated the list is not complete:
-	// an instance it does not name may have sent events.
+	// an instance it does not name may have sent events, and the collector is
+	// asked about the ones that matter by name (see InstanceCounter).
 	Instances          []InstanceCount `json:"instances"`
 	InstancesTruncated bool            `json:"instances_truncated,omitempty"`
 }
@@ -59,8 +60,8 @@ type HTTPCollector struct {
 }
 
 // do calls /v1/internal/sessions/{id}[/suffix] and decodes the JSON reply
-// into out (skipped when out is nil).
-func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, out any) error {
+// into out (skipped when out is nil). in, when not nil, is sent as JSON.
+func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, in, out any) error {
 	cl := c.Client
 	if cl == nil {
 		cl = http.DefaultClient
@@ -71,11 +72,21 @@ func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, out a
 	}
 	var body io.Reader
 	if method == http.MethodPost {
-		body = bytes.NewReader(nil)
+		var b []byte
+		if in != nil {
+			var err error
+			if b, err = json.Marshal(in); err != nil {
+				return err
+			}
+		}
+		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
 		return err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
@@ -95,19 +106,30 @@ func (c *HTTPCollector) do(ctx context.Context, method, id, suffix string, out a
 
 // Delete implements Collector.
 func (c *HTTPCollector) Delete(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodDelete, id, "", nil)
+	return c.do(ctx, http.MethodDelete, id, "", nil, nil)
 }
 
 // DrainStatus implements Collector.
 func (c *HTTPCollector) DrainStatus(ctx context.Context, id string) (DrainStatus, error) {
 	var d DrainStatus
-	err := c.do(ctx, http.MethodGet, id, "drain-status", &d)
+	err := c.do(ctx, http.MethodGet, id, "drain-status", nil, &d)
 	return d, err
 }
 
 // Seal implements Collector.
 func (c *HTTPCollector) Seal(ctx context.Context, id string) (SealResult, error) {
 	var r SealResult
-	err := c.do(ctx, http.MethodPost, id, "seal", &r)
+	err := c.do(ctx, http.MethodPost, id, "seal", nil, &r)
 	return r, err
+}
+
+// InstanceCounts implements InstanceCounter. A collector without the
+// endpoint answers 404, which is an error like any other: the counts stay
+// unknown.
+func (c *HTTPCollector) InstanceCounts(ctx context.Context, id string, instances []InstanceCount) ([]InstanceCount, error) {
+	var out struct {
+		Instances []InstanceCount `json:"instances"`
+	}
+	err := c.do(ctx, http.MethodPost, id, "instance-counts", map[string][]InstanceCount{"instances": instances}, &out)
+	return out.Instances, err
 }
