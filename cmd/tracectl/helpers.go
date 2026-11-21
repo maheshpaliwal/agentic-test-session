@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -43,6 +44,10 @@ func parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, e
 // resolve accepts a session id (ts_...) or a name (latest non-terminal
 // session with that name, falling back to the latest with that name).
 func resolve(ctx context.Context, o client.Options, ref string) (*client.Session, error) {
+	if ref == "" {
+		// An empty name would not be sent as a filter and would match any session.
+		return nil, errors.New("a session id or name is required")
+	}
 	if strings.HasPrefix(ref, "ts_") {
 		s, err := client.Attach(ctx, o, ref)
 		if err != nil && strings.Contains(err.Error(), ": 404 ") {

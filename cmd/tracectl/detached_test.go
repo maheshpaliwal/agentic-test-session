@@ -44,3 +44,15 @@ func TestResultsOfASessionTheControlPlaneForgot(t *testing.T) {
 		t.Fatal("stop of a session the control plane does not know must fail")
 	}
 }
+
+// An empty reference is not sent as a name filter, so it would match any
+// session: it is refused instead.
+func TestEmptySessionReferenceIsRefused(t *testing.T) {
+	env := newResultsEnv(t)
+	env.tc("start", "--name", "run-1")
+	for _, cmd := range []string{"summary", "stop", "delete", "status"} {
+		if code, _, e := env.tc(cmd, ""); code != 1 || !strings.Contains(e, "a session id or name is required") {
+			t.Fatalf("%s with an empty reference: %d %s", cmd, code, e)
+		}
+	}
+}

@@ -527,6 +527,8 @@
        the pages loaded below it. filterGen changes with the state filter: a reply to an earlier one is dropped. */
     const PAGE = U.pageSize(query.get('page'));
     let rows = null, next = '', total = null, unreadNew = 0, unreadOld = 0, loadingMore = false, filterGen = 0, liveBusy = false;
+    let liveAt = 0;  // where the by-id refresh of running rows below the first page goes on
+    let below = 0;   // loaded rows below the first page: the periodic refresh does not reach them
     let counts = {}, svcs = {};
     let loadErr = null, lastSig = '', editing = null, confirming = null, entryVer = 0, entryBusy = false;
     const pendingNames = new Map();
@@ -603,7 +605,7 @@
       const stop = s.state === 'ACTIVE' ? h('button', { type: 'button', class: 'btn danger sm', 'data-act': 'stop', 'data-rw': '', onclick: async (e) => {
         e.stopPropagation();
         // The refresh reloads the newest page only: a row below it is brought up to date from the reply.
-        try { const r = await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); if (r && r.id === s.id && rows) { rows = U.mergeRows(rows, [decorate(r)]); paint(true); } load(); } catch (er) { actionError('Stop failed: ' + er.message); }
+        try { const r = await postJSON('/v1/sessions/' + encodeURIComponent(s.id) + '/stop'); toast('Stopping ' + s.id, 'ok'); if (r && r.id === s.id && rows) { rows = U.mergeRows(rows, [decorate(r)]); paint(!editing); } load(); } catch (er) { actionError('Stop failed: ' + er.message); }
       } }, icon('stop', 'sm'), 'Stop') : null;
       // Delete is two clicks: the first arms the button for a few seconds, the second deletes.
       const armed = confirming === s.id;
@@ -619,7 +621,7 @@
           try {
             await cp('/v1/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' });
             toast('Deleted ' + s.id, 'ok');
-            if (rows) { rows = rows.filter((x) => x.id !== s.id); if (total) total--; paint(true); }
+            if (rows) { rows = rows.filter((x) => x.id !== s.id); if (total) total--; paint(!editing); }
             load();
           } catch (er) { actionError('Delete failed: ' + er.message); paint(true); }
         } }, armed ? 'Confirm delete' : 'Delete') : null;
@@ -659,7 +661,7 @@
       // The search looks at the loaded sessions; the state filter was applied by the server (and is checked again here,
       // for a control plane that does not page and for a session that changed state since).
       const vis = rows.filter((s) => (!f.state || s.state === f.state) && (!f.q || U.sessionHay(s, (ENTRY.get(s.id) || {}).entry).indexOf(f.q) >= 0));
-      sub.textContent = U.listSummary({ loaded: rows.length, shown: vis.length, total: total, more: !!next, state: f.state });
+      sub.textContent = U.listSummary({ loaded: rows.length, shown: vis.length, total: total, more: !!next, state: f.state, below: below });
       const refocus = () => { if (focusMore) { const b = body.querySelector('[data-act="more"]'); if (b) b.focus(); } };
       if (unreadNew + unreadOld) body.appendChild(h('div', { class: 'callout warn list-note', role: 'status' }, icon('warn'), h('div', { class: 'ct', text: U.unreadableText(unreadNew + unreadOld) })));
       const clearFilters = () => { f.q = ''; q.value = ''; if (f.state) setState(''); else paint(true); };
@@ -717,6 +719,10 @@
         if (!m.older) { next = p.next; unreadOld = 0; }
         unreadNew = p.unreadable;
         rows = m.rows.map(decorate);
+        below = m.older;
+        // Everything is loaded and the server counts a different number: rows below the page were deleted (or
+        // changed state) elsewhere. They are never refreshed, so start over from the page rather than show them.
+        if (m.older && !next && p.total !== null && p.total !== rows.length) { rows = fresh.map(decorate); next = p.next; unreadOld = 0; below = 0; }
         total = p.total !== null ? p.total : next ? null : rows.length;
         pendingNames.forEach((v, k) => { const r = rows.find((x) => x.id === k); if (!r || r.name === v.n) pendingNames.delete(k); });
         loadErr = null; if (Date.now() > actionErrUntil) showError('');
@@ -729,18 +735,23 @@
     /* The page after the oldest loaded one, appended. */
     async function loadMore() {
       if (loadingMore || !next || !rows) return;
-      const gen = filterGen;
+      const gen = filterGen, sent = next;
       loadingMore = true; paint(true);
       try {
-        const p = await cpSessions({ limit: PAGE, state: f.state, before: next });
+        const p = await cpSessions({ limit: PAGE, state: f.state, before: sent });
         if (token !== S.token || gen !== filterGen) return;
-        rows = U.mergeRows(rows, p.list.map(decorate));
-        next = p.next; unreadOld += p.unreadable;
-        if (p.total !== null) total = p.total; else if (!next) total = rows.length;
+        // A refresh may have started the list over while this was in flight; the reply then continues a list
+        // that is gone, and appending it would leave a hole between the new rows and these.
+        if (next === sent) {
+          rows = U.mergeRows(rows, p.list.map(decorate));
+          below += p.list.length;
+          next = p.next; unreadOld += p.unreadable;
+          if (p.total !== null) total = p.total; else if (!next) total = rows.length;
+        }
       } catch (e) { if (token === S.token && gen === filterGen) actionError('Could not load more sessions: ' + e.message); }
       if (token !== S.token || gen !== filterGen) return;
       loadingMore = false;
-      paint(true);
+      paint(!editing); // a rename in progress is not interrupted; it repaints when it ends
       loadEntries();
     }
     /* A session that is still running and sits below the newest page is not covered by the refresh: it is
@@ -750,7 +761,12 @@
       const gen = filterGen, onPage = new Set(fresh.map((s) => s.id));
       liveBusy = true;
       try {
-        for (const s of rows.filter((x) => isLive(x) && !onPage.has(x.id)).slice(0, 10)) {
+        // Ten per cycle, going round all of them: always taking the first ten would leave the rest stale for good.
+        const live = rows.filter((x) => isLive(x) && !onPage.has(x.id));
+        if (liveAt >= live.length) liveAt = 0;
+        const batch = live.slice(liveAt, liveAt + 10);
+        liveAt += batch.length;
+        for (const s of batch) {
           let cur = null;
           try { cur = await cp('/v1/sessions/' + encodeURIComponent(s.id)); } catch (e) { if (e.status !== 404) continue; }
           if (token !== S.token || gen !== filterGen || !rows) return;

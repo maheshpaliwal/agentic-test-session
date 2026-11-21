@@ -492,16 +492,19 @@
   // total (matching the state filter on the server; null if unknown), more (older ones not loaded),
   // state (the state filter, '' for none). Search only ever looks at loaded sessions, and says so
   // whenever that is not all of them.
+  // below (optional) is how many loaded rows sit under the first page: the periodic refresh covers
+  // the first page and running sessions only, and the line says so while such rows are shown.
   function listSummary(o) {
     const plural = (n) => n + ' session' + (n === 1 ? '' : 's');
     const kind = o.state ? o.state + ' ' : '';
+    const stale = o.below > 0 ? ' Finished sessions below the newest page are not refreshed; reload the page to update them.' : '';
     if (!o.more) {
-      if (o.shown === o.loaded) return o.state ? plural(o.loaded).replace(' ', ' ' + kind) : plural(o.loaded);
-      return o.shown + ' of ' + o.loaded + ' ' + kind + 'sessions';
+      if (o.shown === o.loaded) return (o.state ? plural(o.loaded).replace(' ', ' ' + kind) : plural(o.loaded)) + (stale ? '.' + stale : '');
+      return o.shown + ' of ' + o.loaded + ' ' + kind + 'sessions' + (stale ? '.' + stale : '');
     }
     const scope = 'the newest ' + o.loaded + (o.total !== null && o.total >= o.loaded ? ' of ' + o.total : '') + ' ' + kind + 'sessions';
-    if (o.shown === o.loaded) return 'Showing ' + scope + '. Search looks only at the sessions that are loaded.';
-    return o.shown + ' match among ' + scope + '. Search looks only at the sessions that are loaded: load more to search older ones.';
+    if (o.shown === o.loaded) return 'Showing ' + scope + '. Search looks only at the sessions that are loaded.' + stale;
+    return o.shown + ' match among ' + scope + '. Search looks only at the sessions that are loaded: load more to search older ones.' + stale;
   }
   // The notice shown when the control plane left sessions out of a list because it could not read them.
   function unreadableText(n) {

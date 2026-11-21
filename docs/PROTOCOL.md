@@ -42,7 +42,9 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
 - `GET /v1/sessions[?state=&name=&limit=&before=]` -> JSON array of Sessions; `GET /v1/sessions/{id}`
   - Without `limit`: every session, oldest first (by `created_at`, then `id`), optionally only those in `state`
     and/or named exactly `name`. This is what the endpoint has always answered; its cost and size grow with the
-    number of sessions ever recorded, so clients that show or search sessions should page.
+    number of sessions ever recorded, so clients that show or search sessions should page. Three things differ
+    from before for a request without `limit`: `name` now filters (it was ignored), `before` is refused with
+    `400` (it was ignored), and the response can carry `X-Tsession-Unreadable`.
   - `limit=N` (1..1000): the newest N matching sessions, **newest first**. `before=<cursor>` (only with `limit`)
     continues after an earlier page. The body stays a plain array; the rest is in response headers:
     `X-Tsession-Next: <cursor>` when older sessions exist (absent on the last page), `X-Tsession-Total: <n>` the

@@ -457,4 +457,11 @@ assert.strictEqual(U.listSummary({ loaded: 200, shown: 3, total: 12345, more: tr
 assert.ok(U.unreadableText(1).startsWith('1 archived session could not be read by the control plane and is missing'));
 assert.ok(U.unreadableText(30).startsWith('30 archived sessions could not be read by the control plane and are missing'));
 
+// listSummary: rows below the first page are not refreshed, and the line says so
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, state: '' }), '5 sessions');
+assert.strictEqual(U.listSummary({ loaded: 5, shown: 5, total: 5, more: false, state: '', below: 3 }),
+  '5 sessions. Finished sessions below the newest page are not refreshed; reload the page to update them.');
+assert.ok(U.listSummary({ loaded: 400, shown: 400, total: 900, more: true, state: '', below: 200 }).endsWith('reload the page to update them.'));
+assert.ok(!/not refreshed/.test(U.listSummary({ loaded: 200, shown: 200, total: 900, more: true, state: '', below: 0 })));
+
 console.log('util ok');
