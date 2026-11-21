@@ -283,6 +283,13 @@ type DrainStatus struct {
 	DroppedEvents   int64 `json:"dropped_events"`
 	// Quarantined counts poison events isolated and dropped for the session.
 	Quarantined int `json:"quarantined"`
+	// Instances is what the collector has of the session from every SDK
+	// instance (see InstanceCount); always present, empty for a session without
+	// events. InstancesTruncated is set when more than MaxStatusInstances
+	// instances sent events: the list then holds the first ones in order, and
+	// an instance that is not in it may have sent events all the same.
+	Instances          []InstanceCount `json:"instances"`
+	InstancesTruncated bool            `json:"instances_truncated,omitempty"`
 }
 
 // DrainStatus reports how much work is still outstanding for a session. It
@@ -292,8 +299,13 @@ func (c *Collector) DrainStatus(ctx context.Context, id string) (DrainStatus, er
 	if err != nil {
 		return DrainStatus{}, err
 	}
+	inst := st.Instances
+	if inst == nil {
+		inst = []InstanceCount{} // "none", not "unknown": a control plane tells the two apart
+	}
 	return DrainStatus{Pending: st.Pending, LastEventUnixNs: st.LastEventNs, ReceivedUnixNs: st.LastEventNs,
-		EventCount: st.EventCount, DroppedEvents: st.Dropped, Quarantined: st.Quarantined}, nil
+		EventCount: st.EventCount, DroppedEvents: st.Dropped, Quarantined: st.Quarantined,
+		Instances: inst, InstancesTruncated: st.InstancesTruncated}, nil
 }
 
 // SealResult is the seal response body.

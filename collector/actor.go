@@ -62,6 +62,9 @@ type sessionActor struct {
 	closed   map[string]struct{} // ids closed before their publish was seen
 	dropped  int64
 	count    int
+	// inst counts the stored events by the service and instance that recorded
+	// them (see instKey), for the delivery check of the control plane.
+	inst     map[instKey]int
 	lastRecv int64 // collector receive time (unix ns) of the latest ingest
 	failures int   // consecutive failed append attempts
 }
@@ -216,6 +219,7 @@ func (a *sessionActor) load(ctx context.Context) error {
 	a.seen = map[evKey]struct{}{}
 	a.open = map[string]struct{}{}
 	a.closed = map[string]struct{}{}
+	a.inst = map[instKey]int{}
 	a.next, a.count, a.dropped = 1, 0, 0
 	for i := range evs {
 		a.apply(&evs[i])
@@ -241,6 +245,9 @@ func closesEntry(e *core.Event) bool {
 func (a *sessionActor) apply(e *core.Event) {
 	a.seen[evKey{e.Instance, e.LocalSeq}] = struct{}{}
 	a.count++
+	if countsForInstance(e) {
+		a.inst[instKey{e.Service, e.Instance}]++
+	}
 	switch e.Kind {
 	case core.KindQueuePub:
 		if _, ok := a.closed[e.SpanID]; ok {
