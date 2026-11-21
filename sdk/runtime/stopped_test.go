@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestSubscriberStopsRecordingAtItsFirstPanicAndResumesWithAFreshSet(t *testi
 			panic("the subscriber panicked and the set it had still stands: recording goes on for sessions it no longer follows")
 		}
 	}
-	if note := sub.stopNote.Load(); note == nil || !strings.Contains(*note, "its subscriber panicked; it records again") {
+	if note := sub.stopNote.Load(); note == nil || *note != noteRestarting {
 		panic(fmt.Sprintf("what the control plane is to be told: %v", note))
 	}
 	time.Sleep(100 * time.Millisecond) // the restart is 400ms after the panic
@@ -81,7 +82,7 @@ func TestSubscriberThatAlwaysPanicsStaysStoppedAndRecordsNothing(t *testing.T) {
 	if sub.IsActive("s1") || sub.AnyActive() || !sub.snap.Load().blind {
 		panic("a subscriber that stays stopped still names sessions")
 	}
-	if note := sub.stopNote.Load(); note == nil || !strings.Contains(*note, "stays stopped; it records nothing more until the service is restarted") {
+	if note := sub.stopNote.Load(); note == nil || *note != noteStopped || !sub.gaveUp.Load() {
 		panic(fmt.Sprintf("what the control plane is to be told: %v", note))
 	}
 	if logs := out.String(); panicLines(logs) != loopRestarts+1 || !strings.Contains(logs, "stays stopped: nothing more is recorded until the process is restarted") {
@@ -102,9 +103,12 @@ func (cp *reportCP) stoppedNotes() []string {
 
 // A service whose subscriber panicked has stopped recording, and nothing in
 // its delivery counts shows it: what it would have recorded is not counted
-// anywhere. The reporter, which goes on, tells the control plane, once per
-// stop, also when it has nothing else to report. What was recorded before is
-// still accounted for: no account is forgotten while the set is unknown.
+// anywhere. The reporter, which goes on, tells the control plane, also when
+// it has nothing else to report: at the panic, again while the subscriber is
+// being started again (a session that begins meanwhile is missing events
+// too), and once more when recording has resumed; then no more. What was
+// recorded before is still accounted for: no account is forgotten while the
+// set is unknown.
 func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 	out := captureLog(t)
 	slowRestarts(300 * time.Millisecond)
@@ -114,7 +118,7 @@ func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 	exp := NewExporter(rec, ExporterConfig{CollectorURL: col.srv.URL, FlushInterval: 2 * time.Millisecond})
 	sub := newSubscriber(cp.srv.URL, "svc", "i", "i")
 	rep := newReporter(rec, exp, sub, "svc", "i", reporterConfig{Tick: 2 * time.Millisecond, FirstDelay: time.Millisecond,
-		Interval: 10 * time.Millisecond, KickEvery: 5 * time.Millisecond})
+		Interval: 10 * time.Millisecond, KickEvery: 50 * time.Millisecond})
 	defer func() { exp.Close(time.Second); rep.close(time.Second); sub.Close() }()
 	eventually(t, "the subscriber to follow s1", func() bool { return sub.IsActive("s1") })
 	for i := range 3 {
@@ -138,18 +142,29 @@ func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 	cp.set(`{"active":["s1","s2"],"delivery_reports":true}`)
 	eventually(t, "the subscriber to panic", func() bool { return hits() == 1 })
 	eventually(t, "the control plane to be told", func() bool { return len(cp.stoppedNotes()) > 0 })
-	if notes := cp.stoppedNotes(); len(notes) != 1 || !strings.Contains(notes[0], "its subscriber panicked; it records again once it has fetched the active sessions anew") {
+	if notes := cp.stoppedNotes(); notes[0] != noteRestarting {
 		panic(fmt.Sprintf("the control plane was told: %q", notes))
 	}
 	if a := rec.accounts()["s1"]; a.recorded != 3 || a.delivered != 3 {
 		panic(fmt.Sprintf("the account of s1 while the set is unknown: %+v", a))
 	}
-	// Recording resumes, the reports go on, and the stop is not told again.
+	// Recording resumes and the reports go on. The control plane was told
+	// again during the restart (300ms, every 50ms at most), and once more
+	// that recording has resumed; then it is told no more.
 	eventually(t, "recording to resume", func() bool { return sub.IsActive("s1") })
 	rec.Record(core.Event{SessionID: "s1", Kind: core.KindAPIIn, LocalSeq: seqBase + 10})
 	eventually(t, "the report of the fourth event", func() bool { return last().Delivered == 4 })
-	if notes := cp.stoppedNotes(); len(notes) != 1 || sub.stopNote.Load() != nil {
-		panic(fmt.Sprintf("the stop was told %d times", len(notes)))
+	eventually(t, "the control plane to be told that recording resumed", func() bool {
+		notes := cp.stoppedNotes()
+		return notes[len(notes)-1] == noteResumed
+	})
+	notes := cp.stoppedNotes()
+	if n := len(notes); n < 4 || n > 8 || slices.Contains(notes[:n-1], noteResumed) || sub.stopNote.Load() != nil {
+		panic(fmt.Sprintf("told %d times in a restart of 300ms, every 50ms at most: %q", n, notes))
+	}
+	time.Sleep(150 * time.Millisecond)
+	if n := len(cp.stoppedNotes()); n != len(notes) {
+		panic(fmt.Sprintf("told %d more times after recording had resumed", n-len(notes)))
 	}
 
 	// A subscriber that gives up: the control plane is told that too, and the
@@ -165,10 +180,17 @@ func TestReporterTellsTheControlPlaneThatRecordingStopped(t *testing.T) {
 	}
 	eventually(t, "the control plane to be told that recording stays stopped", func() bool {
 		notes := cp.stoppedNotes()
-		return strings.Contains(notes[len(notes)-1], "stays stopped; it records nothing more until the service is restarted")
+		return notes[len(notes)-1] == noteStopped
 	})
 	if a := rec.accounts()["s1"]; a.recorded != 4 {
 		panic(fmt.Sprintf("the account of s1 after the subscriber gave up: %+v", a))
+	}
+	// That is said once: a process that stays stopped is like a service that
+	// is not connected, and marks no session that starts later.
+	told := len(cp.stoppedNotes())
+	time.Sleep(150 * time.Millisecond)
+	if n := len(cp.stoppedNotes()); n != told {
+		panic(fmt.Sprintf("a subscriber that stays stopped was reported %d more times", n-told))
 	}
 }
 

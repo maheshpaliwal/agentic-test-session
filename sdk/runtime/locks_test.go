@@ -67,10 +67,14 @@ func TestAPanicUnderTheRecorderLockLeavesItReleased(t *testing.T) {
 		if !panicked {
 			panic(name + " did not panic: the test proves nothing")
 		}
-		rec.mu.Lock() // the test's own repair, which also needs the lock
-		rec.acct, rec.drops = map[string]*account{}, map[string]uint64{}
-		rec.last, rec.lastSID = nil, ""
-		rec.mu.Unlock()
+		if !returnsWithin(5*time.Second, func() {
+			rec.mu.Lock() // the test's own repair, which also needs the lock
+			defer rec.mu.Unlock()
+			rec.acct, rec.drops = map[string]*account{}, map[string]uint64{}
+			rec.last, rec.lastSID = nil, ""
+		}) {
+			panic("a panic in " + name + " left the recorder's lock held")
+		}
 		record(rec, "s", "a panic in "+name)
 	}
 }

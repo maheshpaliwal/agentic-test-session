@@ -135,7 +135,11 @@ panic is retried with backoff until the 24 h after which a failing seal is given
 
 The SDK inside an instrumented service restarts each of its three loops at most 5 times and then leaves it stopped;
 the application is never ended. When its subscriber panics it stops recording at once and tells the control plane,
-which marks the sessions running at that moment incomplete (`stopped recording after an internal error`).
+again every second while the subscriber is being restarted and once more when recording has resumed; the control
+plane marks the sessions that run when it is told incomplete (`stopped recording after an internal error`). A
+subscriber that stays stopped says so once. From then on the service records nothing and is no longer listed by
+`tracectl doctor`, like a service that is not running; sessions started later do not name it, so use
+`tracectl doctor --require-services N` before a run to notice it.
 
 ## Metrics
 

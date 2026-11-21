@@ -95,8 +95,9 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   error: a loop of its SDK panicked, and the text says whether it records again or stays stopped. Every session that
   is `ACTIVE` or `DRAINING` when the request arrives is then `incomplete`, with an `incomplete_reasons` entry that
   names the service and the instance (`... stopped recording after an internal error (...)`), whether the instance
-  had recorded events for it or not: what it would have recorded since is what is missing. Sessions started later
-  are not marked. A control plane that does not know the field ignores it. Like the reports it is the caller's own
+  had recorded events for it or not: what it would have recorded since is what is missing. The SDK sends it at the
+  panic, every second while its subscriber is being restarted, and once when recording has resumed; when the
+  subscriber stays stopped it sends it once. Sessions started after the last such request are not marked. A control plane that does not know the field ignores it. Like the reports it is the caller's own
   word: anyone who can reach the control plane can make every running session incomplete with it, as with reports
   they can one by one.
 - `POST /v1/sessions/{id}/delivery` {service,instance,recorded,delivered,dropped,buffered,delivered_total,last_error,final} ->

@@ -79,8 +79,9 @@ type Subscriber struct {
 	opened   chan struct{}
 	// stopNote is what the reporter still has to tell the control plane
 	// about this process having stopped recording (see panicked); nil when
-	// there is nothing to tell.
+	// there is nothing to tell. gaveUp: the loop stays stopped.
 	stopNote atomic.Pointer[string]
+	gaveUp   atomic.Bool
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -128,16 +129,31 @@ func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscr
 //
 // A service that silently stopped recording would leave its sessions
 // complete with its events missing. So the reporter, which goes on, tells
-// the control plane (stopNote), and that marks the sessions that run now
-// incomplete.
+// the control plane (stopNote), and that marks the sessions that run then
+// incomplete. It tells it again for as long as the loop is being started
+// again, and once more when recording has resumed (see reporter.renote): a
+// session that began meanwhile is missing events too.
 func (s *Subscriber) panicked(final bool) {
 	old := s.snap.Load()
 	s.snap.Store(&snapshot{blind: true, reports: old.reports, heartbeat: old.heartbeat})
-	note := "its subscriber panicked; it records again once it has fetched the active sessions anew"
 	if final {
-		note = "its subscriber panicked repeatedly and stays stopped; it records nothing more until the service is restarted"
+		s.gaveUp.Store(true)
+		s.note(noteStopped)
+		return
 	}
-	s.stopNote.Store(&note)
+	s.note(noteRestarting)
+}
+
+// What the control plane is told (deliveryBatch.Stopped).
+const (
+	noteRestarting = "its subscriber panicked; it records again once it has fetched the active sessions anew"
+	noteResumed    = "its subscriber had panicked and it recorded nothing for a time; it records again now"
+	noteStopped    = "its subscriber panicked repeatedly and stays stopped; it records nothing more until the service is restarted"
+)
+
+// note gives the reporter something to tell the control plane, now.
+func (s *Subscriber) note(text string) {
+	s.stopNote.Store(&text)
 	s.wake()
 }
 
