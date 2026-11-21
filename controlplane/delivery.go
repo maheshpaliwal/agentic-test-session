@@ -1018,11 +1018,22 @@ func unreported(service, instance string, have int64) string {
 // It is unconfirmed (delivery_unconfirmed, a warning) for what deliveryVerdict
 // lists as such, and for:
 //
-//   - a connected instance of which nothing has arrived for too long, no
-//     report and no heartbeat (see unheard), and of which the session has no
-//     report: whether it took part cannot be known. Also one whose last
-//     report for the session was not final and agrees with the collector:
-//     whether it recorded more since cannot be known;
+//   - a connected instance of which nothing at all has arrived since it
+//     connected, no report and no heartbeat (see unheard), and of which the
+//     session has no report: something refuses its reports, and whether it
+//     took part cannot be known;
+//   - a connected instance that was heard of and then not for too long, when
+//     something ties it to the session: its last report for the session was
+//     not final and agrees with the collector (whether it recorded more since
+//     cannot be known), or the collector has events of it and no report
+//     arrived. One that was heard of, is silent now, and of which the session
+//     has neither a report nor events is not named: in an environment of many
+//     services one that is frozen for a while, or whose reports fail for a
+//     few seconds, would otherwise put a line into every session that ends
+//     meanwhile, none of which it took part in. The price: a process that is
+//     cut off from the control plane altogether after its first word, stream
+//     and reports, is not named either (an SDK that only loses its reports
+//     opens its stream anew, and is then one that was never heard of);
 //   - the instances beyond the MaxDeliveryInstances whose reports are stored
 //     and the maxDeliveryRefused whose reports are kept: nothing is known of
 //     them.
@@ -1090,7 +1101,18 @@ func (m *Manager) judgeDeliveryLocked(s *Session, counts collectorCounts) bool {
 				unconfirmed = append(unconfirmed, msg+fmt.Sprintf("; its last report for this session, of %d events, was not final, so whether it recorded more since is unknown", d.Recorded))
 				continue
 			}
-			switch have, ok := counts.of(sub.Service, sub.DeliveryInstance); {
+			have, ok := counts.of(sub.Service, sub.DeliveryInstance)
+			if !sub.heard.IsZero() && (!ok || have == 0) {
+				// Heard of before and silent since, with no report for this
+				// session and no events of it at the collector: nothing ties it
+				// to the session. It is frozen, or its reports stopped arriving
+				// a moment ago, and it is idle as far as anyone can tell; the
+				// list of followers marks it (Subscriber.DeliveryUnheard). An
+				// SDK whose reports keep failing opens its stream anew, and is
+				// then one that was never heard of, which is named.
+				continue
+			}
+			switch {
 			case !ok:
 				msg += ", so whether it recorded anything for this session is unknown"
 			case have == 0:
