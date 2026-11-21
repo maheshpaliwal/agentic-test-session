@@ -171,6 +171,10 @@ func (c *cli) list(ctx context.Context, args []string) error {
 	if *limit < 0 {
 		return errors.New("--limit must be a positive number")
 	}
+	*state = strings.ToUpper(strings.TrimSpace(*state))
+	if *state != "" && !slices.Contains(sessionStates, *state) {
+		return fmt.Errorf("--state %q is not a session state; the states are %s", *state, strings.Join(sessionStates, ", "))
+	}
 	list, more, err := listNewest(ctx, c.opts, *state, *limit)
 	if err != nil {
 		return err
@@ -187,6 +191,9 @@ func (c *cli) list(ctx context.Context, args []string) error {
 	}
 	return nil
 }
+
+// sessionStates are the states a session can be in, as the control plane names them.
+var sessionStates = []string{"CREATED", "ACTIVE", "DRAINING", "SEALED", "ABORTED", "EXPIRED"}
 
 // listMarks says, at the end of a list line, that a session's record is known to be incomplete or that the
 // delivery of some instance could not be confirmed; empty for a session with neither.

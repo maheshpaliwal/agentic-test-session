@@ -754,7 +754,9 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 		for _, r := range src.rep.reasons {
 			d.Verdict.Reasons = append(d.Verdict.Reasons, reason(r))
 		}
-	case info.State == "":
+	case info.State == "", d.Session.Live:
+		// Not known for a running session: what its services still hold has not arrived, and whether all of
+		// it does is decided when the session ends.
 		d.Verdict.Recording = "unknown"
 	}
 	for i, w := range info.DeliveryUnconfirmed {
@@ -1140,7 +1142,11 @@ func (digestMarkdown) render(d *digest) []byte {
 		b.WriteString(" **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.")
 	}
 	state := cmp.Or(mdEscape(d.Session.State, 40), "unknown (the control plane no longer knows this session)")
-	fmt.Fprintf(&b, "\n\n- state: %s; recording: %s\n", state, d.Verdict.Recording)
+	recording := d.Verdict.Recording
+	if d.Session.Live && recording == "unknown" {
+		recording = "not yet known (the session is still running)"
+	}
+	fmt.Fprintf(&b, "\n\n- state: %s; recording: %s\n", state, recording)
 	for _, r := range d.Verdict.Reasons {
 		b.WriteString("- incomplete: " + mdEscape(r, 2*digestErrMax) + "\n")
 	}

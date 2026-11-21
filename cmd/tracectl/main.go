@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
@@ -189,11 +190,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		root.Usage()
 		return 2
 	}
+	for flagName, v := range map[string]string{"--cp": *cp, "--collector": *col} {
+		if v != "" && !strings.Contains(v, "://") {
+			fmt.Fprintf(stderr, "tracectl: %s %q is not a URL: it needs a scheme, as in http://%s\n", flagName, v, v)
+			return 2
+		}
+	}
 	name, rest := root.Arg(0), root.Args()[1:]
 	cmd, ok := commands[name]
 	if !ok {
-		fmt.Fprintln(stderr, usage)
-		fmt.Fprintf(stderr, "tracectl: unknown command %q\n", name)
+		fmt.Fprintf(stderr, "tracectl: unknown command %q; run 'tracectl --help' for the list of commands\n", name)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

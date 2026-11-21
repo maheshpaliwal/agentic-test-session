@@ -254,6 +254,11 @@ Rolling back:
 
 ### Changed
 
+- `tracectl digest` of a running session says `recording: not yet known (the session is still running)` and
+  carries `"recording": "unknown"`; it said `complete`, also while a service could not deliver its events.
+- `tracectl list --state` accepts a state in any case and refuses a word that is not a state, naming the six; it
+  printed nothing and exited 0. `--cp` and `--collector` without a scheme (`127.0.0.1:7070`) are refused with the
+  URL to write. An unknown command prints one line, not the whole usage text before it.
 - Collector and control plane log lines that carry an error are at error level (ten were warnings).
 - The dashboard binary panics on a start-up error (a refused listen address, an unreadable `-open` file) where
   it called `log.Fatalf`: the message is the same, followed by a stack trace, and the exit status is 2, not 1.

@@ -701,7 +701,7 @@ func TestDigestLive(t *testing.T) {
 	}
 	wantAll(t, checkDigestMarkdown(t, out)["### Verdict"],
 		"**Failed**: 3 failed events. **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.\n",
-		"- state: ACTIVE; recording: complete\n")
+		"- state: ACTIVE; recording: not yet known (the session is still running)\n")
 	_, out, _ = env.tc("digest", reportID, "--json")
 	if d := checkDigestJSON(t, out); !d.Session.Live || d.Session.State != "ACTIVE" {
 		panic(fmt.Sprintf("live digest: %+v", d.Session))

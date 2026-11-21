@@ -233,3 +233,21 @@ func TestListMarks(t *testing.T) {
 		}
 	}
 }
+
+func TestListRejectsAnUnknownState(t *testing.T) {
+	env := newPagingEnv(t, false, pagingSession(0, "s0", controlplane.StateSealed))
+	if code, out, e := env.tc("list", "--state", "bogus"); code != 1 || out != "" || !strings.Contains(e, "SEALED") {
+		panic(fmt.Sprintf("unknown state: exit %d, out %q, stderr %q", code, out, e))
+	}
+	// Lower case is the state it names.
+	if code, out, e := env.tc("list", "--state", "sealed"); code != 0 || !strings.Contains(out, " SEALED ") || !strings.HasSuffix(out, " s0\n") {
+		panic(fmt.Sprintf("lower-case state: exit %d, out %q, stderr %q", code, out, e))
+	}
+}
+
+func TestURLFlagWithoutASchemeIsRefused(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"--cp", "127.0.0.1:7070", "list"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "http://127.0.0.1:7070") {
+		panic(fmt.Sprintf("exit %d, stderr %q", code, errb.String()))
+	}
+}
