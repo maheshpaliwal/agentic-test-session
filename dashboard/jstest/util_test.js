@@ -59,6 +59,8 @@ assert.deepStrictEqual(U.sessionWarnings({}), []);
 assert.strictEqual(U.sessionWarnings({ seal_error: 'x', incomplete: true, dropped_events: 3 }).length, 2);
 assert.deepStrictEqual(U.sessionWarnings({ incomplete: true, incomplete_reasons: ['service a (instance i): 0 of 2 recorded events reached the collector'] }).slice(1),
   ['Events did not reach the collector: service a (instance i): 0 of 2 recorded events reached the collector']);
+assert.deepStrictEqual(U.sessionWarnings({ incomplete: true, incomplete_reasons: ['the collector has 3 events from a/i, which did not report how many it recorded'] }).slice(1),
+  ['Delivery is not accounted for: the collector has 3 events from a/i, which did not report how many it recorded']);
 assert.deepStrictEqual(U.deliveryUnconfirmed({}), []);
 assert.deepStrictEqual(U.deliveryUnconfirmed(null), []);
 assert.deepStrictEqual(U.deliveryUnconfirmed({ delivery_unconfirmed: 'x' }), []);

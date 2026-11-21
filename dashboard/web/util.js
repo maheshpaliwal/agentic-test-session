@@ -105,7 +105,10 @@
     if (s.seal_error) w.push('Seal failed: ' + s.seal_error);
     if (s.incomplete) w.push('This session is incomplete: some events or async work may be missing' + (s.dropped_events ? ' (' + s.dropped_events + ' events dropped)' : '') + '. Treat the history as a lower bound.');
     else if (s.dropped_events) w.push(s.dropped_events + ' events were dropped.');
-    (s.incomplete_reasons || []).forEach((r) => w.push('Events did not reach the collector: ' + r));
+    // Most reasons name an instance whose events did not all arrive. Two do
+    // not say that anything is missing: an instance that did not report how
+    // many events it recorded, and reports beyond the ones a session keeps.
+    (s.incomplete_reasons || []).forEach((r) => w.push((/^(the collector has |more than )/.test(r) ? 'Delivery is not accounted for: ' : 'Events did not reach the collector: ') + r));
     return w;
   }
   // The service instances whose delivery the control plane could not

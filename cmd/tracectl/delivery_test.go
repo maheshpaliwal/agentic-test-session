@@ -93,6 +93,14 @@ func TestDeliveryUnconfirmedIsShownEverywhere(t *testing.T) {
 	wantAll(t, string(junit), `<property name="incomplete" value="true">`,
 		`<property name="incomplete_reason" value="Events did not reach the collector: service orders-api (instance o-1): 0 of 7 recorded events reached the collector">`,
 		`<property name="delivery_unconfirmed" value="`+warn+`">`)
+	// A reason that does not say that events are missing is not introduced as
+	// one that does.
+	bad.IncompleteReasons = []string{"the collector has 6 events from orders-api/o-1, which did not report how many it recorded"}
+	junit, err = renderJUnit(buildReport(bad, sum, client.Trace{}, nil))
+	if err != nil {
+		panic(err)
+	}
+	wantAll(t, string(junit), `<property name="incomplete_reason" value="Delivery is not accounted for: the collector has 6 events from orders-api/o-1, which did not report how many it recorded">`)
 
 	// The digest: in the verdict section and in the JSON, within the smallest
 	// budget however many instances there are, and the same every time.

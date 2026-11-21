@@ -140,6 +140,18 @@ type mutationRow struct {
 // The collector hangs a worker run under the span that published its job
 // (TraceNode.Linked), so walking a root's children and linked spans reaches
 // the async work the request caused.
+// deliveryReasonLabel says what one of the control plane's incomplete_reasons
+// is about. Most name an instance whose events did not all reach the
+// collector. Two do not say that anything is missing: an instance whose
+// events the collector has and that did not report how many it recorded, and
+// reports beyond the ones a session keeps.
+func deliveryReasonLabel(reason string) string {
+	if strings.HasPrefix(reason, "the collector has ") || strings.HasPrefix(reason, "more than ") {
+		return "Delivery is not accounted for: "
+	}
+	return "Events did not reach the collector: "
+}
+
 func buildReport(info client.Info, sum client.Summary, tr client.Trace, muts []client.Mutation) *sessionReport {
 	rep := &sessionReport{info: info, sum: sum, incomplete: sum.Incomplete || info.Incomplete}
 	rootOf := map[uint64]int{}
@@ -215,7 +227,7 @@ func incompleteReasons(info client.Info, sum client.Summary) []string {
 		out = append(out, fmt.Sprintf("Unfinished async work: %d published job(s) that a worker %s.", sum.PendingAsync, state))
 	}
 	for _, r := range info.IncompleteReasons {
-		out = append(out, "Events did not reach the collector: "+clip(r, reportErrMax))
+		out = append(out, deliveryReasonLabel(r)+clip(r, reportErrMax))
 	}
 	if info.SealError != "" {
 		r := "Seal error: the collector could not seal the session: " + clip(info.SealError, reportErrMax)
