@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"unicode"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
@@ -127,6 +128,10 @@ type FileStore struct {
 	// ops are the calls that change the archive file through its handle.
 	// Tests replace them to make them fail.
 	ops archOps
+
+	// panicCount counts the panics of the store's goroutines, nil until a
+	// Manager sets it (see countPanics).
+	panicCount atomic.Pointer[func(goroutine string)]
 
 	// testHookListed, if set, runs in list between taking the entries from
 	// the index and reading their lines.
@@ -1536,12 +1541,23 @@ func (f *FileStore) maybeCompactLocked() {
 		f.compacting = done
 		upto, syncArchive := f.journalSize, f.archiveUnsynced
 		// One compaction: not run again by the helper, the journal growing
-		// starts the next.
+		// starts the next. After a panic the bookkeeping comes first: a
+		// logger that panics must not leave Close waiting for the compaction.
 		gosafe.Go(gosafe.Options{Name: "compaction", OnPanic: func(p gosafe.Panic) {
-			gosafe.Slog(f.log, nil)(p)
+			defer gosafe.Slog(f.log, f.countPanic)(p)
 			f.compactionPanicked(done, syncArchive)
 		}}, func() { f.compactInBackground(hot, upto, syncArchive, done) })
 		f.archiveUnsynced = false
+	}
+}
+
+// countPanics implements panicCounter: the Manager counts the panics of a
+// compaction in tsession_controlplane_goroutine_panics_total.
+func (f *FileStore) countPanics(count func(goroutine string)) { f.panicCount.Store(&count) }
+
+func (f *FileStore) countPanic(goroutine string) {
+	if count := f.panicCount.Load(); count != nil {
+		(*count)(goroutine)
 	}
 }
 
@@ -1576,6 +1592,7 @@ func (f *FileStore) compactInBackground(hot []Session, upto int64, syncArchive b
 		data []byte
 		err  error
 	)
+	faultpoint.Hit("compaction.write")
 	if syncArchive {
 		err = f.syncArchive()
 	}
@@ -1593,6 +1610,7 @@ func (f *FileStore) compactInBackground(hot []Session, upto int64, syncArchive b
 	// Whatever happens next, wait for the journal to grow again before the
 	// next attempt.
 	f.compactAt = f.journalSize + max(f.compactMin, f.snapSize)
+	faultpoint.Hit("compaction.finish")
 	if err != nil {
 		f.archiveUnsynced = f.archiveUnsynced || syncArchive
 		return

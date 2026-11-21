@@ -92,14 +92,14 @@ func TestCloseDoesNotWaitForADrainThatWaitsForItsRestart(t *testing.T) {
 	if _, err := m.Stop(s.ID); err != nil {
 		panic(err)
 	}
-	for deadline := time.Now().Add(5 * time.Second); !panicMetric(t, m, "drain", 4); time.Sleep(time.Millisecond) { // 100+200+400ms
+	for deadline := time.Now().Add(5 * time.Second); !panicMetric(t, m, "drain", 2); time.Sleep(time.Millisecond) { // 100ms
 		if time.Now().After(deadline) {
 			panic("the drain was not restarted")
 		}
 	}
-	began := time.Now() // the fifth restart is 800ms away
+	began := time.Now() // the second restart is 200ms away
 	m.Close()
-	if took := time.Since(began); took > 400*time.Millisecond {
+	if took := time.Since(began); took > 120*time.Millisecond {
 		panic(fmt.Sprintf("Close took %v", took))
 	}
 }

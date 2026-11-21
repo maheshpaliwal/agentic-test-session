@@ -62,6 +62,13 @@ type Config struct {
 	// /v1/internal/*.
 	InternalAllow []string
 	Logger        *slog.Logger
+	// OnPanicBudgetSpent is called once when the janitor and the retention
+	// loop have panicked gosafe.PanicBudget times within
+	// gosafe.PanicBudgetWindow: they are not started again, and the service is
+	// to end (the collector command shuts down and exits 1). Nil leaves the
+	// Collector running and degraded (see Health), which only suits a
+	// Collector that is part of another process.
+	OnPanicBudgetSpent func(reason string)
 }
 
 // DefaultConfig returns the protocol defaults.
@@ -84,6 +91,8 @@ type Collector struct {
 	tel      *telemetry
 	log      *slog.Logger
 	internal []*net.IPNet
+	// watch is the health of the collector's loops (see Health).
+	watch *gosafe.Watch
 
 	vmu   sync.Mutex
 	views map[string]*viewEntry
@@ -128,13 +137,16 @@ func New(st store.Store, cfg Config) *Collector {
 	}
 	c := &Collector{cfg: cfg, st: st, log: cfg.Logger, views: map[string]*viewEntry{},
 		tel: newTelemetry(), stop: make(chan struct{}), retention: make(chan struct{})}
-	c.seq = newSequencer(st, cfg, c.tel)
+	c.watch = gosafe.NewWatch(c.budgetSpent)
+	c.seq = newSequencer(st, cfg, c.tel, c.watch)
 	c.tel.observe(c.seq)
 	if cfg.Retention > 0 {
 		// Started again after a panic (a store that panics on one session,
-		// say), without limit: without it nothing is ever deleted for age.
-		gosafe.Go(gosafe.Options{Name: "retention", Restarts: -1, Stop: c.stop, Done: func() { close(c.retention) }, OnPanic: c.tel.onPanic(c.log)},
-			c.retentionLoop)
+		// say): without it nothing is ever deleted for age. Its panics count
+		// against the panic budget: a loop that panics every time ends the
+		// service instead of leaving one that looks alive and deletes nothing.
+		gosafe.Go(gosafe.Options{Name: "retention", Restarts: -1, Stop: c.stop, Done: func() { close(c.retention) }, Watch: c.watch, Budget: true,
+			OnPanic: c.tel.onPanic(c.log)}, c.retentionLoop)
 	} else {
 		close(c.retention)
 	}
@@ -386,6 +398,20 @@ func (c *Collector) delete(ctx context.Context, id, cause string) error {
 	}
 	c.tel.deleted.With(cause).Inc()
 	return nil
+}
+
+// Health says why the collector is not healthy, "" when it is: one of its
+// loops waits for its restart after a panic, or its panic budget is spent.
+// GET /healthz answers 503 with it.
+func (c *Collector) Health() string { return c.watch.Degraded() }
+
+// budgetSpent is called once when the panic budget is spent.
+func (c *Collector) budgetSpent(reason string) {
+	if c.cfg.OnPanicBudgetSpent == nil {
+		c.log.Error("the collector no longer does its background work and stays degraded", "reason", reason)
+		return
+	}
+	c.cfg.OnPanicBudgetSpent(reason)
 }
 
 // retentionLoop may be started again after a panic: it closes nothing.

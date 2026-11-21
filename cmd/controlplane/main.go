@@ -3,8 +3,10 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -13,7 +15,11 @@ import (
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 )
 
-func main() {
+func main() { os.Exit(run()) }
+
+// run is main with an exit status, so that what it defers runs before the
+// process ends.
+func run() int {
 	addr := flag.String("addr", svc.Env("TSESSION_CP_ADDR", "127.0.0.1:7070"), "listen address")
 	flag.StringVar(addr, "listen", *addr, "alias of --addr, the name the collector and dashboard use")
 	collector := flag.String("collector-url", svc.Env("TSESSION_COLLECTOR_URL", "http://127.0.0.1:7071"), "collector base URL")
@@ -37,12 +43,12 @@ func main() {
 		fs, err := controlplane.NewFileStore(*storeFile, controlplane.WithStoreLogger(log))
 		if err != nil {
 			log.Error("open store", "err", err)
-			os.Exit(1)
+			return 1
 		}
 		store = fs
-		// Runs after m.Close below: fold the journal into the snapshot, so a
-		// clean shutdown leaves the whole hot set in the one JSON file, and
-		// release the archive file.
+		// Runs after the manager is closed: fold the journal into the
+		// snapshot, so a clean shutdown leaves the whole hot set in the one
+		// JSON file, and release the archive file.
 		defer func() {
 			if err := fs.Compact(); err != nil {
 				log.Error("compact store", "err", err)
@@ -52,7 +58,15 @@ func main() {
 			}
 		}()
 	}
-	m := controlplane.NewManager(controlplane.Config{
+	ctx, stop := svc.SignalContext()
+	defer stop()
+	ln, err := svc.Listen(*addr, "--addr or TSESSION_CP_ADDR")
+	if err != nil {
+		log.Error("listen", "err", err)
+		return 1
+	}
+	log.Info("control plane listening", "addr", *addr, "collector", *collector)
+	return serve(ctx, stop, log, ln, controlplane.Config{
 		Store:      store,
 		Collector:  &controlplane.HTTPCollector{BaseURL: *collector, Client: controlplane.NewCollectorClient(30 * time.Second)},
 		Logger:     log,
@@ -64,22 +78,26 @@ func main() {
 		AllowedHosts:   svc.SplitCSV(*hosts),
 		AllowedOrigins: svc.SplitCSV(*origins),
 	})
-	defer m.Close()
+}
 
-	ctx, stop := svc.SignalContext()
-	defer stop()
+// serve runs a control plane with cfg on ln until ctx ends, and returns the
+// exit status: 0 after a shutdown that was asked for, 1 when serving failed
+// or the control plane gave up because its sweep kept panicking (the panic
+// budget, see controlplane.Config.OnPanicBudgetSpent). stop cancels ctx.
+func serve(ctx context.Context, stop context.CancelFunc, log *slog.Logger, ln net.Listener, cfg controlplane.Config) int {
+	giveUp := svc.NewGiveUp(log, stop)
+	cfg.OnPanicBudgetSpent = giveUp.Now
+	m := controlplane.NewManager(cfg)
+	defer m.Close()
+	// Not a bare `go m.Run`: a panic in a sweep would end the process at once,
+	// with every session it holds.
 	m.RunInBackground(ctx)
 
 	// No WriteTimeout: /v1/active/stream is a long-lived SSE response.
-	srv := &http.Server{Addr: *addr, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
-	ln, err := svc.Listen(*addr, "--addr or TSESSION_CP_ADDR")
-	if err != nil {
-		log.Error("listen", "err", err)
-		os.Exit(1)
-	}
-	log.Info("control plane listening", "addr", *addr, "collector", *collector)
+	srv := &http.Server{Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	if err := svc.ServeOn(ctx, srv, ln, 5*time.Second, m.Close); err != nil { // Close ends SSE streams so Shutdown can finish
 		log.Error("serve", "err", err)
-		os.Exit(1)
+		return 1
 	}
+	return giveUp.ExitCode()
 }

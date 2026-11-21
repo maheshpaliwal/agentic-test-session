@@ -59,7 +59,7 @@ func newTelemetry() *telemetry {
 		appendFailures: r.Counter("tsession_collector_store_append_failures_total",
 			"Failed attempts to append a batch of events to the store (each is retried)."),
 		panics: r.CounterVec("tsession_collector_goroutine_panics_total",
-			"Panics recovered in a background loop, by goroutine (each is logged with its stack, and the loop is restarted with backoff).", "goroutine"),
+			"Panics recovered in a background loop, by goroutine (each is logged with its stack, and the loop is restarted with backoff; /healthz answers 503 meanwhile).", "goroutine"),
 	}
 }
 

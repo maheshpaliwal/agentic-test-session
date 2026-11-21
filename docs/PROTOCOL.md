@@ -429,7 +429,8 @@ used to export as with `no events`. Only a session without events that the contr
 still exports as an empty file, which does not open (`no events, and no session`).
 
 ### Control plane hardening
-- Every endpoint except `GET /healthz` (static `ok`, any Host) passes `core.LoopbackGuard`: Host must be loopback or in
+- Every endpoint except `GET /healthz` (any Host; `ok`, or `503` and `degraded: <reason>` while a background goroutine
+  that panicked waits for its restart, see "Health and panics" in [`CONFIG.md`](CONFIG.md)) passes `core.LoopbackGuard`: Host must be loopback or in
   `--allowed-hosts`/`TSESSION_CP_ALLOWED_HOSTS` (e.g. `controlplane:7070`); a request with an `Origin` header is rejected
   unless listed in `--allowed-origins`/`TSESSION_CP_ALLOWED_ORIGINS` (default none; includes `Origin: null`); a request with a
   body needs `Content-Type: application/json`. Non-browser clients (SDK, tracectl, SSE subscriber) send no Origin and are unaffected.
@@ -644,7 +645,8 @@ type is `415 {"error": "...requires application/x-protobuf"}`. NDJSON ingest was
   store (deleted by another process) rebuilds its state from the store instead of failing on Seq conflicts.
 - **Seal** is serialised on the session (concurrent calls write the bundle once; files are written via temp+rename)
   and idempotent.
-- **Access control**: the whole API except `GET /healthz` is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
+- **Access control**: the whole API except `GET /healthz` (`ok`, or `503` and `degraded: <reason>`, see "Health and
+  panics" in [`CONFIG.md`](CONFIG.md)) is wrapped in `core.LoopbackGuard` (Host must be loopback or listed in
   `--allowed-hosts` / `TSESSION_COLLECTOR_ALLOWED_HOSTS`, comma-separated; browser `Origin` must be listed in
   `--allowed-origins` / `TSESSION_COLLECTOR_ALLOWED_ORIGINS`; the POST bodies the collector accepts are
   `application/x-protobuf` (ingest, which refuses anything else) and `application/json` (the internal

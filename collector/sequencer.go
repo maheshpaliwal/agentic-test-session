@@ -53,16 +53,18 @@ type Sequencer struct {
 }
 
 // newSequencer expects cfg to have been normalised by New.
-func newSequencer(st store.Store, cfg Config, tel *telemetry) *Sequencer {
+func newSequencer(st store.Store, cfg Config, tel *telemetry, watch *gosafe.Watch) *Sequencer {
 	s := &Sequencer{st: st, window: cfg.Window, idle: cfg.IdleEvict, maxBuf: cfg.MaxBufferedEvents,
 		storeTimeout: cfg.StoreTimeout, shutdownTimeout: cfg.ShutdownTimeout, log: cfg.Logger, tel: tel,
 		actors: map[string]*sessionActor{}, quar: map[string]int{},
 		stop: make(chan struct{}), jd: make(chan struct{})}
 	s.bg, s.cancel = context.WithCancel(context.Background())
 	if s.idle > 0 {
-		// Started again after a panic, without limit: without it no idle
-		// actor is ever evicted, and the collector's memory only grows.
-		gosafe.Go(gosafe.Options{Name: "janitor", Restarts: -1, Stop: s.stop, Done: func() { close(s.jd) }, OnPanic: tel.onPanic(s.log)}, s.janitor)
+		// Started again after a panic: without it no idle actor is ever
+		// evicted, and the collector's memory only grows. Its panics count
+		// against the panic budget (see Config.OnPanicBudgetSpent).
+		gosafe.Go(gosafe.Options{Name: "janitor", Restarts: -1, Stop: s.stop, Done: func() { close(s.jd) }, Watch: watch, Budget: true,
+			OnPanic: tel.onPanic(s.log)}, s.janitor)
 	} else {
 		close(s.jd)
 	}

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
@@ -59,6 +61,12 @@ type Config struct {
 	// TimeUnit is the duration of one "second" in ttl/quiesce/max_drain
 	// fields. Tests shrink it; default time.Second.
 	TimeUnit time.Duration
+	// OnPanicBudgetSpent is called once when the sweep has panicked
+	// gosafe.PanicBudget times within gosafe.PanicBudgetWindow: the sweep is
+	// not started again, and the service is to end (cmd/controlplane shuts
+	// down and exits 1). Nil leaves the Manager running and degraded (see
+	// Health), which only suits a Manager that is part of another process.
+	OnPanicBudgetSpent func(reason string)
 }
 
 // Manager owns the session FSM.
@@ -66,6 +74,8 @@ type Manager struct {
 	cfg Config
 	log *slog.Logger
 	tel *telemetry
+	// watch is the health of the Manager's goroutines (see Health).
+	watch *gosafe.Watch
 
 	mu      sync.Mutex
 	kill    bool
@@ -153,6 +163,10 @@ func NewManager(cfg Config) *Manager {
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
+	m.watch = gosafe.NewWatch(m.budgetSpent)
+	if pc, ok := cfg.Store.(panicCounter); ok {
+		pc.countPanics(m.countPanic)
+	}
 	// Resume drains and pending seals that were in flight when a persistent
 	// store was last written. Archived sessions can have a seal pending; the
 	// finished ones need nothing, so a store that can leave them out does.
@@ -186,6 +200,12 @@ func NewManager(cfg Config) *Manager {
 	}
 	m.retrySealsLocked(time.Now())
 	return m
+}
+
+// panicCounter is a Store with goroutines of its own (FileStore's
+// compaction): it is given what counts their panics.
+type panicCounter interface {
+	countPanics(count func(goroutine string))
 }
 
 // MaxDurationSeconds bounds ttl/quiesce/max_drain (7 days); it also keeps
@@ -454,8 +474,14 @@ func (m *Manager) beginDelete(id string) (inFlight <-chan struct{}, err error) {
 func (m *Manager) Sweep(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	faultpoint.Hit("sweep.top")
 	changed := false
 	for _, s := range m.live {
+		if s.State == StateDraining && m.cancels[s.ID] == nil && m.rootCtx.Err() == nil {
+			// Nobody drains it: whatever moved it to DRAINING panicked before
+			// it had started the drain (a sweep, say, which is started again).
+			m.startDrainLocked(s.ID)
+		}
 		if s.State != StateActive {
 			continue
 		}
@@ -464,6 +490,7 @@ func (m *Manager) Sweep(now time.Time) {
 			if err := m.putLocked(s); err != nil {
 				m.log.Error("persist expiring session", "id", s.ID, "err", err)
 			}
+			faultpoint.Hit("sweep.expired")
 			m.startDrainLocked(s.ID)
 			changed = true
 		}

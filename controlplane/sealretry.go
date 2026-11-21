@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 )
 
@@ -16,6 +17,9 @@ type sealRetry struct {
 	next   time.Time          // earliest time of the next attempt (zero: now)
 	cancel context.CancelFunc // non-nil while an attempt is in flight
 	done   chan struct{}      // closed when the in-flight attempt has returned
+	// disarmed: a Delete took the retry away (disarmSealRetryLocked) and owns
+	// the session now. An attempt that panics must not arm it again.
+	disarmed bool
 }
 
 // armSealRetryLocked schedules background seal retries for id, the first one
@@ -33,6 +37,7 @@ func (m *Manager) disarmSealRetryLocked(id string) <-chan struct{} {
 		return nil
 	}
 	delete(m.pending, id)
+	r.disarmed = true
 	if r.cancel == nil {
 		return nil
 	}
@@ -70,17 +75,20 @@ func (m *Manager) retrySealsLocked(now time.Time) {
 		m.wg.Add(1)
 		// One attempt: not run again by the helper, the next sweep that finds
 		// it due starts another.
-		gosafe.Go(gosafe.Options{Name: "seal_retry", Done: m.wg.Done, OnPanic: m.onPanic(func() { m.sealRetryPanicked(r) })},
+		gosafe.Go(gosafe.Options{Name: "seal_retry", Done: m.wg.Done, OnPanic: m.onPanic(func(gosafe.Panic) { m.sealRetryPanicked(id, r) })},
 			func() { m.retrySeal(ctx, id, r) })
 	}
 }
 
 // sealRetryPanicked puts right what a seal attempt that panicked left
-// undone: the attempt is over (a Delete may be waiting for that) and the
-// next one is due after the backoff, like after a failure. An attempt that
-// panics every time is so retried for good, at SealRetryMaxInterval at most:
-// the budget is looked at only once the collector has answered.
-func (m *Manager) sealRetryPanicked(r *sealRetry) {
+// undone. The attempt is over (a Delete may be waiting for that). The next
+// one is due after the backoff, like after a failure, also when the attempt
+// had already taken the retry off the list (it panicked while it recorded
+// its outcome): the session is still stored with its seal pending, and
+// nothing else would look at it again before the next start. Like a failure,
+// a panic ends the retries once SealPendingBudget has passed since the
+// session ended: an attempt that panics every time is not retried for good.
+func (m *Manager) sealRetryPanicked(id string, r *sealRetry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r.cancel != nil { // it panicked before it took the lock
@@ -88,8 +96,35 @@ func (m *Manager) sealRetryPanicked(r *sealRetry) {
 		r.cancel = nil
 		close(r.done)
 	}
-	r.next = time.Now().Add(r.delay)
+	if r.disarmed || m.pending[id] != nil && m.pending[id] != r {
+		return // a Delete owns the session, or it was armed anew
+	}
+	now := time.Now()
+	r.next = now.Add(r.delay)
 	r.delay = min(r.delay*2, m.cfg.SealRetryMaxInterval)
+	cur, err := m.stored(id)
+	switch {
+	case errors.Is(err, ErrStore): // stored and unreadable: keep trying, as retrySeal does
+	case err != nil || !cur.SealPending:
+		delete(m.pending, id) // gone, or the attempt had recorded its outcome
+		return
+	case m.rootCtx.Err() != nil:
+		return // shutting down: the marker stays for the next start
+	case !now.Before(cur.EndedAt.Add(m.cfg.SealPendingBudget)):
+		delete(m.pending, id)
+		cur.SealPending = false
+		if cur.SealError == "" {
+			cur.SealError = "the seal failed in the control plane"
+		}
+		m.tel.sealRetries.With("failure").Inc()
+		m.tel.sealsAbandoned.Inc()
+		m.log.Error("seal still failing (the attempt panicked), giving up", "id", id, "budget", m.cfg.SealPendingBudget)
+		if perr := m.putLocked(cur); perr != nil {
+			m.log.Error("persist session after seal retry", "id", id, "err", perr)
+		}
+		return
+	}
+	m.pending[id] = r
 }
 
 // retrySeal makes one seal attempt for a pending seal and records the
@@ -100,6 +135,7 @@ func (m *Manager) sealRetryPanicked(r *sealRetry) {
 // The session's state does not change: it stays SEALED, also when it was
 // ended by its TTL.
 func (m *Manager) retrySeal(ctx context.Context, id string, r *sealRetry) {
+	faultpoint.Hit("sealretry.top")
 	res, err := m.cfg.Collector.Seal(ctx, id) // idempotent on the collector
 
 	m.mu.Lock()
@@ -153,6 +189,7 @@ func (m *Manager) retrySeal(ctx context.Context, id string, r *sealRetry) {
 		return
 	}
 	delete(m.pending, id)
+	faultpoint.Hit("sealretry.persist")
 	if perr := m.putLocked(cur); perr != nil {
 		m.log.Error("persist session after seal retry", "id", id, "err", perr)
 	}

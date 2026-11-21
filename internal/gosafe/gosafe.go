@@ -15,6 +15,7 @@ package gosafe
 import (
 	"fmt"
 	"log/slog"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -46,7 +47,9 @@ type Panic struct {
 	// when Runtime is set.
 	Value string
 	// Runtime is set for a panic of the Go runtime (nil dereference, index
-	// out of range, ...), whose text names no data.
+	// out of range, ...), whose text names no data. It goes by the type of
+	// the value, which must be one of package runtime: a type of the
+	// application that implements runtime.Error is not believed.
 	Runtime bool
 	// Stack is where it panicked: function, file and line of at most 32
 	// frames, at most 4 KiB. No arguments, unlike debug.Stack.
@@ -56,6 +59,9 @@ type Panic struct {
 	// RestartIn is how long the goroutine waits before it runs the function
 	// again; zero when it ends instead.
 	RestartIn time.Duration
+	// BudgetSpent is set on the panic that used up the panic budget of the
+	// service (Options.Watch): the goroutine ends, and so does the service.
+	BudgetSpent bool
 }
 
 // Options say how a goroutine is run.
@@ -83,6 +89,12 @@ type Options struct {
 	// Done runs once when the goroutine ends, however it ends: where a bare
 	// goroutine would `defer close(done)` or `defer wg.Done()`.
 	Done func()
+	// Watch, if set, is told while the goroutine waits for its restart: the
+	// service is degraded for that long. With Budget its panics also count
+	// against the Watch's panic budget, and the one that uses it up ends the
+	// goroutine whatever Restarts says.
+	Watch  *Watch
+	Budget bool
 }
 
 // Go runs fn on a new goroutine. When fn returns, the goroutine ends. When
@@ -99,11 +111,15 @@ func Go(o Options, fn func()) {
 				return
 			}
 			p.Name, p.N = o.Name, n
-			if o.Restarts < 0 || n <= o.Restarts {
+			p.BudgetSpent = o.Budget && o.Watch.count(time.Now())
+			if !p.BudgetSpent && (o.Restarts < 0 || n <= o.Restarts) {
 				p.RestartIn = o.backoff(n)
 			}
 			notify(o.OnPanic, p)
-			if p.RestartIn == 0 || !sleep(p.RestartIn, o.Stop) {
+			if p.BudgetSpent {
+				o.Watch.giveUp() // after the panic was logged
+			}
+			if p.RestartIn == 0 || !o.Watch.sleep(o.Name, p.RestartIn, o.Stop) {
 				return
 			}
 		}
@@ -166,10 +182,8 @@ func describe(r any) Panic {
 	p := Panic{Type: fmt.Sprintf("%T", r)}
 	var text string
 	switch v := r.(type) {
-	case runtime.Error:
-		p.Runtime, text = true, v.Error()
 	case error:
-		text = v.Error()
+		p.Runtime, text = runtimeError(v), v.Error()
 	default:
 		text = fmt.Sprint(v)
 	}
@@ -179,6 +193,22 @@ func describe(r any) Panic {
 	}
 	p.Stack = stack()
 	return p
+}
+
+// runtimeError reports whether e is an error the Go runtime itself panics
+// with. The interface runtime.Error says nothing: any type can implement it,
+// and the text of such a type is the application's. The types of package
+// runtime are what counts (boundsError, errorString, TypeAssertionError,
+// PanicNilError, ...); no other package can have that path.
+func runtimeError(e error) bool {
+	if _, ok := e.(runtime.Error); !ok {
+		return false
+	}
+	t := reflect.TypeOf(e)
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.PkgPath() == "runtime"
 }
 
 // stack lists the frames from the one that panicked outwards.
@@ -216,6 +246,10 @@ func Slog(log *slog.Logger, count func(name string)) func(Panic) {
 			count(p.Name)
 		}
 		args := []any{"goroutine", p.Name, "panic", p.Value, "type", p.Type, "panics", p.N, "stack", p.Stack}
+		if p.BudgetSpent {
+			log.Error("a background goroutine panicked and is not restarted: the panic budget of the service is spent", args...)
+			return
+		}
 		if p.RestartIn > 0 {
 			log.Error("a background goroutine panicked and is restarted", append(args, "restart_in", p.RestartIn)...)
 			return

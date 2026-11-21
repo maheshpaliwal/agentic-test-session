@@ -13,7 +13,11 @@ import (
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 )
 
-func main() {
+func main() { os.Exit(run()) }
+
+// run is main with an exit status, so that what it defers (the store is
+// closed, the reorder windows are flushed) runs before the process ends.
+func run() int {
 	sf := registerStoreFlags()
 	listen := flag.String("listen", svc.Env("TSESSION_COLLECTOR_LISTEN", "127.0.0.1:7071"), "listen address (keep on loopback)")
 	window := flag.Duration("window", svc.EnvDur("TSESSION_COLLECTOR_WINDOW", 500*time.Millisecond), "reorder window (0 = immediate)")
@@ -52,9 +56,9 @@ func main() {
 		log.Error("open store", "store", *sf.kind, "err", err)
 		var ue usageError
 		if errors.As(err, &ue) {
-			os.Exit(2)
+			return 2
 		}
-		os.Exit(1)
+		return 1
 	}
 	defer st.Close()
 
@@ -63,19 +67,23 @@ func main() {
 	cfg.MaxMessageBytes, cfg.IdleEvict = *maxMsg, *idle
 	if *retention < 0 {
 		log.Error("--retention must not be negative", "retention", *retention)
-		os.Exit(2)
+		return 2
 	}
 	cfg.Retention = *retention
 	cfg.AllowedHosts, cfg.AllowedOrigins, cfg.InternalAllow = svc.SplitCSV(*hosts), svc.SplitCSV(*origins), svc.SplitCSV(*internal)
 	for _, c := range cfg.InternalAllow {
 		if _, err := collector.ParseCIDR(c); err != nil {
 			log.Error("invalid --internal-allow entry", "entry", c, "err", err)
-			os.Exit(2)
+			return 2
 		}
 	}
 	if !svc.IsLoopbackHost(*listen) {
 		log.Warn("collector listens on a non-loopback address; its endpoints are unauthenticated", "listen", *listen)
 	}
+	// A janitor or a retention loop that keeps panicking ends the service
+	// (the panic budget): it shuts down in order and exits 1.
+	giveUp := svc.NewGiveUp(log, stop)
+	cfg.OnPanicBudgetSpent = giveUp.Now
 	col := collector.New(st, cfg)
 	defer col.Close()
 
@@ -84,11 +92,12 @@ func main() {
 	ln, err := svc.Listen(*listen, "--listen or TSESSION_COLLECTOR_LISTEN")
 	if err != nil {
 		log.Error("listen", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	log.Info("collector listening", "addr", *listen, "store", *sf.kind, "window", *window, "retention", *retention)
 	if err := svc.ServeOn(ctx, srv, ln, 5*time.Second, nil); err != nil {
 		log.Error("serve", "err", err)
-		os.Exit(1)
+		return 1
 	}
+	return giveUp.ExitCode()
 }
