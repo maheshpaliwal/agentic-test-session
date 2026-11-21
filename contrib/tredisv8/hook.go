@@ -137,7 +137,9 @@ func (r reader) ZRange(ctx context.Context, key string, stop int64) ([]redisx.Z,
 }
 
 // Hook returns the tracing hook for client.AddHook. Before-images need a
-// reader: pass WithReader (Wrap/WrapAny do this for you).
+// reader: pass WithReader (Wrap/WrapAny do this for you). Unlike Wrap and
+// WrapAny it may be installed before the SDK starts: it looks the SDK up on
+// every command.
 func Hook(opts ...Option) redis.Hook {
 	return newHook(nil, opts)
 }
@@ -154,6 +156,9 @@ var wrapped sync.Map // client -> struct{}; the idempotency marker
 // Wrap installs the hook on c and returns it. It is a no-op when the SDK is
 // disabled, and wrapping the same client twice installs a single hook.
 func Wrap[C Hookable](c C, opts ...Option) C {
+	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tredisv8.Wrap")
+	}
 	install(c, c, opts)
 	return c
 }
@@ -163,6 +168,9 @@ func Wrap[C Hookable](c C, opts ...Option) C {
 // when v has AddHook(redis.Hook) and reports whether it did. v is also used as
 // the before-image reader when it is a redis.Cmdable.
 func WrapAny(v any, opts ...Option) bool {
+	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tredisv8.WrapAny")
+	}
 	h, ok := v.(interface{ AddHook(redis.Hook) })
 	if !ok || v == nil {
 		return false

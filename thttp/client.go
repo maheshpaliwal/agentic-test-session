@@ -92,6 +92,7 @@ func Transport(rt http.RoundTripper) http.RoundTripper {
 		rt = http.DefaultTransport
 	}
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("thttp.Transport")
 		return rt
 	}
 	if _, ok := rt.(tracedTransport); ok {
@@ -106,6 +107,11 @@ func Client(c *http.Client) *http.Client {
 		c = &http.Client{}
 	}
 	if !core.Enabled() {
+		// Without a transport of its own the client uses http.DefaultTransport
+		// at request time, which the SDK can still patch when it starts.
+		if c.Transport != nil {
+			core.NoteWrapWhileDisabled("thttp.Client")
+		}
 		return c
 	}
 	nc := *c

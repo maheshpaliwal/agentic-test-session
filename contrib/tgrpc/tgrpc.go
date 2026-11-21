@@ -195,6 +195,7 @@ func (l *msgLog) payload() any {
 // UnaryServerInterceptor records an api.in span per unary call.
 func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.UnaryServerInterceptor")
 		return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
 			return h(ctx, req)
 		}
@@ -250,6 +251,7 @@ func (s *serverStream) SendMsg(m any) error {
 // the (capped) sequences of received and sent messages as Req and Resp.
 func StreamServerInterceptor() grpc.StreamServerInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.StreamServerInterceptor")
 		return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, h grpc.StreamHandler) error {
 			return h(srv, ss)
 		}
@@ -288,6 +290,7 @@ func outgoing(ctx context.Context) context.Context {
 // the session context in metadata.
 func UnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.UnaryClientInterceptor")
 		return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, inv grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 			return inv(ctx, method, req, reply, cc, opts...)
 		}
@@ -397,6 +400,7 @@ func (s *clientStream) RecvMsg(m any) error {
 // cancellation) and carries its final status.
 func StreamClientInterceptor() grpc.StreamClientInterceptor {
 	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tgrpc.StreamClientInterceptor")
 		return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, str grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 			return str(ctx, desc, cc, method, opts...)
 		}

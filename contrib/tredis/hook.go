@@ -132,7 +132,8 @@ func (r reader) ZRange(ctx context.Context, key string, stop int64) ([]redisx.Z,
 	return out, err
 }
 
-// Hook returns the tracing hook for client.AddHook.
+// Hook returns the tracing hook for client.AddHook. Unlike Wrap it may be
+// installed before the SDK starts: it looks the SDK up on every command.
 func Hook(opts ...Option) redis.Hook {
 	return newHook(nil, opts)
 }
@@ -140,8 +141,13 @@ func Hook(opts ...Option) redis.Hook {
 var wrapped sync.Map // redis.UniversalClient -> struct{}; the idempotency marker
 
 // Wrap installs the hook on c and returns it. It is a no-op when the SDK is
-// disabled, and wrapping the same client twice installs a single hook.
+// disabled, and wrapping the same client twice installs a single hook. Call
+// it after the SDK has started: a client wrapped before that records nothing,
+// which the SDK reports when it starts.
 func Wrap(c redis.UniversalClient, opts ...Option) redis.UniversalClient {
+	if !core.Enabled() {
+		core.NoteWrapWhileDisabled("tredis.Wrap")
+	}
 	install(c, opts)
 	return c
 }
