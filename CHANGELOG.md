@@ -149,6 +149,8 @@ Rolling back:
 
 ### Changed
 
+- Dashboard `-demo` and `-open`: the session list without `limit` is oldest first, as on the control plane, and
+  an unknown session reads as empty on the collector side instead of `404`.
 - `tracectl history` for an entity the session did not change exits 1 and names what was looked up; it used to
   print `0 mutation(s)` and exit 0.
 - **Redaction is stricter.** Sensitive names also match as whole words (`user[password]`,
@@ -200,6 +202,12 @@ Rolling back:
 
 ### Fixed
 
+- Dashboard: `-demo` and `-open FILE` answered several read endpoints in shapes of their own, so `tracectl` and
+  the Go client could not read them. They now answer as the control plane and collector do, which makes every
+  read command (`summary`, `events`, `trace`, `entities`, `history`, `show`, `report`, `digest`) work on an
+  exported run: `dashboard -open run.ndjson` prints the `tracectl --cp ... --collector ...` flags to use.
+  `tracectl export` through these backends no longer drops the first event. Tests in `integration/` compare
+  each endpoint with the real services. A refused write on an opened file names the file.
 - `tsql` on Postgres: nothing is read inside a SERIALIZABLE transaction however the level was set (`BEGIN` or
   `START TRANSACTION ... ISOLATION LEVEL`, `SET TRANSACTION`, session characteristics, a connection, role or
   database default); it was only detected through `BeginTx`, and two concurrent inserting transactions that
