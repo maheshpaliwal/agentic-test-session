@@ -970,3 +970,57 @@ func TestDigestKeepsTheFirstErrorOfMergedFailures(t *testing.T) {
 	_, md, _ := env.tc("digest", reportID)
 	wantAll(t, checkDigestMarkdown(t, md)["### Failures"], `(the first: "dial tcp 127.0.0.1:18282: connect: connection refused")`)
 }
+
+// What the digest prints of a rollback, of the URL flags and of an empty
+// session, each pinned where a review found the code could be removed
+// without a test noticing.
+func TestDigestRollbackTextAndURLNote(t *testing.T) {
+	no := false
+	env := newReportEnv(t,
+		core.Event{Seq: 1, Service: "api", Kind: core.KindDBWrite, Name: "INSERT INTO ledger", TxID: "tx_1", StartNs: 1, EndNs: 2,
+			Mutations: []core.Mutation{{Store: "postgres", Entity: "ledger", Op: "insert", Effective: &no}}},
+		core.Event{Seq: 2, Service: "api", Kind: core.KindDBWrite, Name: "UPDATE customers", TxID: "tx_1", StartNs: 3, EndNs: 4, Err: "check constraint"})
+	_, md, _ := env.tc("digest", reportID)
+	sec := checkDigestMarkdown(t, md)
+	wantAll(t, sec["### Mutations"], "#1 insert ROLLED BACK (a later statement of its transaction failed: #2)")
+	wantAll(t, sec["### Drill down"], "- "+drillDownNote+"\n")
+
+	// Either URL flag alone is a reason for the note; neither is not. The environment gives the addresses
+	// here, as it does for the commands the digest names.
+	t.Setenv("TSESSION_CONTROLPLANE_URL", env.url)
+	t.Setenv("TSESSION_COLLECTOR_URL", env.url)
+	for _, tc := range []struct {
+		flags []string
+		note  bool
+	}{{nil, false}, {[]string{"--cp", env.url}, true}, {[]string{"--collector", env.url}, true}} {
+		var out, errb bytes.Buffer
+		if code := run(append(tc.flags, "digest", reportID), &out, &errb); code != 0 {
+			panic(fmt.Sprintf("%v: exit %d: %s", tc.flags, code, errb.String()))
+		}
+		if got := strings.Contains(out.String(), drillDownNote); got != tc.note {
+			t.Errorf("flags %v: the note is printed: %v, want %v", tc.flags, got, tc.note)
+		}
+	}
+}
+
+func TestSummaryOfAnEmptySessionSaysSo(t *testing.T) {
+	env := newReportEnv(t)
+	_, out, _ := env.tc("summary", reportID)
+	if !strings.Contains(out, "events     0: the session recorded nothing, so nothing was checked (see tracectl doctor)\n") {
+		panic("summary of an empty session:\n" + out)
+	}
+}
+
+// The first error as recorded is detail: the shorter levels of a failure
+// entry do not carry it.
+func TestFirstErrorIsLeftOutAtTheShorterLevels(t *testing.T) {
+	f := dFailure{Seq: 1, Count: 2, Name: "POST /work", Error: "dial tcp ?", FirstError: "dial tcp 127.0.0.1:1", Path: []dStep{}}
+	if got := failureAt(f, detailFull); got.FirstError != f.FirstError {
+		panic(fmt.Sprintf("full detail: %q", got.FirstError))
+	}
+	for _, level := range []int{detailShort, detailLeast} {
+		if got := failureAt(f, level); got.FirstError != "" {
+			panic(fmt.Sprintf("level %d keeps %q", level, got.FirstError))
+		}
+	}
+}
