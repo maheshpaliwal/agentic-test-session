@@ -210,6 +210,9 @@ const (
 	// with the session, so there are far fewer of them than of the reports
 	// kept in memory.
 	maxStoppedInstances = 64
+	// maxStoppedChanges is how often the note of one instance on one session
+	// is replaced by one that says something else (see StoppedInstance).
+	maxStoppedChanges = 8
 	// maxInstanceProgress bounds Manager.progress.
 	maxInstanceProgress = 4096
 	// maxCountsAsked bounds the instances a drain asks the collector about by
@@ -466,7 +469,10 @@ func noteStopped(s Session, st *deliveryState, n StoppedInstance) (list []Stoppe
 		if old.Why == n.Why && (old.Connected || !n.Connected) {
 			return list, more, false
 		}
-		n.At, n.Connected = old.At, old.Connected || n.Connected
+		if old.Changes >= maxStoppedChanges {
+			return list, more, false
+		}
+		n.At, n.Connected, n.Changes = old.At, old.Connected || n.Connected, old.Changes+1
 		list = slices.Clone(list)
 		list[i] = n
 		return list, more, true

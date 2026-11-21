@@ -389,6 +389,9 @@ Rolling back:
 
 ### Fixed
 
+- The `stopped` note of one instance on one session is replaced by one that says something else at most 8 times
+  (`changes` on the note). A caller that varied the text made the control plane write every running session on
+  every request: about 113 MB of journal from 300 small requests against 10 sessions, by the reviewer's count.
 - `tracectl doctor` with `--cp` at a service that answers `/healthz` and is no control plane (the collector's
   address) says so and exits 1; it printed "ok" and "this control plane is too old". Its list of connected
   services shows the instance name, which was blank. The README's sample-service step no longer puts a

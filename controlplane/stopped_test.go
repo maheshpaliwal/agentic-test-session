@@ -251,6 +251,22 @@ func TestARepeatedStoppedNoteIsStoredOnce(t *testing.T) {
 	if s.StoppedInstances[0].Why != "restarting" {
 		panic("the stored list was changed in place")
 	}
+	// A caller that says something else every time is stored maxStoppedChanges times, then no more: each
+	// stored note is a write of the session.
+	s.StoppedInstances = list
+	writes := 0
+	for i := range 100 {
+		next := n
+		next.Why = fmt.Sprintf("something else %d", i)
+		l, _, changed := noteStopped(s, nil, next)
+		if changed {
+			writes++
+			s.StoppedInstances = l
+		}
+	}
+	if writes != maxStoppedChanges-1 { // one change was made above
+		panic(fmt.Sprintf("%d of 100 different notes were stored, want %d", writes, maxStoppedChanges-1))
+	}
 }
 
 // With the delivery check turned off nothing makes a session incomplete; the

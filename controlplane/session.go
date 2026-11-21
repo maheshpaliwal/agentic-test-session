@@ -138,6 +138,13 @@ type StoppedInstance struct {
 	// Connected: an instance of that name followed the active set and had
 	// announced delivery reports when the control plane was told.
 	Connected bool `json:"connected,omitempty"`
+	// Changes is how often the note was replaced by one that said something
+	// else. An instance says three things at most (it restarts, it records
+	// again, it stays stopped) and may say the first two again after another
+	// panic; beyond maxStoppedChanges what it says is no longer stored, so
+	// that a caller who varies the text cannot make the control plane write
+	// every running session over and over.
+	Changes int `json:"changes,omitempty"`
 }
 
 // ActiveSet is the payload of GET /v1/active and the SSE stream.
