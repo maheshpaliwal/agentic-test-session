@@ -227,6 +227,11 @@ func (s *Session) Mutations(ctx context.Context, f MutationFilter) ([]Mutation, 
 // What reads the file gives the same verdict as the live session then. The
 // verdict is left out when the control plane does not know the session (a
 // handle from Detached), and it is final only for a session that has ended.
+//
+// A session without events is written as one line that holds its id and the
+// verdict (core.ExportHeader): the export of a session whose services could
+// not deliver anything says so, instead of being an empty file. Only when
+// the control plane does not know the session either is nothing written.
 func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
 	evs, err := s.Events(ctx)
 	if err != nil {
@@ -240,10 +245,22 @@ func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
 		if info.DrainTimedOut {
 			meta.MaxDrainSeconds = info.MaxDrainSeconds // the limit the drain ran into
 		}
+		if len(evs) == 0 {
+			meta.StartedAt, meta.EndedAt = info.StartedAt, info.EndedAt
+		}
 	} else if ctx.Err() != nil {
 		return 0, ctx.Err()
 	}
 	out := bufio.NewWriter(w)
+	if len(evs) == 0 && meta != nil {
+		line, err := core.ExportHeader(s.ID, meta)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := out.Write(append(line, '\n')); err != nil {
+			return 0, err
+		}
+	}
 	for i := range evs {
 		line, err := core.ExportLine(&evs[i], meta)
 		if err != nil {

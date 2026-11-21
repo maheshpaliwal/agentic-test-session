@@ -84,8 +84,9 @@ session results (collector):
                                 the call tree; ~> marks async work a span triggered
   show <id|name> <seq> [--json] one event in full: request, response, mutations with diffs
   export <id|name> [-o FILE]    all events as NDJSON (stdout by default), the session's verdict on the
-                                first line: "dashboard -open FILE" and tracectl against it then say
-                                what they say of the live session, --fail-on flags included
+                                first line (alone, when there are no events): "dashboard -open FILE"
+                                and tracectl against it then say what they say of the live session,
+                                --fail-on flags included
   report <id|name> [--format markdown|junit] [-o FILE] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
          [--fail-on-unconfirmed]
                                 a CI report: Markdown for a job summary (default) or JUnit XML, with

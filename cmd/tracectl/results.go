@@ -396,6 +396,9 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 	}
 	if *path != "" {
 		fmt.Fprintf(c.stderr, "wrote %d events to %s\n", n, *path)
+		if n == 0 {
+			fmt.Fprintln(c.stderr, "the session has no events: the file holds its verdict only (one line), or nothing if the control plane does not know the session")
+		}
 	}
 	return nil
 }

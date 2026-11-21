@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -189,7 +190,7 @@ func sameCollector(t *testing.T, a, b backend, id string) {
 	// Every entity's history, by its canonical key and, for a one-column
 	// key, by the bare value.
 	ents, _ := same(t, a, b, ofCol, sp+"/entities", nil).Body.([]any)
-	if len(ents) == 0 {
+	if sum, _ := fetch(t, a.col, sp+"/summary").Body.(map[string]any); len(ents) == 0 && fmt.Sprint(sum["event_count"]) != "0" {
 		t.Errorf("%s: no entities to compare histories of", id)
 	}
 	for _, e := range ents {
@@ -327,10 +328,12 @@ func edgeEvents(id string, base time.Time) []core.Event {
 	return evs
 }
 
-// liveFixture is three sessions recorded by a real control plane and
-// collector and sealed, and the same three exported to files. The third is
+// liveFixture is four sessions recorded by a real control plane and
+// collector and sealed, and the same four exported to files. The third is
 // one the collector finds nothing wrong with: the control plane marked it
-// incomplete, for events a service recorded and could not deliver.
+// incomplete, for events a service recorded and could not deliver. The
+// fourth has no events at all: its only service could not deliver anything
+// (a wrong collector URL), which the control plane knows from its report.
 type liveFixture struct {
 	in    *infra
 	live  backend
@@ -342,7 +345,7 @@ type liveFixture struct {
 func newLiveFixture(t *testing.T) *liveFixture {
 	t.Helper()
 	in := newInfra(t, store.NewMem())
-	f := &liveFixture{in: in, live: backend{"the services", in.cpSrv.URL, in.colSrv.URL}, names: []string{"checkout", "edge cases", "undelivered"}}
+	f := &liveFixture{in: in, live: backend{"the services", in.cpSrv.URL, in.colSrv.URL}, names: []string{"checkout", "edge cases", "undelivered", "nothing arrived"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	demo := dashboard.NewDemo()
@@ -362,11 +365,15 @@ func newLiveFixture(t *testing.T) *liveFixture {
 			evs = relabel(demo.Recorded("ts_demo0001"), s.ID)
 		case 1:
 			evs = edgeEvents(s.ID, time.Now())
-		default:
+		case 2:
 			evs = undeliveredEvents(t, in.cpSrv.URL, s.ID, time.Now())
+		default:
+			nothingArrived(t, in.cpSrv.URL, s.ID)
 		}
-		ingest(t, in.colSrv.URL, evs)
-		stored(t, in.colSrv.URL, s.ID, len(evs))
+		if len(evs) > 0 {
+			ingest(t, in.colSrv.URL, evs)
+			stored(t, in.colSrv.URL, s.ID, len(evs))
+		}
 		if info, err := s.StopAndWait(ctx); err != nil || info.State != "SEALED" {
 			panic(fmt.Sprintf("stop %s: %+v %v", name, info, err))
 		}
@@ -383,6 +390,37 @@ func newLiveFixture(t *testing.T) *liveFixture {
 		f.ids, f.files = append(f.ids, s.ID), append(f.files, file)
 	}
 	return f
+}
+
+// nothingArrived is a session whose only service recorded six events and
+// delivered none: the control plane has its report, the collector nothing.
+func nothingArrived(t *testing.T, cpURL, id string) {
+	t.Helper()
+	resp, err := plain.Post(cpURL+"/v1/sessions/"+id+"/delivery", "application/json", strings.NewReader(
+		`{"service":"orders-api","instance":"orders-api-1","recorded":6,"buffered":6,"last_error":"Post http://127.0.0.1:1/v1/ingest: connection refused","final":true}`))
+	if err != nil {
+		panic(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		panic(fmt.Sprintf("delivery report: %s", resp.Status))
+	}
+}
+
+// emptyExport is the export of the fixture's session without events: one
+// line, the session's id and its verdict.
+func emptyExport(t *testing.T, f *liveFixture) {
+	t.Helper()
+	b, err := os.ReadFile(f.files[3])
+	if err != nil {
+		panic(err)
+	}
+	id, meta, ok := core.ExportHeaderOf(bytes.TrimSpace(b))
+	if !ok || bytes.Count(b, []byte("\n")) != 1 || id != f.ids[3] || !meta.Incomplete || len(meta.IncompleteReasons) != 1 ||
+		!strings.Contains(meta.IncompleteReasons[0], "service orders-api (instance orders-api-1): 0 of 6 recorded events reached the collector") ||
+		meta.StartedAt.IsZero() || meta.EndedAt.Before(meta.StartedAt) {
+		panic(fmt.Sprintf("the export of a session without events: %q", b))
+	}
 }
 
 // undeliveredEvents is a session in which nothing went wrong that an event
@@ -457,6 +495,7 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	file := backend{"the opened files", srv.URL + "/api/cp", srv.URL + "/api/col"}
+	emptyExport(t, f)
 
 	// The collector: every answer is the same.
 	for _, id := range f.ids {
@@ -478,7 +517,7 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 	}
 	for _, p := range []string{
 		"/v1/sessions", "/v1/sessions?state=SEALED", "/v1/sessions?state=ACTIVE", "/v1/sessions?name=" + url.QueryEscape(f.names[1]),
-		"/v1/sessions?name=nope", "/v1/sessions?limit=5", "/v1/sessions?limit=3&state=SEALED", "/v1/sessions?limit=1&name=checkout",
+		"/v1/sessions?name=nope", "/v1/sessions?limit=5", "/v1/sessions?limit=4&state=SEALED", "/v1/sessions?limit=1&name=checkout",
 		// Errors, with their status and message.
 		"/v1/sessions/ts_nope", "/v1/sessions?limit=0", "/v1/sessions?limit=1001", "/v1/sessions?limit=x",
 		"/v1/sessions?limit=2&before=%25%25", "/v1/sessions?before=abc",
@@ -501,7 +540,7 @@ func TestOfflineAnswersLikeTheServices(t *testing.T) {
 			}
 		}
 	}
-	if d := firstDiff("", fmt.Sprint(pages[0]), fmt.Sprint(pages[1])); d != "" || len(pages[0]) != 3 {
+	if d := firstDiff("", fmt.Sprint(pages[0]), fmt.Sprint(pages[1])); d != "" || len(pages[0]) != 4 {
 		t.Errorf("paging the list one session at a time: %d and %d pages, %s", len(pages[0]), len(pages[1]), d)
 	}
 	// The active set: generation counts the changes the control plane made
@@ -738,13 +777,19 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 	file := startDashboard(t, dash, open...)
 
 	for i, id := range f.ids {
+		// The session without events: every command but the ones that name an
+		// event or an entity of it.
+		empty := i == 3
 		// One entity of the session, for history.
 		_, out, _ := tracectlAt(t, tracectl, f.live, "entities", id, "--json")
 		var ents []client.Entity
-		if err := json.Unmarshal([]byte(out), &ents); err != nil || len(ents) == 0 {
+		if err := json.Unmarshal([]byte(out), &ents); err != nil || len(ents) == 0 != empty {
 			panic(fmt.Sprintf("entities of %s: %v %s", id, err, out))
 		}
-		e := ents[len(ents)-1]
+		e := client.Entity{Store: "postgres", Entity: "orders", PK: "1"}
+		if !empty {
+			e = ents[len(ents)-1]
+		}
 		for _, args := range [][]string{
 			{"summary", id}, {"summary", id, "--json"}, {"summary", f.names[i]},
 			{"summary", id, "--fail-on-error", "--fail-on-incomplete"}, // exits 3 on both
@@ -753,6 +798,10 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 			// whose session the control plane had marked incomplete.)
 			{"summary", id, "--fail-on-incomplete"}, {"report", id, "--fail-on-incomplete"}, {"digest", id, "--fail-on-incomplete"},
 			{"summary", id, "--fail-on-unconfirmed"}, {"report", id, "--format", "junit", "--fail-on-unconfirmed"},
+			{"summary", id, "--fail-on-empty"}, {"report", id, "--fail-on-empty"}, {"digest", id, "--fail-on-empty"},
+			{"summary", id, "--fail-on-error"}, {"report", id, "--fail-on-error"}, {"digest", id, "--fail-on-error"},
+			{"digest", id, "--fail-on-unconfirmed"}, {"report", id, "--fail-on-unconfirmed"},
+			{"summary", id, "--fail-on-error", "--fail-on-incomplete", "--fail-on-empty", "--fail-on-unconfirmed"},
 			{"status", id},
 			{"events", id}, {"events", id, "--json"}, {"events", id, "--errors"},
 			{"trace", id}, {"trace", id, "--json"},
@@ -764,13 +813,18 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 			{"diff", f.ids[0], id}, {"diff", f.ids[0], id, "--json"},
 			{"status", id, "--short"}, {"list", "--state", "SEALED"},
 		} {
+			if empty && (args[0] == "show" || args[0] == "history") {
+				continue
+			}
 			wantCode, want, wantErr := tracectlAt(t, tracectl, f.live, args...)
 			code, got, gotErr := tracectlAt(t, tracectl, file, args...)
 			if args[0] == "status" && len(args) == 2 {
 				// The session document, less what a file does not hold.
 				want, got = statusDoc(t, want), statusDoc(t, got)
 			}
-			if strings.TrimSpace(want) == "" || (wantCode != 0 && wantCode != 3) {
+			// A list of nothing prints nothing.
+			silent := empty && slices.Contains([]string{"events", "entities", "trace"}, args[0])
+			if strings.TrimSpace(want) == "" && !silent || (wantCode != 0 && wantCode != 3) {
 				panic(fmt.Sprintf("tracectl %v on the live session: exit %d\n%s%s", args, wantCode, want, wantErr))
 			}
 			if code != wantCode || got != want || gotErr != wantErr {
@@ -796,6 +850,29 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 			t.Errorf("summary --fail-on-unconfirmed of %s: exit %d %s", name, code, errOut)
 		}
 	}
+	// The third review's F3, the session without events: its export used to
+	// be an empty file that could not be opened, so no gate could be run on
+	// it. It is the case delivery accounting exists for. Every gate of every
+	// command exits for the file as for the session.
+	none := f.ids[3]
+	for be, name := range map[backend]string{f.live: "the session", file: "the file"} {
+		for _, cmd := range []string{"summary", "report", "digest"} {
+			for flag, want := range map[string]int{"--fail-on-error": 0, "--fail-on-incomplete": 3, "--fail-on-empty": 3, "--fail-on-unconfirmed": 0} {
+				code, _, errOut := tracectlAt(t, tracectl, be, cmd, none, flag)
+				if code != want || want == 3 && !strings.Contains(errOut, "check failed") {
+					t.Errorf("%s %s of %s (no events): exit %d, want %d\n%s", cmd, flag, name, code, want, errOut)
+				}
+				if flag == "--fail-on-incomplete" && !strings.Contains(errOut, "service orders-api (instance orders-api-1): 0 of 6 recorded events reached the collector") {
+					t.Errorf("%s %s of %s does not say why: %s", cmd, flag, name, errOut)
+				}
+			}
+		}
+		if _, out, _ := tracectlAt(t, tracectl, be, "summary", none); !strings.Contains(out, "(SEALED, incomplete)") || !strings.Contains(out, "events     0") ||
+			!strings.Contains(out, "0 of 6 recorded events reached the collector") {
+			t.Errorf("summary of %s (no events):\n%s", name, out)
+		}
+	}
+
 	// The second session's drain ran into its limit: the file says so too.
 	for be, name := range map[backend]string{f.live: "the session", file: "the file"} {
 		if _, out, _ := tracectlAt(t, tracectl, be, "report", f.ids[1]); !strings.Contains(out, "Drain timed out: asynchronous work was still outstanding after the 15s drain limit.") {

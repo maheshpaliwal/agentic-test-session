@@ -3,12 +3,18 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"time"
 )
 
 // ExportSessionKey is the member of the first line of an export that holds
 // the session's verdict (see ExportSession). The line is an event like every
 // other; the member is one more field of its JSON object, which a reader
 // that does not know it skips, as it skips every unknown field of an event.
+//
+// A session without events has no event to carry it. Its export is one line
+// that holds the session's id and the verdict and nothing else (see
+// ExportHeader): the session the feature exists for, whose only service
+// could not deliver anything, must not export as an empty file.
 const ExportSessionKey = "tsession_session"
 
 // ExportSession is what an export says about its session besides the events:
@@ -29,6 +35,43 @@ type ExportSession struct {
 	DrainTimedOut   bool   `json:"drain_timed_out,omitempty"`
 	MaxDrainSeconds int    `json:"max_drain_seconds,omitempty"`
 	SealError       string `json:"seal_error,omitempty"`
+	// StartedAt and EndedAt are when the session ran. They are written for a
+	// session without events only: the events say it otherwise.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	EndedAt   time.Time `json:"ended_at,omitzero"`
+}
+
+// ExportHeader returns the one line an export of a session without events
+// consists of, without the newline: the session's id and its verdict,
+//
+//	{"session_id":"ts_...","tsession_session":{"state":"SEALED","incomplete":true,...}}
+//
+// It is not an event: it has no seq and no kind. A reader from before it
+// (dashboard -open) refuses the file with "not an exported event (no
+// session_id or seq)", where it refused the empty file with "no events".
+func ExportHeader(sessionID string, meta *ExportSession) ([]byte, error) {
+	return json.Marshal(struct {
+		SessionID string         `json:"session_id"`
+		Meta      *ExportSession `json:"tsession_session"`
+	}{sessionID, meta})
+}
+
+// ExportHeaderOf reads a line written by ExportHeader. ok is false for every
+// other line: an event (with or without the verdict), or anything else.
+func ExportHeaderOf(line []byte) (sessionID string, meta *ExportSession, ok bool) {
+	if !bytes.Contains(line, []byte(`"`+ExportSessionKey+`"`)) {
+		return "", nil, false
+	}
+	var v struct {
+		SessionID string         `json:"session_id"`
+		Seq       uint64         `json:"seq"`
+		Kind      string         `json:"kind"`
+		Meta      *ExportSession `json:"tsession_session"`
+	}
+	if json.Unmarshal(line, &v) != nil || v.Meta == nil || v.SessionID == "" || v.Seq != 0 || v.Kind != "" {
+		return "", nil, false
+	}
+	return v.SessionID, v.Meta, true
 }
 
 // ExportLine returns e as one line of an export, without the newline. With

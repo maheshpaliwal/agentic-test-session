@@ -394,8 +394,24 @@ is final for a session that has ended. `dashboard -open FILE` gives the opened s
 A reader that does not know the member skips it like any unknown field of an event: an older `dashboard -open`
 reads the file as before, without the verdict. An export without the member (written by an older tracectl, or of
 a session the control plane no longer knew) is judged on its events alone: incomplete for dropped events and
-unfinished async work, or when its last line is cut short. An export of a session without events is empty and
-cannot be opened.
+unfinished async work, or when its last line is cut short.
+
+**A session without events** has no event to carry the verdict, and is the session the verdict matters most
+for: its only service could not deliver anything (a wrong collector URL). Its export is one line that is not an
+event, the session's id and the verdict:
+
+```json
+{"session_id":"ts_1a2b...","tsession_session":{"state":"SEALED","incomplete":true,
+ "incomplete_reasons":["service orders-api (instance host-4711-a1b2c3): 0 of 6 recorded events reached the collector (last error: ...)"],
+ "started_at":"2026-11-21T10:00:00Z","ended_at":"2026-11-21T10:00:12Z"}}
+```
+(one line in the file). `started_at` and `ended_at` are written in this form only; the events say when the
+session ran otherwise. `dashboard -open` opens it as a sealed session with no events and that verdict, and every
+`tracectl` read command answers for it as for the live session: `summary`, `report` and `digest` exit `3` with
+`--fail-on-incomplete` and with `--fail-on-empty`, as they do live. A `dashboard -open` from before this form
+refuses the file with `not an exported event (no session_id or seq)`; it refused the empty file such a session
+used to export as with `no events`. Only a session without events that the control plane does not know either
+still exports as an empty file, which does not open (`no events, and no session`).
 
 ### Control plane hardening
 - Every endpoint except `GET /healthz` (static `ok`, any Host) passes `core.LoopbackGuard`: Host must be loopback or in

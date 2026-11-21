@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The verdict rides on the first event's line as one more member of its
@@ -44,5 +45,37 @@ func TestExportLineCarriesTheSession(t *testing.T) {
 	}
 	if ExportSessionOf([]byte(`{"session_id":"x","tsession_session":`)) != nil {
 		panic("a torn line has no session")
+	}
+}
+
+// A session without events has no event to carry the verdict: its export is
+// one line with the session's id and the verdict. It is not an event, and a
+// line that is one is not it.
+func TestExportHeader(t *testing.T) {
+	meta := &ExportSession{State: "SEALED", Incomplete: true,
+		IncompleteReasons: []string{`service orders-api (instance o-1): 0 of 6 recorded events reached the collector`},
+		StartedAt:         time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC), EndedAt: time.Date(2026, 11, 21, 10, 0, 12, 0, time.UTC)}
+	line, err := ExportHeader("ts_1", meta)
+	if err != nil || strings.ContainsAny(string(line), "\n") || !strings.HasPrefix(string(line), `{"session_id":"ts_1","tsession_session":{"state":"SEALED","incomplete":true,`) {
+		panic(fmt.Sprintf("%s %v", line, err))
+	}
+	id, got, ok := ExportHeaderOf(line)
+	if !ok || id != "ts_1" || !reflect.DeepEqual(*got, *meta) {
+		panic(fmt.Sprintf("read back: %q %+v %v", id, got, ok))
+	}
+	// An event, with the verdict or without, is not a header; nor is a line
+	// without a session, a torn one, or one that says nothing of a verdict.
+	e := Event{SessionID: "ts_1", Seq: 1, Kind: KindAPIIn}
+	withMeta, _ := ExportLine(&e, meta)
+	plain, _ := ExportLine(&e, nil)
+	for _, l := range [][]byte{withMeta, plain, []byte(`{"tsession_session":{"state":"SEALED"}}`), []byte(`{"session_id":"ts_1"}`),
+		[]byte(`{"session_id":"ts_1","tsession_session":null}`), []byte(`{"session_id":"ts_1","kind":"api.in","tsession_session":{}}`), line[:len(line)-3]} {
+		if _, _, ok := ExportHeaderOf(l); ok {
+			panic(fmt.Sprintf("taken for the line of a session without events: %s", l))
+		}
+	}
+	// The times are written for such a session only.
+	if with, _ := ExportLine(&e, &ExportSession{State: "SEALED"}); strings.Contains(string(with), "started_at") {
+		panic(fmt.Sprintf("an event's line: %s", with))
 	}
 }

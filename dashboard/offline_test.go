@@ -320,3 +320,75 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 		panic(fmt.Sprintf("an export without a verdict: %+v", s))
 	}
 }
+
+// The third review's F3: a session without events is the one the delivery
+// verdict exists for (its only service could not deliver anything), and its
+// export was an empty file that could not be opened. It is one line with the
+// session's id and its verdict now, and opens as a session without events
+// that says why.
+func TestOfflineOpensASessionWithoutEvents(t *testing.T) {
+	const reason = "service orders-api (instance o-1): 0 of 6 recorded events reached the collector (last error: connection refused)"
+	started := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	line, err := core.ExportHeader("ts_none", &core.ExportSession{State: "SEALED", Incomplete: true, IncompleteReasons: []string{reason},
+		StartedAt: started, EndedAt: started.Add(12 * time.Second)})
+	if err != nil {
+		panic(err)
+	}
+	file := filepath.Join(t.TempDir(), "nothing arrived.ndjson")
+	if err := os.WriteFile(file, append(line, '\n'), 0o600); err != nil {
+		panic(err)
+	}
+	h, err := New(Config{Open: []string{file}})
+	if err != nil {
+		panic(fmt.Sprintf("an export of a session without events does not open: %v", err))
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	var s Session
+	_, b := get(t, srv.URL, "/api/cp/v1/sessions/ts_none")
+	if err := json.Unmarshal(b, &s); err != nil || !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason ||
+		s.State != "SEALED" || s.Name != "nothing arrived" || !s.StartedAt.Equal(started) || !s.EndedAt.Equal(started.Add(12*time.Second)) {
+		panic(fmt.Sprintf("the session: %s %v", b, err))
+	}
+	// Every read of the collector answers, with nothing in it.
+	for path, want := range map[string]string{
+		"/summary": `"event_count":0`, "/events": `[]`, "/trace": `"session_id":"ts_none"`, "/entities": `[]`,
+	} {
+		code, b := get(t, srv.URL, "/api/col/v1/sessions/ts_none"+path)
+		if code.StatusCode != http.StatusOK || !strings.Contains(string(b), want) {
+			panic(fmt.Sprintf("GET %s: %d %s", path, code.StatusCode, b))
+		}
+	}
+	if code, b := get(t, srv.URL, "/api/cp/v1/sessions"); code.StatusCode != http.StatusOK || !strings.Contains(string(b), `"ts_none"`) {
+		panic(fmt.Sprintf("the list: %d %s", code.StatusCode, b))
+	}
+
+	// What does not open, and what it says. An empty file: nothing says which
+	// session it was.
+	bad := func(name, content, want string) {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			panic(err)
+		}
+		if _, err := New(Config{Open: []string{p}}); err == nil || !strings.Contains(err.Error(), want) {
+			panic(fmt.Sprintf("%s: %v, want an error that says %q", name, err, want))
+		}
+	}
+	bad("empty.ndjson", "", "no events, and no session")
+	bad("torn.ndjson", string(line[:len(line)-4]), "not an exported event")
+	other, _ := core.ExportHeader("ts_other", &core.ExportSession{State: "SEALED"})
+	bad("two.ndjson", string(line)+"\n"+string(other)+"\n", "two sessions (ts_none and ts_other) in one file")
+	ev, _ := core.ExportLine(&core.Event{SessionID: "ts_other", Seq: 1, Kind: core.KindAPIIn}, nil)
+	bad("mixed.ndjson", string(line)+"\n"+string(ev)+"\n", "events of two sessions (ts_none and ts_other) in one file")
+	// A verdict's line followed by events of the same session is read like
+	// an export whose first event carries it.
+	ev, _ = core.ExportLine(&core.Event{SessionID: "ts_none", Seq: 1, Kind: core.KindAPIIn, StartNs: 1e9, EndNs: 2e9}, nil)
+	p := filepath.Join(t.TempDir(), "both.ndjson")
+	if err := os.WriteFile(p, []byte(string(line)+"\n"+string(ev)+"\n"), 0o600); err != nil {
+		panic(err)
+	}
+	if _, err := New(Config{Open: []string{p}}); err != nil {
+		panic(err)
+	}
+}
