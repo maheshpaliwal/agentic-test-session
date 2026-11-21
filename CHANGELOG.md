@@ -49,6 +49,13 @@ Before deploying:
   failed `RequireMutation`, `RequireNoMutation` or `Ambient`): the message is the same, but a panic ends the
   whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped.
   `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
+- Delivery accounting: upgrade the collector with or before the control plane, otherwise every session with
+  reports is `delivery_unconfirmed`. A proxy between services and control plane must pass `POST /v1/delivery`;
+  if it answers 404 the service's sessions end `delivery_unconfirmed`. Sessions whose services recorded events
+  the collector lacks are now `incomplete`, so a gate that passed may fail. An older control plane rewriting
+  `--store-file` keeps `incomplete` but drops the reasons. The export of a session without events is one line,
+  not an empty file, and an older `dashboard -open` refuses it. `tracectl summary` prints `(SEALED, incomplete)`
+  for a timed-out drain or a failed seal.
 - `GET /v1/sessions` on the control plane without `limit`: `name` now filters and `before` is refused with `400`;
   both were ignored.
 - A custom collector store that does not implement the optional `store.ExpiredLister` is still swept for
@@ -100,6 +107,32 @@ Rolling back:
 
 ### Added
 
+- **Delivery accounting: a service that cannot deliver its events no longer passes the gates.** Each SDK
+  instance reports to the control plane how many events it recorded per session (`POST /v1/delivery`, batched,
+  plus one small request every 5 s while a session runs). When a drain ends, the control plane compares that
+  with what the collector stored for the instance, and a shortfall makes the session `incomplete` with a reason
+  that names the service, the instance and both numbers. A drain also waits for an instance that still owes
+  events while it makes progress. Before, a service with a wrong `TSESSION_COLLECTOR_URL` lost its events and
+  `--fail-on-incomplete` still passed.
+  - Where the control plane cannot tell (a connected service whose reports do not arrive, an old collector) the
+    session is `delivery_unconfirmed`: shown by `summary`, `report`, `digest`, `run` and the dashboard, and
+    failed only by the new `--fail-on-unconfirmed` (and `tsessiontest.RequireDeliveryConfirmed`). Use that gate
+    where every connected service is yours; in a shared environment another team's service can trip it.
+  - Measured with real binaries, 50 to 2,000 runs per scenario: no false `incomplete` on healthy systems
+    (parallel sessions, 500 sessions stopping together, slow or briefly unreachable collector and report
+    endpoint, idle services frozen or half-open); healthy drain time unchanged.
+  - Not detected: a service killed before it ever reports, a service on an older SDK, and a session that ends
+    sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off).
+  - Reported as `incomplete` although nothing is missing: a service whose reports are blocked while its events
+    all arrived, and one frozen for longer than the grace after delivering and before reporting. The control
+    plane cannot know that without the report, and the reason says so.
+  - The endpoint is unauthenticated, like stop and abort. `docs/PROTOCOL.md` lists what a caller who can reach
+    the control plane or the collector can do: make a session incomplete, hold a drain up to `max_drain`, and,
+    by ingesting events in a service's name or forging a matching final report for a service whose own reports
+    are blocked, make an incomplete session look complete. Whether that is acceptable is for whoever owns the
+    environment's security to decide.
+  - `tracectl export` carries the verdict, also for a session without events, so the gates exit for an
+    exported file as for the live session.
 - `client.StatusError` and `client.StatusCode(err)`: the error of a request the service answered with a non-2xx
   status now carries the code, so callers no longer match its text (it reads the same as before).
 - **Redis writes carry a diff** when before-images are on (`tredis.WithBeforeImage`): the value of a string,
@@ -266,6 +299,8 @@ Rolling back:
 
 ### Fixed
 
+- Control plane and client: a large answer from the collector was not read to its end, so its connection could
+  not be reused and every poll opened a new one; repeated rounds of 500 sessions ran a machine out of ports.
 - `tredis`: values that were recorded although the key or field is sensitive: the reply of `SET ... GET`,
   `HVALS`, `CONFIG GET` of credentials, `ACL`, and the value moved by `RENAME`. The error of a command with a
   masked argument keeps its code and kind only, since Redis and scripts quote arguments in error text.
