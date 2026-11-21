@@ -116,6 +116,9 @@ Rolling back:
 
 ### Added
 
+- `tracectl digest`: a change that was rolled back names the failed event of its transaction (`ROLLED BACK (its
+  transaction failed at #12)`, `rolled_back_by` in JSON). A digest read with `--cp` or `--collector` on the
+  command line says that its drill-down commands need the same flags (`drill_down_note`).
 - The SDK tells the control plane when it stops recording (`stopped` in `POST /v1/delivery`): the sessions
   running at that moment end incomplete, naming the service and instance. `Manager.Health`, `Collector.Health`;
   label `compaction` on `tsession_controlplane_goroutine_panics_total`; "Health and panics" in `docs/CONFIG.md`.

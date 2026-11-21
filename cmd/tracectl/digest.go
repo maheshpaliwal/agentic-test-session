@@ -83,6 +83,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
 	out, err := src.fit(render, *maxBytes)
 	if err != nil {
 		return err
@@ -148,7 +149,11 @@ type digest struct {
 	Tree      []dNode      `json:"tree"`
 	Omitted   []dOmitted   `json:"omitted"`
 	DrillDown []dDrillDown `json:"drill_down"`
-	MaxBytes  int          `json:"max_bytes"`
+	// DrillDownNote is set when the digest was read with --cp or --collector
+	// on the command line: the commands above need the same flags, or they
+	// ask the services of the environment variables or the defaults.
+	DrillDownNote string `json:"drill_down_note,omitempty"`
+	MaxBytes      int    `json:"max_bytes"`
 }
 
 type dSession struct {
@@ -234,6 +239,11 @@ type dChange struct {
 	Seq     uint64 `json:"seq"`
 	Op      string `json:"op"`
 	Outcome string `json:"outcome"` // effective, rolled_back or unknown
+	// RolledBackBy is the first failed event of the transaction of a change
+	// that was rolled back: where to look for why the change did not stay.
+	// Absent when no event of that transaction failed (the application
+	// rolled back on its own).
+	RolledBackBy uint64 `json:"rolled_back_by,omitempty"`
 	// Uncertain: a flag says the key or the row image is incomplete, so the
 	// fields below are not established fact.
 	Uncertain        bool     `json:"uncertain,omitempty"`
@@ -308,7 +318,13 @@ func dataText(s string, limit int) string {
 }
 
 // digestSource is a session as read, before anything is left out.
+// drillDownNote is DrillDownNote's text. It names no address: a digest is the
+// same text wherever it was read from.
+const drillDownNote = "Give these commands the --cp and --collector this digest was read with: without them they ask the services of TSESSION_CONTROLPLANE_URL and TSESSION_COLLECTOR_URL, or the defaults."
+
 type digestSource struct {
+	// urlFlags: --cp or --collector was given on the command line.
+	urlFlags bool
 	rep      *sessionReport
 	failures []dFailure
 	entities []dEntity
@@ -509,6 +525,15 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 func (src *digestSource) buildEntities(evs []core.Event) {
 	type key struct{ store, entity, pk string }
 	byKey := map[key]*dEntity{}
+	// The first failed event of every transaction.
+	txFailed := map[string]uint64{}
+	for i := range evs {
+		if e := &evs[i]; e.TxID != "" && e.Err != "" {
+			if _, seen := txFailed[e.TxID]; !seen {
+				txFailed[e.TxID] = e.Seq
+			}
+		}
+	}
 	for i := range evs {
 		e := &evs[i]
 		flags := digestFlags(e.Flags)
@@ -538,6 +563,7 @@ func (src *digestSource) buildEntities(evs []core.Event) {
 			default:
 				ent.RolledBack++
 				ch.Outcome = "rolled_back"
+				ch.RolledBackBy = txFailed[e.TxID]
 			}
 			if uncertain {
 				ent.Uncertain++
@@ -746,6 +772,9 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 			{"tracectl trace " + id + " --errors", "the failed branches of the call tree"},
 			{"tracectl events " + id + " --errors", "the failed events"},
 		},
+	}
+	if src.urlFlags {
+		d.DrillDownNote = drillDownNote
 	}
 	// The reasons are part of the verdict and always stay; what is cut of
 	// them (a long one shortened, the unconfirmed beyond the first few) is
@@ -1032,6 +1061,9 @@ func mdEntity(b *strings.Builder, e *dEntity) {
 	for _, c := range e.Changes {
 		outcome := map[string]string{"effective": "effective", "rolled_back": "ROLLED BACK"}[c.Outcome]
 		fmt.Fprintf(b, "  #%d %s %s", c.Seq, mdToken(c.Op), cmp.Or(outcome, "outcome unknown"))
+		if c.RolledBackBy != 0 {
+			fmt.Fprintf(b, " (its transaction failed at #%d)", c.RolledBackBy)
+		}
 		if c.Uncertain {
 			b.WriteString(" UNCERTAIN")
 		}
@@ -1223,6 +1255,9 @@ func (digestMarkdown) render(d *digest) []byte {
 	b.WriteString("\n### Drill down\n\n")
 	for _, dd := range d.DrillDown {
 		fmt.Fprintf(&b, "- %s: %s\n", mdCode(dd.Command), dd.Prints)
+	}
+	if d.DrillDownNote != "" {
+		fmt.Fprintf(&b, "- %s\n", d.DrillDownNote)
 	}
 	return b.Bytes()
 }

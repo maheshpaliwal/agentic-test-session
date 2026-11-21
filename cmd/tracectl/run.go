@@ -274,6 +274,7 @@ func (c *cli) runDigest(ctx context.Context, s *client.Session, path string) err
 	if err != nil {
 		return err
 	}
+	src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
 	out, err := src.fit(render, digestDefaultBytes)
 	if err != nil {
 		return err

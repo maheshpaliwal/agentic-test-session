@@ -100,6 +100,7 @@ Lists are never `null`.
 | `tree` | list | the lines of the call tree in pre-order, see below |
 | `omitted` | list | `section` (`verdict`, `counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out. `verdict`: how many of `incomplete_reasons` and `delivery_unconfirmed` are shortened or not listed |
 | `drill_down` | list | `command`, `prints` |
+| `drill_down_note` | string | present when the digest was read with `--cp` or `--collector` on the command line: the commands of `drill_down` need the same flags |
 | `max_bytes` | number | the budget this digest was made for |
 
 A failure: `seq`, `service`, `kind`, `name`, `error`, `in_tree` (false: the call tree does not hold the event),
@@ -115,7 +116,9 @@ merges them the same way, by its own rule (consecutive siblings).
 
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
-`changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`), `uncertain`,
+`changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`),
+`rolled_back_by` (the `seq` of the first failed event of the transaction of a change that was rolled back; absent
+when none failed), `uncertain`,
 `flags`, `after_unavailable`, `fields`, `fields_omitted`. A field: `field`, `before`, `after`, `hidden` (true when
 the column is masked and changed: `before` and `after` then read the same); the values are
 compact JSON text, clipped, or `null` for no value.

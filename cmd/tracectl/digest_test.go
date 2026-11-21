@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -898,5 +899,38 @@ func TestOutcomeCode(t *testing.T) {
 		if got := outcomeCode(&tc.ev); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestDigestLinksARollbackToTheFailureOfItsTransaction(t *testing.T) {
+	no := false
+	rolled := []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &no}}
+	src := &digestSource{}
+	src.buildEntities([]core.Event{
+		{Seq: 1, TxID: "tx_1", Kind: core.KindDBWrite, Mutations: rolled},
+		{Seq: 2, TxID: "tx_1", Kind: core.KindDBWrite, Err: "constraint"},
+		{Seq: 3, TxID: "tx_1", Kind: core.KindDBWrite, Err: "aborted"},
+		{Seq: 4, TxID: "tx_2", Kind: core.KindDBWrite, Mutations: rolled}, // rolled back by the application: nothing failed
+	})
+	var got []uint64
+	for _, e := range src.entities {
+		for _, c := range e.Changes {
+			got = append(got, c.Seq, c.RolledBackBy)
+		}
+	}
+	if want := []uint64{1, 2, 4, 0}; !slices.Equal(got, want) {
+		panic(fmt.Sprintf("seq and rolled_back_by: got %v, want %v", got, want))
+	}
+}
+
+func TestDigestSaysThatDrillDownNeedsTheURLFlags(t *testing.T) {
+	env := failingEnv(t)
+	_, out, _ := env.tc("digest", reportID)
+	if !strings.Contains(checkDigestMarkdown(t, out)["### Drill down"], "- "+drillDownNote+"\n") {
+		panic("the markdown digest read with --cp lacks the note:\n" + out)
+	}
+	_, out, _ = env.tc("digest", reportID, "--json")
+	if !strings.Contains(out, `"drill_down_note"`) {
+		panic("the JSON digest read with --cp lacks the note")
 	}
 }
