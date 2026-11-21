@@ -222,6 +222,39 @@ func TestIngestPartialFailure(t *testing.T) {
 	}
 }
 
+// With a zero window a session can fail after its events were buffered: its
+// actor is loaded and the write fails. It is named, and none of its events
+// are counted: the counts of a failed request are those of the sessions that
+// did not fail, so a request in which every session failed never looks as if
+// something was taken. The buffered events are written once the store is
+// back, and a resend is a duplicate.
+func TestIngestFailedSessionCountsNothing(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Window = 0
+	st := newPartStore()
+	c, url := newPartC(t, cfg, st)
+	if code, raw, _ := postRaw(t, url, sev("bad", 1)); code != 200 {
+		t.Fatalf("status %d body %s", code, raw)
+	}
+	st.set("bad", true)
+	code, raw, b := postRaw(t, url, sev("bad", 2), sev("bad", 3))
+	if code != http.StatusInternalServerError || b.Accepted != 0 || b.Duplicates != 0 || b.FailedSessions["bad"] != "storage" {
+		t.Fatalf("only the failing session: status %d body %s", code, raw)
+	}
+	code, raw, b = postRaw(t, url, sev("bad", 2), sev("bad", 3), sev("a", 4))
+	if code != http.StatusInternalServerError || b.Accepted != 1 || b.Duplicates != 0 || len(b.FailedSessions) != 1 {
+		t.Fatalf("with a healthy session: status %d body %s", code, raw)
+	}
+	st.set("bad", false)
+	code, raw, b = postRaw(t, url, sev("bad", 2), sev("bad", 3), sev("a", 4))
+	if code != 200 || b.Accepted+b.Duplicates != 3 || len(b.FailedSessions) != 0 {
+		t.Fatalf("after recovery: status %d body %s", code, raw)
+	}
+	if got := fmt.Sprint(storedOf(t, c, "a"), storedOf(t, c, "bad")); got != "[4] [1 2 3]" {
+		t.Fatalf("stored %s", got)
+	}
+}
+
 // A session whose buffer is full answers 503 and is named with its cause; the
 // other session of the request is accepted.
 func TestIngestPartialBackpressure(t *testing.T) {

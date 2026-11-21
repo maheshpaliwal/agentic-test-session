@@ -182,11 +182,12 @@ type IngestResult struct {
 	RejectedReasons map[string]int `json:"rejected_reasons,omitempty"`
 	// FailedSessions names the sessions whose events the request could not
 	// take, each with the cause (backpressure, shutdown or storage). It is set
-	// only on a failed request, and lets an exporter treat the events of every
-	// session it does not name as resolved and resend only the named ones. At
-	// most maxFailedSessions are listed; FailedSessionsTruncated says that
-	// more failed, in which case a session that is not named may have failed
-	// too and the whole request has to be resent.
+	// only on a failed request. A failed session counts nothing in Accepted
+	// and Duplicates, so an exporter that sees them above zero knows that the
+	// events of every session not named here are done, and resends only the
+	// named ones. At most maxFailedSessions are listed;
+	// FailedSessionsTruncated says that more failed, in which case a session
+	// that is not named may have failed too.
 	FailedSessions          map[string]string `json:"failed_sessions,omitempty"`
 	FailedSessionsTruncated bool              `json:"failed_sessions_truncated,omitempty"`
 }

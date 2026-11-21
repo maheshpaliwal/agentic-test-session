@@ -315,8 +315,13 @@ func (a *sessionActor) add(ctx context.Context, evs []core.Event) (acc, dup int,
 	if a.window <= 0 {
 		if err = a.flushNow(); err != nil {
 			a.arm(a.backoff())
+			// The events stay buffered and are flushed again later, but the
+			// session failed, and a failed session counts nothing: an exporter
+			// reads the counts of a failed request as those of the sessions
+			// that did not fail. What it sends again is deduplicated.
+			return 0, 0, err
 		}
-		return acc, dup, err
+		return acc, dup, nil
 	}
 	a.arm(a.window)
 	return acc, dup, nil
