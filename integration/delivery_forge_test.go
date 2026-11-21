@@ -225,6 +225,50 @@ func TestDeliveryForgery(t *testing.T) {
 		}
 	})
 
+	// The same caller opens its stream anew more often than the grace is
+	// long. Connecting is a sign of life, so the grace starts over each time
+	// and the drain is held until max_drain (6s). Pinned, not prevented; a
+	// request without reports does not have that effect (the heartbeat is no
+	// sign of life: TestDrainSilentParticipant).
+	t.Run("a+d: the same, opening the stream anew: the drain is held until max_drain (not defended)", func(t *testing.T) {
+		t.Parallel()
+		f := &forgeEnv{t, newInfra(t, store.NewMem())}
+		stop, stopped := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(stopped)
+			for {
+				ctx, cancel := context.WithCancel(context.Background())
+				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, f.in.cpSrv.URL+"/v1/active/stream", nil)
+				req.Header.Set(core.HeaderService, "ghost")
+				req.Header.Set(core.HeaderDeliveryInstance, "ghost-1")
+				resp, err := deliveryHTTP.Do(req)
+				select {
+				case <-stop:
+				case <-time.After(300 * time.Millisecond):
+				}
+				cancel()
+				if err == nil {
+					resp.Body.Close()
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+		infos, longest := f.each(1, func(id string) {
+			f.honest(id)
+			f.ingest(id, "ghost", "ghost-1", 2)
+		})
+		close(stop)
+		<-stopped
+		all(t, infos, "a stream opened anew every 0.3s", func(info client.Info) bool { return info.Incomplete && info.DrainTimedOut })
+		if longest < 5*time.Second {
+			t.Errorf("drain %v: expected it to be held until max_drain (6s)", longest)
+		}
+	})
+
 	// A forged report cannot clear a shortfall: the collector's count for the
 	// instance decides, and it has nothing.
 	t.Run("a forged report of everything delivered", func(t *testing.T) {
@@ -341,6 +385,41 @@ func TestDeliveryForgery(t *testing.T) {
 			f.report(id, forgedReport{"service": "victim", "instance": "v-1", "recorded": 5, "delivered": 5, "final": true})
 		})
 		all(t, infos, "the documented limit (a final report forged for an instance whose own do not arrive)", complete)
+	})
+
+	// (h) What is not defended beyond that, pinned so that the docs stay
+	// true: a session keeps the reports of 256 instances with it and of 1024
+	// more beside it. With 1280 made-up instances in place, the report of an
+	// instance that comes after them is not kept. If it is not final and the
+	// instance is then killed, the session says "more than 1280 instances
+	// reported" under delivery_unconfirmed where it would be incomplete; a
+	// report that names dropped events makes it incomplete all the same.
+	t.Run("h: more made-up instances than a session keeps (not defended)", func(t *testing.T) {
+		t.Parallel()
+		f := &forgeEnv{t, newInfra(t, store.NewMem())}
+		crowd := func(id string) {
+			for k := range 1280 { // each with its event at the collector: nothing is wrong with them
+				inst := fmt.Sprintf("f-%04d", k)
+				f.ingest(id, "f", inst, 1)
+				f.report(id, forgedReport{"service": "f", "instance": inst, "recorded": 1, "delivered": 1, "final": true})
+			}
+		}
+		infos, _ := f.each(min(n, 2), func(id string) {
+			crowd(id)
+			f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 10, "buffered": 10})
+		})
+		all(t, infos, "the documented limit (a report beyond the 1280 a session keeps)", func(info client.Info) bool {
+			return !info.Incomplete && len(info.IncompleteReasons) == 0 && len(info.DeliveryUnconfirmed) == 1 &&
+				info.DeliveryUnconfirmed[0] == "more than 1280 instances reported; the reports of the ones beyond that are not accounted for"
+		})
+		infos, _ = f.each(min(n, 2), func(id string) {
+			crowd(id)
+			f.report(id, forgedReport{"service": "real", "instance": "real-1", "recorded": 10, "dropped": 10, "final": true})
+		})
+		all(t, infos, "a report beyond the 1280 that names dropped events", func(info client.Info) bool {
+			return info.Incomplete && len(info.IncompleteReasons) == 1 &&
+				strings.HasPrefix(info.IncompleteReasons[0], "more than 1280 instances reported, and a report of one beyond that said that events were dropped or left undelivered")
+		})
 	})
 
 	// (d) What the counts cannot defend against, pinned so that the docs

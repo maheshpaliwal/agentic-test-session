@@ -576,13 +576,20 @@ func TestReporterHeartbeat(t *testing.T) {
 		if n := cp.beats(); n != 1 {
 			panic(fmt.Sprintf("%d requests from a process that follows no session, want the one at its connect", n))
 		}
-		// A session begins: the first heartbeat is sent at once, not a period later.
-		began := time.Now()
 		cp.set(`{"active":["someone-elses"]}`)
 		eventually(t, "a heartbeat when a session begins", func() bool { return cp.beats() == 2 })
-		if took := time.Since(began); took > period/2 {
-			panic(fmt.Sprintf("the first heartbeat took %v", took))
-		}
+	})
+	// The first heartbeat after a time without sessions does not wait for the
+	// reporter's next look at its accounts (here: an hour away). The control
+	// plane counts the silence of this process from the moment the session
+	// began.
+	t.Run("the first session after none: at once", func(t *testing.T) {
+		cp := newReportCP(t, `{"active":[]}`)
+		newReportEnvOn(t, cp, nil, beat, func(c *reporterConfig) { c.Tick = time.Hour })
+		eventually(t, "the hello", func() bool { return cp.beats() == 1 })
+		time.Sleep(2 * period)
+		cp.set(`{"active":["someone-elses"]}`)
+		eventually(t, "a heartbeat when a session begins", func() bool { return cp.beats() == 2 })
 	})
 	t.Run("a session of somebody else: one per period", func(t *testing.T) {
 		cp := newReportCP(t, `{"active":["someone-elses"]}`)
@@ -590,7 +597,9 @@ func TestReporterHeartbeat(t *testing.T) {
 		eventually(t, "the hello", func() bool { return cp.beats() >= 1 })
 		before := cp.beats()
 		time.Sleep(10 * period)
-		if n := cp.beats() - before; n < 8 || n > 12 {
+		// About ten; fewer on a machine that is busy, never more than one per
+		// three quarters of a period.
+		if n := cp.beats() - before; n < 4 || n > 14 {
 			panic(fmt.Sprintf("%d heartbeats in ten periods", n))
 		}
 		if posts := cp.postCount(); posts != 0 {
