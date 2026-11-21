@@ -343,7 +343,7 @@ func (t *stmtTrace) keySelect(cols []string, exact bool, refs []pkRef, sys bool)
 	var b strings.Builder
 	b.WriteString("SELECT *")
 	if sys {
-		b.WriteString(", xmax::text AS " + xmaxCol)
+		b.WriteString(", xmax::text AS " + xmaxCol + ", tableoid::text || ':' || ctid::text AS " + verCol)
 	}
 	b.WriteString(" FROM " + t.info.TableSQL + " WHERE ")
 	if len(cols) == 1 {

@@ -108,10 +108,11 @@ func WithPKLookup(on bool) Option { return func(c *config) { c.pkLookup = on } }
 // WithUpsertBefore toggles the read of the row an upsert can update before
 // the statement runs (default true; see "Upserts" in the package
 // documentation). It is one capture: three round trips on Postgres, one on
-// MySQL. With it off, Postgres still tells a row the upsert inserted
-// (recorded as with it on) from one it updated, which is then recorded as an
-// update with its new values only: no before image, no diff, flag
-// "image_skipped". On MySQL every upsert is then flagged "upsert_unknown".
+// MySQL. With it off, Postgres still tells a row the upsert inserted and
+// nothing has locked since (recorded as with it on); every other row is
+// recorded with its new values only, no before image and no diff, under the
+// flag "upsert_unknown". On MySQL every upsert is then flagged
+// "upsert_unknown".
 func WithUpsertBefore(on bool) Option { return func(c *config) { c.upsertBefore = on } }
 
 // WithMaxImageRows caps rows captured per statement for images (default 50).

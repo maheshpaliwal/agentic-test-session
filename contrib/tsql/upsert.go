@@ -16,6 +16,46 @@ import (
 // fails on a partitioned table, and changes what the application receives).
 const xmaxCol = "ts_capture_xmax"
 
+// verCol is read with it, before the statement and after: where the row
+// version is stored (its table, for a partitioned one, and its ctid). xmax
+// alone does not say that THIS statement wrote the row: it stays set on a
+// row that was ever locked or updated. A row whose version is where it was
+// before the statement was not written by it, whatever its xmax says: the
+// WHERE of DO UPDATE left it alone, or the statement wrote another row (a
+// trigger changed the key, the server rounded it).
+const verCol = "ts_capture_ver"
+
+// noSysCols reports whether the last capture's read failed because the
+// relation has no system columns (a view, a database that only speaks the
+// protocol): SQLSTATE 42703, undefined column. Any other failure (no SELECT
+// right, a timeout) says nothing about them.
+func (c *conn) noSysCols() bool {
+	if c.readErr == nil {
+		return false
+	}
+	if state, coded := sqlState(c.readErr); coded {
+		return state == "42703"
+	}
+	m := c.readErr.Error()
+	return strings.Contains(m, "42703") || strings.Contains(m, "does not exist") &&
+		(strings.Contains(m, "xmax") || strings.Contains(m, "ctid") || strings.Contains(m, "tableoid"))
+}
+
+// takeSys removes the columns a read with sys added from a row image and
+// returns them. has is false for a row read without them.
+func takeSys(m *img) (xmax, ver string, has bool) {
+	x, ok := m.disp[xmaxCol]
+	if !ok {
+		return "", "", false
+	}
+	v := m.disp[verCol]
+	delete(m.disp, xmaxCol)
+	delete(m.disp, verCol)
+	delete(m.raw, xmaxCol)
+	delete(m.raw, verCol)
+	return fmt.Sprint(x), fmt.Sprint(v), true
+}
+
 // upsertRead is what is read around an upsert that can update a row: the
 // rows with the keys in VALUES, before the statement and after it.
 type upsertRead struct {
@@ -31,6 +71,9 @@ type upsertRead struct {
 
 	before   []img
 	beforeOK bool // the rows were read before the statement
+	// ver is where the version of each row of before was stored (verCol),
+	// by the row's key; empty when the database does not say.
+	ver map[string]string
 	// notKey: cols matched more rows than there are keys, so they do not
 	// identify a row.
 	notKey bool
@@ -123,14 +166,33 @@ func (t *stmtTrace) upsertBefore() {
 		t.flag("image_failed")
 		return
 	}
-	q, vals := t.keySelect(u.cols, u.exact, u.keys, false)
-	rs, st := t.captureKeyed(q, vals, len(u.keys)+1, "image_failed", u.keyCols)
+	sys := t.pg() && !t.c.pks.noSys(t.info.TableSQL)
+	q, vals := t.keySelect(u.cols, u.exact, u.keys, sys)
+	failFlag := "image_failed"
+	if sys {
+		failFlag = "" // a view has no system columns: asked again without them below
+	}
+	rs, st := t.captureKeyed(q, vals, len(u.keys)+1, failFlag, u.keyCols)
+	switch {
+	case sys && st == capFailed && t.c.noSysCols():
+		t.c.pks.setNoSys(t.info.TableSQL)
+		q, vals = t.keySelect(u.cols, u.exact, u.keys, false)
+		rs, st = t.captureKeyed(q, vals, len(u.keys)+1, "image_failed", u.keyCols)
+	case sys && (st == capFailed || st == capAborted):
+		t.flag("image_failed")
+	}
 	if st != capOK {
 		return
 	}
 	if len(rs) > len(u.keys) {
 		t.upsertNotKey(u)
 		return
+	}
+	u.ver = map[string]string{}
+	for i := range rs {
+		if _, ver, has := takeSys(&rs[i]); has {
+			u.ver[u.key(rs[i])] = ver
+		}
 	}
 	u.before, u.beforeOK = rs, true
 }
@@ -148,6 +210,7 @@ const (
 	upUnknown = iota
 	upInserted
 	upUpdated
+	upUntouched // the row is where it was: the statement did not write it
 )
 
 // upsertRow is one row read after an upsert.
@@ -178,8 +241,14 @@ func (t *stmtTrace) upsertKind(r upsertRow, u *upsertRead, affected int64) int {
 	switch {
 	case r.fresh == 1 && !was:
 		return upInserted
-	case r.fresh == 0 && (was || !u.beforeOK):
+	case r.fresh == 0 && was:
 		return upUpdated
+	case r.fresh == 0 && !u.beforeOK:
+		// No read before the statement (WithUpsertBefore(false)): a version
+		// that is not fresh is a row the statement updated, or one it
+		// inserted and something then locked (a foreign-key check, a
+		// trigger). Not known.
+		return upUnknown
 	case r.fresh >= 0 || !u.beforeOK:
 		return upUnknown
 	case t.pg():
@@ -205,7 +274,15 @@ func (t *stmtTrace) addUpserts(res driver.Result, ret []img, affected int64, emi
 		t.flag("multi_row_insert")
 	}
 	if !t.cfg.images {
-		emit("upsert", nil, nil, t.pkFromValues(in.Values, t.pk).disp, true)
+		// The key in VALUES is the written row's key only if it is what the
+		// statement collides on: with another conflict target the row that
+		// is updated can be a different one.
+		pk := t.pkFromValues(in.Values, t.pk).disp
+		if t.pg() && !in.Conflict.DoNothing && !sameCols(in.Conflict.Target, t.pk) {
+			pk = nil
+			t.flag("upsert_unknown")
+		}
+		emit("upsert", nil, nil, pk, true)
 		return
 	}
 	// unknown records rows of which it is not known whether they were
@@ -230,10 +307,12 @@ func (t *stmtTrace) addUpserts(res driver.Result, ret []img, affected int64, emi
 	}
 	sys := t.pg() && !t.c.pks.noSys(in.TableSQL)
 	rs, st := read(sys, "")
-	if sys && st == capFailed {
+	if sys && st == capFailed && t.c.noSysCols() {
 		// A view has no xmax, nor has every database that speaks the
 		// protocol. The read failed inside the fence; it is made again
-		// without, and for a while the table is not asked for it.
+		// without, and for a while the table is not asked for it. A read
+		// that failed for another reason (no SELECT right) is not a sign of
+		// that, and must not cost later statements the columns.
 		t.c.pks.setNoSys(in.TableSQL)
 		rs, st = read(false, "")
 	}
@@ -257,10 +336,10 @@ func (t *stmtTrace) addUpserts(res driver.Result, ret []img, affected int64, emi
 	rows := make([]upsertRow, len(rs))
 	for i := range rs {
 		r := upsertRow{after: &rs[i], fresh: -1}
-		if x, ok := rs[i].disp[xmaxCol]; ok {
-			delete(rs[i].disp, xmaxCol)
+		xmax, ver, hasSys := takeSys(&rs[i])
+		if hasSys {
 			r.fresh = 0
-			if fmt.Sprint(x) == "0" {
+			if xmax == "0" {
 				r.fresh = 1
 			}
 		}
@@ -268,7 +347,28 @@ func (t *stmtTrace) addUpserts(res driver.Result, ret []img, affected int64, emi
 		r.before = was[k]
 		delete(was, k)
 		r.kind = t.upsertKind(r, u, affected)
+		if r.before != nil && hasSys && ver != "" && ver == u.ver[k] {
+			r.kind = upUntouched
+		}
 		rows[i] = r
+	}
+	// Rows the statement did not write are not its mutations. If it wrote
+	// as many rows as are accounted for without them, that is all: DO
+	// UPDATE ... WHERE left them alone. If its row count is not known, or it
+	// wrote a row that is not found under the keys in VALUES, what it wrote
+	// is not known (the count check below says so).
+	untouched := 0
+	written := rows[:0:0]
+	for _, r := range rows {
+		if r.kind == upUntouched {
+			untouched++
+			continue
+		}
+		written = append(written, r)
+	}
+	rows = written
+	if untouched > 0 && affected < 0 {
+		unknown(nil)
 	}
 
 	// The statement's row count must account for the rows that were found
@@ -375,4 +475,17 @@ func (t *stmtTrace) upsertWritten(res driver.Result, ret []img, affected int64) 
 		}
 	}
 	return nil
+}
+
+// sameCols reports whether a and b name the same columns, in any order.
+func sameCols(a, b []string) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	for _, c := range a {
+		if !isKeyCol(c, b) {
+			return false
+		}
+	}
+	return true
 }

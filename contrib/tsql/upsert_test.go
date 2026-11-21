@@ -25,7 +25,8 @@ type upTable struct {
 	key    int // index in cols of the column the statements find a row by
 	rows   [][]driver.Value
 	locked map[string]bool
-	noXmax bool // a view: it has no system columns
+	ver    map[string]int // how often the row was written: a write stores a new row version elsewhere
+	noXmax bool           // a view: it has no system columns
 	nextID int64
 }
 
@@ -46,7 +47,7 @@ func (u *upTable) sel(q string, args []driver.Value) result {
 	}
 	r := result{cols: append([]string(nil), u.cols...)}
 	if sys {
-		r.cols = append(r.cols, "ts_capture_xmax")
+		r.cols = append(r.cols, "ts_capture_xmax", "ts_capture_ver")
 	}
 	for _, row := range u.rows {
 		for _, a := range args {
@@ -57,7 +58,7 @@ func (u *upTable) sel(q string, args []driver.Value) result {
 					if u.locked[fmt.Sprint(row[u.key])] {
 						x = "731"
 					}
-					out = append(out, x)
+					out = append(out, x, fmt.Sprintf("16384:(0,%d)", u.ver[fmt.Sprint(row[u.key])]+1))
 				}
 				r.rows = append(r.rows, out)
 				break
@@ -74,6 +75,10 @@ func (u *upTable) put(row []driver.Value, set ...int) {
 		u.locked = map[string]bool{}
 	}
 	k := fmt.Sprint(row[u.key])
+	if u.ver == nil {
+		u.ver = map[string]int{}
+	}
+	u.ver[k]++
 	if i := u.find(row[u.key]); i >= 0 {
 		for _, c := range set {
 			u.rows[i][c] = row[c]

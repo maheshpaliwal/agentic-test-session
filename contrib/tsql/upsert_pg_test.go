@@ -323,20 +323,129 @@ func TestPGUpsertThroughView(t *testing.T) {
 }
 
 // WithUpsertBefore(false): the row after the statement alone says whether it
-// was inserted; an updated row has no before image and no diff.
+// was inserted. A row whose version is not fresh was updated, or inserted and
+// then locked: that is not known without the read before, and is flagged.
 func TestPGUpsertBeforeOff(t *testing.T) {
 	rtDSN(t)
 	off := []tsql.Option{tsql.WithUpsertBefore(false)}
 	m := upPGClean(t, upPGOne(t, off, upPGStmt, "gadget", 5, "Gadget"))
 	upCheck(t, m, "upsert", false, "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget")
 	e := upPGOne(t, off, upPGStmt, "widget", 7, "x")
-	if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, []string{"image_skipped"}) || e.Attrs["image_skip_reason"] != "upsert_before_off" {
-		t.Fatalf("mutations %+v flags %v attrs %v", e.Mutations, e.Flags, e.Attrs)
+	upUnknown(t, e)
+	if len(e.Mutations) != 1 || jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) {
+		t.Fatalf("mutations %+v flags %v", e.Mutations, e.Flags)
 	}
-	upCheck(t, e.Mutations[0], "update", false, "")
-	if jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) {
-		t.Errorf("after %s", e.Mutations[0].After.Inline)
+}
+
+// A row that was there before the statement and has xmax set is not thereby
+// a row the statement updated: xmax stays set on any row that was ever locked
+// or updated. Where the row version is stored says whether it was written.
+// Each case below was recorded as an update of the wrong row, with before
+// equal to after and no flag.
+func TestPGUpsertDoesNotClaimARowItDidNotWrite(t *testing.T) {
+	rtDSN(t)
+	// noRecordOf fails if any mutation claims the row with this key was changed.
+	untouched := func(t *testing.T, e core.Event, col string, val any) {
+		t.Helper()
+		for _, m := range e.Mutations {
+			if reflect.DeepEqual(m.PK[col], val) && (m.Op == "update" || !m.After.IsZero()) {
+				t.Errorf("the statement did not write %s=%v, yet it is recorded: %+v (flags %v)", col, val, m, e.Flags)
+			}
+		}
 	}
+	t.Run("key rounded by the server", func(t *testing.T) {
+		upPGReset(t)
+		rtAdmin(t, "DROP TABLE IF EXISTS tsql_up_n", "CREATE TABLE tsql_up_n (id int PRIMARY KEY, v text)",
+			"INSERT INTO tsql_up_n VALUES (1, 'one'), (2, 'two')", "UPDATE tsql_up_n SET v = v") // both rows carry an xmax
+		t.Cleanup(func() { rtAdmin(t, "DROP TABLE IF EXISTS tsql_up_n") })
+		rec, ctx := setup(t)
+		db, err := tsql.Open("pgx", rtDSN(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		// 1.6 is looked for as 1.6 (no row; 1 is not read either), and stored as 2.
+		if _, err := db.ExecContext(ctx, "INSERT INTO tsql_up_n (id, v) VALUES (1.6, 'x') ON CONFLICT (id) DO UPDATE SET v = EXCLUDED.v"); err != nil {
+			t.Fatal(err)
+		}
+		e := lastWrite(t, rec)
+		untouched(t, e, "id", float64(1))
+		untouched(t, e, "id", int64(1))
+		if !hasFlag(e, "upsert_unknown") && !hasFlag(e, "image_skipped") {
+			t.Errorf("row 2 was written and is not found under the key in VALUES: the record must say so; flags %v mutations %+v", e.Flags, e.Mutations)
+		}
+	})
+	t.Run("DO UPDATE WHERE false through Query", func(t *testing.T) {
+		upPGReset(t)
+		rtAdmin(t, "UPDATE tsql_up SET qty = qty WHERE sku = 'widget'") // widget carries an xmax
+		rec, ctx := setup(t)
+		db, err := tsql.Open("pgx", rtDSN(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(ctx, upPGStmt+" WHERE false", "widget", 7, "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		e := lastWrite(t, rec)
+		for _, m := range e.Mutations {
+			if m.Op == "update" {
+				t.Errorf("nothing was written, yet an update is recorded: %+v (flags %v)", m, e.Flags)
+			}
+		}
+	})
+	t.Run("a fresh insert that something locked, no read before", func(t *testing.T) {
+		upPGReset(t)
+		rtAdmin(t, "DROP TABLE IF EXISTS tsql_up_child",
+			"CREATE TABLE tsql_up_child (id serial PRIMARY KEY, sku text REFERENCES tsql_up(sku))",
+			`CREATE OR REPLACE FUNCTION tsql_up_child_fn() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN INSERT INTO tsql_up_child (sku) VALUES (NEW.sku); RETURN NEW; END $f$`,
+			"CREATE TRIGGER tsql_up_child_tr AFTER INSERT ON tsql_up FOR EACH ROW EXECUTE FUNCTION tsql_up_child_fn()")
+		t.Cleanup(func() {
+			rtAdmin(t, "DROP TABLE IF EXISTS tsql_up_child", "DROP FUNCTION IF EXISTS tsql_up_child_fn() CASCADE")
+		})
+		rec, ctx := setup(t)
+		db, err := tsql.Open("pgx", rtDSN(t), tsql.WithUpsertBefore(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.ExecContext(ctx, upPGStmt, "gadget", 5, "Gadget"); err != nil {
+			t.Fatal(err)
+		}
+		// The foreign-key check of the trigger's insert locks the new row: its xmax is set.
+		e := lastWrite(t, rec)
+		for _, m := range e.Mutations {
+			if m.Op == "update" {
+				t.Errorf("an inserted row is recorded as an update: %+v (flags %v)", m, e.Flags)
+			}
+		}
+		upUnknown(t, e)
+	})
+	t.Run("images off, another row's id in VALUES", func(t *testing.T) {
+		upPGReset(t)
+		rec, ctx := setup(t)
+		db, err := tsql.Open("pgx", rtDSN(t), tsql.WithImages(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		// The conflict is on email: the row that is updated is Ann's (id 1), not id 99.
+		if _, err := db.ExecContext(ctx, "INSERT INTO tsql_up_users (id, email, name) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name", 99, "a@example.com", "Anna"); err != nil {
+			t.Fatal(err)
+		}
+		e := lastWrite(t, rec)
+		untouched(t, e, "id", int64(99))
+		for _, m := range e.Mutations {
+			if len(m.PK) != 0 {
+				t.Errorf("filed under %v, a row that was not written: %+v", m.PK, m)
+			}
+		}
+		if !hasFlag(e, "upsert_unknown") {
+			t.Errorf("flags %v, want upsert_unknown", e.Flags)
+		}
+	})
 }
 
 // An upsert with RETURNING: the application gets the rows and columns it

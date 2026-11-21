@@ -59,6 +59,7 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			out, st = nil, capFailed
 		}
 	}()
+	c.readErr = nil
 	inTx, iso := c.txState()
 	if inTx && iso == isoSerial {
 		return nil, capSerializable
@@ -226,6 +227,7 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 		}
 	}
 	out, err := c.fetchImgs(cctx, q, vals, limit, pkCols)
+	c.readErr = err
 	st = classify(err, cctx)
 	closeFence(true)
 	if err != nil {

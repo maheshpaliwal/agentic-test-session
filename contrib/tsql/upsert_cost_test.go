@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	upSelBefore = "SELECT * FROM stock WHERE sku IN ($1)"
-	upSelAfter  = "SELECT *, xmax::text AS ts_capture_xmax FROM stock WHERE sku IN ($1)"
+	upSelAfter  = "SELECT *, xmax::text AS ts_capture_xmax, tableoid::text || ':' || ctid::text AS ts_capture_ver FROM stock WHERE sku IN ($1)"
+	upSelBefore = upSelAfter // both reads say where the row version is stored
 )
 
 // An upsert that can update costs what an UPDATE costs: one fenced read
@@ -85,8 +85,9 @@ func TestUpsertUsesKeyCache(t *testing.T) {
 }
 
 // WithUpsertBefore(false): one read, after the statement. A row the upsert
-// inserted is recorded as ever; one it updated is an update whose earlier
-// values are not known.
+// inserted is recorded as ever. One whose version is not fresh was updated,
+// or inserted and then locked (a foreign-key check, a trigger): without the
+// read before, that is not known, and the record says so.
 func TestUpsertBeforeOff(t *testing.T) {
 	rec, ctx := setup(t)
 	f := upFake(stockTable(), 1)
@@ -104,15 +105,15 @@ func TestUpsertBeforeOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	e = lastWrite(t, rec)
-	if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, []string{"image_skipped"}) || e.Attrs["image_skip_reason"] != "upsert_before_off" {
+	if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, []string{"upsert_unknown"}) {
 		t.Fatalf("update: mutations %+v flags %v attrs %v", e.Mutations, e.Flags, e.Attrs)
 	}
-	upCheck(t, e.Mutations[0], "update", false, "")
+	upCheck(t, e.Mutations[0], "upsert", false, "")
 	if jsonMap(t, e.Mutations[0].After)["qty"] != float64(7) {
 		t.Errorf("after %s", e.Mutations[0].After.Inline)
 	}
 	calls := f.Calls()
-	if len(calls) != 4 || calls[1].SQL != `SELECT *, xmax::text AS ts_capture_xmax FROM stock WHERE sku IN ($1)` || calls[3].SQL != calls[1].SQL {
+	if len(calls) != 4 || calls[1].SQL != upSelAfter || calls[3].SQL != calls[1].SQL {
 		t.Fatalf("calls, want each statement and one read after it:\n%s", sqls(calls))
 	}
 }
@@ -153,20 +154,24 @@ func TestUpsertRace(t *testing.T) {
 }
 
 // The read before the statement fails: the row after it still says whether
-// it was inserted; an updated row has no before image and no diff.
+// it was inserted; of a row whose version is not fresh it is not known
+// whether the statement updated it.
 func TestUpsertBeforeReadFails(t *testing.T) {
 	for _, tc := range []struct {
 		sku, op, diff string
 	}{
 		{"gadget", "upsert", "name:<nil>->Gadget qty:<nil>->5 sku:<nil>->gadget"},
-		{"widget", "update", ""},
+		{"widget", "upsert", ""},
 	} {
 		rec, ctx := setup(t)
 		f := upFake(stockTable(), 1)
 		inner := f.handler
+		reads := 0
 		f.handler = func(q string, args []driver.Value) result {
 			if q == upSelBefore {
-				return result{err: errors.New("permission denied for table stock")}
+				if reads++; reads == 1 { // the read before the statement; the one after it is the same text
+					return result{err: errors.New("permission denied for table stock")}
+				}
 			}
 			return inner(q, args)
 		}
@@ -175,7 +180,11 @@ func TestUpsertBeforeReadFails(t *testing.T) {
 			t.Fatal(err)
 		}
 		e := lastWrite(t, rec)
-		if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, []string{"image_failed"}) {
+		wantFlags := []string{"image_failed"}
+		if tc.sku == "widget" {
+			wantFlags = append(wantFlags, "upsert_unknown")
+		}
+		if len(e.Mutations) != 1 || !reflect.DeepEqual(e.Flags, wantFlags) {
 			t.Fatalf("%s: mutations %+v flags %v", tc.sku, e.Mutations, e.Flags)
 		}
 		upCheck(t, e.Mutations[0], tc.op, false, tc.diff)
@@ -223,8 +232,9 @@ func TestUpsertRelationWithoutXmax(t *testing.T) {
 		}
 		upCheck(t, e.Mutations[0], "update", true, want)
 	}
-	if got := f.Calls(); len(got) != 4+3 || got[2].SQL != upSelAfter || got[6].SQL != upSelBefore {
-		t.Fatalf("calls, want the first read after the statement made twice and the second once:\n%s", sqls(got))
+	const plain = "SELECT * FROM stock WHERE sku IN ($1)"
+	if got := f.Calls(); len(got) != 4+3 || got[0].SQL != upSelBefore || got[1].SQL != plain || got[3].SQL != plain || got[4].SQL != plain || got[6].SQL != plain {
+		t.Fatalf("calls, want the very first read made twice (with and without system columns) and every later one once:\n%s", sqls(got))
 	}
 	if _, err := db.ExecContext(ctx, stockUpsert, "gadget", 5, "Gadget"); err != nil {
 		t.Fatal(err)

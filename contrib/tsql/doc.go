@@ -112,10 +112,22 @@
 // and once after it, each a capture like any other (fenced, skipped under
 // SERIALIZABLE, never outside a session or with WithImages(false)). The
 // target need not be the primary key; the mutation is filed under the
-// primary key the row has. The read after the statement also takes the row
-// version's xmax: 0 on a version an INSERT wrote, set on the one ON CONFLICT
-// DO UPDATE wrote. That is what tells an insert from an update; the read
-// before it gives the old values. The statement itself is never changed (a
+// primary key the row has. Both reads also take where the row version is
+// stored (its table and ctid), and the read after the statement its xmax: 0
+// on a version an INSERT wrote and nothing has locked since. A row that was
+// not there before and is fresh after was inserted. A row that was there
+// and whose version is stored elsewhere after was updated; the read before
+// gives the old values. A row whose version is where it was has not been
+// written by the statement, whatever its xmax says (xmax stays set on a row
+// that was ever locked or updated): the WHERE of DO UPDATE left it alone,
+// or the statement wrote another row than the one looked for (a trigger
+// changed the key, the server rounded it), which the statement's row count
+// then shows and the record says ("upsert_unknown"). A row that was not
+// there and is not fresh was inserted by someone else in between, or was
+// inserted by the statement and locked at once: an AFTER INSERT trigger
+// that inserts a row referencing it is enough, through the foreign-key
+// check. Which of the two is not known, so on such a table every inserting
+// upsert is recorded as "upsert_unknown", with its after image and no diff. The statement itself is never changed (a
 // RETURNING clause would need SELECT rights it may not have, fails with a
 // system column on a partitioned table, and changes what the application
 // receives), also when it has a RETURNING of its own.
@@ -149,9 +161,9 @@
 // and nothing is read before it.
 //
 // WithUpsertBefore(false) drops the read before the statement. On Postgres
-// an inserted row is still recorded as above; an updated one is an update
-// with its after image only, no diff, flag "image_skipped" (reason
-// "upsert_before_off").
+// a row that is fresh after the statement is still recorded as inserted;
+// any other row was updated, or inserted and then locked, and is recorded
+// as "upsert_unknown" with its after image and no diff.
 //
 // MySQL (INSERT ... ON DUPLICATE KEY UPDATE, REPLACE) has not been run
 // against a server, and is kept to what holds in either client convention

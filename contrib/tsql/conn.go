@@ -35,6 +35,10 @@ type conn struct {
 	// capture). Only the statement path touches it, which database/sql
 	// serializes per connection.
 	multi multiStmt
+	// readErr is the error of the last capture's read itself, nil if it
+	// ran: the caller that asked for system columns wants to know whether
+	// the relation has none or the read failed for another reason.
+	readErr error
 	// fence holds the statements of this connection's savepoint fence, made
 	// when the first one is needed (see fenceStmts).
 	fence *fenceStmts

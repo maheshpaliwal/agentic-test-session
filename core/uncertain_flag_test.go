@@ -4,7 +4,7 @@ import "testing"
 
 func TestUncertainFlag(t *testing.T) {
 	for flag, want := range map[string]bool{
-		"pk_unknown": true, "pk_not_unique": true, "pk_lookup_failed": true, "after_unavailable": true,
+		"pk_unknown": true, "pk_not_unique": true, "pk_lookup_failed": true, "after_unavailable": true, "upsert_unknown": true,
 		"after_from_args": true, "returning_partial": true, "image_skipped": true, "image_timeout": true,
 		"image_skipped:deadline": true, "image_skipped:": true,
 		// about the event, not about how far a row image can be trusted
