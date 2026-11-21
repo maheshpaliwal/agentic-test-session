@@ -149,7 +149,15 @@ func produceBatch(ctx context.Context, w KafkaWriter, msgs []kafka.Message) erro
 		for i := range cp {
 			kc := kafkaCarrier{&cp[i].Headers}
 			for k, v := range carrier {
-				kc.Set(k, v)
+				switch k {
+				case core.KeyTraceparent:
+					// Decided per message by WriteTraceparent: a message
+					// may carry the application's own.
+				case core.KeyTSessionTraceparent:
+					core.WriteTraceparent(kc, v)
+				default:
+					kc.Set(k, v)
+				}
 			}
 		}
 		return w.WriteMessages(c, cp...)

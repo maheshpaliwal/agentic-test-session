@@ -21,8 +21,8 @@ import (
 const maxSQSAttrs = 10
 
 // ctxAttr is the compact single-attribute carrier ("k=v&k=v", url-encoded),
-// used when fewer than 3 attribute slots are free. The name is namespaced so
-// it cannot collide with an application attribute.
+// used when the attributes of the full form do not fit (see SendMessageOpts).
+// The name is namespaced so it cannot collide with an application attribute.
 const ctxAttr = "x-tsession-ctx"
 
 // legacyCtxAttr is the compact carrier name written by earlier versions. It is
@@ -30,25 +30,65 @@ const ctxAttr = "x-tsession-ctx"
 // written, because applications use "ts" for their own data.
 const legacyCtxAttr = "ts"
 
+// sqsOwnKeys are the attributes of the full form that only tsession writes.
+// The fourth attribute of the full form, traceparent, may be the
+// application's.
+var sqsOwnKeys = [...]string{core.KeyTSessionTraceparent, core.KeySession, core.KeyHLC}
+
+// sqsCarrier reads the trace context of a received message, in either form.
 type sqsCarrier map[string]types.MessageAttributeValue
 
-func (c sqsCarrier) Get(key string) string {
-	key = strings.ToLower(key)
+func (c sqsCarrier) direct(key string) string {
 	if v, ok := c[key]; ok && v.StringValue != nil {
 		return *v.StringValue
 	}
+	return ""
+}
+
+func (c sqsCarrier) compact(key string) string {
 	for _, name := range [...]string{ctxAttr, legacyCtxAttr} {
-		if v, ok := c[name]; ok && v.StringValue != nil {
-			if q, err := url.ParseQuery(*v.StringValue); err == nil && q.Get(key) != "" {
-				return q.Get(key)
-			}
+		if q, err := url.ParseQuery(c.direct(name)); err == nil && q.Get(key) != "" {
+			return q.Get(key)
 		}
 	}
 	return ""
 }
 
+// Get reads key from where the session id is. A message whose session id is
+// in the compact attribute was sent in the compact form, which writes no other
+// attribute: one named like a carrier key (traceparent) is then the
+// application's, and the compact value is used. Otherwise the attribute is
+// used, and the compact value only when there is none.
+func (c sqsCarrier) Get(key string) string {
+	key = strings.ToLower(key)
+	d, k := c.direct(key), c.compact(key)
+	if d == "" || (k != "" && c.direct(core.KeySession) == "") {
+		return k
+	}
+	return d
+}
+
 func (c sqsCarrier) Set(key, val string) {
 	c[strings.ToLower(key)] = types.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String(val)}
+}
+
+// sqsAttrs is the carrier for writing the full form into the attributes of a
+// message being sent. Unlike sqsCarrier it never looks inside a compact
+// attribute: whether the message already has a traceparent is a question
+// about its attributes only.
+type sqsAttrs map[string]types.MessageAttributeValue
+
+func (c sqsAttrs) Get(key string) string { return sqsCarrier(c).direct(strings.ToLower(key)) }
+func (c sqsAttrs) Set(key, val string)   { sqsCarrier(c).Set(key, val) }
+
+// stale reports which carrier attributes c already has from an earlier
+// publish: a compact attribute that holds a session id (an application
+// attribute of that name does not), and a traceparent equal to
+// x-tsession-traceparent, which tsession wrote.
+func (c sqsAttrs) stale() (compact, traceparent bool) {
+	q, err := url.ParseQuery(c.Get(ctxAttr))
+	tp := c.Get(core.KeyTraceparent)
+	return err == nil && q.Get(core.KeySession) != "", tp != "" && tp == c.Get(core.KeyTSessionTraceparent)
 }
 
 func encodeTS(m core.MapCarrier) string {
@@ -88,18 +128,30 @@ func SendMessage(ctx context.Context, c SQSAPI, in *sqs.SendMessageInput, optFns
 }
 
 // SendMessageOpts is SendMessage with options. SQS allows 10 message
-// attributes: with 3 free slots the carrier uses 3 attributes; with 1-2 free it
-// uses one compact "x-tsession-ctx" attribute; with none (or when the
-// application already set an attribute of that name, which is never
-// overwritten) it uses opts.SideChannel when configured, else propagation is
-// skipped and the publish span is flagged propagation_skipped:attr_limit
-// (side-channel failure: ...:side_channel).
+// attributes, and the carrier picks the first form that fits:
+//
+//   - Full: x-tsession-traceparent, x-tsession-id and x-tsession-hlc, plus
+//     traceparent when the message has none. That is 4 new attributes, or 3
+//     when the application set its own traceparent, which is left untouched.
+//   - Compact: one "x-tsession-ctx" attribute holding the same keys, when the
+//     full form does not fit and one slot is free. No other attribute is
+//     written, so an application traceparent is untouched here too.
+//   - opts.SideChannel, when configured and no slot is free, or the
+//     application already set an attribute named x-tsession-ctx (it is never
+//     overwritten).
+//   - Otherwise propagation is skipped and the publish span is flagged
+//     propagation_skipped:attr_limit (side-channel failure: ...:side_channel).
+//
+// Carrier attributes that are already on the message, because it is a
+// received message sent on with its attributes, name the span that published
+// it the first time. They are replaced, and removed when this publish uses
+// another form, and do not count against the limit.
 func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.SendMessageInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
 	if !core.Enabled() || in == nil {
 		return c.SendMessage(ctx, in, optFns...)
 	}
 	cp := *in
-	attrs := make(map[string]types.MessageAttributeValue, len(in.MessageAttributes)+3)
+	attrs := make(map[string]types.MessageAttributeValue, len(in.MessageAttributes)+len(sqsOwnKeys)+1)
 	maps.Copy(attrs, in.MessageAttributes)
 	cp.MessageAttributes = attrs
 	queue := aws.ToString(in.QueueUrl)
@@ -107,12 +159,33 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 	info := Message{System: "sqs", Queue: queue, JobName: queue, Params: bodyParams([]byte(body)),
 		Delay: secs(in.DelaySeconds)}
 
-	room := maxSQSAttrs - len(attrs)
-	var carrier core.Carrier = sqsCarrier(attrs)
+	// The form is chosen from counts only: the attributes are not changed
+	// until a publish span exists, so a message outside a session is sent as
+	// the application built it.
+	used := len(attrs)
+	staleCtx, staleTP := sqsAttrs(attrs).stale()
+	if staleCtx {
+		used--
+	}
+	need, ownPresent := 0, 0
+	for _, k := range sqsOwnKeys {
+		if has(attrs, k) {
+			ownPresent++
+		} else {
+			need++
+		}
+	}
+	if !has(attrs, core.KeyTraceparent) {
+		need++
+	}
+	if staleTP {
+		ownPresent++
+	}
+	var carrier core.Carrier = sqsAttrs(attrs)
 	mode := "attrs"
 	switch {
-	case room >= 3:
-	case room >= 1 && !has(attrs, ctxAttr):
+	case maxSQSAttrs-used >= need:
+	case maxSQSAttrs-(used-ownPresent) >= 1 && (staleCtx || !has(attrs, ctxAttr)):
 		mode, carrier = "ctx", core.MapCarrier{}
 	case opts.SideChannel != nil:
 		mode, carrier = "side", core.MapCarrier{}
@@ -122,16 +195,27 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 	}
 	var out *sqs.SendMessageOutput
 	err := publish(ctx, info, carrier, func(c2 context.Context, span *core.Span) error {
-		switch m := carrier.(type) {
-		case core.MapCarrier:
-			if len(m) > 0 {
-				switch mode {
-				case "ctx":
-					sqsCarrier(attrs).Set(ctxAttr, encodeTS(m))
-				case "side":
-					if e := putBounded(c2, opts.SideChannel, sqsSideKey(queue, md5Hex(body)), m, opts.PutTimeout); e != nil {
-						flag(span, FlagSideChannel)
-					}
+		if span != nil {
+			// Whatever carrier the message arrived with is stale now.
+			if staleCtx {
+				delete(attrs, ctxAttr)
+			}
+			if mode != "attrs" {
+				for _, k := range sqsOwnKeys {
+					delete(attrs, k)
+				}
+				if staleTP {
+					delete(attrs, core.KeyTraceparent)
+				}
+			}
+		}
+		if m, ok := carrier.(core.MapCarrier); ok && len(m) > 0 {
+			switch mode {
+			case "ctx":
+				sqsCarrier(attrs).Set(ctxAttr, encodeTS(m))
+			case "side":
+				if e := putBounded(c2, opts.SideChannel, sqsSideKey(queue, md5Hex(body)), m, opts.PutTimeout); e != nil {
+					flag(span, FlagSideChannel)
 				}
 			}
 		}
@@ -149,7 +233,7 @@ func ReceiveMessage(ctx context.Context, c SQSAPI, in *sqs.ReceiveMessageInput, 
 	}
 	cp := *in
 	cp.MessageAttributeNames = append(append([]string(nil), in.MessageAttributeNames...),
-		core.KeyTraceparent, core.KeySession, core.KeyHLC, ctxAttr, legacyCtxAttr)
+		core.KeyTSessionTraceparent, core.KeyTraceparent, core.KeySession, core.KeyHLC, ctxAttr, legacyCtxAttr)
 	cp.MessageSystemAttributeNames = append(append([]types.MessageSystemAttributeName(nil), in.MessageSystemAttributeNames...),
 		types.MessageSystemAttributeNameApproximateReceiveCount)
 	return c.ReceiveMessage(ctx, &cp, optFns...)
