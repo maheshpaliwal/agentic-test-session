@@ -295,6 +295,38 @@ func TestKafkaLeavesEmptyApplicationTraceparent(t *testing.T) {
 
 // ---- AMQP ----
 
+// AMQP header names are case-sensitive. An application header named
+// Traceparent is its trace context all the same: tsession does not put a
+// traceparent next to it.
+func TestAMQPSeesTraceparentUnderAnyNameCase(t *testing.T) {
+	for _, name := range []string{"Traceparent", "TRACEPARENT"} {
+		for _, overwrite := range []bool{false, true} {
+			rec, ctx := setup(t, true)
+			core.Configure(core.Config{Service: "svc", Enabled: true, OverwriteTraceparent: overwrite})
+			ch := &fakeAMQP{}
+			in := amqp.Publishing{Body: []byte(`{}`), Headers: amqp.Table{name: appTP, "Other": "1"}}
+			if err := PublishAMQP(ctx, ch, "ex", "k", false, false, in); err != nil {
+				t.Fatal(err)
+			}
+			got, pub := ch.got[0].Headers, lastPub(t, rec)
+			want := appTP
+			if overwrite {
+				want = tpFor(pub) // replaced where it is
+			}
+			if _, added := got["traceparent"]; added || got[name] != want || got["Other"] != "1" || len(got) != 5 {
+				t.Fatalf("%s, overwrite=%v: headers %v, want %s = %q and no traceparent", name, overwrite, got, name, want)
+			}
+			if in.Headers[name] != appTP || len(in.Headers) != 2 {
+				t.Fatalf("caller's headers mutated: %v", in.Headers)
+			}
+			if err := ConsumeDelivery(context.Background(), "q", amqp.Delivery{Headers: got, RoutingKey: "k", DeliveryTag: 1}, 0, noop); err != nil {
+				t.Fatal(err)
+			}
+			assertLastWorker(t, rec, pub)
+		}
+	}
+}
+
 // An AMQP header can hold any field type. A traceparent that is neither a
 // string nor bytes is the application's all the same.
 func TestAMQPLeavesTraceparentThatIsNotText(t *testing.T) {

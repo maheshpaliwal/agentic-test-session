@@ -82,6 +82,34 @@ func TestClientKeepsApplicationTraceparent(t *testing.T) {
 	}
 }
 
+// An application that sets its header with req.Header["traceparent"] = ...
+// stores it under a key http.Header.Get does not find. The receiver must get
+// that one value, not tsession's in front of it.
+func TestClientSeesTraceparentUnderNonCanonicalKey(t *testing.T) {
+	rec := setup(t, active("s1"))
+	var got http.Header
+	down := httptest.NewServer(Handler(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r.Header.Clone() })))
+	defer down.Close()
+	root := core.SpanContext{SessionID: "s1", TraceID: core.NewTraceID(), SpanID: core.NewSpanID()}
+	req, _ := http.NewRequestWithContext(core.ContextWith(t.Context(), root), "GET", down.URL, nil)
+	req.Header["traceparent"] = []string{appTraceparent}
+	resp, err := Client(nil).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if tp := got.Values("Traceparent"); len(tp) != 1 || tp[0] != appTraceparent {
+		t.Fatalf("receiver got traceparent %q, want exactly the application's", tp)
+	}
+	out, in := kind(rec.Events(), core.KindAPIOut), kind(rec.Events(), core.KindAPIIn)
+	if len(out) != 1 || len(in) != 1 || in[0].ParentID != out[0].SpanID || in[0].TraceID != root.TraceID {
+		t.Fatalf("api.out %+v, api.in %+v", out, in)
+	}
+	if len(req.Header) != 1 {
+		t.Fatalf("caller's request headers mutated: %v", req.Header)
+	}
+}
+
 // Without application tracing the wire is what it was, plus the own key.
 func TestClientWritesBothKeysWithoutApplicationTracing(t *testing.T) {
 	rec := setup(t, active("s1"))

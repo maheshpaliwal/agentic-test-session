@@ -94,14 +94,58 @@ type HTTPHeaderCarrier http.Header
 // Get implements Carrier.
 func (h HTTPHeaderCarrier) Get(k string) string { return http.Header(h).Get(k) }
 
-// Has implements PresenceCarrier: a header sent with an empty value counts.
+// Has implements PresenceCarrier. A header sent with an empty value counts,
+// and so does one stored under a key that is not in canonical form
+// (h["traceparent"] = ..., which http.Header.Get does not find but which is
+// sent all the same).
 func (h HTTPHeaderCarrier) Has(k string) bool {
-	_, ok := h[http.CanonicalHeaderKey(k)]
+	ck := canonicalKey(k)
+	if _, ok := h[ck]; ok {
+		return true
+	}
+	_, ok := h.variant(ck)
 	return ok
 }
 
-// Set implements Carrier.
-func (h HTTPHeaderCarrier) Set(k, v string) { http.Header(h).Set(k, v) }
+// Set implements Carrier. A header stored under a key that is not in
+// canonical form is replaced where it is, so that the request never carries
+// the header twice.
+func (h HTTPHeaderCarrier) Set(k, v string) {
+	ck := canonicalKey(k)
+	if _, ok := h[ck]; !ok {
+		if name, ok := h.variant(ck); ok {
+			ck = name
+		}
+	}
+	h[ck] = []string{v}
+}
+
+// canonicalKey is http.CanonicalHeaderKey, without the allocation for the
+// keys Inject writes on every traced request.
+func canonicalKey(k string) string {
+	switch k {
+	case KeyTraceparent:
+		return "Traceparent"
+	case KeyTSessionTraceparent:
+		return "X-Tsession-Traceparent"
+	case KeySession:
+		return "X-Tsession-Id"
+	case KeyHLC:
+		return "X-Tsession-Hlc"
+	}
+	return http.CanonicalHeaderKey(k)
+}
+
+// variant returns a key of h that differs from the canonical key ck in case
+// only.
+func (h HTTPHeaderCarrier) variant(ck string) (string, bool) {
+	for name := range h {
+		if len(name) == len(ck) && name != ck && strings.EqualFold(name, ck) {
+			return name, true
+		}
+	}
+	return "", false
+}
 
 // Inject writes the current span context (if any) into c: the session id, and
 // the trace context and the clock as described at WriteTraceparent.

@@ -310,6 +310,54 @@ func TestInjectLeavesTraceparentThatIsNotText(t *testing.T) {
 	}
 }
 
+// An application that stores its header with h["traceparent"] = ... instead of
+// h.Set has one all the same: http.Header.Get does not find the key, but the
+// header is sent. tsession must not add a Traceparent next to it.
+func TestInjectSeesHTTPTraceparentUnderAnyKeyCase(t *testing.T) {
+	ctx, sc := propSetup(t, Config{})
+	// The headers are plain maps here: the keys are meant not to be canonical.
+	for _, key := range []string{"traceparent", "TRACEPARENT", "TraceParent"} {
+		h := map[string][]string{key: {appTP}, "tracestate": {"vendor=1"}}
+		Inject(ctx, HTTPHeaderCarrier(h))
+		if len(h[key]) != 1 || h[key][0] != appTP {
+			t.Errorf("%s: application traceparent is now %q", key, h[key])
+		}
+		if _, added := h["Traceparent"]; added {
+			t.Errorf("%s: a second traceparent header was added: %v", key, h)
+		}
+		if h["tracestate"][0] != "vendor=1" || len(h) != 5 {
+			t.Errorf("%s: headers are now %v", key, h)
+		}
+		if got, ok := ExtractSpanContext(HTTPHeaderCarrier(h)); !ok || got.SpanID != sc.SpanID {
+			t.Errorf("%s: extracted %+v", key, got)
+		}
+	}
+
+	// The overwrite setting replaces the header where it is.
+	Configure(Config{Service: "svc", Enabled: true, OverwriteTraceparent: true})
+	h := map[string][]string{"traceparent": {appTP}}
+	Inject(ctx, HTTPHeaderCarrier(h))
+	if _, added := h["Traceparent"]; added || len(h["traceparent"]) != 1 || h["traceparent"][0] != tpOf(sc) {
+		t.Errorf("overwrite setting: %v", h)
+	}
+
+	// tsession's own keys under such names are replaced as well, not doubled.
+	Configure(Config{Service: "svc", Enabled: true})
+	h = map[string][]string{"x-tsession-id": {"s0"}, "x-tsession-hlc": {"1"}, "x-tsession-traceparent": {"stale;1"}}
+	Inject(ctx, HTTPHeaderCarrier(h))
+	if len(h) != 4 || h["x-tsession-id"][0] != "s1" || h["x-tsession-hlc"][0] == "1" || h["x-tsession-traceparent"][0] == "stale;1" {
+		t.Errorf("own keys under non-canonical names: %v", h)
+	}
+}
+
+func TestCanonicalKeyMatchesNetHTTP(t *testing.T) {
+	for _, k := range []string{KeyTraceparent, KeyTSessionTraceparent, KeySession, KeyHLC, "x-other", "Traceparent"} {
+		if got, want := canonicalKey(k), http.CanonicalHeaderKey(k); got != want {
+			t.Errorf("canonicalKey(%q) = %q, want %q", k, got, want)
+		}
+	}
+}
+
 func TestBeginIngressParentFromOwnKey(t *testing.T) {
 	_, sc := propSetup(t, Config{})
 	rec := &MemRecorder{}
