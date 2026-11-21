@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,8 +47,14 @@ type fakeDB struct {
 	// abortModel mimics Postgres: after an error every statement fails with
 	// "current transaction is aborted" until ROLLBACK TO SAVEPOINT; COMMIT of
 	// an aborted tx fails.
+	// It also keeps the savepoints: ROLLBACK TO and RELEASE of one that does
+	// not exist fail and abort the transaction, as on the server.
 	abortModel bool
 	aborted    bool
+	saves      []string
+	// rawSQL is every statement text as sent. In calls, and for the handler,
+	// the name of tsql's savepoint is "ts_capture" (see fenceNorm).
+	rawSQL []string
 	// noMulti mimics a driver that prepares every statement: Postgres refuses
 	// a text holding two statements, and that refusal is an error like any other.
 	noMulti bool
@@ -117,8 +124,63 @@ func (f *fakeDB) wait(ctx context.Context, q string) error {
 
 func (f *fakeDB) record(c call) {
 	f.mu.Lock()
+	f.rawSQL = append(f.rawSQL, c.SQL)
+	c.SQL = fenceNorm(c.SQL)
 	f.calls = append(f.calls, c)
 	f.mu.Unlock()
+}
+
+// fenceName matches the name of tsql's savepoint: it differs per connection.
+var fenceName = regexp.MustCompile(`ts_capture_[0-9a-f]{16}\b`)
+
+// fenceNorm replaces the name of tsql's savepoint with "ts_capture", so that
+// statement sequences can be compared.
+func fenceNorm(q string) string { return fenceName.ReplaceAllString(q, "ts_capture") }
+
+// savepoints applies the savepoint statements at the start of q to the
+// model. done is true when q held nothing else; r is then its outcome.
+func (f *fakeDB) savepoints(q string) (r result, done bool) {
+	find := func(name string) int {
+		for i := len(f.saves) - 1; i >= 0; i-- {
+			if f.saves[i] == name {
+				return i
+			}
+		}
+		return -1
+	}
+	missing := func(name string) (result, bool) {
+		f.aborted = true
+		return result{err: fmt.Errorf("ERROR: savepoint %q does not exist (SQLSTATE 3B001)", name)}, true
+	}
+	aborted := result{err: errors.New("current transaction is aborted, commands ignored until end of transaction block")}
+	for _, st := range strings.Split(q, "; ") {
+		name := st[strings.LastIndexByte(st, ' ')+1:]
+		switch {
+		case strings.HasPrefix(st, "ROLLBACK TO SAVEPOINT "):
+			i := find(name)
+			if i < 0 {
+				return missing(name)
+			}
+			f.saves, f.aborted = f.saves[:i+1], false
+		case strings.HasPrefix(st, "RELEASE SAVEPOINT "):
+			if f.aborted {
+				return aborted, true
+			}
+			i := find(name)
+			if i < 0 {
+				return missing(name)
+			}
+			f.saves = f.saves[:i]
+		case strings.HasPrefix(st, "SAVEPOINT "):
+			if f.aborted {
+				return aborted, true
+			}
+			f.saves = append(f.saves, name)
+		default:
+			return result{}, false
+		}
+	}
+	return result{affected: 1}, true
 }
 
 // RawCalls returns every statement including the capture fence
@@ -157,14 +219,14 @@ func (f *fakeDB) answer(q string, args []driver.Value) result {
 		return result{err: errors.New("cannot insert multiple commands into a prepared statement (SQLSTATE 42601)")}
 	}
 	if f.abortModel {
-		if strings.HasPrefix(q, "ROLLBACK TO") {
-			f.aborted = false
-			return result{}
+		if r, done := f.savepoints(q); done {
+			return r
 		}
 		if f.aborted {
 			return result{err: errors.New("current transaction is aborted, commands ignored until end of transaction block")}
 		}
 	}
+	q = fenceNorm(q)
 	var r result
 	switch {
 	case isPKLookup(q):
@@ -248,9 +310,16 @@ func (t fakeTx) Commit() error {
 		return errors.New("commit of aborted transaction")
 	}
 	t.db.commits++
+	t.db.saves = nil
 	return nil
 }
-func (t fakeTx) Rollback() error { t.db.mu.Lock(); t.db.rbacks++; t.db.mu.Unlock(); return nil }
+func (t fakeTx) Rollback() error {
+	t.db.mu.Lock()
+	t.db.rbacks++
+	t.db.saves = nil
+	t.db.mu.Unlock()
+	return nil
+}
 
 type fakeStmt struct {
 	c *fakeConn

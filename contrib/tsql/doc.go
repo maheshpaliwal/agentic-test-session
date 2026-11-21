@@ -116,7 +116,13 @@
 // fenced with a SAVEPOINT (inside a transaction) or a short read-only
 // transaction (autocommit) and bounded by a server-side statement_timeout
 // (WithCaptureTimeout, default 500ms; flag "image_timeout"), so a failing
-// capture cannot abort the application's transaction. A capture uses at most
+// capture cannot abort the application's transaction. The savepoint is named
+// "ts_capture_" and 16 hex digits drawn at random per connection, so it is
+// never a savepoint of the application. When the text that opens the fence
+// fails, tsql does not know whether the savepoint was taken; it then sends
+// "SHOW transaction_isolation", and rolls back to the savepoint only if that
+// fails, that is, only if the transaction (or the fence's subtransaction) is
+// aborted and a ROLLBACK TO can do no harm. A capture uses at most
 // a quarter of the time the caller's deadline leaves and is skipped when that
 // is too little ("image_skipped:deadline"). Transactions the
 // application controls with BEGIN / COMMIT / ROLLBACK statements are tracked
@@ -175,9 +181,9 @@
 // cost no extra round trip. The first traced write of a table on a handle
 // costs one capture more, for its primary key (see above). Each image read of a traced write costs three on
 // Postgres: one text that opens the fence and sets the timeout ("SAVEPOINT
-// ts_capture; SET LOCAL statement_timeout = n", or "BEGIN READ ONLY; SET LOCAL
+// ts_capture_x; SET LOCAL statement_timeout = n", or "BEGIN READ ONLY; SET LOCAL
 // ..." in autocommit), the SELECT, and one that closes the fence by rolling it
-// back ("ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture", or
+// back ("ROLLBACK TO SAVEPOINT ts_capture_x; RELEASE SAVEPOINT ts_capture_x", or
 // "ROLLBACK"), which also puts statement_timeout back to what the application
 // had. An UPDATE reads the rows before and after (7 round trips in all), a
 // DELETE before and an INSERT with its key in VALUES after (4 each); an INSERT

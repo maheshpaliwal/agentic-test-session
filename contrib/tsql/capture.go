@@ -2,10 +2,13 @@ package tsql
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -36,8 +39,9 @@ const serverGrace = 200 * time.Millisecond
 
 // capture runs a read-only capture query on the application's own connection
 // without being able to hurt it:
-//   - on Postgres it runs in SAVEPOINT ts_capture inside the app's transaction
-//     or in its own read-only transaction when the app is in autocommit, with
+//   - on Postgres it runs in a savepoint of its own inside the app's
+//     transaction (named per connection, see fenceStmts), or in its own
+//     read-only transaction when the app is in autocommit, with
 //     a statement_timeout set (SET LOCAL) inside that fence. The fence is
 //     always closed by rolling it back, after a capture that worked as after
 //     one that failed: that ends an aborted subtransaction, so the app's
@@ -103,15 +107,19 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 	// sent one by one afterwards recover from it), the opening pair in
 	// autocommit, and the opening pair inside a transaction only once this
 	// connection has accepted such a text (c.multi).
-	begin := fenceSavepoint
-	if !inTx {
-		begin = fenceBegin
+	begin := fenceBegin
+	var sp *fenceStmts
+	if inTx {
+		sp = c.fenceStmts()
+		begin = sp.savepoint
 	}
 	timeout := fmt.Sprintf("SET LOCAL statement_timeout = %d", max(eff.Milliseconds(), 1))
 	if ask {
 		timeout = fmt.Sprintf(isoAskTimeout, max(eff.Milliseconds(), 1))
 	}
-	closeFence := func() {
+	// closeFence ends the fence. taken says the savepoint is known to exist;
+	// it is not after an opening text that failed as a whole.
+	closeFence := func(taken bool) {
 		// Its own second, counted from now: the capture may have used up any
 		// earlier deadline, and a fence left open keeps the timeout and the
 		// savepoint (or, in autocommit, a read-only transaction) in place.
@@ -121,17 +129,42 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			c.execInner(clean, fenceRollback, nil)
 			return
 		}
+		if !taken {
+			// ROLLBACK TO a savepoint that does not exist is an error, and an
+			// error aborts the application's transaction. So first see what
+			// state it is in, with a statement that changes nothing and takes
+			// no snapshot. If it runs, the transaction is alive: the opening
+			// text did not fail on the server (it never got there: pgx returns
+			// without sending when the context has ended), so there is no
+			// savepoint and nothing to close. A driver that reported a failure
+			// for a text the server ran in full, and kept the connection,
+			// would leave the savepoint and its timeout to the end of the
+			// transaction; pgx and lib/pq drop the connection when they give
+			// up on a statement they sent. If it fails, the
+			// transaction, or the fence's subtransaction, is aborted: rolling
+			// back to the savepoint then either ends that subtransaction or
+			// fails in a transaction that is aborted anyway. Either way it
+			// cannot touch a savepoint of the application: the name is this
+			// connection's own.
+			if _, err := c.execInner(clean, fenceAlive, nil); err == nil {
+				return
+			}
+		}
 		if c.multi != multiNo {
-			if _, err := c.execInner(clean, fenceRollbackTo+"; "+fenceRelease, nil); err == nil {
+			_, err := c.execInner(clean, sp.closePair, nil)
+			if err == nil {
 				c.multi = multiYes
 				return
 			}
-			if clean.Err() == nil { // refused, not merely out of time
+			// Refused as a text of two statements (a syntax error to a driver
+			// that prepares it), not merely out of time, and not an error of
+			// the statements themselves (no such savepoint).
+			if state, coded := sqlState(err); state == "42601" || !coded && clean.Err() == nil {
 				c.multi = multiNo
 			}
 		}
-		c.execInner(clean, fenceRollbackTo, nil)
-		c.execInner(clean, fenceRelease, nil)
+		c.execInner(clean, sp.rollbackTo, nil)
+		c.execInner(clean, sp.release, nil)
 	}
 
 	opened := false
@@ -141,20 +174,20 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 		case err == nil:
 			c.multi, opened = multiYes, true
 			if ask && c.learnIso(res) {
-				closeFence()
+				closeFence(true)
 				return nil, capSerializable
 			}
 		case inTx:
 			// The text itself is known to be accepted here, so one of the two
-			// statements failed. In a transaction that was already aborted
-			// that is the SAVEPOINT: there is no fence then, and nothing more
-			// is sent (a ROLLBACK TO could hit a savepoint of the same name
-			// that belongs to the application).
+			// statements failed, or the text was never sent. In a transaction
+			// that was already aborted it is the SAVEPOINT that failed: there
+			// is no fence then, and nothing more is sent. Otherwise the
+			// savepoint may or may not have been taken.
 			if txAborted(err) {
 				return nil, capAborted
 			}
 			st = classify(err, cctx)
-			closeFence()
+			closeFence(false)
 			return nil, st
 		default:
 			st = classify(err, cctx)
@@ -167,7 +200,7 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			}
 			// Autocommit: nothing ran, or the BEGIN did and the transaction it
 			// opened is tsql's own. Ending it is right in both cases.
-			closeFence()
+			closeFence(true)
 			if c.multi == multiYes || cctx.Err() != nil {
 				return nil, st
 			}
@@ -184,34 +217,64 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 		res, err := c.execInner(cctx, timeout, nil)
 		if err != nil {
 			st = classify(err, cctx)
-			closeFence()
+			closeFence(true)
 			return nil, st
 		}
 		if ask && c.learnIso(res) {
-			closeFence()
+			closeFence(true)
 			return nil, capSerializable
 		}
 	}
 	out, err := c.fetchImgs(cctx, q, vals, limit, pkCols)
 	st = classify(err, cctx)
-	closeFence()
+	closeFence(true)
 	if err != nil {
 		return nil, st
 	}
 	return out, capOK
 }
 
-// The statements of the Postgres capture fence.
+// The statements of the Postgres capture fence in autocommit.
 const (
-	fenceSavepoint  = "SAVEPOINT ts_capture"
-	fenceRollbackTo = "ROLLBACK TO SAVEPOINT ts_capture"
-	fenceRelease    = "RELEASE SAVEPOINT ts_capture"
 	// The session default may make this transaction SERIALIZABLE. That is
 	// harmless: it is always rolled back, and the reads of a transaction
 	// that rolled back take part in no serialization conflict.
 	fenceBegin    = "BEGIN READ ONLY"
 	fenceRollback = "ROLLBACK"
+	// fenceAlive runs in a transaction that is not aborted and fails in one
+	// that is. SHOW changes nothing, reads no table and takes no snapshot.
+	fenceAlive = "SHOW transaction_isolation"
 )
+
+// fenceStmts are the statements of the fence inside a transaction, for one
+// connection's savepoint.
+type fenceStmts struct {
+	savepoint, rollbackTo, release string
+	closePair                      string // rollbackTo and release in one text
+}
+
+// fenceStmts returns the connection's fence statements. The savepoint is
+// named "ts_capture_" and 16 hex digits drawn at random for the connection:
+// a savepoint of the application with the same name would be the one a
+// ROLLBACK TO reaches if the fence's own had not been taken, and a fixed name
+// can be an application's. The name is a plain identifier (lower-case
+// letters, digits, underscore; 27 bytes) made only of the constant and the
+// random digits, never of input. Only the statement path calls this, which
+// database/sql serializes per connection.
+func (c *conn) fenceStmts() *fenceStmts {
+	if c.fence == nil {
+		var b [8]byte
+		_, _ = rand.Read(b[:]) // crypto/rand does not fail
+		name := "ts_capture_" + hex.EncodeToString(b[:])
+		c.fence = &fenceStmts{
+			savepoint:  "SAVEPOINT " + name,
+			rollbackTo: "ROLLBACK TO SAVEPOINT " + name,
+			release:    "RELEASE SAVEPOINT " + name,
+			closePair:  "ROLLBACK TO SAVEPOINT " + name + "; RELEASE SAVEPOINT " + name,
+		}
+	}
+	return c.fence
+}
 
 // multiStmt is what a connection is known to do with a text that holds two
 // statements.
@@ -225,15 +288,54 @@ const (
 
 // txAborted reports whether err is Postgres refusing a statement because the
 // transaction is already aborted (SQLSTATE 25P02). The code is read from the
-// driver's error where it offers one (pgx, lib/pq); the message is the
-// fallback, and is in English only when the server's lc_messages is.
+// driver's error wherever it has one (sqlState). Only for an error without
+// any is the message looked at: for the code, which drivers that have no
+// field for it tend to print, and for the server's wording, which is English
+// only when its lc_messages is.
 func txAborted(err error) bool {
-	var coded interface{ SQLState() string }
-	if errors.As(err, &coded) {
-		return coded.SQLState() == "25P02"
+	if state, ok := sqlState(err); ok {
+		return state == "25P02"
 	}
 	m := err.Error()
 	return strings.Contains(m, "25P02") || strings.Contains(m, "current transaction is aborted")
+}
+
+// sqlState returns the SQLSTATE a driver's error carries, in any of the ways
+// Postgres drivers expose it, without depending on a driver:
+//   - a SQLState() string method: pgx (*pgconn.PgError), lib/pq since 1.9
+//     (*pq.Error), go-sql-driver has none for MySQL's own five letters;
+//   - a Get(byte) string method answering the protocol's field 'C': lib/pq
+//     of any version;
+//   - an exported string field Code of five characters: pgx v3 (pgx.PgError),
+//     and pq.Error and pgconn.PgError again.
+//
+// The error may be wrapped.
+func sqlState(err error) (string, bool) {
+	var coded interface{ SQLState() string }
+	if errors.As(err, &coded) {
+		if s := coded.SQLState(); len(s) == 5 {
+			return s, true
+		}
+	}
+	var fields interface{ Get(byte) string }
+	if errors.As(err, &fields) {
+		if s := fields.Get('C'); len(s) == 5 {
+			return s, true
+		}
+	}
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		v := reflect.ValueOf(e)
+		for v.Kind() == reflect.Pointer && !v.IsNil() {
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			continue
+		}
+		if f := v.FieldByName("Code"); f.IsValid() && f.Kind() == reflect.String && f.Len() == 5 {
+			return f.String(), true
+		}
+	}
+	return "", false
 }
 
 // mysqlTimeoutHint adds a server-side MAX_EXECUTION_TIME optimizer hint to a
@@ -251,6 +353,9 @@ func classify(err error, cctx context.Context) capStatus {
 		return capOK
 	}
 	if errors.Is(err, context.DeadlineExceeded) || cctx.Err() == context.DeadlineExceeded {
+		return capTimeout
+	}
+	if state, ok := sqlState(err); ok && state == "57014" {
 		return capTimeout
 	}
 	m := err.Error()

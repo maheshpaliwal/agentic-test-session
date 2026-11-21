@@ -171,7 +171,9 @@ func TestCaptureFenceSendsNothingAfterRefusalInAbortedTx(t *testing.T) {
 }
 
 // Any other failure of the opening text inside a transaction may have left
-// the savepoint behind with its subtransaction aborted: the fence is closed.
+// the savepoint behind with its subtransaction aborted. The transaction no
+// longer takes a statement then, which is how tsql knows, and the fence is
+// closed. (When it still does, see TestFenceThatNeverOpenedTouchesNothing.)
 func TestCaptureFenceClosesAfterFailedOpenInTx(t *testing.T) {
 	_, ctx := setup(t)
 	fail := false
@@ -201,6 +203,7 @@ func TestCaptureFenceClosesAfterFailedOpenInTx(t *testing.T) {
 	}
 	fenceWant(t, f,
 		"SAVEPOINT ts_capture; "+isoAsk,
+		"SHOW transaction_isolation",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		fenceUpdate,
 		"SAVEPOINT ts_capture; "+isoAsk, // the first one was not answered

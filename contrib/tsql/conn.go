@@ -35,6 +35,9 @@ type conn struct {
 	// capture). Only the statement path touches it, which database/sql
 	// serializes per connection.
 	multi multiStmt
+	// fence holds the statements of this connection's savepoint fence, made
+	// when the first one is needed (see fenceStmts).
+	fence *fenceStmts
 }
 
 func newConn(inner driver.Conn, cfg *config, pks *pkCache) *conn {
