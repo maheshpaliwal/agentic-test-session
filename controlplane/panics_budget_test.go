@@ -234,13 +234,30 @@ func TestASessionLeftDrainingByASweepThatPanickedIsDrained(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.RunInBackground(ctx)
 	t.Cleanup(func() { cancel(); m.Close() })
-	s, err := m.Start(StartRequest{Name: "ttl", TTLSeconds: 1, QuiesceSeconds: 1})
+	// A subscriber, as an SDK is one: it must be told that the session drains, or it does not flush and
+	// does not send its last delivery report. The sweep that panicked had told nobody.
+	sets, unsubscribe := m.Subscribe()
+	defer unsubscribe()
+	var sawDraining atomic.Bool
+	var id atomic.Value
+	go func() {
+		for a := range sets {
+			if want, _ := id.Load().(string); want != "" && slices.Contains(a.Draining, want) {
+				sawDraining.Store(true)
+			}
+		}
+	}()
+	s, err := m.Start(StartRequest{Name: "ttl", TTLSeconds: 1, QuiesceSeconds: 20})
 	if err != nil {
 		panic(err)
 	}
+	id.Store(s.ID)
 	got := waitSession(t, m, s.ID, "ended by its TTL", func(s Session) bool { return s.State.Terminal() })
 	if hits() != 1 || got.State != StateExpired || got.Incomplete || !panicMetric(t, m, "sweep", 1) {
 		panic(fmt.Sprintf("after %d panics: %+v", hits(), got))
+	}
+	if !sawDraining.Load() {
+		panic("no subscriber was told that the session drains")
 	}
 }
 

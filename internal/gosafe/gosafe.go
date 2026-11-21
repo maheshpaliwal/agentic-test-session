@@ -79,9 +79,11 @@ type Options struct {
 	// cannot do without).
 	Restarts int
 	// Backoff is the wait before the first restart; it doubles with every
-	// panic up to MaxBackoff and is never taken back, so a loop that keeps
-	// panicking settles at one attempt per MaxBackoff. Zero means
-	// DefaultBackoff and DefaultMaxBackoff.
+	// panic up to MaxBackoff, so a loop that keeps panicking settles at one
+	// attempt per MaxBackoff. It starts over after a run that lasted longer
+	// than PanicBudgetWindow: a panic every few days is not a loop that keeps
+	// panicking, and must not leave the service degraded for MaxBackoff each
+	// time. Zero means DefaultBackoff and DefaultMaxBackoff.
 	Backoff, MaxBackoff time.Duration
 	// Stop ends the wait for a restart: closed, the goroutine ends instead of
 	// running the function again. Nil never does.
@@ -105,15 +107,21 @@ func Go(o Options, fn func()) {
 		if o.Done != nil {
 			defer o.Done()
 		}
+		streak := 0 // panics since the last long healthy run: what the backoff grows with
 		for n := 1; ; n++ {
+			started := time.Now()
 			p, panicked := run(fn)
 			if !panicked {
 				return
 			}
+			if time.Since(started) > healthyRun {
+				streak = 0
+			}
+			streak++
 			p.Name, p.N = o.Name, n
 			p.BudgetSpent = o.Budget && o.Watch.count(time.Now())
 			if !p.BudgetSpent && (o.Restarts < 0 || n <= o.Restarts) {
-				p.RestartIn = o.backoff(n)
+				p.RestartIn = o.backoff(streak)
 			}
 			notify(o.OnPanic, p)
 			if p.BudgetSpent {
@@ -126,7 +134,11 @@ func Go(o Options, fn func()) {
 	}()
 }
 
-// backoff is the wait after the nth panic.
+// healthyRun is how long a run must have lasted for the backoff to start
+// over at the panic that ends it. A variable for the tests.
+var healthyRun = PanicBudgetWindow
+
+// backoff is the wait after the nth panic in a row.
 func (o Options) backoff(n int) time.Duration {
 	d, limit := o.Backoff, o.MaxBackoff
 	if d <= 0 {

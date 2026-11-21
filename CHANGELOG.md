@@ -360,6 +360,11 @@ Rolling back:
 
 ### Fixed
 
+- Panic recovery, from its review: a session that a panicking sweep left DRAINING is announced to the SDKs when
+  the next sweep starts its drain (they were not told, so they did not flush or send their last delivery
+  report); the restart backoff of a background loop starts over after a run longer than ten minutes, so a panic
+  every few days no longer leaves `/healthz` degraded for up to 30 seconds each time; a drain that is run again
+  after a panic counts its session once in `sessions_finished_total`.
 - Control plane and client: a large answer from the collector was not read to its end, so its connection could
   not be reused and every poll opened a new one; repeated rounds of 500 sessions ran a machine out of ports.
 - `tredis`: values that were recorded although the key or field is sensitive: the reply of `SET ... GET`,

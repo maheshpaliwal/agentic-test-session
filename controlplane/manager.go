@@ -480,7 +480,10 @@ func (m *Manager) Sweep(now time.Time) {
 		if s.State == StateDraining && m.cancels[s.ID] == nil && m.rootCtx.Err() == nil {
 			// Nobody drains it: whatever moved it to DRAINING panicked before
 			// it had started the drain (a sweep, say, which is started again).
+			// It had not told the subscribers either: they flush and send
+			// their last delivery reports on that word.
 			m.startDrainLocked(s.ID)
+			changed = true
 		}
 		if s.State != StateActive {
 			continue

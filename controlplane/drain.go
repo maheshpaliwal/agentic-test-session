@@ -250,7 +250,6 @@ func (m *Manager) drain(ctx context.Context, d *drainRun) {
 		m.tel.sealFailures.Inc()
 		m.armSealRetryLocked(id, time.Now().Add(m.cfg.PollInterval))
 	}
-	m.tel.finished.With(string(cur.State)).Inc()
 	cur.DrainTimedOut = timedOut
 	short := m.judgeDeliveryLocked(&cur, counts)
 	cur.Incomplete = timedOut || err != nil || res.Incomplete || short
@@ -260,6 +259,9 @@ func (m *Manager) drain(ctx context.Context, d *drainRun) {
 	if perr := m.putLocked(cur); perr != nil {
 		m.log.Error("persist sealed session", "id", id, "err", perr)
 	}
+	// Counted once the session is stored: a drain that panics before that is
+	// run again and comes by here a second time.
+	m.tel.finished.With(string(cur.State)).Inc()
 	// Only now: until the session is stored as finished, an Abort must find
 	// the drain's cancel function, also while the drain waits for a restart.
 	delete(m.cancels, id)

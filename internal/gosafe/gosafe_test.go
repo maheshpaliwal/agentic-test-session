@@ -240,3 +240,34 @@ func BenchmarkGo(b *testing.B) {
 		wg.Wait()
 	})
 }
+
+// A panic after a long healthy run is not one more of a loop that keeps
+// panicking: the backoff starts over, so the service is degraded for the
+// first backoff, not for the longest.
+func TestGoBackoffStartsOverAfterAHealthyRun(t *testing.T) {
+	old := healthyRun
+	healthyRun = 30 * time.Millisecond
+	defer func() { healthyRun = old }()
+	var c collect
+	var runs atomic.Int32
+	done := make(chan struct{})
+	const base = time.Millisecond
+	Go(Options{Name: "loop", OnPanic: c.on, Restarts: 4, Backoff: base, MaxBackoff: 100 * base, Done: func() { close(done) }},
+		func() {
+			if runs.Add(1) == 4 { // the fourth run is a healthy one, well over healthyRun
+				time.Sleep(3 * healthyRun)
+			}
+			panic(errors.New("boom"))
+		})
+	wait(done, "the goroutine to give up")
+	ps := c.all()
+	if len(ps) != 5 {
+		panic(fmt.Sprintf("%d reports, want 5", len(ps)))
+	}
+	// 1, 2, 4 in a row; the fourth panic follows the healthy run and starts over; the fifth is the last.
+	for i, want := range []time.Duration{base, 2 * base, 4 * base, base, 0} {
+		if ps[i].N != i+1 || ps[i].RestartIn != want {
+			t.Errorf("panic %d: N=%d RestartIn=%v, want %v", i+1, ps[i].N, ps[i].RestartIn, want)
+		}
+	}
+}
