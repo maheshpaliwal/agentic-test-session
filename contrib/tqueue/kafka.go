@@ -162,7 +162,12 @@ func produceBatch(ctx context.Context, w KafkaWriter, msgs []kafka.Message) erro
 			// which decides per message whether its traceparent is the
 			// application's. carrier was empty, so its traceparent is the
 			// one tsession wrote.
-			core.WriteTraceparent(kc, carrier[core.KeyTraceparent], carrier[core.KeyHLC])
+			// When the publish was not recorded (a nested publish, a session
+			// that ended meanwhile) nothing was injected and the carrier is
+			// empty: the messages then go out untouched.
+			if carrier[core.KeyTraceparent] != "" {
+				core.WriteTraceparent(kc, carrier[core.KeyTraceparent], carrier[core.KeyHLC])
+			}
 			for k, v := range carrier {
 				switch k {
 				case core.KeyTraceparent, core.KeyTSessionTraceparent, core.KeyHLC:

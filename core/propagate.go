@@ -185,6 +185,9 @@ func Inject(ctx context.Context, c Carrier) {
 // Any other traceparent belongs to the application and is left as it is,
 // whatever it holds: an empty value, or one that is not text.
 func WriteTraceparent(c Carrier, tp, hlc string) {
+	if tp == "" || hlc == "" {
+		return // nothing to propagate: never write empty keys onto a carrier
+	}
 	app := c.Get(KeyTraceparent)
 	absent := app == ""
 	if absent {
@@ -204,14 +207,20 @@ func WriteTraceparent(c Carrier, tp, hlc string) {
 // value own of a carrier whose x-tsession-hlc is hlc, or "" when own is not
 // current: the clock value it was written with is not the carrier's.
 //
-// Every write sets both keys, and no later hop produces the same clock value
-// (it has observed the one it received, so its own is greater). A difference
+// Every write sets both keys, and a later hop that received the carrier
+// through an instrumented entry point has observed its clock value, so the
+// one it writes is greater. (A hop that passes keys on without having
+// received them that way, such as an outbox relay, has not; if its clock
+// reads the same millisecond as the sender's the two values can be equal and
+// the stale key is then trusted.) A difference
 // therefore means that a hop which does not know x-tsession-traceparent wrote
 // its own context into traceparent and x-tsession-hlc afterwards and passed
 // this key on as it received it.
 //
 // A carrier without x-tsession-hlc was not rewritten by such a hop, which
 // always writes one; something on the way dropped that key, and own is used.
+// (If the key was dropped after an old hop forwarded the carrier, own is
+// stale and still used: nothing on the carrier can tell the two apart.)
 func ownTraceparent(own, hlc string) string {
 	tp, bound, ok := strings.Cut(own, ownSep)
 	if !ok || bound == "" || (hlc != "" && hlc != bound) {

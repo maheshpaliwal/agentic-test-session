@@ -817,6 +817,9 @@
           let cur = null;
           try { cur = await cp('/v1/sessions/' + encodeURIComponent(s.id)); } catch (e) { if (e.status !== 404) continue; }
           if (token !== S.token || gen !== filterGen || !rows) return;
+          // The count was asked before the state: a session that finished in between is not live any more and
+          // would never be asked again, so its count goes on the list of ids still to ask.
+          if (cur && !isLive(cur)) missing.add(s.id);
           rows = cur && (!f.state || cur.state === f.state) ? U.mergeRows(rows, [decorate(cur)]) : rows.filter((x) => x.id !== s.id);
           paint();
         }

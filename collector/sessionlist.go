@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 
 	"github.com/maheshpaliwal/agentic-test-session/collector/store"
+	"net/url"
+	"time"
 )
 
 const (
@@ -18,6 +20,8 @@ const (
 	// listLookups is how many of a request's ids are looked up in the store
 	// at the same time.
 	listLookups = 8
+	// listLookupTimeout bounds the store calls for one id.
+	listLookupTimeout = 5 * time.Second
 	// headerUnanswered is set on every answer to an ids request: the number
 	// of requested ids left out because the store failed for them or the
 	// request ended first. An id missing from the body means "no events held"
@@ -36,7 +40,14 @@ type sessionCount struct {
 }
 
 func (c *Collector) handleSessions(w http.ResponseWriter, r *http.Request) {
-	if raw, ok := r.URL.Query()["ids"]; ok {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		// r.URL.Query() would drop what it cannot parse, and a damaged ids
+		// parameter would then be answered with every session.
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("query: %w", err))
+		return
+	}
+	if raw, ok := q["ids"]; ok {
 		ids, err := parseListIDs(raw)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -100,7 +111,18 @@ func (c *Collector) sessionCounts(ctx context.Context, ids []string) (out []sess
 		errOnce  sync.Once
 		firstErr error
 	)
-	lookup := func(id string) (sessionCount, bool, error) {
+	lookup := func(id string) (sc sessionCount, held bool, err error) {
+		// These run on goroutines of their own: a panic in the store would
+		// end the process instead of the one request, as it does elsewhere.
+		defer func() {
+			if r := recover(); r != nil {
+				sc, held, err = sessionCount{}, false, fmt.Errorf("store panicked: %v", r)
+			}
+		}()
+		// A bound of their own: a store that hangs must not keep the workers
+		// of every poll until its client gives up.
+		ctx, cancel := context.WithTimeout(ctx, listLookupTimeout)
+		defer cancel()
 		head, err := c.st.Head(ctx, id)
 		if err != nil || head == 0 {
 			return sessionCount{}, false, err

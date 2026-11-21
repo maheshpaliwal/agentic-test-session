@@ -344,9 +344,14 @@ zeros. If neither key parses, the event still joins the session, with a new trac
 The clock value is what ties `x-tsession-traceparent` to the hop that wrote it. A service on an SDK that predates
 the key and passes a carrier on with its keys copied (a retry or dead-letter topic, a forwarded request) writes its
 own span into `traceparent` and a new `x-tsession-hlc`, and copies the `x-tsession-traceparent` it does not know.
-The receiver sees that the two clock values differ and reads `traceparent`, which names that service's span. Two
-hops never write the same clock value on one carrier: a service that received it has moved its clock past the value
-it received before it writes its own.
+The receiver sees that the two clock values differ and reads `traceparent`, which names that service's span. A
+service that received the carrier through an instrumented entry point has moved its clock past the value it
+received before it writes its own, so the two differ. A service that passes the keys on without having received
+them that way (an outbox relay, a batch re-sender) has not: if its clock reads the same millisecond as the
+sender's, the values can be equal and the receiver then links to the first sender. Two further cases link to the
+first sender instead of the forwarder, both behind a forwarder on an SDK that predates the key: a gateway that
+drops `x-tsession-hlc` but passes `x-tsession-traceparent` (see the table below), and an SQS forwarder that adds
+the compact attribute beside the full-form attributes it copied.
 
 **Order of instrumentation.** On an HTTP client the application's tracing transport may wrap tsession's (`thttp`
 or the patched default transport) or be wrapped by it; on a gRPC client its interceptor or stats handler may run
@@ -430,7 +435,7 @@ the receiver falls back to `traceparent`, which is right only where no applicati
 |---|---|
 | The key is dropped: a gateway, load balancer or service mesh that passes only listed request headers | `traceparent`, as from an old sender: correct without application tracing on the sender, otherwise the application's trace id and a parent that no recorded event has |
 | The value is changed: two `x-tsession-traceparent` headers joined into one with a comma, a truncated value | the same; a value that does not parse is never used in part |
-| `x-tsession-hlc` is dropped and `x-tsession-traceparent` is not | `x-tsession-traceparent`; the receiver's clock is not advanced by the sender's |
+| `x-tsession-hlc` is dropped and `x-tsession-traceparent` is not | `x-tsession-traceparent`; the receiver's clock is not advanced by the sender's. Behind a forwarder on an SDK that predates the key this is the stale value: pass `x-tsession-hlc` too |
 | `x-tsession-hlc` is changed | `traceparent`: the key is taken for one copied by an old SDK |
 | `x-tsession-id` is dropped | nothing; the request is not part of the session, as before |
 
