@@ -205,7 +205,7 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 	// statement; from then on the connection is known to take two statements
 	// in one text.
 	want := []string{
-		"SAVEPOINT ts_capture", "SET LOCAL statement_timeout = 500", "SELECT *",
+		"SAVEPOINT ts_capture", isoAsk, "SELECT *",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture", "UPDATE t",
 		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", "SELECT *",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
@@ -245,7 +245,7 @@ func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 	}
 	want := []string{
 		"SAVEPOINT ts_capture",
-		"SET LOCAL statement_timeout = 500",
+		isoAsk,
 		"SELECT * FROM t WHERE id = $1 LIMIT 51",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		"DELETE FROM t WHERE id = $1",

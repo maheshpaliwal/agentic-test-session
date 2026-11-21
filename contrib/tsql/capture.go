@@ -55,10 +55,12 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			out, st = nil, capFailed
 		}
 	}()
-	inTx, serial := c.txState()
-	if inTx && serial {
+	inTx, iso := c.txState()
+	if inTx && iso == isoSerial {
 		return nil, capSerializable
 	}
+	// A transaction whose level no statement showed: the fence asks (iso.go).
+	ask := pg && inTx && iso == isoUnknown
 	if ctx.Err() != nil {
 		return nil, capFailed
 	}
@@ -106,6 +108,9 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 		begin = fenceBegin
 	}
 	timeout := fmt.Sprintf("SET LOCAL statement_timeout = %d", max(eff.Milliseconds(), 1))
+	if ask {
+		timeout = fmt.Sprintf(isoAskTimeout, max(eff.Milliseconds(), 1))
+	}
 	closeFence := func() {
 		// Its own second, counted from now: the capture may have used up any
 		// earlier deadline, and a fence left open keeps the timeout and the
@@ -131,10 +136,14 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 
 	opened := false
 	if c.multi == multiYes || (!inTx && c.multi == multiUnknown) {
-		_, err := c.execInner(cctx, begin+"; "+timeout, nil)
+		res, err := c.execInner(cctx, begin+"; "+timeout, nil)
 		switch {
 		case err == nil:
 			c.multi, opened = multiYes, true
+			if ask && c.learnIso(res) {
+				closeFence()
+				return nil, capSerializable
+			}
 		case inTx:
 			// The text itself is known to be accepted here, so one of the two
 			// statements failed. In a transaction that was already aborted
@@ -172,10 +181,15 @@ func (c *conn) capture(ctx context.Context, pg bool, q string, vals []driver.Val
 			}
 			return nil, classify(err, cctx)
 		}
-		if _, err := c.execInner(cctx, timeout, nil); err != nil {
+		res, err := c.execInner(cctx, timeout, nil)
+		if err != nil {
 			st = classify(err, cctx)
 			closeFence()
 			return nil, st
+		}
+		if ask && c.learnIso(res) {
+			closeFence()
+			return nil, capSerializable
 		}
 	}
 	out, err := c.fetchImgs(cctx, q, vals, limit, pkCols)
@@ -192,8 +206,11 @@ const (
 	fenceSavepoint  = "SAVEPOINT ts_capture"
 	fenceRollbackTo = "ROLLBACK TO SAVEPOINT ts_capture"
 	fenceRelease    = "RELEASE SAVEPOINT ts_capture"
-	fenceBegin      = "BEGIN READ ONLY"
-	fenceRollback   = "ROLLBACK"
+	// The session default may make this transaction SERIALIZABLE. That is
+	// harmless: it is always rolled back, and the reads of a transaction
+	// that rolled back take part in no serialization conflict.
+	fenceBegin    = "BEGIN READ ONLY"
+	fenceRollback = "ROLLBACK"
 )
 
 // multiStmt is what a connection is known to do with a text that holds two

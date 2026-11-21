@@ -28,6 +28,16 @@ func txCorpus() []string {
 		"PREPARE TRANSACTION 'x'", "prepare transaction 'x'", "PREPARE p AS SELECT 1", "PREPARE",
 		"SAVEPOINT s", "RELEASE SAVEPOINT s", "RELEASE s", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
 		"SET autocommit = 0", "LOCK TABLE t", "XA START 'x'", "XA COMMIT 'x'",
+		// Isolation levels: of the transaction, the next one, the session.
+		"START TRANSACTION ISOLATION LEVEL SERIALIZABLE", "begin isolation level repeatable read",
+		"set transaction isolation level serializable", "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+		"SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+		"SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED",
+		"SET default_transaction_isolation = 'serializable'", "Set Default_Transaction_Isolation To Default",
+		"SET transaction_isolation = 'serializable'", "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+		"SET @@session.transaction_isolation = 'READ-COMMITTED'", "SET @@transaction_isolation = 'SERIALIZABLE'",
+		"RESET ALL", "reset all", "DISCARD ALL", "RESET default_transaction_isolation",
+		"SELECT set_config('default_transaction_isolation', 'serializable', false)", "SHOW transaction_isolation",
 		// Look-alikes: a keyword that is not the first token, or only a prefix
 		// or suffix of it.
 		"SELECT 1", "SELECT 'BEGIN'", "SELECT 'BEGIN; COMMIT'", "SELECT 1 AS begin", "SELECT commit FROM t",
@@ -140,19 +150,34 @@ func TestTxScanSkipsOrdinaryStatements(t *testing.T) {
 
 // Feeding the same texts to a conn through the untraced path and to another
 // through the old one (parse, then trackTx) leaves both with the same
-// transaction state after every statement.
+// transaction and isolation state after every statement.
 func TestTrackTxUntracedMatchesTrackTx(t *testing.T) {
 	for _, store := range []string{"postgres", "mysql"} {
 		cfg := buildConfig(nil)
 		cfg.store = store
 		oldC, newC := newConn(nil, cfg, &pkCache{}), newConn(nil, cfg, &pkCache{})
+		serial := 0
 		for i, q := range txCorpus() {
 			info, _ := oldC.parse(q)
-			oldC.trackTx(info.Tx)
+			oldC.trackTx(info)
 			newC.trackTxUntraced(q)
 			if oldC.rawTx != newC.rawTx {
 				t.Fatalf("%s: statement %d %q: rawTx = %v, want %v", store, i, q, newC.rawTx, oldC.rawTx)
 			}
+			type iso struct {
+				iso                                    isoState
+				isoDefault, defSerial, defInTx, nextTx bool
+			}
+			got := iso{newC.iso, newC.isoDefault, newC.defSerial, newC.defInTx, newC.nextSerial}
+			if want := (iso{oldC.iso, oldC.isoDefault, oldC.defSerial, oldC.defInTx, oldC.nextSerial}); got != want {
+				t.Fatalf("%s: statement %d %q: isolation state %+v, want %+v", store, i, q, got, want)
+			}
+			if got.iso == isoSerial {
+				serial++
+			}
+		}
+		if serial < 100 {
+			t.Fatalf("%s: only %d statements of the corpus left a SERIALIZABLE transaction open", store, serial)
 		}
 	}
 }

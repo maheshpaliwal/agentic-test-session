@@ -97,11 +97,14 @@ skip:
 	case 3:
 		return foldEq(w, "END")
 	case 5:
-		return foldEq(w, "BEGIN") || foldEq(w, "START") || foldEq(w, "ABORT")
+		// RESET and DISCARD control no transaction; RESET ALL and DISCARD ALL
+		// change the session's default isolation level without naming it
+		// (see MentionsIsolation), so Parse looks at them too.
+		return foldEq(w, "BEGIN") || foldEq(w, "START") || foldEq(w, "ABORT") || foldEq(w, "RESET")
 	case 6:
 		return foldEq(w, "COMMIT")
 	case 7:
-		return foldEq(w, "PREPARE")
+		return foldEq(w, "PREPARE") || foldEq(w, "DISCARD")
 	case 8:
 		return foldEq(w, "ROLLBACK")
 	}

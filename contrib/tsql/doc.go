@@ -95,8 +95,7 @@
 // (WithCaptureTimeout, default 500ms; flag "image_timeout"), so a failing
 // capture cannot abort the application's transaction. A capture uses at most
 // a quarter of the time the caller's deadline leaves and is skipped when that
-// is too little ("image_skipped:deadline"). They are skipped inside
-// SERIALIZABLE transactions ("image_skipped:serializable"). Transactions the
+// is too little ("image_skipped:deadline"). Transactions the
 // application controls with BEGIN / COMMIT / ROLLBACK statements are tracked
 // from the leading keywords of every statement in the text. Primary keys are re-bound with the exact driver values (never
 // the display form); a NULL key skips the re-read ("image_skipped:pk_unbindable").
@@ -104,6 +103,48 @@
 // Values are captured up to a length cap; "diff_truncated" marks a diff that
 // found two capped values equal and so cannot see a change beyond the cap, and
 // "mutations_truncated" marks a statement with more rows than were captured.
+//
+// # SERIALIZABLE transactions
+//
+// Nothing is read inside a SERIALIZABLE transaction (flag
+// "image_skipped:serializable"; the key lookup is left to a later
+// statement): on Postgres the extra reads take predicate locks and can make
+// the transaction, or a concurrent one, fail with a serialization error it
+// would not have had; on MySQL a plain SELECT is a locking read there. The
+// level is known from what the connection was sent, in or outside a session:
+// the isolation option of BeginTx, the ISOLATION LEVEL mode of BEGIN and
+// START TRANSACTION, SET TRANSACTION, and, for a transaction that states no
+// level, the session default set with SET SESSION CHARACTERISTICS AS
+// TRANSACTION or default_transaction_isolation (on MySQL: SET [SESSION]
+// TRANSACTION and the transaction_isolation / tx_isolation variable). In
+// such a transaction tsql sends nothing of its own.
+//
+// A default no statement shows (set for the role or the database, in the
+// connection string's options, by a function or through set_config, RESET
+// or DISCARD) is asked for on Postgres: in a transaction of unknown level
+// the statement that sets the first fence's timeout is "SELECT
+// set_config('statement_timeout', n, true) WHERE
+// current_setting('transaction_isolation') <> 'serializable'", whose row
+// count says which it is. That is no extra round trip. Under SERIALIZABLE it
+// sets and reads nothing, the fence is closed, and the answer holds for the
+// rest of the transaction; when the transaction took the session default it
+// also holds for the connection's later transactions, until a statement
+// changes the default. So with a SERIALIZABLE default the first transaction
+// with a traced write on each connection sees one such fence (two round
+// trips, no table read, no predicate lock; it does take the transaction's
+// snapshot if the application has not yet) and later ones nothing. A default
+// that stops being SERIALIZABLE without a statement on the connection
+// showing it is not noticed: images stay skipped on that connection.
+//
+// In autocommit a capture has a transaction of its own, which a SERIALIZABLE
+// default makes SERIALIZABLE. That is harmless, because it is always rolled
+// back and the reads of a rolled-back transaction conflict with nothing.
+//
+// On MySQL there is no fence to ask in. A default no statement on the
+// connection shows (the global level, an init command of the driver) is not
+// detected and captures run as under any other level; a level set from a
+// variable or an expression counts as SERIALIZABLE. The MySQL statements have
+// been checked against the manual, not against a server.
 //
 // # Cost of image capture
 //

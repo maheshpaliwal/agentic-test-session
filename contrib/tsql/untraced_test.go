@@ -142,7 +142,7 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 	want := []string{
 		"BEGIN",
 		"SAVEPOINT ts_capture",
-		"SET LOCAL statement_timeout = 500",
+		isoAsk,
 		"SELECT * FROM t WHERE id = 2 LIMIT 51",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		"UPDATE t SET a = 1 WHERE id = 2",

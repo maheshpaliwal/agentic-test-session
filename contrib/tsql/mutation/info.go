@@ -87,6 +87,13 @@ type Info struct {
 	// Tx is the transaction state the text leaves behind: every ';'-separated
 	// statement is classified and the last transaction-control one wins.
 	Tx TxControl
+	// TxIso is the isolation level the text gives a transaction: the one
+	// that is open once it has run (the mode of the BEGIN that opened it, or
+	// a SET TRANSACTION after it; IsoUnset with Tx == TxBegin means the
+	// session default), or on MySQL, where SET TRANSACTION comes before the
+	// transaction, the next one. DefIso is the level it makes the session
+	// default. Both follow the statements in order, like Tx.
+	TxIso, DefIso IsoLevel
 	// Projections lists the aliased / computed items of every SELECT list and
 	// RETURNING clause, so callers can tell which output columns carry the
 	// value of a sensitive-named column under another name.

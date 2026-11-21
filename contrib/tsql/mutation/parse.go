@@ -48,8 +48,21 @@ func Parse(sql string, d Dialect) Info {
 	in.ArgCols = map[int][]string{}
 	seen := map[string]bool{}
 	for i, s := range segs {
-		if e := txEffect(s); e != TxNone {
+		e := txEffect(s)
+		if e != TxNone {
 			in.Tx = e
+		}
+		switch scope, lvl := isoEffect(s, d); {
+		case e == TxBegin:
+			in.TxIso = lvl
+		case e.Ends():
+			in.TxIso = IsoUnset
+		case scope == isoTx:
+			in.TxIso = lvl
+		case scope == isoSession:
+			in.DefIso = lvl
+		case scope == isoAll:
+			in.TxIso, in.DefIso = IsoUnknown, IsoUnknown
 		}
 		in.Projections = append(in.Projections, projections(s)...)
 		r := p.mapCols(infos[i].Columns, s)

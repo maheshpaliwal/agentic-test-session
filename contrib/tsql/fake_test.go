@@ -57,6 +57,19 @@ type fakeDB struct {
 	// the table as the lookup names it); nil answers "no primary key", so the
 	// default key "id" applies.
 	pk func(table string) result
+	// serializable is what the server answers when tsql asks, inside the
+	// capture fence, whether the open transaction is SERIALIZABLE.
+	serializable bool
+}
+
+// isoAsk is that question: the statement that sets the timeout of the first
+// fence of a transaction whose level no statement showed.
+const isoAsk = "SELECT set_config('statement_timeout', '500', true) WHERE current_setting('transaction_isolation') <> 'serializable'"
+
+// isIsoProbe reports whether q carries the question a fence asks about the
+// isolation level of the application's transaction.
+func isIsoProbe(q string) bool {
+	return strings.Contains(q, "current_setting('transaction_isolation')")
 }
 
 // noPKLookup keeps the catalog lookup out of tests that assert the exact
@@ -131,7 +144,7 @@ func (f *fakeDB) Calls() []call {
 // isFence reports whether q is a statement of the Postgres capture fence.
 func isFence(q string) bool {
 	return strings.HasPrefix(q, "BEGIN READ ONLY") || q == "ROLLBACK" || strings.Contains(q, "SAVEPOINT ts_capture") ||
-		strings.HasPrefix(q, "SET LOCAL statement_timeout")
+		strings.HasPrefix(q, "SET LOCAL statement_timeout") || isIsoProbe(q)
 }
 
 func (f *fakeDB) answer(q string, args []driver.Value) result {
@@ -164,6 +177,12 @@ func (f *fakeDB) answer(q string, args []driver.Value) result {
 	}
 	if f.abortModel && r.err != nil {
 		f.aborted = true
+	}
+	if r.err == nil && isIsoProbe(q) { // the row count of the text's last statement is the answer
+		r.affected = 1
+		if f.serializable {
+			r.affected = 0
+		}
 	}
 	return r
 }

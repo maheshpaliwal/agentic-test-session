@@ -18,10 +18,15 @@ type conn struct {
 	cfg   *config
 	pks   *pkCache // primary keys found in the catalog, shared by the handle's connections
 
-	mu     sync.Mutex
-	txID   string
-	serial bool // open tx runs at SERIALIZABLE
-	rawTx  bool // the app opened a transaction with a plain BEGIN statement
+	mu    sync.Mutex
+	txID  string
+	rawTx bool // the app opened a transaction with a plain BEGIN statement
+	// Isolation bookkeeping (see iso.go).
+	iso        isoState // level of the open transaction
+	isoDefault bool     // the open transaction took the session's default level
+	defSerial  bool     // the session's default level is SERIALIZABLE
+	defInTx    bool     // the default was set inside the open transaction
+	nextSerial bool     // MySQL: SET TRANSACTION made the next transaction SERIALIZABLE
 	// Primary-key cache bookkeeping for the open transaction (see endPKTx).
 	pkSchemaDirty bool
 	pkTxTables    []string
@@ -42,31 +47,45 @@ func (c *conn) currentTx() string {
 	return c.txID
 }
 
-func (c *conn) setTx(id string, serializable bool) {
+// setTx notes the transaction database/sql opened with the given level.
+func (c *conn) setTx(id string, level driver.IsolationLevel) {
+	lvl := mutation.IsoOther
+	switch sql.IsolationLevel(level) {
+	case sql.LevelDefault:
+		lvl = mutation.IsoUnset
+	case sql.LevelSerializable:
+		lvl = mutation.IsoSerializable
+	}
 	c.mu.Lock()
 	c.txID = id
-	c.serial = serializable
+	c.beginIso(lvl)
 	c.mu.Unlock()
 }
 
-// txState reports whether a transaction is open on this conn and whether it is SERIALIZABLE.
-func (c *conn) txState() (open, serializable bool) {
+// txState reports whether a transaction is open on this conn and what is
+// known of its isolation level.
+func (c *conn) txState() (open bool, iso isoState) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.txID != "" || c.rawTx, c.serial
+	return c.txID != "" || c.rawTx, c.iso
 }
 
 // trackTx notices hand-written BEGIN/COMMIT/ROLLBACK statements (anywhere in
 // a multi-statement text) so capture never opens its own transaction inside
-// one the app started by hand.
-func (c *conn) trackTx(tc mutation.TxControl) {
-	if tc == mutation.TxNone {
+// one the app started by hand, and the statements that set an isolation
+// level, so it never reads inside a SERIALIZABLE one.
+func (c *conn) trackTx(in mutation.Info) {
+	tc := in.Tx
+	if tc == mutation.TxNone && in.TxIso == mutation.IsoUnset && in.DefIso == mutation.IsoUnset {
 		return
 	}
 	c.mu.Lock()
-	c.rawTx = tc.Opens()
+	c.noteIso(in)
+	if tc != mutation.TxNone {
+		c.rawTx = tc.Opens()
+	}
 	c.mu.Unlock()
-	if tc != mutation.TxBegin {
+	if tc != mutation.TxNone && tc != mutation.TxBegin {
 		c.endPKTx(tc == mutation.TxCommit)
 	}
 }
@@ -75,14 +94,14 @@ func (c *conn) trackTx(tc mutation.TxControl) {
 // not parsed. The transaction state must stay exact for it too: a later
 // statement on this conn may belong to a session. Only a text that can
 // contain transaction control (a cheap scan of the first keyword of each
-// statement) is parsed, and then trackTx sees exactly what it sees for a
-// traced statement.
+// statement) or names an isolation level is parsed, and then trackTx sees
+// exactly what it sees for a traced statement.
 func (c *conn) trackTxUntraced(query string) {
-	if !mutation.MayControlTx(query, c.dialect()) {
+	if !mutation.MayControlTx(query, c.dialect()) && !mutation.MentionsIsolation(query) {
 		return
 	}
 	info, _ := c.parse(query)
-	c.trackTx(info.Tx)
+	c.trackTx(info)
 }
 
 func (c *conn) dialect() mutation.Dialect {
@@ -102,11 +121,11 @@ func (c *conn) parse(query string) (info mutation.Info, ok bool) {
 	return parseCached(query, c.dialect()), true
 }
 
-func (c *conn) clearTx(id string) {
+func (c *conn) clearTx(id string, committed bool) {
 	c.mu.Lock()
 	if c.txID == id {
 		c.txID = ""
-		c.serial = false
+		c.endIso(committed)
 	}
 	c.mu.Unlock()
 }
@@ -182,7 +201,7 @@ func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return tx, nil
 	}
 	id := "tx_" + core.NewSpanID()
-	c.setTx(id, driver.IsolationLevel(opts.Isolation) == driver.IsolationLevel(sql.LevelSerializable))
+	c.setTx(id, opts.Isolation)
 	// The id is kept even outside a session: statements of this transaction
 	// may run with a context that is in one.
 	if core.Active(ctx) {
@@ -347,7 +366,7 @@ func (t *txWrap) Rollback() error {
 }
 
 func (t *txWrap) end(kind core.Kind, name string, err error, commitFailed bool) {
-	t.c.clearTx(t.id)
+	t.c.clearTx(t.id, kind == core.KindDBTxCommit)
 	t.c.endPKTx(kind == core.KindDBTxCommit)
 	if !core.Active(t.ctx) {
 		return // no span: nothing to render or redact

@@ -111,7 +111,8 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 			"ROLLBACK TO SAVEPOINT ts_capture", "RELEASE SAVEPOINT ts_capture",
 		}
 		// the one attempt: the closing pair of the first capture, under its savepoint
-		first := append([]string{}, one[:3]...)
+		// (the first fence of a transaction also asks for its isolation level)
+		first := []string{one[0], isoAsk, one[2]}
 		first = append(first, "ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture")
 		first = append(first, one[3:]...)
 		fenceWant(t, f, append(first, one...)...)
@@ -162,7 +163,7 @@ func TestCaptureFenceSendsNothingAfterRefusalInAbortedTx(t *testing.T) {
 	if _, err := tx.ExecContext(ctx, fenceUpdate); err == nil {
 		t.Fatal("the application's statement must fail")
 	}
-	fenceWant(t, f, "SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", fenceUpdate)
+	fenceWant(t, f, "SAVEPOINT ts_capture; "+isoAsk, fenceUpdate)
 	ws := byKind(rec.Events(), core.KindDBWrite)
 	if e := ws[len(ws)-1]; !hasFlag(e, "image_failed") {
 		t.Fatalf("flags %v", e.Flags)
@@ -199,10 +200,10 @@ func TestCaptureFenceClosesAfterFailedOpenInTx(t *testing.T) {
 		t.Fatalf("COMMIT: %v", err)
 	}
 	fenceWant(t, f,
-		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500",
+		"SAVEPOINT ts_capture; "+isoAsk,
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		fenceUpdate,
-		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500",
+		"SAVEPOINT ts_capture; "+isoAsk, // the first one was not answered
 		"SELECT * FROM t WHERE id IN ($1)",
 		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 	)

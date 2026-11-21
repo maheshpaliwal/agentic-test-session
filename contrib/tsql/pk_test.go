@@ -156,7 +156,7 @@ func TestPKLookupRunsInsideTheFence(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	want := "SAVEPOINT ts_capture\nSET LOCAL statement_timeout = 500\n<pk lookup>\nROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture\n"
+	want := "SAVEPOINT ts_capture\n" + isoAsk + "\n<pk lookup>\nROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture\n"
 	if got := raw(f); got != want {
 		t.Fatalf("transaction:\n%s\nwant:\n%s", got, want)
 	}
