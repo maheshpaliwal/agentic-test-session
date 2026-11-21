@@ -165,7 +165,7 @@ func NewManager(cfg Config) *Manager {
 	m.tel = newTelemetry(m)
 	m.watch = gosafe.NewWatch(m.budgetSpent)
 	if pc, ok := cfg.Store.(panicCounter); ok {
-		pc.countPanics(m.countPanic)
+		pc.countPanics(m.countPanic, m.watch)
 	}
 	// Resume drains and pending seals that were in flight when a persistent
 	// store was last written. Archived sessions can have a seal pending; the
@@ -203,9 +203,10 @@ func NewManager(cfg Config) *Manager {
 }
 
 // panicCounter is a Store with goroutines of its own (FileStore's
-// compaction): it is given what counts their panics.
+// compaction): it is given what counts their panics, and the Watch that
+// says while one of them has panicked and was not repeated yet (see Health).
 type panicCounter interface {
-	countPanics(count func(goroutine string))
+	countPanics(count func(goroutine string), watch *gosafe.Watch)
 }
 
 // MaxDurationSeconds bounds ttl/quiesce/max_drain (7 days); it also keeps

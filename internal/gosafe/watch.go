@@ -39,8 +39,11 @@ type Watch struct {
 	mu      sync.Mutex
 	recent  []time.Time    // the panics that count, oldest first, at most budget
 	waiting map[string]int // goroutines that wait for their restart, by name
-	gaveUp  bool
-	reason  string // why the budget is spent; "" while it is not
+	// held are the goroutines whose work something else starts anew after a
+	// panic (see Hold), by name, with when that is due.
+	held   map[string]time.Time
+	gaveUp bool
+	reason string // why the budget is spent; "" while it is not
 }
 
 // NewWatch returns a Watch with the panic budget of a service. spent is
@@ -48,7 +51,7 @@ type Watch struct {
 // panic was reported: it ends the service. It may be nil, for a service
 // that is part of another process; the Watch then stays degraded.
 func NewWatch(spent func(reason string)) *Watch {
-	return &Watch{budget: PanicBudget, window: PanicBudgetWindow, spent: spent, waiting: map[string]int{}}
+	return &Watch{budget: PanicBudget, window: PanicBudgetWindow, spent: spent, waiting: map[string]int{}, held: map[string]time.Time{}}
 }
 
 // Cover widens the window of the panic budget so that it holds PanicBudget
@@ -79,11 +82,49 @@ func (w *Watch) Degraded() string {
 	if w.reason != "" {
 		return w.reason
 	}
-	if len(w.waiting) == 0 {
+	now := time.Now()
+	names := mapx.SortedKeys(w.waiting)
+	for name, until := range w.held {
+		if !now.Before(until) {
+			delete(w.held, name)
+		} else if _, dup := w.waiting[name]; !dup {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
 		return ""
 	}
-	names := mapx.SortedKeys(w.waiting)
+	slices.Sort(names)
 	return "a background goroutine panicked and waits to be restarted: " + strings.Join(names, ", ") + "; the log has the panic"
+}
+
+// Hold is for work that Go does not run again after a panic, because
+// something else starts it anew: one attempt of a seal retry, which the next
+// sweep that finds it due repeats; one compaction, which the next one
+// replaces. Go never waits for a restart of such a goroutine, so nothing
+// would say that it panicked but a counter. Its OnPanic calls Hold: the
+// service is degraded for name until the next attempt is due (until), or
+// until Release says that one went through. A later Hold of the same name
+// moves the time on, never back.
+func (w *Watch) Hold(name string, until time.Time) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if until.After(w.held[name]) {
+		w.held[name] = until
+	}
+}
+
+// Release ends a Hold of name before its time.
+func (w *Watch) Release(name string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	delete(w.held, name) // a delete: cannot panic
+	w.mu.Unlock()
 }
 
 // count notes a panic that counts against the budget and reports whether it
