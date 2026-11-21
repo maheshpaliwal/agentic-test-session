@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,29 @@ func (a *svcApp) arm(site string, times int) {
 	if resp.StatusCode != http.StatusOK {
 		panic("POST /fault: " + resp.Status)
 	}
+}
+
+// panics is how often the SDK inside the service has panicked at the armed
+// fault point. (The service's output is not read while it runs: the process
+// is still writing it.)
+func (a *svcApp) panics() int {
+	resp, err := deliveryHTTP.Get("http://" + a.addr + "/fault")
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	n, err := strconv.Atoi(string(b))
+	if err != nil {
+		panic(fmt.Sprintf("GET /fault: %q", b))
+	}
+	return n
+}
+
+// log ends the service and returns what it wrote.
+func (a *svcApp) log() string {
+	a.kill()
+	return a.out.String()
 }
 
 // alive reports whether the service still answers.
@@ -79,7 +103,7 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		// and is complete.
 		time.Sleep(3 * time.Second)
 		if !a.alive() {
-			panic("the host is gone:\n" + a.out.String())
+			panic("the host is gone")
 		}
 		later, err := e.begin(30)
 		if err != nil {
@@ -89,7 +113,7 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 			panic(err)
 		}
 		if next := e.finish(later, 21); next.err != nil || next.info.Incomplete || next.got != 21 || len(next.info.DeliveryUnconfirmed) != 0 {
-			panic(fmt.Sprintf("a session started after recording had resumed: %s\n%s", next, a.out))
+			panic(fmt.Sprintf("a session started after recording had resumed: %s", next))
 		}
 		// The sessions that ran while the service did not record say so.
 		r := e.finish(s, 102)
@@ -101,7 +125,7 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 			!strings.Contains(o.info.IncompleteReasons[0], "stopped recording after an internal error") {
 			panic(fmt.Sprintf("the other session that ran meanwhile: %s", o))
 		}
-		if out := a.out.String(); strings.Count(out, "the subscriber goroutine panicked") != 1 || strings.Contains(out, "stays stopped") ||
+		if out := a.log(); strings.Count(out, "the subscriber goroutine panicked") != 1 || strings.Contains(out, "stays stopped") ||
 			!strings.Contains(out, "the application is not affected") {
 			t.Errorf("the service's log:\n%s", out)
 		}
@@ -123,11 +147,14 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		if err := a.burst(s, 50); err != nil {
 			panic(fmt.Sprintf("a request of the host while the SDK does not record: %v", err))
 		}
-		for deadline := time.Now().Add(90 * time.Second); !strings.Contains(a.out.String(), "stays stopped: nothing more is recorded"); time.Sleep(100 * time.Millisecond) {
+		// Six panics: five restarts (after 1, 2, 4, 8 and 16 seconds), then it
+		// stays stopped.
+		for deadline := time.Now().Add(90 * time.Second); a.panics() < 6; time.Sleep(100 * time.Millisecond) {
 			if time.Now().After(deadline) {
-				panic("the subscriber never gave up:\n" + a.out.String())
+				panic(fmt.Sprintf("the subscriber never gave up: %d panics", a.panics()))
 			}
 		}
+		time.Sleep(time.Second) // the control plane is told
 		if err := a.burst(s, 50); err != nil || !a.alive() {
 			panic(fmt.Sprintf("the host after the subscriber gave up: %v, alive %v", err, a.alive()))
 		}
@@ -136,7 +163,7 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		if r.got != 0 {
 			panic(fmt.Sprintf("events were recorded without an active set: %s", r))
 		}
-		if out := a.out.String(); strings.Count(out, "the subscriber goroutine panicked") != 6 {
+		if out := a.log(); strings.Count(out, "the subscriber goroutine panicked") != 6 || !strings.Contains(out, "stays stopped: nothing more is recorded") {
 			t.Errorf("the service's log:\n%s", out)
 		}
 	})
@@ -160,9 +187,9 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		if r := e.finish(first, 6); r.err != nil || r.short() {
 			panic(fmt.Sprintf("the first session: %s", r))
 		}
-		for deadline := time.Now().Add(30 * time.Second); strings.Count(a.out.String(), "the delivery reporter goroutine panicked") < 2; time.Sleep(50 * time.Millisecond) {
+		for deadline := time.Now().Add(30 * time.Second); a.panics() < 2; time.Sleep(50 * time.Millisecond) {
 			if time.Now().After(deadline) {
-				panic("the reporter never got to forget the session:\n" + a.out.String())
+				panic(fmt.Sprintf("the reporter never got to forget the session: %d panics", a.panics()))
 			}
 		}
 		s, err := e.begin(30)
@@ -181,6 +208,9 @@ func TestDelivery_APanicInTheSDKNeitherEndsTheHostNorPassesForAGreenRun(t *testi
 		}
 		if r := e.finish(s, 101); r.err != nil || r.info.Incomplete || r.short() || len(r.info.DeliveryUnconfirmed) != 0 {
 			panic(fmt.Sprintf("the session after the reporter was started again: %s", r))
+		}
+		if out := a.log(); strings.Count(out, "the delivery reporter goroutine panicked") != 2 || strings.Contains(out, "stays stopped") {
+			t.Errorf("the service's log:\n%s", out)
 		}
 	})
 }
