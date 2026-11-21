@@ -4,7 +4,8 @@ go 1.25
 
 require github.com/maheshpaliwal/agentic-test-session v0.0.0
 
-// Test-only: used by the `integration`-tagged tests; not imported by the library.
+// Test-only: used by the real-database tests (`integration`-tagged, and those
+// gated on TSESSION_TEST_PG_DSN alone); not imported by the library.
 require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/jackc/pgx/v5 v5.7.6
