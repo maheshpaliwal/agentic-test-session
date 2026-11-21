@@ -7,6 +7,14 @@ on a development laptop, mostly against in-process fakes; treat them as indicati
 
 ### Upgrading
 
+- `GET /healthz` of the collector and the control plane can answer `503 degraded: <reason>`: while a background
+  loop of theirs restarts after a panic, and once the panic budget is spent. `tracectl doctor` then prints
+  `DEGRADED <reason>` and exits 1. A health check that restarts on the first non-200 will restart sooner than
+  the service would have exited by itself.
+- Both services exit 1 after 5 panics of their background loops (sweep, janitor, retention) within 10 minutes,
+  after an orderly shutdown of at most 20 seconds. Run them under a supervisor that restarts them; the Compose
+  file has `restart: on-failure:5` (not tried with Docker).
+- `controlplane.Config` and `collector.Config` gained `OnPanicBudgetSpent`.
 Before deploying:
 
 - Custom implementations need new methods: `collector/store.Store.DeleteSession(ctx, sessionID) error` (a missing
@@ -108,6 +116,9 @@ Rolling back:
 
 ### Added
 
+- The SDK tells the control plane when it stops recording (`stopped` in `POST /v1/delivery`): the sessions
+  running at that moment end incomplete, naming the service and instance. `Manager.Health`, `Collector.Health`;
+  label `compaction` on `tsession_controlplane_goroutine_panics_total`; "Health and panics" in `docs/CONFIG.md`.
 - `dashboard -demo`: the incomplete session carries a delivery report and the reason drawn from it, and one
   update changes a masked column, so the delivery table and the "changed (value hidden)" row can be seen without
   any service running.
@@ -257,6 +268,15 @@ Rolling back:
 
 ### Changed
 
+- A panic in a background goroutine of the SDK, the collector or the control plane no longer ends the process
+  (for the SDK, the host application): the goroutine restarts with a backoff, and what was lost is reported. A
+  drain that panics three times ends its session SEALED and incomplete; `max_drain` counts from the stop, also
+  across restarts of the drain. The SDK stops recording at the first panic of its subscriber until it has the
+  active set again. A panic under a lock no longer leaves the lock held.
+  Known limits: a subscriber that stays stopped is reported once, and later sessions seal without that service's
+  events and without a mark (it then counts as a service that is not connected, which `doctor --require-services`
+  sees); `stopped` marks every running session, whether or not the instance took part, and any caller that
+  reaches the control plane can send it; panics of the seal retry and of compaction are outside the budget.
 - `tracectl list` refuses a reply whose sessions have no state (`--cp` pointing at the collector) with exit 1; it
   printed a row of blanks. `tracectl summary` of a session without events says that nothing was recorded.
 - `tracectl start --name X` notes on standard error when an earlier session is also named X, with its id and
