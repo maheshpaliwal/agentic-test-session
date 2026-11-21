@@ -72,9 +72,7 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 		// drain timed out is not known, so the gate cannot pass.
 		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
 	}
-	switch {
-	case !g.onUnconfirmed:
-	case !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != ""):
+	if g.onUnconfirmed && !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != "") {
 		// The stricter gate on its own: a session known to have lost events
 		// must not pass where one that is merely unconfirmed fails.
 		msg := "session is incomplete"
@@ -82,6 +80,9 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 			msg += " (" + strings.Join(info.IncompleteReasons, "; ") + ")"
 		}
 		failed = append(failed, msg)
+	}
+	switch {
+	case !g.onUnconfirmed:
 	case len(info.DeliveryUnconfirmed) > 0:
 		failed = append(failed, "delivery is unconfirmed ("+strings.Join(info.DeliveryUnconfirmed, "; ")+")")
 	case info.State == "" && !g.onIncomplete:

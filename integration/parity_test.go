@@ -865,7 +865,8 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 	none := f.ids[3]
 	for be, name := range map[backend]string{f.live: "the session", file: "the file"} {
 		for _, cmd := range []string{"summary", "report", "digest"} {
-			for flag, want := range map[string]int{"--fail-on-error": 0, "--fail-on-incomplete": 3, "--fail-on-empty": 3, "--fail-on-unconfirmed": 0} {
+			for flag, want := range map[string]int{"--fail-on-error": 0, "--fail-on-incomplete": 3, "--fail-on-empty": 3,
+				"--fail-on-unconfirmed": 3} { // the stricter gate includes the plain one: the session is incomplete
 				code, _, errOut := tracectlAt(t, tracectl, be, cmd, none, flag)
 				if code != want || want == 3 && !strings.Contains(errOut, "check failed") {
 					t.Errorf("%s %s of %s (no events): exit %d, want %d\n%s", cmd, flag, name, code, want, errOut)
