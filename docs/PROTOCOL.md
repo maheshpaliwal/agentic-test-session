@@ -171,7 +171,7 @@ retry stays `SEALED` (a terminal state never changes), also when it was ended by
   - `GET /v1/sessions/{id}/entities` -> list of `{store,entity,pk,mutation_count,uncertain}`; `pk` is the key as
     canonical JSON (`{}` when it is not known). `uncertain` (optional, omitted when 0) counts the mutations whose
     event carries a flag saying the recorded key or row image is incomplete or uncertain: `pk_unknown`,
-    `pk_not_unique`, `pk_lookup_failed`, `upsert_unknown`, `after_unavailable`, `after_from_args`, `after_failed`, `returning_partial`,
+    `pk_not_unique`, `pk_lookup_failed`, `upsert_unknown`, `after_unavailable`, `after_from_args`, `after_failed`,
     `image_skipped`, `image_timeout`, `image_failed`, `image_truncated`, `diff_truncated` (a flag with a reason,
     `image_skipped:deadline`, counts as its base name; `core.UncertainFlag`)
   - `GET /v1/sessions/{id}/entities/{store}/{entity}/{pk}` ->

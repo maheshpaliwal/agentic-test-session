@@ -520,9 +520,9 @@ assert.ok(U.listSummary({ loaded: 400, shown: 400, total: 900, more: true, state
 assert.ok(!/not refreshed/.test(U.listSummary({ loaded: 200, shown: 200, total: 900, more: true, state: '', below: 0 })));
 
 // Entity history: which event flags mean an uncertain key or row image (mirrors core.UncertainFlag).
-for (const f of ['pk_unknown', 'pk_not_unique', 'pk_lookup_failed', 'upsert_unknown', 'after_unavailable', 'after_from_args', 'after_failed', 'returning_partial',
+for (const f of ['pk_unknown', 'pk_not_unique', 'pk_lookup_failed', 'upsert_unknown', 'after_unavailable', 'after_from_args', 'after_failed',
   'image_skipped', 'image_skipped:deadline', 'image_timeout', 'image_failed', 'image_truncated', 'diff_truncated']) assert.strictEqual(U.uncertainFlag(f), true, f);
-for (const f of ['redacted', 'tx_unresolved', 'orphaned', 'returning_appended', '', ':pk_unknown', 'PK_UNKNOWN', 'constructor', '__proto__', 'toString', undefined, null, 7])
+for (const f of ['redacted', 'tx_unresolved', 'orphaned', 'returning_appended', 'returning_partial', '', ':pk_unknown', 'PK_UNKNOWN', 'constructor', '__proto__', 'toString', undefined, null, 7])
   assert.strictEqual(U.uncertainFlag(f), false, String(f));
 assert.strictEqual(U.flagBase('image_skipped:deadline'), 'image_skipped');
 assert.strictEqual(U.flagBase('orphaned'), 'orphaned');

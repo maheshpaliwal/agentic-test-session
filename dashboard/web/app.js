@@ -66,7 +66,7 @@
     pk_unknown: 'no primary key value found for the row; declare the key with tsql.WithPKColumns', pk_lookup_failed: 'the primary key could not be read from the database catalog',
     pk_not_unique: 'the key columns matched more than one row, so the new values were not recorded; declare the key with tsql.WithPKColumns',
     after_from_args: 'the new values were taken from the statement, not read back from the database',
-    returning_partial: 'the statement returned only some of the row\'s columns',
+    returning_partial: 'the statement\'s RETURNING lists only some columns; the recorded row was read separately',
     oversize_dropped: 'payload dropped for exceeding size limits',
     after_failed: 'reading the row back after the write failed; its new values are not known',
     upsert_unknown: 'whether this upsert inserted the row or updated one that was there is not known, so no changed fields are listed',

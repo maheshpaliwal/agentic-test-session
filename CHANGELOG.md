@@ -207,6 +207,10 @@ Rolling back:
 
 ### Fixed
 
+- An `INSERT ... RETURNING id` (any RETURNING that lists only some columns) was shown as an uncertain record
+  in `tracectl digest`, `history`, `entities` and the dashboard, although its row image is read separately and
+  is complete. The flag `returning_partial` describes the statement, not the image, and no longer counts as
+  uncertain.
 - `tsql`: an upsert (`INSERT ... ON CONFLICT DO UPDATE`) that updated an existing row was recorded like an
   insert, every column as new; with a conflict target other than the primary key it could be filed under a row
   that was never written. It is now recorded as an `update` with the row's earlier values and a diff of the
