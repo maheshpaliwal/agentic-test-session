@@ -25,8 +25,9 @@
 // resolved by the server as they are for the statement; KEY_COLUMN_USAGE of
 // information_schema on MySQL. Composite keys are kept in key order. The
 // answer is cached per handle (at most 1024 tables), "no primary key"
-// included, so the cost is one capture (three round trips on Postgres, one on
-// MySQL) per table per handle and none afterwards; several connections that
+// included, for 30 seconds; then it is asked again. So the cost is one
+// capture (three round trips on Postgres, one on MySQL) per table per handle
+// every 30 seconds; several connections that
 // first meet a table at the same moment may each ask once. The MySQL lookup
 // has not been run against a live server. The lookup is a capture like an
 // image read: fenced, bounded by the capture timeout, skipped under
@@ -37,15 +38,22 @@
 // default applies. WithPKLookup(false) switches the lookup off.
 //
 // The cached keys are dropped when a traced statement on the handle is DDL
-// or sets search_path. A key changed outside a session, through another
-// handle or by another process is not noticed until the handle is reopened;
-// neither is a search_path that differs between the connections of one
-// handle, so tables that share an unqualified name across schemas but not a
-// key need schema-qualified statements or WithPKColumns. A table without a
-// primary key and a view have nothing to find: declare their key with
-// WithPKColumns.
+// or can change what an unqualified table name means (search_path in any
+// spelling, SET ROLE, RESET, DISCARD, USE), again when the transaction such a
+// statement ran in ends, and, for the tables looked up in it, when a
+// transaction is rolled back. A workload that sets search_path in every
+// transaction therefore pays the lookup in every transaction: use
+// schema-qualified names or WithPKColumns there. What no statement on the
+// handle shows (DDL through another handle or process, a search_path that
+// differs between the connections of one handle or is set inside a function)
+// is noticed only when the 30 seconds are over. Until then a write may be
+// looked for under the old key; if those columns match more rows than were
+// written, nothing is recorded as the row's new values (flag
+// "pk_not_unique"). The same holds for a table without a primary key whose
+// "id" does not identify a row. A table without a primary key and a view
+// have nothing to find: declare their key with WithPKColumns.
 //
-// Two flags mark a write whose key or new values are not known:
+// Three flags mark a write whose key or new values are not known:
 //
 //   - "pk_unknown": no value for the key columns was found in the row images,
 //     the predicate or the VALUES list (typically the table has no "id" and
@@ -55,6 +63,9 @@
 //     (no key, or the re-read failed or was skipped). The mutation carries
 //     the before image only and no diff: the new values are not known, which
 //     is not the same as every column having been cleared.
+//   - "pk_not_unique": the key columns matched more rows than the statement
+//     wrote, so they are not the table's key. The after image is dropped
+//     ("after_unavailable" applies) and the key is looked up afresh.
 //
 // # Redaction
 //

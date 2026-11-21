@@ -141,6 +141,8 @@ func (c *conn) doExec(ctx context.Context, query string, args []driver.NamedValu
 	if err == nil {
 		c.trackTx(info.Tx)
 		c.noteSchema(info)
+	} else {
+		c.pks.drop(info.TableSQL) // the table may not exist yet: what the lookup said about it is not kept
 	}
 	safe(func() { t.finishExec(res, err) })
 	t.span.End()
@@ -178,6 +180,7 @@ func (c *conn) doQuery(ctx context.Context, query string, args []driver.NamedVal
 	}
 	r, rel, err := run(q)
 	if err != nil {
+		c.pks.drop(info.TableSQL)
 		t.setErr(err)
 		t.span.End()
 		return nil, err

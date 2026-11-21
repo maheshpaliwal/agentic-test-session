@@ -4,13 +4,14 @@ import (
 	"database/sql/driver"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/contrib/tsql/mutation"
 )
 
 const (
-	// maxPKTables bounds the tables one handle remembers; the cache is emptied
-	// when it is full.
+	// maxPKTables bounds the tables one handle remembers; when it is full the
+	// entries that are out of date go, or failing that any one entry.
 	maxPKTables = 1024
 	// maxPKLookups is how many failed lookups of one table a handle makes
 	// before it stops asking and keeps the default key.
@@ -19,6 +20,13 @@ const (
 	// MySQL 16).
 	maxPKCols = 32
 )
+
+// pkTTL is how long a handle trusts what the catalog said. A key can change
+// in ways no statement on the handle shows (another connection's DDL, a
+// search_path that is set by a function or reverts with its transaction, a
+// table created after it was first named), so every answer is asked for
+// again after this long, a failed lookup's fallback included.
+var pkTTL = 30 * time.Second
 
 // pkCache remembers, for one database handle, what the catalog said the
 // primary key of each table is. Tables are keyed by their name as written in
@@ -34,6 +42,7 @@ type pkCache struct {
 type pkEntry struct {
 	cols  []string
 	fails int
+	at    time.Time // when the catalog was asked
 }
 
 // settled reports whether the table needs no further lookup.
@@ -43,6 +52,10 @@ func (p *pkCache) get(table string) (pkEntry, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.m[table]
+	if ok && time.Since(e.at) > pkTTL {
+		delete(p.m, table)
+		return pkEntry{}, false
+	}
 	return e, ok
 }
 
@@ -50,12 +63,32 @@ func (p *pkCache) put(table string, e pkEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, ok := p.m[table]; !ok && len(p.m) >= maxPKTables {
-		clear(p.m)
+		for k, v := range p.m {
+			if time.Since(v.at) > pkTTL {
+				delete(p.m, k)
+			}
+		}
+		for k := range p.m { // still full: make room for one
+			if len(p.m) < maxPKTables {
+				break
+			}
+			delete(p.m, k)
+		}
 	}
 	if p.m == nil {
 		p.m = map[string]pkEntry{}
 	}
+	e.at = time.Now()
 	p.m[table] = e
+}
+
+// drop forgets the given tables.
+func (p *pkCache) drop(tables ...string) {
+	p.mu.Lock()
+	for _, t := range tables {
+		delete(p.m, t)
+	}
+	p.mu.Unlock()
 }
 
 // failed counts one failed lookup of table.
@@ -147,6 +180,7 @@ func (t *stmtTrace) lookupPK() {
 			return
 		}
 		t.c.pks.put(in.TableSQL, pkEntry{cols: cols})
+		t.c.notePKLookup(in.TableSQL)
 		if len(cols) > 0 {
 			t.pk, t.pkCatalog = cols, true
 		}
@@ -180,11 +214,50 @@ func pkNames(rs []img) (cols []string, ok bool) {
 	return cols, true
 }
 
+// schemaWords are the words of a statement that is neither a read nor a
+// write of rows but can change what an unqualified table name means.
+var schemaWords = []string{"search_path", "schema", "role", "authorization", "discard", "reset", "use"}
+
 // noteSchema drops the cached keys after a traced statement that can change
-// them: DDL, or one that names search_path (which decides what an unqualified
-// table name means).
+// them: DDL, or one that can change what an unqualified table name means
+// (search_path and its other spellings, SET ROLE, RESET, DISCARD, MySQL's
+// USE). Inside a transaction the change may be undone when it ends, so the
+// keys are dropped again then.
 func (c *conn) noteSchema(in mutation.Info) {
-	if in.Kind == mutation.DDL || (in.Kind == mutation.Other && slices.Contains(in.Idents, "search_path")) {
+	hit := in.Kind == mutation.DDL || slices.Contains(in.Idents, "search_path") || slices.Contains(in.Idents, "set_config")
+	if !hit && in.Kind == mutation.Other {
+		hit = slices.ContainsFunc(schemaWords, func(w string) bool { return slices.Contains(in.Idents, w) })
+	}
+	if !hit {
+		return
+	}
+	c.pks.reset()
+	c.mu.Lock()
+	c.pkSchemaDirty = c.txID != "" || c.rawTx
+	c.mu.Unlock()
+}
+
+// notePKLookup remembers that table's key was read inside the open
+// transaction: if that transaction is rolled back, what the lookup saw (DDL
+// of the same transaction) may never have happened.
+func (c *conn) notePKLookup(table string) {
+	c.mu.Lock()
+	if c.txID != "" || c.rawTx {
+		c.pkTxTables = append(c.pkTxTables, table)
+	}
+	c.mu.Unlock()
+}
+
+// endPKTx is called when the connection's transaction ends.
+func (c *conn) endPKTx(committed bool) {
+	c.mu.Lock()
+	dirty, tables := c.pkSchemaDirty, c.pkTxTables
+	c.pkSchemaDirty, c.pkTxTables = false, nil
+	c.mu.Unlock()
+	switch {
+	case dirty:
 		c.pks.reset()
+	case !committed:
+		c.pks.drop(tables...)
 	}
 }

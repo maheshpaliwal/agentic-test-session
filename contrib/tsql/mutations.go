@@ -318,8 +318,17 @@ func (t *stmtTrace) reread(refs []pkRef, pkCols []string) []img {
 			b.WriteString(")")
 		}
 	}
-	rs, ok := t.capture(b.String(), vals, t.cfg.maxRows, "after_failed")
+	rs, ok := t.capture(b.String(), vals, len(refs)+1, "after_failed")
 	if !ok {
+		return nil
+	}
+	if len(rs) > len(refs) {
+		// More rows than keys: these columns do not identify a row, so they
+		// are not the table's key (the default "id" on a table without one,
+		// or a key that has changed since it was looked up). Which row is the
+		// changed one cannot be told, and a guess would be recorded as fact.
+		t.flag("pk_not_unique")
+		t.c.pks.drop(t.info.TableSQL)
 		return nil
 	}
 	return rs

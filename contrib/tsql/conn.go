@@ -22,6 +22,9 @@ type conn struct {
 	txID   string
 	serial bool // open tx runs at SERIALIZABLE
 	rawTx  bool // the app opened a transaction with a plain BEGIN statement
+	// Primary-key cache bookkeeping for the open transaction (see endPKTx).
+	pkSchemaDirty bool
+	pkTxTables    []string
 
 	// multi is whether this connection takes two statements in one text (see
 	// capture). Only the statement path touches it, which database/sql
@@ -63,6 +66,9 @@ func (c *conn) trackTx(tc mutation.TxControl) {
 	c.mu.Lock()
 	c.rawTx = tc.Opens()
 	c.mu.Unlock()
+	if tc != mutation.TxBegin {
+		c.endPKTx(tc == mutation.TxCommit)
+	}
 }
 
 // trackTxUntraced is trackTx for a statement that is not traced and so was
@@ -342,6 +348,7 @@ func (t *txWrap) Rollback() error {
 
 func (t *txWrap) end(kind core.Kind, name string, err error, commitFailed bool) {
 	t.c.clearTx(t.id)
+	t.c.endPKTx(kind == core.KindDBTxCommit)
 	if !core.Active(t.ctx) {
 		return // no span: nothing to render or redact
 	}

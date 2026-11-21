@@ -71,7 +71,7 @@ TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
 - Other wrappers live under `contrib/`: gRPC, SQL, Redis (go-redis v8 and v9), Mongo, DynamoDB, queues (Kafka,
   SQS, AMQP). Each package's doc comment shows its setup.
 - `contrib/tsql` supports Postgres and MySQL only. It reads each table's primary key from the database catalog
-  (once per table per `sql.DB`), so rows are recorded under their real key whatever it is called. Declare the key
+  (once per table per `sql.DB`, refreshed every 30 seconds), so rows are recorded under their real key whatever it is called. Declare the key
   with `tsql.WithPKColumns` for a table without a primary key or a view. Two flags on a write say what could not
   be captured: `pk_unknown` (no key value was found for the row) and `after_unavailable` (an updated row could not
   be read back, so the record has its before image and no diff). The package doc has the details.
