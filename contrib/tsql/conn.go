@@ -21,6 +21,11 @@ type conn struct {
 	txID   string
 	serial bool // open tx runs at SERIALIZABLE
 	rawTx  bool // the app opened a transaction with a plain BEGIN statement
+
+	// multi is whether this connection takes two statements in one text (see
+	// capture). Only the statement path touches it, which database/sql
+	// serializes per connection.
+	multi multiStmt
 }
 
 func newConn(inner driver.Conn, cfg *config) *conn { return &conn{inner: inner, cfg: cfg} }

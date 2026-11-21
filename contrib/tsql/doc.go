@@ -46,6 +46,25 @@
 // found two capped values equal and so cannot see a change beyond the cap, and
 // "mutations_truncated" marks a statement with more rows than were captured.
 //
+// # Cost of image capture
+//
+// Statements outside an active session, reads, and writes with WithImages(false)
+// cost no extra round trip. Each image read of a traced write costs three on
+// Postgres: one text that opens the fence and sets the timeout ("SAVEPOINT
+// ts_capture; SET LOCAL statement_timeout = n", or "BEGIN READ ONLY; SET LOCAL
+// ..." in autocommit), the SELECT, and one that closes the fence by rolling it
+// back ("ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture", or
+// "ROLLBACK"), which also puts statement_timeout back to what the application
+// had. An UPDATE reads the rows before and after (7 round trips in all), a
+// DELETE before and an INSERT with its key in VALUES after (4 each); an INSERT
+// whose key the database generates is not re-read (1). Sending two statements
+// in one text needs a driver that uses the simple query protocol for an Exec
+// without arguments (pgx and lib/pq do). tsql finds out per connection, where a
+// refusal cannot hurt, so the first capture on a connection costs one or two
+// round trips more; with a driver that refuses, the statements are sent one by
+// one (five per image read inside a transaction, four in autocommit). On MySQL
+// an image read is one SELECT.
+//
 // # Reaching the wrapped driver
 //
 // sql.Conn.Raw and sql.DB.Driver hand out tsql's wrappers; UnwrapConn and

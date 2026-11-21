@@ -182,17 +182,43 @@ func rtSQLs(cs []rtCall) []string {
 // rtCase is one traced statement to measure; args returns the arguments of
 // the i-th execution.
 type rtCase struct {
-	name string
-	stmt string
-	args func(i int) []any
+	name     string
+	captures int // image reads tsql adds: before and/or after
+	stmt     string
+	args     func(i int) []any
 }
 
 var rtCases = []rtCase{
-	{"update", "UPDATE tsql_rt SET status = $1 WHERE id = $2", func(i int) []any { return []any{fmt.Sprintf("s%d", i), 1} }},
-	{"delete", "DELETE FROM tsql_rt WHERE id = $1", func(i int) []any { return []any{10 + i} }},
-	{"insert_explicit_key", "INSERT INTO tsql_rt (id, status, note) VALUES ($1, $2, $3)", func(i int) []any { return []any{1000000 + i, "new", "n"} }},
-	{"insert_serial_key", "INSERT INTO tsql_rt_serial (status) VALUES ($1)", func(i int) []any { return []any{"new"} }},
-	{"update_multi_row", "UPDATE tsql_rt SET status = $1 WHERE note = $2", func(i int) []any { return []any{fmt.Sprintf("m%d", i), "grp"} }},
+	{"update", 2, "UPDATE tsql_rt SET status = $1 WHERE id = $2", func(i int) []any { return []any{fmt.Sprintf("s%d", i), 1} }},
+	{"delete", 1, "DELETE FROM tsql_rt WHERE id = $1", func(i int) []any { return []any{10 + i} }},
+	{"insert_explicit_key", 1, "INSERT INTO tsql_rt (id, status, note) VALUES ($1, $2, $3)", func(i int) []any { return []any{1000000 + i, "new", "n"} }},
+	{"insert_serial_key", 0, "INSERT INTO tsql_rt_serial (status) VALUES ($1)", func(i int) []any { return []any{"new"} }},
+	{"update_multi_row", 2, "UPDATE tsql_rt SET status = $1 WHERE note = $2", func(i int) []any { return []any{fmt.Sprintf("m%d", i), "grp"} }},
+}
+
+// rtWant is the number of statements a case sends to the driver: the
+// application's own plus the fenced captures. A capture is three round trips
+// (open the fence, SELECT, close it). Inside a transaction the first capture
+// on a connection opens the fence in two, until the connection has shown
+// that it takes two statements in one text. A driver that prepares every
+// statement (legacy) cannot: there a capture is five statements in a
+// transaction and four in autocommit, plus the one refused attempt per
+// connection (followed in autocommit by a ROLLBACK).
+func (c rtCase) rtWant(inTx, legacy bool) (first, steady int) {
+	per, probe := 3, 0
+	switch {
+	case legacy && inTx:
+		per, probe = 5, 1
+	case legacy:
+		per, probe = 4, 2
+	case inTx:
+		probe = 1
+	}
+	steady = 1 + per*c.captures
+	if c.captures == 0 {
+		probe = 0
+	}
+	return steady + probe, steady
 }
 
 // rtReset (re)creates the tables the cases write to: ids 1..3 with note
@@ -284,25 +310,45 @@ func TestPGRoundTrips(t *testing.T) {
 			if inTx {
 				mode = "tx"
 			}
-			t.Run(c.name+"/"+mode, func(t *testing.T) {
-				m := rtMeasure(t, c, inTx, false)
-				t.Logf("%-20s %-10s first on connection: %d round trips, steady state: %d", c.name, mode, len(m[0].calls), len(m[1].calls))
-				for i, label := range []string{"first", "steady"} {
-					if i == 1 && strings.Join(rtSQLs(m[0].calls), "\n") == strings.Join(rtSQLs(m[1].calls), "\n") {
-						t.Logf("  steady: same sequence")
-					} else {
-						for n, s := range rtSQLs(m[i].calls) {
-							t.Logf("  %s %d. %s", label, n+1, s)
-						}
-					}
-					t.Logf("  %s recorded: %s", label, m[i].recorded)
+			var recorded [2]string
+			for _, legacy := range []bool{false, true} {
+				name := c.name + "/" + mode
+				if legacy {
+					name += "/legacy_driver"
 				}
-			})
+				t.Run(name, func(t *testing.T) {
+					m := rtMeasure(t, c, inTx, legacy)
+					t.Logf("%-20s %-10s first on connection: %d round trips, steady state: %d", c.name, mode, len(m[0].calls), len(m[1].calls))
+					for i, label := range []string{"first", "steady"} {
+						if i == 1 && strings.Join(rtSQLs(m[0].calls), "\n") == strings.Join(rtSQLs(m[1].calls), "\n") {
+							t.Logf("  steady: same sequence")
+						} else {
+							for n, s := range rtSQLs(m[i].calls) {
+								t.Logf("  %s %d. %s", label, n+1, s)
+							}
+						}
+						t.Logf("  %s recorded: %s", label, m[i].recorded)
+					}
+					first, steady := c.rtWant(inTx, legacy)
+					if len(m[0].calls) != first || len(m[1].calls) != steady {
+						t.Errorf("round trips: first %d, steady %d; want %d and %d", len(m[0].calls), len(m[1].calls), first, steady)
+					}
+					// what is recorded does not depend on how the fence is sent
+					if !legacy {
+						recorded = [2]string{m[0].recorded, m[1].recorded}
+					} else if recorded != [2]string{m[0].recorded, m[1].recorded} {
+						t.Errorf("recorded differs from the run with multi-statement support:\n%s\n%s", m[0].recorded, recorded[0])
+					}
+				})
+			}
 		}
 	}
 	t.Run("update/images_off", func(t *testing.T) {
 		m := rtMeasure(t, rtCases[0], false, false, tsql.WithImages(false))
 		t.Logf("update with WithImages(false): %d round trips: %v", len(m[1].calls), rtSQLs(m[1].calls))
+		if len(m[0].calls) != 1 || len(m[1].calls) != 1 {
+			t.Errorf("round trips without images: %d and %d, want 1", len(m[0].calls), len(m[1].calls))
+		}
 	})
 }
 

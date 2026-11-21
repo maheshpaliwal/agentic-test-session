@@ -144,14 +144,11 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 		"SAVEPOINT ts_capture",
 		"SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id = 2 LIMIT 51",
-		"ROLLBACK TO SAVEPOINT ts_capture",
-		"RELEASE SAVEPOINT ts_capture",
+		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		"UPDATE t SET a = 1 WHERE id = 2",
-		"SAVEPOINT ts_capture",
-		"SET LOCAL statement_timeout = 500",
+		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id IN ($1)",
-		"ROLLBACK TO SAVEPOINT ts_capture",
-		"RELEASE SAVEPOINT ts_capture",
+		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 	}
 	if got := sqls(f.RawCalls()); got != strings.Join(want, "\n")+"\n" {
 		t.Fatalf("driver saw:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))

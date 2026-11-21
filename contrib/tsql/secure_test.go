@@ -201,9 +201,17 @@ func TestCaptureInPGTxUsesSavepointAndNeverPoisonsTx(t *testing.T) {
 		t.Fatalf("COMMIT must succeed: %v", err)
 	}
 	calls := f.RawCalls()
-	want := []string{"SAVEPOINT ts_capture", "SET LOCAL statement_timeout", "SELECT *", "ROLLBACK TO", "RELEASE SAVEPOINT", "UPDATE t"}
+	// The first capture on a connection opens the fence statement by
+	// statement; from then on the connection is known to take two statements
+	// in one text.
+	want := []string{
+		"SAVEPOINT ts_capture", "SET LOCAL statement_timeout = 500", "SELECT *",
+		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture", "UPDATE t",
+		"SAVEPOINT ts_capture; SET LOCAL statement_timeout = 500", "SELECT *",
+		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
+	}
 	for i, w := range want {
-		if !strings.HasPrefix(calls[i].SQL, strings.Fields(w)[0]) {
+		if !strings.HasPrefix(calls[i].SQL, w) {
 			t.Fatalf("call %d = %q, want prefix %q\n%s", i, calls[i].SQL, w, sqls(calls))
 		}
 	}
@@ -239,8 +247,7 @@ func TestCaptureInPGTxSuccessRollsBackItsSavepoint(t *testing.T) {
 		"SAVEPOINT ts_capture",
 		"SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id = $1 LIMIT 51",
-		"ROLLBACK TO SAVEPOINT ts_capture",
-		"RELEASE SAVEPOINT ts_capture",
+		"ROLLBACK TO SAVEPOINT ts_capture; RELEASE SAVEPOINT ts_capture",
 		"DELETE FROM t WHERE id = $1",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {

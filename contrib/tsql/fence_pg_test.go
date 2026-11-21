@@ -325,6 +325,47 @@ func TestPGFenceLeavesTransactionStateUntouched(t *testing.T) {
 	}
 }
 
+// The first capture on a connection is where tsql finds out whether the
+// driver takes two statements in one text. When that very capture fails (its
+// subtransaction is aborted) the fence is still closed and the application's
+// transaction commits, with a driver that takes such a text and with one that
+// refuses it.
+func TestPGFenceFirstCaptureOnConnectionFails(t *testing.T) {
+	rtDSN(t)
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) {
+			rtFenceTable(t)
+			rec, ctx := setup(t)
+			d := &rtDriver{legacy: legacy}
+			db := rtOpen(t, d, tsql.WithCaptureTimeout(100*time.Millisecond))
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE tsql_fence SET v = 'y' WHERE id = 2 AND (SELECT pg_sleep(0.3)) IS NOT NULL"); err != nil {
+				t.Fatalf("application statement after a failed capture: %v", err)
+			}
+			t.Logf("driver saw:\n%s", strings.Join(rtSQLs(d.take()), "\n"))
+			if got := rtShow(t, tx, "SHOW statement_timeout"); got != "0" {
+				t.Fatalf("statement_timeout = %q", got)
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE tsql_fence SET v = $1 WHERE id = $2", "x", 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("COMMIT: %v", err)
+			}
+			if got := rtShow(t, db, "SELECT string_agg(id || '=' || v, ',' ORDER BY id) FROM tsql_fence"); got != "1=x,2=y" {
+				t.Fatalf("committed rows: %s", got)
+			}
+			evs := byKind(rec.Events(), core.KindDBWrite)
+			if len(evs) != 2 || !hasFlag(evs[0], "image_timeout") || len(evs[1].Mutations) != 1 || jsonMap(t, evs[1].Mutations[0].After)["v"] != "x" {
+				t.Fatalf("events: %+v", evs)
+			}
+		})
+	}
+}
+
 // In a transaction that is already aborted the capture gives up at its first
 // statement, which the server refuses like any other: nothing follows it, in
 // particular no ROLLBACK TO SAVEPOINT (it could revive the transaction if the

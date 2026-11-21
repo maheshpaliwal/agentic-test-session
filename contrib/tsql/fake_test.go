@@ -48,6 +48,9 @@ type fakeDB struct {
 	// an aborted tx fails.
 	abortModel bool
 	aborted    bool
+	// noMulti mimics a driver that prepares every statement: Postgres refuses
+	// a text holding two statements, and that refusal is an error like any other.
+	noMulti bool
 	// slow makes matching queries block (honouring ctx) for the returned duration.
 	slow func(q string) time.Duration
 }
@@ -100,6 +103,12 @@ func isFence(q string) bool {
 func (f *fakeDB) answer(q string, args []driver.Value) result {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noMulti && strings.Contains(q, "; ") {
+		if f.abortModel {
+			f.aborted = true
+		}
+		return result{err: errors.New("cannot insert multiple commands into a prepared statement (SQLSTATE 42601)")}
+	}
 	if f.abortModel {
 		if strings.HasPrefix(q, "ROLLBACK TO") {
 			f.aborted = false
