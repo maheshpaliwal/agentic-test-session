@@ -14,12 +14,17 @@ import "strings"
 // the first token of the text and the first token after every ';' byte. A ';'
 // inside a literal or a comment is not a statement separator, but treating it
 // as one can only turn the answer into a maybe, never into a wrong no.
-func MayControlTx(sql string, d Dialect) bool {
+func MayControlTx(sql string, d Dialect) bool { return anyStatementStarts(sql, d, isTxKeyword) }
+
+// anyStatementStarts reports whether the first word of the text, or the
+// first word after some ';', is one match accepts (or cannot be read
+// cheaply, which is a maybe).
+func anyStatementStarts(sql string, d Dialect, match func(w string) bool) bool {
 	// Skipping blanks and comments after a ';' that sits inside a comment
 	// can rescan the same bytes; the budget keeps the scan linear by
 	// answering maybe once it has skipped more than the text is long.
 	budget := len(sql) + 64
-	if txKeywordAt(sql, 0, d, &budget) {
+	if keywordAt(sql, 0, d, &budget, match) {
 		return true
 	}
 	for i := 0; ; {
@@ -28,16 +33,42 @@ func MayControlTx(sql string, d Dialect) bool {
 			return false
 		}
 		i += j + 1
-		if txKeywordAt(sql, i, d, &budget) {
+		if keywordAt(sql, i, d, &budget, match) {
 			return true
 		}
 	}
 }
 
-// txKeywordAt reports whether the first token at or after s[i:] may be a word
-// txEffect acts on. Blanks and comments are skipped exactly as tokenize skips
+// MaySetIsolation is a cheap, allocation-free pre-check for the isolation
+// fields of Parse's result (TxIso, DefIso) on a text MayControlTx said no
+// to. A statement that sets a level names it with the word "isolation" and
+// is a SET, or calls set_config. The word alone is not enough to pay for a
+// parse: it is also a column name and a word in a string, and the text it
+// sits in can be a bulk insert of megabytes.
+func MaySetIsolation(sql string, d Dialect) bool {
+	if !MentionsIsolation(sql) {
+		return false
+	}
+	return anyStatementStarts(sql, d, isSet) || hasWordFold(sql, "SET_CONFIG")
+}
+
+func isSet(w string) bool { return len(w) == 3 && foldEq(w, "SET") }
+
+// hasWordFold reports whether s contains the upper-case ASCII word upper in
+// any case.
+func hasWordFold(s, upper string) bool {
+	for i := 0; i+len(upper) <= len(s); i++ {
+		if s[i]&^0x20 == upper[0] && foldEq(s[i:i+len(upper)], upper) {
+			return true
+		}
+	}
+	return false
+}
+
+// keywordAt reports whether the first token at or after s[i:] may be a word
+// match accepts. Blanks and comments are skipped exactly as tokenize skips
 // them.
-func txKeywordAt(s string, i int, d Dialect, budget *int) bool {
+func keywordAt(s string, i int, d Dialect, budget *int, match func(w string) bool) bool {
 	n := len(s)
 	st := i
 skip:
@@ -92,7 +123,11 @@ skip:
 	if j < n && s[j] >= 0x80 {
 		return true
 	}
-	w := s[i:j]
+	return match(s[i:j])
+}
+
+// isTxKeyword reports whether w is a word txEffect acts on.
+func isTxKeyword(w string) bool {
 	switch len(w) {
 	case 3:
 		return foldEq(w, "END")

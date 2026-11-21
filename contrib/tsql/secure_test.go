@@ -286,7 +286,7 @@ func TestMySQLCaptureInTxHasNoSavepoint(t *testing.T) {
 	tx, _ := db.BeginTx(ctx, nil)
 	tx.ExecContext(ctx, "UPDATE t SET a = ? WHERE id = ?", 1, 2)
 	tx.Commit()
-	if s := sqls(f.RawCalls()); strings.Contains(s, "SAVEPOINT") || strings.Contains(s, "BEGIN READ ONLY") {
+	if s := sqls(f.RawCalls()); strings.Contains(s, "SAVEPOINT") || strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") {
 		t.Fatalf("mysql must not use savepoints:\n%s", s)
 	}
 }
@@ -518,7 +518,7 @@ func TestRawBeginIsTreatedAsOpenTx(t *testing.T) {
 	db.ExecContext(ctx, "BEGIN")
 	db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2")
 	s := sqls(f.RawCalls())
-	if strings.Contains(s, "BEGIN READ ONLY") || !strings.Contains(s, "SAVEPOINT ts_capture") {
+	if strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") || !strings.Contains(s, "SAVEPOINT ts_capture") {
 		t.Fatalf("capture inside a hand-written BEGIN must use a savepoint:\n%s", s)
 	}
 	f.mu.Lock()
@@ -526,7 +526,7 @@ func TestRawBeginIsTreatedAsOpenTx(t *testing.T) {
 	f.mu.Unlock()
 	db.ExecContext(ctx, "COMMIT")
 	db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2")
-	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY") {
+	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") {
 		t.Fatalf("after COMMIT capture runs in its own read-only tx:\n%s", s)
 	}
 }

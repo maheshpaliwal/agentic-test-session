@@ -60,11 +60,11 @@ func TestCaptureFenceAutocommitSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	fenceWant(t, f,
-		"BEGIN READ ONLY; SET LOCAL statement_timeout = 500",
+		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id = 2 LIMIT 51",
 		"ROLLBACK",
 		fenceUpdate,
-		"BEGIN READ ONLY; SET LOCAL statement_timeout = 500",
+		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500",
 		"SELECT * FROM t WHERE id IN ($1)",
 		"ROLLBACK",
 	)
@@ -123,13 +123,13 @@ func TestCaptureFenceWithoutMultiStatementSupport(t *testing.T) {
 	t.Run("autocommit", func(t *testing.T) {
 		f, got := run(t, true, false)
 		one := []string{
-			"BEGIN READ ONLY", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id = 2 LIMIT 51", "ROLLBACK",
+			"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id = 2 LIMIT 51", "ROLLBACK",
 			fenceUpdate,
-			"BEGIN READ ONLY", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id IN ($1)", "ROLLBACK",
+			"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED", "SET LOCAL statement_timeout = 500", "SELECT * FROM t WHERE id IN ($1)", "ROLLBACK",
 		}
 		// the one attempt: the opening pair, outside any transaction, then a
 		// ROLLBACK in case its BEGIN did run
-		first := append([]string{"BEGIN READ ONLY; SET LOCAL statement_timeout = 500", "ROLLBACK"}, one...)
+		first := append([]string{"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500", "ROLLBACK"}, one...)
 		fenceWant(t, f, append(first, one...)...)
 		if _, want := run(t, false, false); got != want {
 			t.Fatalf("recorded:\n%s\nwith multi-statement support:\n%s", got, want)

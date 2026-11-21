@@ -1,6 +1,9 @@
 package mutation
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsolationEffect(t *testing.T) {
 	const (
@@ -136,5 +139,33 @@ func TestMentionsIsolationDoesNotAllocate(t *testing.T) {
 	}
 	if n := testing.AllocsPerRun(100, func() { MentionsIsolation(q) }); n != 0 {
 		t.Fatalf("%v allocations", n)
+	}
+}
+
+// The untraced path parses a statement for isolation levels only if it can
+// set one. The word alone, in a column name or a string, must not cost a
+// parse: the text can be a bulk insert of megabytes.
+func TestMaySetIsolation(t *testing.T) {
+	for sql, want := range map[string]bool{
+		"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE":                                               true,
+		"set session characteristics as transaction isolation level serializable":                    true,
+		"SET default_transaction_isolation = 'serializable'":                                         true,
+		"SELECT 1; SET default_transaction_isolation TO serializable":                                true,
+		"/* x */ SET LOCAL transaction_isolation = 'serializable'":                                   true,
+		"SELECT set_config('default_transaction_isolation', 'serializable', false)":                  true,
+		"SET @@session.transaction_isolation = 'SERIALIZABLE'":                                       true,
+		"INSERT INTO notes (body) VALUES ('isolation ward'), ('more')":                               false,
+		"UPDATE wards SET isolation_ward = 1 WHERE id = 2":                                           false,
+		"SELECT isolation FROM wards":                                                                false,
+		"SET search_path TO app":                                                                     false,
+		"INSERT INTO t (v) VALUES ('" + strings.Repeat("isolation level serializable ", 2000) + "')": false,
+	} {
+		if got := MaySetIsolation(sql, Postgres); got != want {
+			t.Errorf("MaySetIsolation(%.60q) = %v, want %v", sql, got, want)
+		}
+	}
+	big := "INSERT INTO t (v) VALUES ('" + strings.Repeat("isolation ", 5000) + "')"
+	if n := testing.AllocsPerRun(20, func() { MaySetIsolation(big, Postgres) }); n != 0 {
+		t.Errorf("MaySetIsolation allocates %v times", n)
 	}
 }

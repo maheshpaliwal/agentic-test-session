@@ -159,15 +159,24 @@
 // rest of the transaction; when the transaction took the session default it
 // also holds for the connection's later transactions, until a statement
 // changes the default. So with a SERIALIZABLE default the first transaction
-// with a traced write on each connection sees one such fence (two round
-// trips, no table read, no predicate lock; it does take the transaction's
+// with a traced write on each connection sees one such fence (three round
+// trips on a fresh connection, two afterwards, no table read, no predicate lock; it does take the transaction's
 // snapshot if the application has not yet) and later ones nothing. A default
 // that stops being SERIALIZABLE without a statement on the connection
 // showing it is not noticed: images stay skipped on that connection.
 //
-// In autocommit a capture has a transaction of its own, which a SERIALIZABLE
-// default makes SERIALIZABLE. That is harmless, because it is always rolled
-// back and the reads of a rolled-back transaction conflict with nothing.
+// In autocommit a capture has a transaction of its own. It is opened READ
+// COMMITTED whatever the session's default: a SERIALIZABLE one would take
+// part in serialization checks while it is open, and a concurrent
+// transaction that succeeds untraced could then fail with 40001.
+//
+// Under REPEATABLE READ, and for the first transaction on a connection whose
+// default is SERIALIZABLE, a capture is a statement like any other: if it is
+// the first of the transaction it takes the transaction's snapshot, a moment
+// before the application's own statement would have. A concurrent commit
+// that lands in between is then not seen, and an UPDATE of the row it
+// changed fails with 40001 where the untraced run would have succeeded. Use
+// WithImages(false) for tests that depend on that moment.
 //
 // On MySQL there is no fence to ask in. A default no statement on the
 // connection shows (the global level, an init command of the driver) is not

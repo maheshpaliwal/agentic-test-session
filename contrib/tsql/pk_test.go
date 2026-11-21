@@ -142,7 +142,7 @@ func TestPKLookupRunsInsideTheFence(t *testing.T) {
 	if _, err := open(t, f, "postgres").ExecContext(ctx, stockUpdate, "widget"); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := raw(f), "BEGIN READ ONLY; SET LOCAL statement_timeout = 500\n<pk lookup>\nROLLBACK\n"; got != want {
+	if got, want := raw(f), "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED; SET LOCAL statement_timeout = 500\n<pk lookup>\nROLLBACK\n"; got != want {
 		t.Fatalf("autocommit:\n%s\nwant:\n%s", got, want)
 	}
 	f = stockDB(map[string][]string{"stock": {"sku"}})

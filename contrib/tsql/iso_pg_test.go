@@ -208,7 +208,7 @@ func TestPGSerializableDefaultSendsNoCapture(t *testing.T) {
 			}
 			got = take()
 			e := lastWrite(t, rec)
-			if isoReads(got) != 2 || !strings.HasPrefix(got[0], "BEGIN READ ONLY") ||
+			if isoReads(got) != 2 || !strings.HasPrefix(got[0], "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") ||
 				len(e.Mutations) != 1 || e.Mutations[0].Before.IsZero() || e.Mutations[0].After.IsZero() || len(e.Flags) != 0 {
 				t.Fatalf("autocommit: flags %v, driver saw:\n%s", e.Flags, strings.Join(got, "\n"))
 			}

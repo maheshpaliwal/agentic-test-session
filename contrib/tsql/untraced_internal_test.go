@@ -19,7 +19,7 @@ func txCorpus() []string {
 	// One statement each.
 	stmts := []string{
 		"BEGIN", "begin", "Begin", "BEGIN WORK", "BEGIN TRANSACTION", "BEGIN ISOLATION LEVEL SERIALIZABLE",
-		"BEGIN READ ONLY", "START TRANSACTION", "start transaction read only", "START SLAVE", "START",
+		"BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED", "START TRANSACTION", "start transaction read only", "START SLAVE", "START",
 		"COMMIT", "commit", "COMMIT WORK", "COMMIT TRANSACTION", "COMMIT AND CHAIN", "COMMIT AND NO CHAIN",
 		"COMMIT PREPARED 'x'", "END", "end", "END WORK", "END AND CHAIN",
 		"ROLLBACK", "rollback", "ROLLBACK WORK", "ROLLBACK TRANSACTION", "ROLLBACK AND CHAIN",

@@ -205,7 +205,7 @@ func (f *fakeDB) Calls() []call {
 
 // isFence reports whether q is a statement of the Postgres capture fence.
 func isFence(q string) bool {
-	return strings.HasPrefix(q, "BEGIN READ ONLY") || q == "ROLLBACK" || strings.Contains(q, "SAVEPOINT ts_capture") ||
+	return strings.HasPrefix(q, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") || q == "ROLLBACK" || strings.Contains(q, "SAVEPOINT ts_capture") ||
 		strings.HasPrefix(q, "SET LOCAL statement_timeout") || isIsoProbe(q)
 }
 

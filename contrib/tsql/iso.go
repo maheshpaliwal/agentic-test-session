@@ -87,6 +87,13 @@ func (c *conn) noteIso(in mutation.Info) {
 		// MySQL cannot be and is taken to be SERIALIZABLE.
 		c.defSerial = in.DefIso == mutation.IsoSerializable || mysql && in.DefIso == mutation.IsoUnknown
 		c.defInTx = !mysql && (c.inTxLocked() || in.Tx.Opens()) // MySQL's SET is not undone by a rollback
+		if c.defInTx {
+			// Set inside a transaction, the default can be undone by a
+			// rollback to a savepoint, which is not tracked, and it is never
+			// the level of the transaction it was set in. It is not believed:
+			// the next transaction's fence asks the server.
+			c.defSerial = false
+		}
 	}
 	switch tc := in.Tx; {
 	case tc == mutation.TxBegin:

@@ -239,7 +239,11 @@ const (
 	// The session default may make this transaction SERIALIZABLE. That is
 	// harmless: it is always rolled back, and the reads of a transaction
 	// that rolled back take part in no serialization conflict.
-	fenceBegin    = "BEGIN READ ONLY"
+	// READ COMMITTED whatever the session's default: under a SERIALIZABLE
+	// default the fence's own transaction would take part in serialization
+	// checks while it is open, and a concurrent transaction that succeeds
+	// untraced could fail with 40001.
+	fenceBegin    = "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED"
 	fenceRollback = "ROLLBACK"
 	// fenceAlive runs in a transaction that is not aborted and fails in one
 	// that is. SHOW changes nothing, reads no table and takes no snapshot.

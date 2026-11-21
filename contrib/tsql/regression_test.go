@@ -319,7 +319,7 @@ func TestRawTxControlVariants(t *testing.T) {
 				t.Fatal(err)
 			}
 			s := sqls(f.RawCalls())
-			savepoint, own := strings.Contains(s, "SAVEPOINT ts_capture"), strings.Contains(s, "BEGIN READ ONLY")
+			savepoint, own := strings.Contains(s, "SAVEPOINT ts_capture"), strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED")
 			if savepoint != c.inTx || own == c.inTx {
 				t.Fatalf("inTx=%v but capture ran:\n%s", c.inTx, s)
 			}

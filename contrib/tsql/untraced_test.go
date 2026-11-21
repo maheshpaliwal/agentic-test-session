@@ -103,7 +103,7 @@ func TestTxControlOutsideSessionIsTracked(t *testing.T) {
 					t.Fatal(err)
 				}
 				s := sqls(f.RawCalls())
-				savepoint, own := strings.Contains(s, "SAVEPOINT ts_capture"), strings.Contains(s, "BEGIN READ ONLY")
+				savepoint, own := strings.Contains(s, "SAVEPOINT ts_capture"), strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED")
 				if savepoint != c.inTx || own == c.inTx {
 					t.Fatalf("inTx=%v but capture ran:\n%s", c.inTx, s)
 				}
@@ -170,7 +170,7 @@ func TestRawBeginOutsideSessionThenUpdateInside(t *testing.T) {
 	if _, err := db.ExecContext(ctx, "UPDATE t SET a = 1 WHERE id = 2"); err != nil {
 		t.Fatal(err)
 	}
-	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY") || strings.Contains(s, "SAVEPOINT ts_capture") {
+	if s := sqls(f.RawCalls()); !strings.Contains(s, "BEGIN READ ONLY ISOLATION LEVEL READ COMMITTED") || strings.Contains(s, "SAVEPOINT ts_capture") {
 		t.Fatalf("after COMMIT capture runs in its own read-only tx:\n%s", s)
 	}
 	if n := len(rec.Events()); n != 2 {

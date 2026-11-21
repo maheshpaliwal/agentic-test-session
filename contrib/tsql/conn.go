@@ -100,7 +100,7 @@ func (c *conn) trackTx(in mutation.Info) {
 // statement) or names an isolation level is parsed, and then trackTx sees
 // exactly what it sees for a traced statement.
 func (c *conn) trackTxUntraced(query string) {
-	if !mutation.MayControlTx(query, c.dialect()) && !mutation.MentionsIsolation(query) {
+	if !mutation.MayControlTx(query, c.dialect()) && !mutation.MaySetIsolation(query, c.dialect()) {
 		return
 	}
 	info, _ := c.parse(query)
