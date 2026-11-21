@@ -137,7 +137,8 @@ func SendMessage(ctx context.Context, c SQSAPI, in *sqs.SendMessageInput, optFns
 //     when the application set its own traceparent, which is left untouched.
 //   - Compact: one "x-tsession-ctx" attribute holding the same keys, when the
 //     full form does not fit and one slot is free. No other attribute is
-//     written, so an application traceparent is untouched here too.
+//     written, so an application traceparent is untouched here too (with
+//     core.Config.OverwriteTraceparent it is replaced, as in the full form).
 //   - opts.SideChannel, when configured and no slot is free, or the
 //     application already set an attribute named x-tsession-ctx (it is never
 //     overwritten).
@@ -215,6 +216,12 @@ func SendMessageOpts(ctx context.Context, c SQSAPI, opts SQSOptions, in *sqs.Sen
 			switch mode {
 			case "ctx":
 				sqsCarrier(attrs).Set(ctxAttr, encodeTS(m))
+				// The overwrite setting covers this form too: a consumer on
+				// an older SDK reads the traceparent attribute before the
+				// compact one. The attribute exists, so the count is the same.
+				if has(attrs, core.KeyTraceparent) && core.GetConfig().OverwriteTraceparent {
+					sqsCarrier(attrs).Set(core.KeyTraceparent, m[core.KeyTraceparent])
+				}
 			case "side":
 				if e := putBounded(c2, opts.SideChannel, sqsSideKey(queue, md5Hex(body)), m, opts.PutTimeout); e != nil {
 					flag(span, FlagSideChannel)

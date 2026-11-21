@@ -482,6 +482,61 @@ func TestSQSReadByOlderConsumer(t *testing.T) {
 	}
 }
 
+// The overwrite setting exists so that a consumer on an older SDK links to
+// the publish span although the application set traceparent. It must hold in
+// every form that carries the context in the message: at every attribute
+// count, the application's traceparent attribute is replaced.
+func TestSQSOverwriteTraceparentSetting(t *testing.T) {
+	for n := 1; n <= maxSQSAttrs; n++ { // application attributes, its traceparent among them
+		form := map[bool]string{true: "full", false: "compact"}[n <= 7]
+		if n == maxSQSAttrs {
+			form = "none" // no slot: nothing is propagated, nothing is replaced
+		}
+		t.Run(strconv.Itoa(n)+" attrs, "+form, func(t *testing.T) {
+			rec, ctx := setup(t, true)
+			core.Configure(core.Config{Service: "svc", Enabled: true, OverwriteTraceparent: true})
+			in := withApp(n)
+			sent := sqsSend(t, ctx, in, SQSOptions{})
+			pub := lastPub(t, rec)
+			if got := sqsForm(sent); got != form {
+				t.Fatalf("form %q, want %q", got, form)
+			}
+			for k, v := range in {
+				if k != "traceparent" && aws.ToString(sent[k].StringValue) != aws.ToString(v.StringValue) {
+					t.Fatalf("application attribute %q changed", k)
+				}
+			}
+			tp := aws.ToString(sent["traceparent"].StringValue)
+			if form == "none" {
+				if tp != appTP {
+					t.Fatalf("nothing was propagated, yet traceparent is now %q", tp)
+				}
+				return
+			}
+			if tp != tpFor(pub) || aws.ToString(sent["traceparent"].DataType) != "String" {
+				t.Fatalf("traceparent = %q, want tsession's %q", tp, tpFor(pub))
+			}
+			if session, trace, span := oldExtract(oldSQSGet(sent)); session != "s1" || trace != pub.TraceID || span != pub.SpanID {
+				t.Fatalf("older consumer links to %s/%s in session %q, want %s/%s", trace, span, session, pub.TraceID, pub.SpanID)
+			}
+			sqsConsume(t, sent, SQSOptions{})
+			assertLastWorker(t, rec, pub)
+		})
+	}
+
+	// With the side channel the context is not in the message, an older
+	// consumer reads all of it from the record, and the attribute is left.
+	rec, ctx := setup(t, true)
+	core.Configure(core.Config{Service: "svc", Enabled: true, OverwriteTraceparent: true})
+	opts := SQSOptions{SideChannel: &MemSideChannel{}}
+	sent := sqsSend(t, ctx, withApp(maxSQSAttrs), opts)
+	if aws.ToString(sent["traceparent"].StringValue) != appTP || len(sent) != maxSQSAttrs {
+		t.Fatalf("side channel: attributes changed: %v", sent)
+	}
+	sqsConsume(t, sent, opts)
+	assertLastWorker(t, rec, lastPub(t, rec))
+}
+
 // Messages from a producer on an older SDK: the context is in traceparent
 // (full form) or in the compact attribute, where an attribute named
 // traceparent is the application's.
