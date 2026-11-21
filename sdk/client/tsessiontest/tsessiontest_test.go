@@ -157,6 +157,10 @@ func TestRequireMutation(t *testing.T) {
 	if !failed || !strings.Contains(out, "no effective mutation") {
 		panic(fmt.Sprintf("rolled-back update must not satisfy the assertion: %v %s", failed, out))
 	}
+	// The message names what was asked for in the caller's words, not the filter's fields.
+	if !strings.Contains(out, `matching entity "orders", op "update"`) || strings.Contains(out, "ExcludeRolledBack") {
+		panic("the message of a failed RequireMutation: " + out)
+	}
 
 	tsessiontest.RequireNoMutation(t, s, client.MutationFilter{Entity: "orders", Op: "update"})
 	tsessiontest.RequireNoMutation(t, s, client.MutationFilter{Store: "mongo"})
@@ -183,7 +187,7 @@ func TestFailedTestLogsTheSession(t *testing.T) {
 		fn()
 	}
 	out := strings.Join(r.msgs, "\n")
-	if !strings.Contains(out, "tracectl summary "+s.ID) || !strings.Contains(out, "#3 worker worker.end ship: timeout") {
+	if !strings.Contains(out, "tracectl digest "+s.ID) || !strings.Contains(out, "#3 worker worker.end ship: timeout") {
 		panic(fmt.Sprintf("log of a failed test:\n%s", out))
 	}
 }
@@ -265,7 +269,7 @@ func TestFailureIsListedOnce(t *testing.T) {
 	if n := strings.Count(out, "#3 worker worker.end ship: timeout"); n != 1 {
 		panic(fmt.Sprintf("the failed event is listed %d times, want once:\n%s", n, out))
 	}
-	if !strings.Contains(out, "tracectl summary "+s.ID) {
+	if !strings.Contains(out, "tracectl digest "+s.ID) {
 		panic(fmt.Sprintf("the pointer to the session is still printed:\n%s", out))
 	}
 }

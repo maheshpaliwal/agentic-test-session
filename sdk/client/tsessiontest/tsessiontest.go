@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -148,7 +149,7 @@ func Run(t testing.TB, o client.Options) *client.Session {
 		if !t.Failed() {
 			return
 		}
-		t.Logf("tsession: session %s (%s) recorded this test; inspect it with: tracectl summary %s", s.ID, s.Info().Name, s.ID)
+		t.Logf("tsession: session %s (%s) recorded this test; inspect it with: tracectl digest %s", s.ID, s.Info().Name, s.ID)
 		if _, listed := failuresListed.Load(s.ID); listed {
 			failuresListed.Delete(s.ID)
 		} else if sum, err := s.Summary(ctx); err == nil {
@@ -241,7 +242,12 @@ func stop(ctx context.Context, s *client.Session) error {
 }
 
 // Stop stops the session, waits for its seal and returns the summary. The Require functions do this
-// themselves; call Stop to inspect the results directly.
+// themselves; call Stop to inspect the results directly. Stopping a session that is already stopped is
+// allowed: Stop, the Require functions and the cleanup of Run can follow each other in any order.
+//
+// What Stop, Run and Ambient cannot do (no control plane, no ambient session, a seal that fails to be read)
+// is a broken set-up, not a finding of the test: they panic, which ends the test binary of the package. An
+// assertion that does not hold (RequireNoFailures, RequireMutation, ...) fails its test only.
 //
 // Stop, and with it every Require function, fails the test instead when s is the ambient session (the one
 // named in TSESSION_ID): that session is tracectl run's to stop.
@@ -275,6 +281,10 @@ var failuresListed sync.Map
 // RequireNoFailures fails the test if the session recorded a failed event or is incomplete (dropped or
 // quarantined events, asynchronous work that never finished, events a service recorded that the collector
 // does not have). Each reason the control plane gives is printed.
+//
+// A failed event is one that carries an error: an HTTP request answered with 500 or above, a gRPC call that
+// failed on the server's side, a failed query, a job that failed. A request that was refused (a 404, a 409) is
+// not a failed event; it carries the attribute "http.status", which a test can look for in Session.Events.
 //
 // A delivery the control plane could not confirm (Info.DeliveryUnconfirmed) is logged and does not fail
 // the test; `go test` shows a passing test's log only with -v. Use RequireDeliveryConfirmed to fail on it.
@@ -349,7 +359,11 @@ func RequireMutation(t testing.TB, s *client.Session, f client.MutationFilter) [
 	f.ExcludeRolledBack = true
 	ms := mutations(t, s, f)
 	if len(ms) == 0 {
-		panic(fmt.Sprintf("tsession: session %s recorded no effective mutation matching %+v", s.ID, f))
+		// What the system did not do is the test's finding, not a broken set-up: the test fails like one
+		// whose RequireNoFailures fails, the tests after it run, and the cleanup of Run names the session
+		// and saves it.
+		t.Errorf("tsession: session %s recorded no effective mutation matching %s", s.ID, describe(f))
+		t.FailNow()
 	}
 	return ms
 }
@@ -360,9 +374,24 @@ func RequireNoMutation(t testing.TB, s *client.Session, f client.MutationFilter)
 	f.ExcludeRolledBack = true
 	if ms := mutations(t, s, f); len(ms) > 0 {
 		m := ms[0]
-		panic(fmt.Sprintf("tsession: session %s recorded %d mutation(s) matching %+v, first: event #%d %s %s/%s",
-			s.ID, len(ms), f, m.Seq, m.Op, m.Store, m.Entity))
+		t.Errorf("tsession: session %s recorded %d mutation(s) matching %s, first: event #%d %s %s/%s",
+			s.ID, len(ms), describe(f), m.Seq, m.Op, m.Store, m.Entity)
+		t.FailNow()
 	}
+}
+
+// describe names what a filter asks for, in the words of its fields that are set.
+func describe(f client.MutationFilter) string {
+	var parts []string
+	for _, p := range [][2]string{{"store", f.Store}, {"entity", f.Entity}, {"op", f.Op}} {
+		if p[1] != "" {
+			parts = append(parts, p[0]+" "+strconv.Quote(p[1]))
+		}
+	}
+	if len(parts) == 0 {
+		return "any mutation"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func mutations(t testing.TB, s *client.Session, f client.MutationFilter) []client.Mutation {

@@ -53,10 +53,12 @@ Before deploying:
   `ResourceExhausted`, `Canceled`) are no longer failed events: a session whose only "failures" were such calls
   now passes `--fail-on-error` and `RequireNoFailures`. Assert on the attribute `grpc.code` if a test relied on
   them failing.
-- `sdk/client/tsessiontest` panics where it called `t.Fatalf` (a session that cannot be started or stopped, a
-  failed `RequireMutation`, `RequireNoMutation` or `Ambient`): the message is the same, but a panic ends the
-  whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped.
-  `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
+- `sdk/client/tsessiontest` panics where it called `t.Fatalf` for a broken set-up (a session that cannot be
+  started or stopped, `Ambient` without a surrounding `tracectl run`): the message is the same, but a panic ends
+  the whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped. An
+  assertion that does not hold (`RequireNoFailures`, `RequireDeliveryConfirmed`, `RequireMutation`,
+  `RequireNoMutation`) reports with `t.Errorf` and stops with `t.FailNow`: it fails its test only, and the
+  cleanup of `Run` names the session and saves it to `$TSESSION_ARTIFACT_DIR`.
 - Delivery accounting: upgrade the collector with or before the control plane, otherwise every session with
   reports is `delivery_unconfirmed`. A proxy between services and control plane must pass `POST /v1/delivery`;
   if it answers 404 or 403 a session the service took part in ends `incomplete`, and one it did not take part in
@@ -281,6 +283,10 @@ Rolling back:
 
 ### Changed
 
+- `tsessiontest`: a failed `RequireMutation` or `RequireNoMutation` fails its test, not the test binary (it
+  panicked), and names what was asked for (`matching entity "orders", op "update"`). The hint of a failed test
+  reads `tracectl digest <id>`, where it read `tracectl summary <id>`. The docs say what a failed event is (a 404
+  is not one), that a second stop is allowed, and what panics.
 - `dashboard -demo`: the start of a job carries no error, as the SDK records it (`worker.start` is a point
   event; a failed job fails at its `worker.end`). The demo session has 7 failed events where it had 10.
 - `tracectl diff` says when a side is incomplete (`note: b is incomplete: ...`, and `"recording": "incomplete"`
