@@ -194,6 +194,13 @@ type dFailure struct {
 	Error   string `json:"error"`
 	InTree  bool   `json:"in_tree"`         // false: the call tree does not hold the event
 	Async   bool   `json:"async,omitempty"` // reached from its parent by an async edge
+	// Count is set (above 1) when this entry stands for that many failed
+	// events that did the same thing in the same place: same service, kind,
+	// normalised name and error, under the same chain of ancestors. Seq and
+	// Path are those of the first, LastSeq is the last, and Name and Error
+	// are normalised.
+	Count   int    `json:"count,omitempty"`
+	LastSeq uint64 `json:"last_seq,omitempty"`
 	// Path is the chain of ancestors, the root request first; empty for a
 	// failed root. PathOmitted steps were left out after the first one.
 	Path        []dStep `json:"path"`
@@ -415,8 +422,30 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 	for _, n := range tr.Roots {
 		walk(n, false)
 	}
+	// Three hundred requests that fail the same way are one thing to know,
+	// not three hundred lines: failures that did the same thing in the same
+	// place are listed once, with a count.
+	groups := map[string]int{} // signature -> index in src.failures
 	for _, f := range src.rep.failures {
 		p, ok := places[f.Seq]
+		if p.path == nil {
+			p.path = []dStep{} // "path" is always a list, also for a failed root
+		}
+		var sig strings.Builder
+		fmt.Fprintf(&sig, "%s\x00%s\x00%s\x00%s\x00%v\x00%v", f.Service, f.Kind, normalizeName(f.Name), normalizeName(f.Err), ok, p.async)
+		for _, s := range p.path {
+			fmt.Fprintf(&sig, "\x00%s\x00%s\x00%s\x00%v", s.Service, s.Kind, normalizeName(s.Name), s.Async)
+		}
+		if at, seen := groups[sig.String()]; seen {
+			g := &src.failures[at]
+			if g.Count == 0 {
+				g.Count = 1
+				g.Name, g.Error = dataText(normalizeName(g.Name), digestNameMax), dataText(normalizeName(g.Error), digestErrMax)
+			}
+			g.Count, g.LastSeq = g.Count+1, f.Seq
+			continue
+		}
+		groups[sig.String()] = len(src.failures)
 		src.failures = append(src.failures, dFailure{Seq: f.Seq, Service: dataText(f.Service, 40), Kind: dataText(string(f.Kind), 40),
 			Name: dataText(f.Name, digestNameMax), Error: dataText(f.Err, digestErrMax),
 			InTree: ok, Async: p.async, Path: p.path, PathOmitted: p.omitted})
@@ -657,7 +686,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 		Session: dSession{ID: id, Name: dataText(displayName(info), nameMax), State: dataText(info.State, 20),
 			Live: info.State != "" && !info.Done()},
 		Verdict: dVerdict{Recording: "complete"},
-		Counts: dCounts{Events: sum.EventCount, Failures: len(src.failures), Mutations: src.mutations, DurationNs: sum.DurationNs,
+		Counts: dCounts{Events: sum.EventCount, Failures: len(src.rep.failures), Mutations: src.mutations, DurationNs: sum.DurationNs,
 			PendingAsync: sum.PendingAsync, Dropped: max(sum.DroppedEvents, info.DroppedEvents), Quarantined: sum.Quarantined},
 		Failures: []dFailure{}, Mutations: []dEntity{}, Tree: []dNode{},
 		DrillDown: []dDrillDown{
@@ -804,7 +833,7 @@ func (k digestKept) notes(id string, failures, entities, lines, counts int) []dO
 		add("counts", fmt.Sprintf("%d smaller entries of the counts", counts), "summary ID --json")
 	}
 	if k.failures < failures {
-		add("failures", fmt.Sprintf("%d of %d failed events are not listed", failures-k.failures, failures), "events ID --errors", "trace ID --errors")
+		add("failures", fmt.Sprintf("%d of %d distinct failures are not listed", failures-k.failures, failures), "events ID --errors --limit 50", "trace ID --errors --depth 3")
 	}
 	if k.failLevel > detailFull && failures > 0 {
 		add("failures", "names, errors and the chains of ancestors are shortened", "show ID <seq>", "trace ID --errors")
@@ -876,7 +905,11 @@ func mdStep(seq uint64, service, kind, name string) string {
 }
 
 func mdFailure(b *strings.Builder, f *dFailure) {
-	fmt.Fprintf(b, "%s ERR %s\n", mdStep(f.Seq, f.Service, f.Kind, f.Name), mdQuote(f.Error))
+	if f.Count > 1 {
+		fmt.Fprintf(b, "%dx %s #%d..#%d ERR %s\n", f.Count, mdStep(f.Seq, f.Service, f.Kind, f.Name), f.Seq, f.LastSeq, mdQuote(f.Error))
+	} else {
+		fmt.Fprintf(b, "%s ERR %s\n", mdStep(f.Seq, f.Service, f.Kind, f.Name), mdQuote(f.Error))
+	}
 	edge := func(async bool) string {
 		if async {
 			return " ~> "

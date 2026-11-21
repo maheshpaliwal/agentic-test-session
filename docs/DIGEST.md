@@ -102,6 +102,12 @@ A failure: `seq`, `service`, `kind`, `name`, `error`, `in_tree` (false: the call
 `seq`, `service`, `kind`, `name` and `async`; empty for a failed root), `path_omitted` (ancestors left out after
 the first).
 
+Failed events that did the same thing in the same place (same service, kind, normalised name and error, under
+the same chain of ancestors) are one entry with `count` (above 1) and `last_seq`; its `seq` and `path` are those
+of the first, and its `name` and `error` are normalised. `counts.failures` is still the number of failed events.
+In Markdown such an entry reads `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`. The call tree
+is unaffected: there a span on a failed branch is never merged.
+
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
 `changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`), `uncertain`,

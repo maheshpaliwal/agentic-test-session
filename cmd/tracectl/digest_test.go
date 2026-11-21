@@ -628,7 +628,7 @@ func TestDigestCutOrder(t *testing.T) {
 	var evs []core.Event
 	for i := range 60 {
 		evs = append(evs,
-			core.Event{Seq: uint64(2*i + 1), Service: "api", Kind: core.KindAPIIn, Name: fmt.Sprintf("POST /orders/%d?%s", i, strings.Repeat("q", 60)), Err: "HTTP 500 " + strings.Repeat("e", 200)},
+			core.Event{Seq: uint64(2*i + 1), Service: "api", Kind: core.KindAPIIn, Name: fmt.Sprintf("POST /orders/%c%c?%s", 'a'+i/26, 'a'+i%26, strings.Repeat("q", 60)), Err: "HTTP 500 " + strings.Repeat("e", 200)}, // sixty different failures: the same one would be listed once
 			core.Event{Seq: uint64(2*i + 2), Service: "api", Kind: core.KindDBWrite, Name: fmt.Sprintf("UPDATE orders SET n = %d", i),
 				Mutations: []core.Mutation{{Store: "postgres", Entity: "orders", Op: "update", PK: map[string]any{"id": i}, Effective: &yes,
 					Diff: []core.FieldChange{{Field: "note", Old: strings.Repeat("a", 50), New: strings.Repeat("b", 50)}}}}})
@@ -664,7 +664,7 @@ func TestDigestCutOrder(t *testing.T) {
 	_, out, _ = env.tc("digest", reportID, "--max-bytes", "4096")
 	sec = checkDigestMarkdown(t, out)
 	if n := strings.Count(sec["### Failures"], " ERR "); len(out) > 4096 || n == 0 || n >= 60 ||
-		!strings.Contains(sec["### Omitted"], fmt.Sprintf("- failures: %d of 60 failed events are not listed: `tracectl events ts_r1 --errors`", 60-n)) {
+		!strings.Contains(sec["### Omitted"], fmt.Sprintf("- failures: %d of 60 distinct failures are not listed: `tracectl events ts_r1 --errors --limit 50`", 60-n)) {
 		t.Fatalf("4096 bytes: %d bytes, %d failures:\n%s", len(out), n, out)
 	}
 	if !strings.Contains(out, "**Failed**: 60 failed events.") {
@@ -790,4 +790,43 @@ func TestCLIRunDigest(t *testing.T) {
 			t.Errorf("%v: exit %d, stderr %q; want exit 2 and %q", tt.flags, code, e, tt.want)
 		}
 	}
+}
+
+// Failures that did the same thing in the same place are listed once with a
+// count: three hundred failing requests are one thing to know. A failure of
+// another kind, or in another place, keeps its own line, and the count of
+// failed events is still the true one.
+func TestDigestGroupsEqualFailures(t *testing.T) {
+	var evs []core.Event
+	for i := range 300 {
+		evs = append(evs,
+			core.Event{Seq: uint64(2*i + 1), Service: "api", Kind: core.KindAPIIn, Name: fmt.Sprintf("POST /orders/%d/pay", 1000+i), Err: "HTTP 500"},
+			core.Event{Seq: uint64(2*i + 2), Service: "api", Kind: core.KindDBWrite, Name: fmt.Sprintf("UPDATE orders SET paid = true WHERE id = %d", 1000+i), Err: "deadlock detected"})
+	}
+	evs = append(evs, core.Event{Seq: 601, Service: "api", Kind: core.KindAPIIn, Name: "GET /health", Err: "HTTP 503"})
+	env := newReportEnv(t, evs...)
+	for i := range 300 {
+		env.roots = append(env.roots, env.node(2*i+1, nodes(env.node(2*i+2, nil, nil)), nil))
+	}
+	env.roots = append(env.roots, env.node(601, nil, nil))
+
+	_, out, _ := env.tc("digest", reportID, "--max-bytes", "4096", "--json")
+	d := checkDigestJSON(t, out)
+	if len(out) > 4096 || d.Counts.Failures != 601 || len(d.Failures) != 3 {
+		t.Fatalf("%d bytes, %d failed events, %d failure entries: %s", len(out), d.Counts.Failures, len(d.Failures), out)
+	}
+	for _, f := range d.Failures {
+		if f.Path == nil {
+			t.Fatalf("path of #%d is null, the schema says it is always a list", f.Seq)
+		}
+	}
+	root, write, health := d.Failures[0], d.Failures[1], d.Failures[2]
+	if root.Count != 300 || root.Seq != 1 || root.LastSeq != 599 || root.Name != "POST /orders/?/pay" ||
+		write.Count != 300 || write.Seq != 2 || write.LastSeq != 600 || len(write.Path) != 1 ||
+		health.Count != 0 || health.Error != "HTTP 503" {
+		t.Fatalf("groups: %+v\n%+v\n%+v", root, write, health)
+	}
+	_, md, _ := env.tc("digest", reportID, "--max-bytes", "4096")
+	sec := checkDigestMarkdown(t, md)
+	wantAll(t, sec["### Failures"], `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`, `300x #2 api db.write`, `#601 api api.in "GET /health" ERR "HTTP 503"`)
 }

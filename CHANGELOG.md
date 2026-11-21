@@ -79,6 +79,8 @@ Rolling back:
   (`docs/DIGEST.md`); takes the `--fail-on-*` gates; `tracectl run --digest FILE` writes it after the seal.
   Recorded text is quoted as data and stripped of control characters; that protects the structure of the
   output, not a model's judgement of what the text says.
+  Failures that did the same thing in the same place are listed once with a count, so 300 requests failing
+  the same way take one line, not the whole budget.
 - **Uncertain records are visible in entity history.** Each history entry carries its event's flags and each
   entity an `uncertain` count (optional fields); `tracectl history` and `entities` and the dashboard show them.
   `tracectl history` accepts a key as `k=v,k2=v2`, loosely typed JSON or the bare value of a one-column key;
