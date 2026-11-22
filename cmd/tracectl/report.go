@@ -65,7 +65,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	} else if _, err := c.stdout.Write(out); err != nil {
 		return err
 	}
-	return g.check(c.stderr, rep.info, rep.sum, len(rep.failures))
+	return g.of(c).check(c.stderr, rep.info, rep.sum, len(rep.failures))
 }
 
 // reportRenderer returns the renderer of a --format value.

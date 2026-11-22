@@ -436,6 +436,25 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl --from` passed all three gates on files that proved nothing (a review's findings). Now:
+  - a verdict that does not decode (`"events":"3"`, `"incomplete":"true"`), a negative count, a `state` that is
+    none, a second verdict, or another number of events than the count is refused (exit 1); such a verdict was
+    dropped, and the file judged without it;
+  - a file without a verdict or without the count is read as a session whose state is not known, with a note:
+    `--fail-on-incomplete` and `--fail-on-unconfirmed` fail on it, as they do on a live session the control
+    plane has forgotten. That is also what an export written while the control plane did not answer gives;
+  - a session that had not ended when it was exported (`ACTIVE`, `DRAINING`: `run --export` of a session that
+    did not seal) fails `--fail-on-incomplete`; it got a note and exit 0;
+  - reasons or a seal error make the session incomplete whatever `incomplete` next to them says.
+  `dashboard -open` stays a viewer: it refuses what cannot be read and shows the rest.
+- `tracectl --from`: a session is named by its id first, then by its name or its file's name; a reference that
+  fits two sessions is refused (a file named like another file's session id won), and a session name that begins
+  with `ts_` works. Session names from a file are printed without control characters, and a session id that
+  is not printable ASCII is refused. No more than 512 MB of events are read from one file (a 36 MB gzip file
+  took 2.6 GB of memory).
+- `tracectl run --export FILE` with `--digest` or `--report` on the same file is refused (the second overwrote
+  the export and the run still said it wrote it); the export is made private (0600) also when the file was
+  there; an export that fails part-way is removed. `--from - --from -` says that it was given twice.
 - `tracectl --from` and `dashboard -open` given two exports of one session name both files and say that only one
   can be read at a time; a file given twice is said to be given twice. Both read "was already opened from
   another file".

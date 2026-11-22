@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -314,12 +316,15 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 
 	meta := &core.ExportSession{State: "SEALED", Incomplete: true, IncompleteReasons: []string{reason}, DeliveryUnconfirmed: []string{warn},
 		DrainTimedOut: true, MaxDrainSeconds: 60}
-	for _, on := range []int{0, 1} { // on the first line; a reader does not insist on which
-		s := open(write("verdict.ndjson", meta, on))
-		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason || len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != warn ||
-			!s.DrainTimedOut || s.MaxDrainSeconds != 60 || s.State != "SEALED" || s.Name != "verdict" {
-			panic(fmt.Sprintf("session opened from an export with a verdict (on line %d): %+v", on+1, s))
-		}
+	s := open(write("verdict.ndjson", meta, 0))
+	if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason || len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != warn ||
+		!s.DrainTimedOut || s.MaxDrainSeconds != 60 || s.State != "SEALED" || s.Name != "verdict" {
+		panic(fmt.Sprintf("session opened from an export with a verdict: %+v", s))
+	}
+	// The verdict is on the first line. One on another line is not the export's: the file is refused,
+	// where it was read as if it were (and a second, contradicting one was passed over).
+	if _, err := New(Config{Open: []string{write("late.ndjson", meta, 1)}}); err == nil || !strings.Contains(err.Error(), "late.ndjson:2: a second tsession_session") {
+		panic(fmt.Sprintf("a verdict on the second line: %v", err))
 	}
 	// A session that was complete says so, and stays complete.
 	if s := open(write("fine.ndjson", &core.ExportSession{State: "SEALED"}, 0)); s.Incomplete || len(s.IncompleteReasons)+len(s.DeliveryUnconfirmed) != 0 || s.DrainTimedOut {
@@ -404,5 +409,39 @@ func TestOfflineOpensASessionWithoutEvents(t *testing.T) {
 	}
 	if _, err := New(Config{Open: []string{p}}); err != nil {
 		panic(err)
+	}
+}
+
+// An export is held in memory, several times its size, and a small gzip file
+// can hold any amount: no more than maxExportBytes are read of one.
+func TestOfflineRefusesAFileThatIsTooLarge(t *testing.T) {
+	old := maxExportBytes
+	maxExportBytes = 4 << 10
+	defer func() { maxExportBytes = old }()
+	var b strings.Builder
+	for seq := 1; b.Len() < 16<<10; seq++ {
+		fmt.Fprintf(&b, `{"session_id":"ts_big","seq":%d,"service":"api","kind":"api.in","name":"GET /x","start_ns":1,"end_ns":2}`+"\n", seq)
+	}
+	p := filepath.Join(t.TempDir(), "big.ndjson")
+	if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
+		panic(err)
+	}
+	if _, err := NewOffline([]string{p}); err == nil || !strings.Contains(err.Error(), "too large to open") {
+		panic(fmt.Sprintf("a file over the limit: %v", err))
+	}
+	// As gzip, where the file itself is small.
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	_, _ = zw.Write([]byte(b.String()))
+	_ = zw.Close()
+	if z.Len() >= 4<<10 {
+		panic(fmt.Sprintf("the gzip file is %d bytes: not smaller than the limit, so the test proves nothing", z.Len()))
+	}
+	pz := filepath.Join(t.TempDir(), "big.ndjson.gz")
+	if err := os.WriteFile(pz, z.Bytes(), 0o600); err != nil {
+		panic(err)
+	}
+	if _, err := NewOffline([]string{pz}); err == nil || !strings.Contains(err.Error(), "too large to open") {
+		panic(fmt.Sprintf("a gzip file that expands over the limit: %v", err))
 	}
 }

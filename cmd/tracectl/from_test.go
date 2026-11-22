@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -20,12 +19,19 @@ import (
 // the file as a person does.
 func exportFile(t *testing.T, dir, name string, evs ...core.Event) string {
 	t.Helper()
+	// As tracectl export writes it: the first line carries the verdict and the number of events.
 	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
 	for i := range evs {
-		if err := enc.Encode(&evs[i]); err != nil {
+		var meta *core.ExportSession
+		if i == 0 {
+			meta = &core.ExportSession{State: "SEALED", Events: count(len(evs))}
+		}
+		line, err := core.ExportLine(&evs[i], meta)
+		if err != nil {
 			panic(err)
 		}
+		b.Write(line)
+		b.WriteByte('\n')
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), b.Bytes(), 0o600); err != nil {
 		panic(err)
@@ -285,10 +291,10 @@ func TestFromErrors(t *testing.T) {
 		{[]string{good, good}, []string{"list"}, 1, "run.ndjson was given twice"},
 		{[]string{good, missing}, []string{"digest", "ts_a"}, 1, "no such file or directory"},
 		// The session, when it is named, is the file's.
-		{[]string{good}, []string{"digest", "ts_other"}, 1, "session ts_other is not in the files of --from: " + good + " holds ts_a"},
-		{[]string{good}, []string{"summary", "nightly"}, 1, `no session named "nightly" in the files of --from: ` + good + " holds ts_a"},
-		{[]string{good}, []string{"show", "ts_other", "2"}, 1, "session ts_other is not in the files of --from"},
-		{[]string{good, other}, []string{"diff", "ts_a", "ts_c"}, 1, "session ts_c is not in the files of --from: " + good + " holds ts_a, " + other + " holds ts_b"},
+		{[]string{good}, []string{"digest", "ts_other"}, 1, `no session with the id or the name "ts_other" in the files of --from: ` + good + " holds ts_a"},
+		{[]string{good}, []string{"summary", "nightly"}, 1, `no session with the id or the name "nightly" in the files of --from: ` + good + " holds ts_a"},
+		{[]string{good}, []string{"show", "ts_other", "2"}, 1, `no session with the id or the name "ts_other" in the files of --from`},
+		{[]string{good, other}, []string{"diff", "ts_a", "ts_c"}, 1, `no session with the id or the name "ts_c" in the files of --from: ` + good + " holds ts_a, " + other + " holds ts_b"},
 		// Which session, of several files; and what diff needs.
 		{[]string{good, other}, []string{"digest"}, 1, "--from was given 2 files: name the session to read (ts_a, ts_b)"},
 		{[]string{good, other}, []string{"show", "2"}, 1, "--from was given 2 files: name the session to read"},
@@ -394,7 +400,7 @@ func exportWith(t *testing.T, name string, meta *core.ExportSession, evs []core.
 func TestFromRefusesAFileThatLostLines(t *testing.T) {
 	t.Chdir(t.TempDir())
 	evs := fromEvents("ts_a")
-	lines := exportWith(t, "whole.ndjson", &core.ExportSession{State: "SEALED", Events: len(evs)}, evs)
+	lines := exportWith(t, "whole.ndjson", &core.ExportSession{State: "SEALED", Events: count(len(evs))}, evs)
 	if code, _, e := fromTC(t, []string{"whole.ndjson"}, "summary", "--fail-on-error"); code != exitCheckFailed {
 		panic(fmt.Sprintf("the whole file: exit %d %s", code, e))
 	}
@@ -413,7 +419,7 @@ func TestFromRefusesAFileThatLostLines(t *testing.T) {
 func TestFromKeepsTheSessionsName(t *testing.T) {
 	t.Chdir(t.TempDir())
 	evs := fromEvents("ts_a")
-	exportWith(t, "run.ndjson", &core.ExportSession{Name: "nightly e2e #42", State: "SEALED", Events: len(evs)}, evs)
+	exportWith(t, "run.ndjson", &core.ExportSession{Name: "nightly e2e #42", State: "SEALED", Events: count(len(evs))}, evs)
 	_, out, _ := fromTC(t, []string{"run.ndjson"}, "summary")
 	if !strings.Contains(out, "ts_a  nightly e2e #42  (SEALED") {
 		panic("summary does not show the session's name:\n" + out)
@@ -430,7 +436,7 @@ func TestFromKeepsTheSessionsName(t *testing.T) {
 func TestFromShowsASessionExportedWhileItRanAsLive(t *testing.T) {
 	t.Chdir(t.TempDir())
 	evs := fromEvents("ts_a")
-	exportWith(t, "live.ndjson", &core.ExportSession{State: "ACTIVE", Events: len(evs)}, evs)
+	exportWith(t, "live.ndjson", &core.ExportSession{State: "ACTIVE", Events: count(len(evs))}, evs)
 	_, out, _ := fromTC(t, []string{"live.ndjson"}, "digest")
 	if !strings.Contains(out, "**Live**") || !strings.Contains(out, "state: ACTIVE; recording: not yet known") {
 		panic("digest of a session exported while it ran:\n" + out)
@@ -529,5 +535,123 @@ func TestFromTwoExportsOfOneSession(t *testing.T) {
 	if code != 1 || out != "" || !strings.Contains(e, "early.ndjson and late.ndjson are exports of the same session (ts_a)") ||
 		!strings.Contains(e, "cannot be compared") || strings.Count(e, "\n") != 1 {
 		panic(fmt.Sprintf("exit %d, stdout %q, stderr %q", code, out, e))
+	}
+}
+
+// count is n as the event count of an export.
+func count(n int) *int { return &n }
+
+// Files on which every gate passed although the session they are of would
+// not have passed (a review's findings): each is refused, or fails the gate
+// that asks whether the recording is complete.
+func TestFromDoesNotPassAFileThatProvesNothing(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ev := func(seq int) string {
+		return fmt.Sprintf(`{"session_id":"ts_a","seq":%d,"service":"api","kind":"api.in","name":"GET /x","start_ns":1000000000,"end_ns":2000000000}`, seq)
+	}
+	with := func(seq int, verdict string) string {
+		e := ev(seq)
+		return e[:len(e)-1] + `,"tsession_session":` + verdict + `}`
+	}
+	gates := []string{"summary", "--fail-on-error", "--fail-on-incomplete", "--fail-on-empty"}
+	for _, tt := range []struct {
+		name  string
+		lines []string
+		code  int
+		want  string // in stderr
+	}{
+		{"a count that is a string", []string{with(1, `{"state":"SEALED","incomplete":true,"events":"3"}`), ev(2)}, 1, "tsession_session does not read as one"},
+		{"a count that is not a whole number", []string{with(1, `{"state":"SEALED","events":3.5}`), ev(2)}, 1, "tsession_session does not read as one"},
+		{"a flag that is a string", []string{with(1, `{"state":"SEALED","incomplete":"true","events":2}`), ev(2)}, 1, "tsession_session does not read as one"},
+		{"a verdict that is a list", []string{with(1, `["SEALED"]`), ev(2)}, 1, "tsession_session does not read as one"},
+		{"a negative count", []string{with(1, `{"state":"SEALED","events":-1}`), ev(2)}, 1, "counts -1 events"},
+		{"a state that is none", []string{with(1, `{"state":"BOGUS","events":2}`), ev(2)}, 1, `the state "BOGUS"`},
+		{"a state in lower case", []string{with(1, `{"state":"sealed","events":2}`), ev(2)}, 1, `the state "sealed"`},
+		{"a second verdict", []string{with(1, `{"state":"SEALED","events":2}`), with(2, `{"state":"SEALED","incomplete":true,"events":2}`)}, 1, ":2: a second tsession_session"},
+		{"a verdict on the last line only", []string{ev(1), with(2, `{"state":"SEALED","events":2}`)}, 1, ":2: a second tsession_session"},
+		{"more events than were exported", []string{with(1, `{"state":"SEALED","events":1}`), ev(2)}, 1, "holds 2 of the 1 events"},
+		{"no verdict: the first line is lost", []string{ev(2), ev(3)}, exitCheckFailed, "whether it is complete is unknown"},
+		{"a verdict without a count, and lines lost", []string{with(1, `{"state":"SEALED"}`)}, exitCheckFailed, "whether it is complete is unknown"},
+		{"a session that had not ended", []string{with(1, `{"state":"ACTIVE","events":2}`), ev(2)}, exitCheckFailed, "had not ended when the file was written (ACTIVE)"},
+		{"a session that was draining", []string{with(1, `{"state":"DRAINING","events":2}`), ev(2)}, exitCheckFailed, "had not ended when the file was written (DRAINING)"},
+		{"reasons under a flag that says complete", []string{with(1, `{"state":"SEALED","incomplete":false,"incomplete_reasons":["lost"],"events":2}`), ev(2)}, exitCheckFailed, "session is incomplete (lost)"},
+		{"a failed seal under a flag that says complete", []string{with(1, `{"state":"SEALED","seal_error":"timeout","events":2}`), ev(2)}, exitCheckFailed, "session is incomplete"},
+	} {
+		if err := os.WriteFile("f.ndjson", []byte(strings.Join(tt.lines, "\n")+"\n"), 0o600); err != nil {
+			panic(err)
+		}
+		code, out, e := fromTC(t, []string{"f.ndjson"}, gates...)
+		if code != tt.code || !strings.Contains(e, tt.want) {
+			t.Errorf("%s: exit %d, want %d and %q in stderr\nstdout %q\nstderr %q", tt.name, code, tt.code, tt.want, out, e)
+		}
+	}
+	// The whole, proper file passes: the cases above fail for what is wrong with them.
+	if err := os.WriteFile("f.ndjson", []byte(with(1, `{"state":"SEALED","events":2}`)+"\n"+ev(2)+"\n"), 0o600); err != nil {
+		panic(err)
+	}
+	if code, out, e := fromTC(t, []string{"f.ndjson"}, gates...); code != 0 || e != "" {
+		panic(fmt.Sprintf("a whole export: exit %d\n%s%s", code, out, e))
+	}
+	// A file without a verdict is still read, for a person: with a note, and without a gate it exits 0.
+	if err := os.WriteFile("f.ndjson", []byte(ev(2)+"\n"+ev(3)+"\n"), 0o600); err != nil {
+		panic(err)
+	}
+	if code, out, e := fromTC(t, []string{"f.ndjson"}, "summary"); code != 0 || !strings.Contains(out, "events     2") || !strings.Contains(e, "note: f.ndjson does not say how its session ended") {
+		panic(fmt.Sprintf("a file without a verdict, no gate: exit %d\n%s%s", code, out, e))
+	}
+}
+
+// A session is named by its id first; a name or a file's name that fits two
+// sessions is refused, not resolved to one of them.
+func TestFromSessionReferences(t *testing.T) {
+	t.Chdir(t.TempDir())
+	n := 1
+	file := func(name, id, sessionName string) {
+		e := core.Event{SessionID: id, Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /" + id, StartNs: 1e9, EndNs: 2e9}
+		line, err := core.ExportLine(&e, &core.ExportSession{Name: sessionName, State: "SEALED", Events: &n})
+		if err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(name, append(line, '\n'), 0o600); err != nil {
+			panic(err)
+		}
+	}
+	file("a.ndjson", "ts_a", "ts_nightly") // a name that looks like an id
+	file("ts_a.ndjson", "ts_c", "a")       // a file named like the other's session, a session named like the other's file
+	both := []string{"a.ndjson", "ts_a.ndjson"}
+	for ref, want := range map[string]string{"ts_a": "ts_a SEALED", "ts_c": "ts_c SEALED", "ts_nightly": "ts_a SEALED"} {
+		if code, out, e := fromTC(t, both, "status", ref, "--short"); code != 0 || !strings.HasPrefix(out, want) {
+			t.Errorf("status %s: exit %d, %q %q; want %q", ref, code, out, e, want)
+		}
+	}
+	// "a" is the first file's name and the second session's name.
+	if code, _, e := fromTC(t, both, "status", "a", "--short"); code != 1 || !strings.Contains(e, `"a" names 2 sessions`) || !strings.Contains(e, "name the session by its id") {
+		t.Errorf("an ambiguous reference: exit %d %q", code, e)
+	}
+}
+
+// What a file calls its session is printed: it cannot steer the terminal.
+func TestFromCleansTheNameOfAFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	n := 1
+	e := core.Event{SessionID: "ts_a", Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9}
+	line, err := core.ExportLine(&e, &core.ExportSession{Name: "x\x1b[31mRED\x1b[0m\r\nfake line", State: "SEALED", Events: &n})
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile("f.ndjson", append(line, '\n'), 0o600); err != nil {
+		panic(err)
+	}
+	_, out, _ := fromTC(t, []string{"f.ndjson"}, "summary")
+	if strings.ContainsAny(out, "\x1b\r") || !strings.Contains(out, "x[31mRED[0m fake line") {
+		panic(fmt.Sprintf("summary: %q", out))
+	}
+	// A session id that is not one is refused.
+	bad := strings.Replace(string(line), `"ts_a"`, `"ts_a\u001b[31m"`, 1)
+	if err := os.WriteFile("bad.ndjson", []byte(bad+"\n"), 0o600); err != nil {
+		panic(err)
+	}
+	if code, _, e := fromTC(t, []string{"bad.ndjson"}, "summary"); code != 1 || !strings.Contains(e, "the session id is not one") || strings.Contains(e, "\x1b") {
+		panic(fmt.Sprintf("a session id with an escape: exit %d %q", code, e))
 	}
 }

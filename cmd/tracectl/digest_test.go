@@ -1134,3 +1134,28 @@ func TestCLIRunExport(t *testing.T) {
 		}
 	}
 }
+
+// run --export and --digest (or --report) on one file: the second would
+// overwrite the first, and the run would still say that it wrote the export.
+func TestCLIRunExportAndDigestOnOneFile(t *testing.T) {
+	env := newRunEnv(t, failedEvents()...)
+	t.Chdir(t.TempDir())
+	for _, flags := range [][]string{
+		{"--export", "x.md", "--digest", "x.md", "--", "true"},
+		{"--export", "x.md", "--report", "./x.md", "--", "true"},
+	} {
+		if code, _, e := env.tc(append([]string{"run"}, flags...)...); code != 2 || !strings.Contains(e, "name the same file") {
+			t.Errorf("%v: exit %d, stderr %q", flags, code, e)
+		}
+	}
+	// An export onto a file that was readable by others is private afterwards.
+	if err := os.WriteFile("run.ndjson", []byte("old\n"), 0o644); err != nil {
+		panic(err)
+	}
+	if code, _, e := env.run("ok", []string{"--export", "run.ndjson"}); code != 0 {
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
+	}
+	if st, err := os.Stat("run.ndjson"); err != nil || st.Mode().Perm() != 0o600 {
+		panic(fmt.Sprintf("the export's mode: %v %v", st.Mode().Perm(), err))
+	}
+}

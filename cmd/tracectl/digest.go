@@ -97,7 +97,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	} else if _, err := c.stdout.Write(out); err != nil {
 		return err
 	}
-	return g.check(c.stderr, src.rep.info, src.rep.sum, len(src.rep.failures))
+	return g.of(c).check(c.stderr, src.rep.info, src.rep.sum, len(src.rep.failures))
 }
 
 // digestRenderer returns the renderer of a --format value.

@@ -37,11 +37,23 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 	} else {
 		printSummary(c.stdout, s.Info(), sum)
 	}
-	return g.check(c.stderr, s.Info(), sum, len(sum.Failures))
+	return g.of(c).check(c.stderr, s.Info(), sum, len(sum.Failures))
 }
 
 // gates are the --fail-on-* checks of summary, report, digest and run.
-type gates struct{ onError, onIncomplete, onEmpty, onUnconfirmed bool }
+type gates struct {
+	onError, onIncomplete, onEmpty, onUnconfirmed bool
+	// file: the session is read from a file of --from. What such a session
+	// lacks will not arrive: where a running session gets a note, the file
+	// of one fails the gate.
+	file bool
+}
+
+// of returns g for the sessions c reads: from the services, or from files.
+func (g *gates) of(c *cli) *gates {
+	g.file = len(c.files) > 0
+	return g
+}
 
 func (g *gates) register(fs *flag.FlagSet) {
 	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
@@ -71,6 +83,9 @@ func (g *gates) check(stderr io.Writer, info client.Info, sum client.Summary, fa
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
 		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+	case !info.Done() && g.file:
+		failed = append(failed, fmt.Sprintf("the session had not ended when the file was written (%s), so the file does not hold all of it and whether it is complete is not known; export the session once it has ended",
+			dataText(info.State, 20)))
 	case !info.Done():
 		// Still running: what its services hold has not all arrived, and the
 		// verdict on it is given when it ends. The gate judges what there is

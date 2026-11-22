@@ -58,11 +58,21 @@ is silent or cannot deliver, and 12 to 18 s while a service's delivery reports a
 
 ## Reading an export (`tracectl --from`, `dashboard -open`)
 
-- **A file that lost whole lines is refused only if its first line is intact** and was written by a `tracectl`
-  that stores the event count (`events` in `tsession_session`). A file that lost its first line, or an older
-  export that lost lines at the end, is read and judged on what is left.
-- A session exported while it ran holds the events that had arrived, and is shown as running.
+- `tracectl --from` passes its gates only on a file that proves what it holds: a verdict on its first line
+  with the number of events (`events` in `tsession_session`), that many events, and a session that had ended.
+  A file that lost lines, holds a verdict that does not read, or a second verdict, is refused. One without a
+  verdict or without the count (its first line is lost, it was written by an older `tracectl`, or the control
+  plane could not be asked at the export) is read with a note, and `--fail-on-incomplete` and
+  `--fail-on-unconfirmed` fail on it. `--fail-on-error` and `--fail-on-empty` alone still judge what is there.
+- **`dashboard -open` is a viewer and is more lenient**: it shows a file without a verdict as a sealed session,
+  and one that lost lines as incomplete.
+- A session exported while it ran holds the events that had arrived, is shown as running, and fails
+  `--fail-on-incomplete`.
 - An export from before the name was stored is named after its file.
+- No more than 512 MB of events (after decompression) are read from one file; a larger one is refused. Reading
+  takes several times the file's size in memory (about 0.5 GB for a 56 MB export in one measurement).
+- **A file that was edited is believed.** Nothing signs an export: whoever can write the artifact can write its
+  verdict.
 
 ## Masking
 

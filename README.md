@@ -391,7 +391,8 @@ share; whether it may go to CI storage is a question for your own data-handling 
 keeps its id and its name (an export from before the name was stored is named after the file, `run` above), and
 is read-only: stop, rename and delete are refused.
 `tracectl --from` refuses a file that is missing, empty, not an export, or cut short (exit 1; the export says
-how many events it wrote, so a file that lost whole lines is refused too, unless its first line is gone):
+how many events it wrote, so a file that lost whole lines is refused too; one whose first line is gone is read
+with a note and fails `--fail-on-incomplete`, see [`docs/LIMITS.md`](docs/LIMITS.md)):
 a gate does not judge a part of a recording. (`dashboard -open` shows a file cut short, marked incomplete.)
 
 ## Storage and retention

@@ -245,7 +245,8 @@ func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
 	// After the events: a session that was sealed meanwhile says so.
 	var meta *core.ExportSession
 	if info, err := s.Get(ctx); err == nil && info.State != "" {
-		meta = &core.ExportSession{Name: info.Name, NameAuto: info.NameAuto, Events: len(evs),
+		n := len(evs)
+		meta = &core.ExportSession{Name: info.Name, NameAuto: info.NameAuto, Events: &n,
 			State: info.State, Incomplete: info.Incomplete, IncompleteReasons: info.IncompleteReasons,
 			DeliveryUnconfirmed: info.DeliveryUnconfirmed, DrainTimedOut: info.DrainTimedOut, SealError: info.SealError}
 		if info.DrainTimedOut {

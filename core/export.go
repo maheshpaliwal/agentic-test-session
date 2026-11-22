@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"time"
 )
 
@@ -25,11 +27,12 @@ type ExportSession struct {
 	// Name is the session's name; NameAuto says that it was generated.
 	Name     string `json:"name,omitempty"`
 	NameAuto bool   `json:"name_auto,omitempty"`
-	// Events is how many events the export holds. A reader that finds fewer
-	// has a part of the file: one that was cut at the end of a line (a
-	// download that stopped) looks whole otherwise, and would be judged on
-	// the events that happen to be there.
-	Events int `json:"events,omitempty"`
+	// Events is how many events the export holds; nil in an export from
+	// before it was written. A reader that finds another number has a part
+	// of the file, or more than the file: one that was cut at the end of a
+	// line (a download that stopped) looks whole otherwise, and would be
+	// judged on the events that happen to be there.
+	Events *int `json:"events,omitempty"`
 	// State is the session's state when it was exported.
 	State      string `json:"state,omitempty"`
 	Incomplete bool   `json:"incomplete,omitempty"`
@@ -119,4 +122,41 @@ func ExportSessionOf(line []byte) *ExportSession {
 		return nil
 	}
 	return v.Meta
+}
+
+// ExportStates are the values of ExportSession.State: the session states of
+// the control plane.
+var ExportStates = []string{"CREATED", "ACTIVE", "DRAINING", "SEALED", "ABORTED", "EXPIRED"}
+
+// ExportVerdict reads the verdict of an export line for a reader that acts
+// on it. present says that the line has the key; err, that what is under it
+// cannot be relied on: it does not decode (a number written as a string, a
+// value of the wrong kind), counts fewer than no events, or names a state
+// that is none. A verdict that is half read is worse than none: the reader
+// would judge the session without the part that did not decode.
+func ExportVerdict(line []byte) (meta *ExportSession, present bool, err error) {
+	if !bytes.Contains(line, []byte(`"`+ExportSessionKey+`"`)) {
+		return nil, false, nil
+	}
+	var v struct {
+		Meta json.RawMessage `json:"tsession_session"`
+	}
+	if json.Unmarshal(line, &v) != nil {
+		return nil, false, nil // not a JSON object: the reader says so in its own words
+	}
+	if v.Meta == nil {
+		return nil, false, nil // the text is inside a recorded value, not a key of the line
+	}
+	meta = &ExportSession{}
+	// Members this version does not know are passed over: a later version adds them.
+	if err := json.Unmarshal(v.Meta, meta); err != nil {
+		return nil, true, fmt.Errorf("its %s does not read as one: %w", ExportSessionKey, err)
+	}
+	if meta.Events != nil && *meta.Events < 0 {
+		return nil, true, fmt.Errorf("its %s counts %d events", ExportSessionKey, *meta.Events)
+	}
+	if meta.State != "" && !slices.Contains(ExportStates, meta.State) {
+		return nil, true, fmt.Errorf("its %s has the state %q, which is none", ExportSessionKey, meta.State)
+	}
+	return meta, true, nil
 }

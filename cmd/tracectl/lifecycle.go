@@ -191,7 +191,7 @@ func (c *cli) list(ctx context.Context, args []string) error {
 	}
 	// Every session of a control plane has a state. A collector answers the same path with its own list,
 	// which decodes into sessions without one: that is --cp pointing at the wrong service, not a list.
-	if slices.ContainsFunc(list, func(i client.Info) bool { return i.State == "" }) {
+	if len(c.files) == 0 && slices.ContainsFunc(list, func(i client.Info) bool { return i.State == "" }) {
 		return errors.New("the service at --cp did not answer like a control plane (it lists sessions without a state); is --cp the collector's address?")
 	}
 	for _, i := range list {

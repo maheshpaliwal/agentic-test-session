@@ -109,6 +109,8 @@ asked: `--cp`, `--collector` and their environment variables are not used, `--fr
 `diff` without sessions compares the first (baseline) with the second (candidate); otherwise name the session by
 its id, its name or its file's name without the extension. A file that is missing, empty, not an export or cut
 short (in its last line, or by whole lines: the export says how many events it wrote) is refused with exit 1.
+`tracectl run --export FILE` writes such a file when the run ends; `docs/LIMITS.md` says what a file has to
+hold for the gates to pass on it.
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
 command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or

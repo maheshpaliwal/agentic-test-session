@@ -108,6 +108,11 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		if st, err := os.Stat(filepath.Dir(*exportPath)); err != nil || !st.IsDir() {
 			return runUsage("--export %s: its directory does not exist", *exportPath)
 		}
+		for _, o := range []struct{ flag, path string }{{"--digest", *digestPath}, {"--report", *reportPath}} {
+			if o.path != "" && filepath.Clean(o.path) == filepath.Clean(*exportPath) {
+				return runUsage("--export and %s name the same file (%s): the second would overwrite the first", o.flag, o.path)
+			}
+		}
 	}
 	if *reportPath != "" {
 		if *format == "" {
@@ -267,7 +272,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 		}
 		printSummary(c.stderr, s.Info(), sum)
 		c.hintUntagged(byID, sum)
-		return g.check(c.stderr, s.Info(), sum, len(sum.Failures)), nil
+		return g.of(c).check(c.stderr, s.Info(), sum, len(sum.Failures)), nil
 	}
 	rep, err := loadReport(ctx, s)
 	if err != nil {
@@ -275,7 +280,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	}
 	printSummary(c.stderr, rep.info, rep.sum)
 	c.hintUntagged(byID, rep.sum)
-	gateErr = g.check(c.stderr, rep.info, rep.sum, len(rep.failures))
+	gateErr = g.of(c).check(c.stderr, rep.info, rep.sum, len(rep.failures))
 	if exported != "" {
 		rep.from = shellWord(exported, false)
 	}
@@ -299,7 +304,15 @@ func (c *cli) runExport(ctx context.Context, s *client.Session, path string) (er
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
+		if err != nil {
+			// A part of an export is worse than none: it would be read as the session.
+			_ = os.Remove(path)
+		}
 	}()
+	// A file that was there keeps its mode when it is opened: make it private as a new one is.
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
 	n, err := s.Export(ctx, f)
 	if err != nil {
 		return err

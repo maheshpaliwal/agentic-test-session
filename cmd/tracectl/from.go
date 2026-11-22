@@ -98,12 +98,19 @@ func (w *memResponse) Write(b []byte) (int, error) {
 
 // openFrom opens the files of --from and points the commands at them.
 func (c *cli) openFrom(paths []string) error {
-	d, err := dashboard.NewOffline(paths)
+	d, err := dashboard.NewOfflineStrict(paths)
 	if err != nil {
 		return err
 	}
 	c.files = d.Files()
 	for _, f := range c.files {
+		if f.Unproven {
+			// It is read, and judged as a session of which the control plane knows nothing is: no gate
+			// passes on a file that does not say how its session ended, or that it is whole.
+			fmt.Fprintf(c.stderr, "tracectl: note: %s does not say how its session ended or how many events it holds (its first line is lost, or it was "+
+				"exported by an older tracectl or without the control plane): --fail-on-incomplete and --fail-on-unconfirmed fail on it; export the session again\n",
+				shellWord(f.Path, false))
+		}
 		if f.Truncated != nil {
 			// dashboard -open shows such a file, marked incomplete, for a person
 			// to look at. A command whose output and exit status are acted on
@@ -146,20 +153,29 @@ func (c *cli) resolve(ctx context.Context, ref string) (*client.Session, error) 
 	if len(c.files) == 0 {
 		return resolve(ctx, c.opts, ref)
 	}
-	if strings.HasPrefix(ref, "ts_") && !slices.ContainsFunc(c.files, func(f dashboard.OpenedFile) bool { return f.SessionID == ref }) {
-		return nil, fmt.Errorf("session %s is not in the files of --from: %s", ref, c.fromList())
+	// An id is an id, whatever a file or a session is called. Otherwise the reference is a session's name
+	// or a file's name without the extension, and has to mean one session.
+	id := ""
+	if slices.ContainsFunc(c.files, func(f dashboard.OpenedFile) bool { return f.SessionID == ref }) {
+		id = ref
+	} else {
+		var ids []string
+		for _, f := range c.files {
+			base := strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path))
+			if (f.Name == ref || base == ref) && !slices.Contains(ids, f.SessionID) {
+				ids = append(ids, f.SessionID)
+			}
+		}
+		switch len(ids) {
+		case 0:
+			return nil, fmt.Errorf("no session with the id or the name %q in the files of --from: %s", ref, c.fromList())
+		case 1:
+			id = ids[0]
+		default:
+			return nil, fmt.Errorf("%q names %d sessions in the files of --from (%s): name the session by its id", ref, len(ids), strings.Join(ids, ", "))
+		}
 	}
-	// The file's name without the extension names its session too, whatever the session is called.
-	if i := slices.IndexFunc(c.files, func(f dashboard.OpenedFile) bool {
-		return strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path)) == ref
-	}); i >= 0 {
-		ref = c.files[i].SessionID
-	}
-	s, err := resolve(ctx, c.opts, ref)
-	if err != nil {
-		return nil, fmt.Errorf("%w in the files of --from: %s", err, c.fromList())
-	}
-	return s, nil
+	return client.Attach(ctx, c.opts, id)
 }
 
 // fromList is "FILE holds ts_x, FILE holds ts_y".
@@ -213,6 +229,8 @@ func shellWord(path string, tight bool) string {
 		return "FILE"
 	case strings.ContainsFunc(path, func(r rune) bool { return !plain(r) }):
 		return "'" + path + "'"
+	case strings.HasPrefix(path, "=") || strings.HasPrefix(path, "~"):
+		return "'" + path + "'" // a shell expands these at the start of a word
 	}
 	return path
 }
