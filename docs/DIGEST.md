@@ -160,3 +160,26 @@ out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`;
 
 Optional numbers, booleans and lists (`async`, `count`, `hidden`, `flags`, `fields`, ...) are left out when zero,
 false or empty; `path` is always there.
+
+### For a parser
+
+- **Types.** `seq`, `last_seq`, `count`, `depth`, `mutations`, `hidden`, `path_omitted`, `changes_omitted`,
+  `fields_omitted`, `rolled_back_by` and every count are non-negative integers; `duration_ns` and
+  `max_duration_ns` are integers in nanoseconds; `live`, `in_tree`, `async`, `uncertain`, `after_unavailable`
+  and a field's `hidden` are booleans; everything else is a string or a list of strings. A field's `before`
+  and `after` are the only members that can be `null`.
+- **Present or absent.** The top-level lists (`failures`, `mutations`, `tree`, `omitted`, `drill_down`) and a
+  failure's `path` are always present, empty when there is nothing; they are never `null`. Lists inside an
+  entry (`flags`, `fields`, `changes`, `incomplete_reasons`, `delivery_unconfirmed`) are left out when empty.
+- **`verdict.status`** is the first that applies: `failed` (a failed event), `incomplete`, `empty` (no events),
+  `passed`. A session can be failed and incomplete: `status` is `failed` and `recording` is `incomplete`.
+- **`session.state`**: `CREATED`, `ACTIVE`, `DRAINING`, `SEALED`, `ABORTED`, `EXPIRED`, or empty.
+- **`kind`** is one of `api.in`, `api.out`, `db.read`, `db.write`, `db.tx.begin`, `db.tx.commit`,
+  `db.tx.rollback`, `cache.read`, `cache.write`, `queue.publish`, `queue.consume`, `worker.start`, `worker.end`,
+  `worker.retry`, `worker.dlq`, `session.start`, `session.stop`, `sdk.dropped`. Treat an unknown one as data:
+  kinds are added.
+- **`op`** is what the wrapper recorded, in lower case: `insert`, `update`, `delete`, `upsert`, a Redis command
+  such as `set`, a Mongo or DynamoDB operation. It is not a closed list.
+- **Bounds.** At most 8 flags per change and per tree line, 12 fields per change, 20 changes per entity, 5
+  ancestors per failure, 4 unconfirmed instances. A tree line's `error` is clipped at 120 runes; a failure's at
+  300.
