@@ -146,6 +146,10 @@ Rolling back:
 
 ### Added
 
+- `tracectl run --export FILE` writes the session as `export -o FILE` does, when the run ends: the artifact a
+  CI job keeps. The `--digest` and `--report` files of that run then name commands that read it
+  (`tracectl --from run.ndjson show <seq>`), which still work when the services of the run are gone; without
+  `--export` they name the session, as before.
 - `tracectl --from FILE` reads a session saved with `tracectl export -o FILE`, with no service running: `digest`,
   `summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`, `status` and `list`, with the
   output and the exit status of the live session. The session argument can be left out. `--from` given twice is

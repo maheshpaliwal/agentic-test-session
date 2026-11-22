@@ -1090,3 +1090,47 @@ func TestFirstErrorIsLeftOutAtTheShorterLevels(t *testing.T) {
 		}
 	}
 }
+
+// run --export writes the artifact a later job reads with --from, and the
+// digest and the report of the same run name commands that read it: the
+// services of the run are gone by then.
+func TestCLIRunExport(t *testing.T) {
+	env := newRunEnv(t, failedEvents()...)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	code, _, e := env.run("ok", []string{"--export", "run.ndjson", "--digest", "digest.md", "--report", "report.md", "--fail-on-error"})
+	if code != exitCheckFailed || !strings.Contains(e, "to run.ndjson; read it with no service running: tracectl --from run.ndjson digest") {
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
+	}
+	md, err := os.ReadFile("digest.md")
+	if err != nil {
+		panic(err)
+	}
+	sec := checkDigestMarkdown(t, string(md))
+	wantAll(t, sec["### Drill down"], "`tracectl --from run.ndjson show <seq>`")
+	if strings.Contains(string(md), drillDownNote) || strings.Contains(string(md), "tracectl show "+runID) {
+		panic("the digest of a run with --export names commands that need the services:\n" + string(md))
+	}
+	rep, err := os.ReadFile("report.md")
+	if err != nil || !strings.Contains(string(rep), "`tracectl --from run.ndjson trace --errors`") {
+		panic(fmt.Sprintf("report: %v\n%s", err, rep))
+	}
+	// The file is an export: one line per event, the first with the session's verdict and how many events
+	// there are. (That --from reads an export like the live session is held by the integration tests; the
+	// events of this fixture carry no session id.)
+	raw, err := os.ReadFile("run.ndjson")
+	if err != nil || strings.Count(string(raw), "\n") != 3 || !strings.Contains(strings.SplitN(string(raw), "\n", 2)[0], `"tsession_session":{"events":3,"state":"SEALED"}`) {
+		panic(fmt.Sprintf("the export: %v\n%s", err, raw))
+	}
+	for _, tt := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"--export", "-", "--", "true"}, "--export needs a file"},
+		{[]string{"--export", "no/such/dir/run.ndjson", "--", "true"}, "its directory does not exist"},
+	} {
+		if code, _, e := env.tc(append([]string{"run"}, tt.flags...)...); code != 2 || !strings.Contains(e, tt.want) {
+			t.Errorf("%v: exit %d, stderr %q; want exit 2 and %q", tt.flags, code, e, tt.want)
+		}
+	}
+}

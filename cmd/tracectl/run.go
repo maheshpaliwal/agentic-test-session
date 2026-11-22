@@ -21,7 +21,7 @@ import (
 
 const (
 	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed] " +
-		"[--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]] [--timeout D] -- <command> [args...]"
+		"[--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]] [--export FILE] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.
 	sessionEnv = client.SessionEnv
@@ -70,6 +70,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	format := fl.String("format", "", "format of --report: markdown (default) or junit")
 	digestPath := fl.String("digest", "", "write a digest of the session to this file: Markdown, or JSON if the name ends in .json")
 	maxBytes := fl.Int("max-bytes", digestDefaultBytes, "the --digest file is never larger than this many bytes")
+	exportPath := fl.String("export", "", "write the session's events to this file, as export -o does: an artifact that tracectl --from FILE reads with no service running; the --digest and --report files then name commands that read it")
 	timeout := fl.Duration("timeout", 2*time.Minute, "how long to wait for the session to stop and seal")
 	if err := fl.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -88,6 +89,8 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return runUsage("--report needs a file: standard output belongs to the command")
 	case *digestPath == "-":
 		return runUsage("--digest needs a file: standard output belongs to the command")
+	case *exportPath == "-":
+		return runUsage("--export needs a file: standard output belongs to the command")
 	case *reportPath == "" && *format != "":
 		return runUsage("--format needs --report FILE")
 	case *maxBytes < digestMinBytes:
@@ -99,6 +102,11 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	if *digestPath != "" {
 		if st, err := os.Stat(filepath.Dir(*digestPath)); err != nil || !st.IsDir() {
 			return runUsage("--digest %s: its directory does not exist", *digestPath)
+		}
+	}
+	if *exportPath != "" {
+		if st, err := os.Stat(filepath.Dir(*exportPath)); err != nil || !st.IsDir() {
+			return runUsage("--export %s: its directory does not exist", *exportPath)
 		}
 	}
 	if *reportPath != "" {
@@ -211,9 +219,18 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		readCtx, cancel := context.WithTimeout(waitCtx, runResultsTimeout)
 		// In header mode without bindings only what carries the id is recorded.
 		byID := opts.Mode != "exclusive" && len(opts.Bindings) == 0
-		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render)
+		// The export first: the report and the digest then name commands that
+		// read it, which still work when the services of the run are gone.
+		if *exportPath != "" {
+			if xerr := c.runExport(readCtx, s, *exportPath); xerr != nil {
+				failed = true
+				fmt.Fprintf(c.stderr, "tracectl: exporting session %s: %v\n", s.ID, xerr)
+				*exportPath = ""
+			}
+		}
+		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render, *exportPath)
 		if err == nil && *digestPath != "" {
-			err = c.runDigest(readCtx, s, *digestPath, *maxBytes)
+			err = c.runDigest(readCtx, s, *digestPath, *maxBytes, *exportPath)
 		}
 		cancel()
 		if err != nil {
@@ -242,7 +259,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 // report and returns the verdict of the gates. byID says that the session
 // records only requests that carry its id; an empty one then gets a hint.
 func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID bool, reportPath, format string,
-	render func(*sessionReport) ([]byte, error)) (gateErr, err error) {
+	render func(*sessionReport) ([]byte, error), exported string) (gateErr, err error) {
 	if render == nil {
 		sum, err := s.Summary(ctx)
 		if err != nil {
@@ -259,6 +276,9 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	printSummary(c.stderr, rep.info, rep.sum)
 	c.hintUntagged(byID, rep.sum)
 	gateErr = g.check(c.stderr, rep.info, rep.sum, len(rep.failures))
+	if exported != "" {
+		rep.from = shellWord(exported, false)
+	}
 	out, err := render(rep)
 	if err != nil {
 		return gateErr, err
@@ -268,7 +288,27 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 
 // runDigest writes the digest of the session run recorded to path, in at
 // most maxBytes bytes.
-func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, maxBytes int) error {
+// runExport writes the events of the session run recorded to path, as
+// export -o does, and says how to read the file.
+func (c *cli) runExport(ctx context.Context, s *client.Session, path string) (err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // events may hold sensitive payloads
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	n, err := s.Export(ctx, f)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.stderr, "wrote %d events to %s; read it with no service running: tracectl --from %s digest\n", n, path, shellWord(path, false))
+	return nil
+}
+
+func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, maxBytes int, exported string) error {
 	format := "markdown"
 	if strings.HasSuffix(path, ".json") {
 		format = "json"
@@ -281,7 +321,11 @@ func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, max
 	if err != nil {
 		return err
 	}
-	src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
+	// With an export the digest names commands that read it; otherwise, as
+	// digest does, the session and the URL flags they need.
+	if src.from = exported; src.from == "" {
+		src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
+	}
 	out, err := src.fit(render, maxBytes)
 	if err != nil {
 		return err

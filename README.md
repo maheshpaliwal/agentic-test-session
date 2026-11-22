@@ -277,7 +277,8 @@ tracectl digest my-run --fail-on-error --fail-on-incomplete --fail-on-empty   # 
 tracectl show my-run 17                                         # then drill down: one event in full
 tracectl history my-run postgres orders 42                      # every change to one row
 
-# no services running, only the artifact of a run (tracectl export my-run -o run.ndjson):
+# no services running, only the artifact of a run (tracectl run --export run.ndjson -- ..., or
+# tracectl export my-run -o run.ndjson):
 tracectl --from run.ndjson digest --fail-on-error --fail-on-incomplete --fail-on-empty
 tracectl --from run.ndjson show 17                              # the digest names these commands itself
 ```
