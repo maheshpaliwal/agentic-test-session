@@ -589,6 +589,9 @@ Rolling back:
 
 ### Performance
 
+- Span and trace ids come from the runtime's random generator, without a system call: a span id takes 14 ns
+  where it took 310 (parallel benchmark on a laptop; the system call was more than half the CPU of starting a
+  span on macOS). They identify spans and are not secrets; the instance suffix still comes from the system.
 - From a measured audit of the SDK's hot paths (figures are medians of interleaved runs on a loaded laptop):
   - a request that carries no session header no longer allocates to find that out: reading the header costs 11 ns
     and no allocation, where it cost 48 ns and one (`core.HTTPHeaderCarrier.Get`); `thttp.Handler` without an
