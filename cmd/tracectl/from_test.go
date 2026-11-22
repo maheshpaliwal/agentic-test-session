@@ -655,3 +655,56 @@ func TestFromCleansTheNameOfAFile(t *testing.T) {
 		panic(fmt.Sprintf("a session id with an escape: exit %d %q", code, e))
 	}
 }
+
+// Rules of --from that a review could change without a test noticing.
+func TestFromSmallRules(t *testing.T) {
+	// The word a digest writes for the file: quoted where a shell would read it otherwise, FILE where no
+	// word can stand for it.
+	for path, want := range map[string]string{
+		"run.ndjson":       "run.ndjson",
+		"my run.ndjson":    "'my run.ndjson'",
+		"=ls":              "'=ls'",
+		"~user/run.ndjson": "'~user/run.ndjson'",
+		"-":                "FILE",
+		"-rf":              "FILE",
+		"/dev/stdin":       "FILE",
+		"/dev/fd/3":        "FILE",
+		"it's.ndjson":      "FILE",
+		"a`b.ndjson":       "FILE",
+		"a\nb.ndjson":      "FILE",
+	} {
+		if got := shellWord(path, false); got != want {
+			t.Errorf("shellWord(%q) = %q, want %q", path, got, want)
+		}
+	}
+	// --from after the command, in each way of writing a flag.
+	for _, flag := range []string{"--from", "-from", "--from=x.ndjson", "-from=x.ndjson"} {
+		var out, errb bytes.Buffer
+		if code := run([]string{"summary", flag}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--from goes before the command") {
+			t.Errorf("summary %s: exit %d, stderr %q", flag, code, errb.String())
+		}
+	}
+
+	t.Chdir(t.TempDir())
+	// A generated name is marked as one, as for the live session.
+	n := 1
+	e := core.Event{SessionID: "ts_a", Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9}
+	line, err := core.ExportLine(&e, &core.ExportSession{Name: "run 12:00:01", NameAuto: true, State: "SEALED", Events: &n})
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile("auto.ndjson", append(line, '\n'), 0o600); err != nil {
+		panic(err)
+	}
+	if _, out, _ := fromTC(t, []string{"auto.ndjson"}, "summary"); !strings.Contains(out, "run 12:00:01 (auto)") {
+		t.Errorf("a generated name: %q", out)
+	}
+	// A file that begins with the first byte of gzip's two and is not gzip is read as what it is: refused
+	// as not an export, not as a broken gzip stream.
+	if err := os.WriteFile("odd.ndjson", []byte("\x1f{}\n"), 0o600); err != nil {
+		panic(err)
+	}
+	if code, _, errOut := fromTC(t, []string{"odd.ndjson"}, "summary"); code != 1 || strings.Contains(errOut, "gzip") || !strings.Contains(errOut, "not an exported event") {
+		t.Errorf("a file that starts with 0x1f: exit %d, %q", code, errOut)
+	}
+}
