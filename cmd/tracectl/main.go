@@ -130,13 +130,14 @@ read an export instead of the services:
                                 flags exit as they do for it. Any other command, or --from together with
                                 --cp or --collector, exits 2.
                                 The session need not be named: "tracectl --from run.ndjson digest",
-                                "tracectl --from run.ndjson show 17". It may be, by its id or by the file's
-                                name without the extension (run); a session the files do not hold is an
-                                error. Repeat --from to read several files: "list" lists them,
+                                "tracectl --from run.ndjson show 17". It may be, by its id, its name or
+                                the file's name without the extension (run); a session the files do not
+                                hold is an error. --from goes before the command. Repeat --from to read several files: "list" lists them,
                                 "tracectl --from a.ndjson --from b.ndjson diff" compares a (baseline) with
                                 b (candidate), and any other command then has to name its session.
-                                A file that is missing, empty, not an export or cut short in its last
-                                line is refused (exit 1). The commands a digest names carry --from FILE.
+                                A file that is missing, empty, not an export or cut short is refused
+                                (exit 1). A session exported while it ran is shown as running. The
+                                commands a digest or a report names carry --from FILE.
 
 exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
              3 a --fail-on-* check failed; run: see above

@@ -53,6 +53,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	rep.from = c.fromWord(s.ID)
 	out, err := render(rep)
 	if err != nil {
 		return err
@@ -116,6 +117,9 @@ type sessionReport struct {
 	incomplete bool
 	reasons    []string // why it is incomplete; plain text, not yet escaped
 	mutations  []mutationRow
+	// from is the file of --from as a command names it; empty without it.
+	// The commands the report names then read the file.
+	from string
 }
 
 // reportRoot is one trace root with the failed events of its tree, async
@@ -433,7 +437,7 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 		}
 	}
 
-	fmt.Fprintf(&b, "\nDig further: %s, %s\n", mdCode("tracectl trace "+info.ID+" --errors"), mdCode("tracectl show "+info.ID+" <seq>"))
+	fmt.Fprintf(&b, "\nDig further: %s, %s\n", mdCode(drillCommand(rep.from, info.ID, "trace ID --errors")), mdCode(drillCommand(rep.from, info.ID, "show ID <seq>")))
 	return b.Bytes(), nil
 }
 

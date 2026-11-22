@@ -131,6 +131,10 @@ func loadExport(path string) (*demoSess, error) {
 		}
 		return nil, fmt.Errorf("%s: no events, and no session: an export of a session without events holds one line with its verdict", path)
 	}
+	// Fewer events than the export wrote: the file was cut at the end of a line, which no line shows.
+	if meta != nil && meta.Events > 0 && len(evs) != meta.Events && !torn {
+		torn, tornErr = true, fmt.Errorf("%s: holds %d of the %d events that were exported", path, len(evs), meta.Events)
+	}
 	slicex.SortBy(evs, func(e core.Event) uint64 { return e.Seq })
 	var first, last int64
 	for i := range evs {
@@ -169,11 +173,23 @@ func loadExport(path string) (*demoSess, error) {
 	// seal failed. An export from before the verdict was carried has none,
 	// and the session is then judged on its events alone.
 	if meta != nil {
+		// The session's own name, where the export carries it; the file's name stands in for an export
+		// from before that.
+		if meta.Name != "" {
+			sess.Name, sess.NameAuto = meta.Name, meta.NameAuto
+		}
+		// A session that was exported while it ran is not a finished one: its events are those that had
+		// arrived, and nothing was sealed.
+		if st := controlplane.State(meta.State); st != "" && !st.Terminal() {
+			sess.State, sess.EndedAt, cv.sealed = st, time.Time{}, false
+		} else if st != "" {
+			sess.State = st
+		}
 		sess.Incomplete = sess.Incomplete || meta.Incomplete
 		sess.IncompleteReasons, sess.DeliveryUnconfirmed = meta.IncompleteReasons, meta.DeliveryUnconfirmed
 		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
 	}
-	ds := &demoSess{Session: sess, events: evs, sealed: true, file: cv, path: path}
+	ds := &demoSess{Session: sess, events: evs, sealed: cv.sealed, file: cv, path: path}
 	if torn {
 		ds.torn = tornErr
 	}

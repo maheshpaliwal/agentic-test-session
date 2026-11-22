@@ -876,9 +876,10 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 			for _, r := range files {
 				want := liveOut
 				code, got, gotErr := r.run(args...)
-				if r.from && args[0] == "digest" {
+				if r.from && (args[0] == "digest" || args[0] == "report" && !slices.Contains(args, "junit")) {
+					// The commands a digest and a Markdown report name read the file.
 					if want = fromDigest(want, id, word(i)); want == liveOut || !strings.Contains(want, "tracectl --from "+word(i)+" show <seq>") {
-						panic(fmt.Sprintf("the digest of the live session names no command to rewrite:\n%s", liveOut))
+						panic(fmt.Sprintf("the %s of the live session names no command to rewrite:\n%s", args[0], liveOut))
 					}
 				}
 				// Before the output is read: a tracectl that could not reach the

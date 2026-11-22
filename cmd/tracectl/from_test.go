@@ -105,8 +105,8 @@ func TestFromReadsLikeTheDashboardThatOpenedTheFile(t *testing.T) {
 		if wantCode != 0 && wantCode != exitCheckFailed || want == "" {
 			panic(fmt.Sprintf("tracectl %v on the dashboard: exit %d\n%s%s", args, wantCode, want, wantErr))
 		}
-		if args[0] == "digest" {
-			// The one difference: the commands a digest names. See TestFromDigestNamesTheFile.
+		if args[0] == "digest" || args[0] == "report" {
+			// The one difference: the commands a digest or a report names. See TestFromDigestNamesTheFile.
 			want = strings.ReplaceAll(want, `,"drill_down_note":`+string(jsonBytes(drillDownNote)[:len(jsonBytes(drillDownNote))-1]), "")
 			for _, c := range []string{"show", "history", "trace", "events"} {
 				want = strings.ReplaceAll(want, "tracectl "+c+" ts_a", "tracectl --from "+a+" "+c)
@@ -277,7 +277,7 @@ func TestFromErrors(t *testing.T) {
 		{[]string{blank}, []string{"summary"}, 1, blank + ": no events, and no session"},
 		{[]string{notExport}, []string{"digest"}, 1, notExport + ":1: not an exported event (no session_id or seq)"},
 		{[]string{text}, []string{"digest"}, 1, text + ":1: not an exported event"},
-		{[]string{cut}, []string{"digest"}, 1, cut + ":4: not an exported event: unexpected end of JSON input: the last line of the file is cut short"},
+		{[]string{cut}, []string{"digest"}, 1, cut + ":4: not an exported event: unexpected end of JSON input: the file is cut short"},
 		{[]string{cut}, []string{"summary", "--fail-on-error"}, 1, "export the session again"},
 		{[]string{cutOnly}, []string{"digest"}, 1, cutOnly + ":1: not an exported event"},
 		{[]string{mixed}, []string{"digest"}, 1, "mixed.ndjson:5: events of two sessions (ts_a and ts_z) in one file"},
@@ -362,5 +362,83 @@ func TestFromGatesOnTheVerdictOfTheFile(t *testing.T) {
 				t.Errorf("%s %s does not say why: %s", cmd, flag, e)
 			}
 		}
+	}
+}
+
+// exportWith writes an export whose first line carries meta, as tracectl
+// export writes it, and returns the lines.
+func exportWith(t *testing.T, name string, meta *core.ExportSession, evs []core.Event) []string {
+	t.Helper()
+	var lines []string
+	for i := range evs {
+		m := meta
+		if i > 0 {
+			m = nil
+		}
+		line, err := core.ExportLine(&evs[i], m)
+		if err != nil {
+			panic(err)
+		}
+		lines = append(lines, string(line))
+	}
+	if err := os.WriteFile(name, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		panic(err)
+	}
+	return lines
+}
+
+// A file that lost its last lines at the end of a line looks whole: every
+// line parses. The export says how many events it wrote, and a file with
+// fewer is refused, where it was judged on the events that were left.
+func TestFromRefusesAFileThatLostLines(t *testing.T) {
+	t.Chdir(t.TempDir())
+	evs := fromEvents("ts_a")
+	lines := exportWith(t, "whole.ndjson", &core.ExportSession{State: "SEALED", Events: len(evs)}, evs)
+	if code, _, e := fromTC(t, []string{"whole.ndjson"}, "summary", "--fail-on-error"); code != exitCheckFailed {
+		panic(fmt.Sprintf("the whole file: exit %d %s", code, e))
+	}
+	// The first line alone: an event that went well... no: seq 1 failed; keep the two writes that went well.
+	if err := os.WriteFile("part.ndjson", []byte(strings.Join(lines[:3], "\n")+"\n"), 0o600); err != nil {
+		panic(err)
+	}
+	code, out, e := fromTC(t, []string{"part.ndjson"}, "summary", "--fail-on-error", "--fail-on-incomplete")
+	if code != 1 || out != "" || !strings.Contains(e, "part.ndjson: holds 3 of the 4 events that were exported") || !strings.Contains(e, "cut short") {
+		panic(fmt.Sprintf("a file that lost a line: exit %d, stdout %q, stderr %q", code, out, e))
+	}
+}
+
+// The session keeps its name through an export, and can be named by it or
+// by the file's name.
+func TestFromKeepsTheSessionsName(t *testing.T) {
+	t.Chdir(t.TempDir())
+	evs := fromEvents("ts_a")
+	exportWith(t, "run.ndjson", &core.ExportSession{Name: "nightly e2e #42", State: "SEALED", Events: len(evs)}, evs)
+	_, out, _ := fromTC(t, []string{"run.ndjson"}, "summary")
+	if !strings.Contains(out, "ts_a  nightly e2e #42  (SEALED") {
+		panic("summary does not show the session's name:\n" + out)
+	}
+	for _, ref := range []string{"nightly e2e #42", "run", "ts_a"} {
+		if code, _, e := fromTC(t, []string{"run.ndjson"}, "status", ref, "--short"); code != 0 {
+			panic(fmt.Sprintf("status %q: exit %d %s", ref, code, e))
+		}
+	}
+}
+
+// A session exported while it ran is shown as running, not as sealed and
+// complete; the report and the digest name commands that read the file.
+func TestFromShowsASessionExportedWhileItRanAsLive(t *testing.T) {
+	t.Chdir(t.TempDir())
+	evs := fromEvents("ts_a")
+	exportWith(t, "live.ndjson", &core.ExportSession{State: "ACTIVE", Events: len(evs)}, evs)
+	_, out, _ := fromTC(t, []string{"live.ndjson"}, "digest")
+	if !strings.Contains(out, "**Live**") || !strings.Contains(out, "state: ACTIVE; recording: not yet known") {
+		panic("digest of a session exported while it ran:\n" + out)
+	}
+	if _, out, _ := fromTC(t, []string{"live.ndjson"}, "status", "--short"); !strings.Contains(out, "ts_a ACTIVE") {
+		panic("status: " + out)
+	}
+	_, out, _ = fromTC(t, []string{"live.ndjson"}, "report")
+	if !strings.Contains(out, "`tracectl --from live.ndjson trace --errors`") || strings.Contains(out, "tracectl trace ts_a") {
+		panic("the report names commands that ask the services:\n" + out)
 	}
 }

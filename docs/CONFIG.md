@@ -107,8 +107,8 @@ they give the live session: the export carries the session's verdict (see "Expor
 asked: `--cp`, `--collector` and their environment variables are not used, `--from` together with `--cp` or
 `--collector` exits 2, and so does any other command. With one file the session need not be named; with two,
 `diff` without sessions compares the first (baseline) with the second (candidate); otherwise name the session by
-its id or by its file's name without the extension. A file that is missing, empty, not an export or cut short
-in its last line is refused with exit 1.
+its id, its name or its file's name without the extension. A file that is missing, empty, not an export or cut
+short (in its last line, or by whole lines: the export says how many events it wrote) is refused with exit 1.
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
 command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or

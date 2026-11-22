@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -107,7 +108,7 @@ func (c *cli) openFrom(paths []string) error {
 			// dashboard -open shows such a file, marked incomplete, for a person
 			// to look at. A command whose output and exit status are acted on
 			// does not judge a part of a recording.
-			return fmt.Errorf("%w: the last line of the file is cut short (an interrupted export or download); export the session again", f.Truncated)
+			return fmt.Errorf("%w: the file is cut short (an interrupted export or download); export the session again", f.Truncated)
 		}
 	}
 	c.opts.BaseURL, c.opts.CollectorURL = "http://"+fileCPHost, "http://"+fileColHost
@@ -147,6 +148,12 @@ func (c *cli) resolve(ctx context.Context, ref string) (*client.Session, error) 
 	}
 	if strings.HasPrefix(ref, "ts_") && !slices.ContainsFunc(c.files, func(f dashboard.OpenedFile) bool { return f.SessionID == ref }) {
 		return nil, fmt.Errorf("session %s is not in the files of --from: %s", ref, c.fromList())
+	}
+	// The file's name without the extension names its session too, whatever the session is called.
+	if i := slices.IndexFunc(c.files, func(f dashboard.OpenedFile) bool {
+		return strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path)) == ref
+	}); i >= 0 {
+		ref = c.files[i].SessionID
 	}
 	s, err := resolve(ctx, c.opts, ref)
 	if err != nil {

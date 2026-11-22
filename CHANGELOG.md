@@ -426,6 +426,16 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl --from FILE`, from a walkthrough of it:
+  - a file that lost whole lines (a download that stopped at the end of a line) is refused: the export now says
+    how many events it wrote (`events` in `tsession_session`). The first 5 of 32 lines read as "5 events, 0
+    failures" and passed every gate. A file that lost its first line still cannot be told from an old export.
+  - a session exported while it ran is shown as running (`**Live**`, `recording: not yet known`), not as sealed
+    and complete;
+  - the export stores the session's name (`name`), and the session is shown and can be named by it; it was
+    named after the file;
+  - the commands a Markdown report names read the file (`tracectl --from run.ndjson trace --errors`); they
+    named the session, and run as printed would have asked the services at the default addresses.
 - Delivery accounting, two silent misses from its fifth review: an instance with an old stream that lingers behind
   a proxy and a new one that was never heard of is judged by the newest connection, and is named again; a stream
   on which a report got no answer or a 5xx is opened anew once after the grace (never two within a grace, one

@@ -22,6 +22,14 @@ const ExportSessionKey = "tsession_session"
 // event holds. An export without it was written before there was one, or of
 // a session the control plane no longer knew.
 type ExportSession struct {
+	// Name is the session's name; NameAuto says that it was generated.
+	Name     string `json:"name,omitempty"`
+	NameAuto bool   `json:"name_auto,omitempty"`
+	// Events is how many events the export holds. A reader that finds fewer
+	// has a part of the file: one that was cut at the end of a line (a
+	// download that stopped) looks whole otherwise, and would be judged on
+	// the events that happen to be there.
+	Events int `json:"events,omitempty"`
 	// State is the session's state when it was exported.
 	State      string `json:"state,omitempty"`
 	Incomplete bool   `json:"incomplete,omitempty"`

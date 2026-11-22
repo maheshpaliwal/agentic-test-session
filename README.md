@@ -294,8 +294,10 @@ empty. A live session works too and says so. Details: [`docs/DIGEST.md`](docs/DI
 `--from FILE` reads an export instead of the services: nothing has to run and nothing is asked. It works with
 the commands that read (`digest`, `summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`,
 `status`, `list`); they print what they print for the session the file was exported from and exit as they do
-for it, `--fail-on-*` gates included. The session need not be named (the file holds one); when it is, by its id
-or by the file's name without the extension, it has to be the file's. Any other command with `--from` exits 2.
+for it, `--fail-on-*` gates included. The session need not be named (the file holds one); when it is, by its id,
+its name or the file's name without the extension, it has to be the file's. Any other command with `--from`
+exits 2. A session that was exported while it ran is shown as running: its events are those that had arrived.
+`--from` goes before the command.
 
 | `tracectl run` exits | It means | Next |
 |---|---|---|
@@ -379,9 +381,11 @@ TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
 ```
 
 An export holds recorded payloads, masked by field name only. Treat it like test data, not as something safe to
-share; whether it may go to CI storage is a question for your own data-handling policy. The opened session is
-named after the file (`run` above), keeps its id, and is read-only: stop, rename and delete are refused.
-`tracectl --from` refuses a file that is missing, empty, not an export, or cut short in its last line (exit 1):
+share; whether it may go to CI storage is a question for your own data-handling policy. The opened session
+keeps its id and its name (an export from before the name was stored is named after the file, `run` above), and
+is read-only: stop, rename and delete are refused.
+`tracectl --from` refuses a file that is missing, empty, not an export, or cut short (exit 1; the export says
+how many events it wrote, so a file that lost whole lines is refused too, unless its first line is gone):
 a gate does not judge a part of a recording. (`dashboard -open` shows a file cut short, marked incomplete.)
 
 ## Storage and retention
