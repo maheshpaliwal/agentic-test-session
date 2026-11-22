@@ -103,7 +103,11 @@ func RedactText(s string) string {
 	if s == "" {
 		return s
 	}
-	s = reBearer.ReplaceAllString(s, "$1 "+RedactedValue)
+	// reBearer needs white space after the scheme, reJSONish a ':' or '=':
+	// text without them (most header values) is not run through either.
+	if strings.ContainsAny(s, " \t\n\f\r") {
+		s = reBearer.ReplaceAllString(s, "$1 "+RedactedValue)
+	}
 	if strings.Contains(s, "</") {
 		s = reXMLText.ReplaceAllStringFunc(s, func(m string) string {
 			sub := reXMLText.FindStringSubmatch(m)
@@ -113,15 +117,30 @@ func RedactText(s string) string {
 			return sub[1] + RedactedValue + sub[4]
 		})
 	}
-	return reJSONish.ReplaceAllStringFunc(s, func(m string) string {
-		sub := reJSONish.FindStringSubmatch(m)
-		if len(sub) < 4 || !sensitive(sub[2]) {
-			return m
+	if !strings.ContainsAny(s, ":=") {
+		return s
+	}
+	// One pass: the submatches of each match are taken from the match itself
+	// instead of matching every fragment a second time.
+	var b strings.Builder
+	last := 0
+	for _, m := range reJSONish.FindAllStringSubmatchIndex(s, -1) {
+		if !sensitive(s[m[4]:m[5]]) {
+			continue
 		}
-		q := ""
-		if v := sub[3]; len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
-			q = string(v[0])
+		b.WriteString(s[last:m[3]]) // up to and including "key: "
+		if c := s[m[6]]; c == '"' || c == '\'' {
+			b.WriteByte(c)
+			b.WriteString(RedactedValue)
+			b.WriteByte(c)
+		} else {
+			b.WriteString(RedactedValue)
 		}
-		return sub[1] + q + RedactedValue + q
-	})
+		last = m[1]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }

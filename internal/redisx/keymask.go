@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"strings"
 	"sync"
 )
@@ -146,20 +147,26 @@ func (h *Redactor) maskSegment(session, seg string) string {
 	if h.KeyMask == KeyMaskFlat {
 		return masked
 	}
-	var mac interface {
-		Write([]byte) (int, error)
-		Sum([]byte) []byte
-	}
+	var mac hash.Hash
 	if h.KeyMask == KeyMaskSession {
 		mac = hmac.New(sha256.New, []byte(session))
 	} else {
-		mac = hmac.New(sha256.New, processKey())
+		// Keying an HMAC costs two SHA-256 blocks and five allocations; the
+		// process key never changes, so the keyed state is kept and reset.
+		mac = processMAC.Get().(hash.Hash)
+		defer func() { mac.Reset(); processMAC.Put(mac) }()
 		mac.Write([]byte(session))
 		mac.Write([]byte{0})
 	}
 	mac.Write([]byte(seg))
-	return "#" + hex.EncodeToString(mac.Sum(nil))[:keyHashLen]
+	var sum [sha256.Size]byte
+	var out [1 + 2*sha256.Size]byte
+	out[0] = '#'
+	hex.Encode(out[1:], mac.Sum(sum[:0]))
+	return string(out[:1+keyHashLen])
 }
+
+var processMAC = sync.Pool{New: func() any { return hmac.New(sha256.New, processKey()) }}
 
 // maskedSegment reports whether p is what ShowKey writes for a masked part.
 func maskedSegment(p string) bool {

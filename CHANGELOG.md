@@ -586,6 +586,20 @@ Rolling back:
 
 ### Performance
 
+- From a measured audit of the SDK's hot paths (figures are medians of interleaved runs on a loaded laptop):
+  - a request that carries no session header no longer allocates to find that out: reading the header costs 11 ns
+    and no allocation, where it cost 48 ns and one (`core.HTTPHeaderCarrier.Get`); `thttp.Handler` without an
+    active session takes about 120 ns per request, where it took about 160;
+  - `core.RedactJSON` looks for a sensitive key before it parses, and returns a document without one as it is.
+    The audit measured a recorded `tsql` insert at 4.6 µs and 66 allocations, where it was 7.2 µs and 109, and a
+    Redis `GET` at 12 allocations where it was 25; documents that do hold a secret cost what they did;
+  - `core.RedactText` skips the regular expressions that cannot match and runs the last one once per match: a
+    64 KB request through `thttp.Handler` takes about 1.6 ms, where it took about 2.0;
+  - `tgrpc`'s server interceptors read nothing while no session is active, and otherwise read the metadata key
+    by key instead of copying all of it (the audit: 121 ns and 1 allocation, where it was 279 ns and 4);
+  - a Redis key masked with the process secret reuses the keyed hash (the audit: 52 allocations, where it was 59).
+  `core/redact_same_test.go` holds the fast paths of `RedactJSON` and `RedactText` to the plain implementations
+  on 500,000 generated inputs, valid and broken.
 - The control plane indexes a session's delivery reports once per judgement, not once per unheard instance: with
   1,000 streams and 1,280 reports a judgement takes 2.6 ms and 1.1 MB where it took 407 ms and 430 MB (the
   developer's benchmark, `BenchmarkJudgeDelivery`), and no longer stalls the API while it holds the lock.
