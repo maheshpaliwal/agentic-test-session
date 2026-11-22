@@ -146,6 +146,9 @@ Rolling back:
 
 ### Added
 
+- `docs/LIMITS.md`: what the tool does not record, what a verdict can miss, and what the preflight and an
+  export cannot tell, in one place; the README links it from its first screen and says what adopting it costs.
+  `docs/PROTOCOL.md` documents `name`, `name_auto` and `events` of an export's `tsession_session`.
 - `tracectl --from` and `dashboard -open` read a gzip'ed export as it is, and `-` for standard input
   (`gunzip -c run.ndjson.gz | tracectl --from - digest`). `--from` after the command is refused with the order
   that works, where the command reported an unknown flag.

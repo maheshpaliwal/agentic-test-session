@@ -15,6 +15,10 @@ Start a *session*, exercise the system, stop the session. tsession then shows, f
 It is not a general-purpose APM: traffic outside a session is not recorded. It records request and response
 payloads, masked by field name only, so run it against test data. See [`SECURITY.md`](SECURITY.md).
 
+What it costs: the services are Go, each gets one import and a wrapper around its handlers and clients, and
+three small processes run next to them (collector, control plane, dashboard). What it can miss is listed in one
+place: [`docs/LIMITS.md`](docs/LIMITS.md).
+
 The screenshots below come from the built-in demo, which needs nothing else running:
 
 ```bash
@@ -218,8 +222,8 @@ but does not count as a failure. A gRPC call follows the same line: the
 statuses that say the callee failed count (`Internal`, `Unavailable`, `Unknown`, `DeadlineExceeded`,
 `Unimplemented`, `DataLoss`), `NotFound` or `Canceled` do not (see the `contrib/tgrpc` doc comment).
 
-Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
-`3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
+Exit status: `0` ok, `1` failed (including bad arguments to a command; `run` and `--from` exit `2` for those),
+`2` unknown command or global flag, `3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
 
 ## Architecture
 
@@ -333,7 +337,8 @@ control plane) panics, which ends the package's test binary.
 Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
 `client.Options.QuiesceSeconds` if your system has no asynchronous work.
 When a service still holds events it cannot deliver, or its reports do not arrive, the stop waits about ten
-seconds more for it (`--delivery-grace` on the control plane) before it calls the session incomplete.
+seconds more for it (`--delivery-grace` on the control plane), and 12 to 18 seconds while its reports are
+failing, before it calls the session incomplete.
 
 `sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
 `Trace`).

@@ -120,9 +120,11 @@ session results (collector):
   doctor [--json] [--require-services N] [--require-delivery]
                                 check that the control plane and collector answer and list the
                                 services connected to the control plane; one that reports events
-                                it cannot deliver is marked. --require-delivery exits 3 on such a
-                                service, or one whose reports do not arrive: a check for DURING a
-                                run (it sees only services that report, and only running sessions)
+                                it cannot deliver is marked. --require-delivery exits 3 on a
+                                service that says it cannot reach its collector (also before a
+                                run), and during a run on one that holds events it cannot deliver
+                                or whose reports do not arrive (those two show only for the
+                                sessions running now)
   version                       print the tracectl version
 
 read an export instead of the services:

@@ -548,8 +548,12 @@ event's own:
   "delivery_unconfirmed":["..."],"drain_timed_out":true,"max_drain_seconds":60,"seal_error":"..."}}
 ```
 (one line in the file). `tsession_session` is the session's verdict as the control plane had it when the export
-was written, which no event holds: `state`, `incomplete`, `incomplete_reasons`, `delivery_unconfirmed`,
-`drain_timed_out` (with `max_drain_seconds`, the limit it ran into) and `seal_error`, each omitted when empty. It
+was written, which no event holds: `name` (and `name_auto` when it was generated), `events` (how many events
+the export holds), `state`, `incomplete`, `incomplete_reasons`, `delivery_unconfirmed`, `drain_timed_out` (with
+`max_drain_seconds`, the limit it ran into) and `seal_error`, each omitted when empty. A reader that finds
+fewer events than `events` has a part of the file and refuses it. Without `events` (an export of an older
+`tracectl`, or a hand-written one) a file that lost whole lines cannot be told from a whole one, and neither
+can a file that lost its first line: write `events` in anything that produces exports. It
 is final for a session that has ended. `dashboard -open FILE` gives the opened session that verdict, so
 `tracectl summary`, `report` and `digest` against it print what they print for the live session and their
 `--fail-on-*` flags exit the same. The delivery reports themselves (`delivery`) are not in the file.
