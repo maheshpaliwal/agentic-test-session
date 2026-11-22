@@ -58,7 +58,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	path := fs.String("o", "", "write to this file instead of stdout")
 	var g gates
 	g.register(fs)
-	pos, err := parseArgs(fs, args, 1, digestArgs)
+	pos, err := c.parseArgs(fs, args, 1, digestArgs)
 	if err != nil {
 		return err
 	}
@@ -75,13 +75,17 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("usage: tracectl digest %s: %w", digestArgs, err)
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}
 	src, err := loadDigest(ctx, s)
 	if err != nil {
 		return err
+	}
+	src.rep.command = c.commandStatus(s.ID)
+	if src.from = c.fromFile(s.ID); src.from == "" {
+		src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
 	}
 	out, err := src.fit(render, *maxBytes)
 	if err != nil {
@@ -94,7 +98,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	} else if _, err := c.stdout.Write(out); err != nil {
 		return err
 	}
-	return g.check(src.rep.info, src.rep.sum, len(src.rep.failures))
+	return g.of(c).check(c.stderr, src.rep.info, src.rep.sum, len(src.rep.failures))
 }
 
 // digestRenderer returns the renderer of a --format value.
@@ -138,6 +142,9 @@ func loadDigest(ctx context.Context, s *client.Session) (*digestSource, error) {
 // The digest as it is printed with --format json. Every string that holds
 // recorded text went through dataText.
 type digest struct {
+	// fromFile: the session was read from a file of --from (for wording only).
+	fromFile bool
+
 	Schema    string       `json:"schema"`
 	Notice    string       `json:"notice"`
 	Session   dSession     `json:"session"`
@@ -148,7 +155,12 @@ type digest struct {
 	Tree      []dNode      `json:"tree"`
 	Omitted   []dOmitted   `json:"omitted"`
 	DrillDown []dDrillDown `json:"drill_down"`
-	MaxBytes  int          `json:"max_bytes"`
+	// DrillDownNote is set when the digest was read with --cp or --collector
+	// on the command line: the commands above need the same flags, or they
+	// ask the services of the environment variables or the defaults. A digest
+	// read with --from has no note: its commands carry --from themselves.
+	DrillDownNote string `json:"drill_down_note,omitempty"`
+	MaxBytes      int    `json:"max_bytes"`
 }
 
 type dSession struct {
@@ -166,6 +178,11 @@ type dVerdict struct {
 	// could not tell whether all their events arrived. The recording is not
 	// incomplete for it, and not known to be complete either.
 	Unconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+	// CommandStatus is the exit status of the command of the run, when the
+	// digest is of a tracectl run or of the file one exported; absent
+	// otherwise. Other than 0 makes the status "failed", whatever was
+	// recorded.
+	CommandStatus *int `json:"command_status,omitempty"`
 }
 
 // digestMaxUnconfirmed bounds dVerdict.Unconfirmed: the verdict is the part
@@ -210,6 +227,11 @@ type dFailure struct {
 	// are normalised.
 	Count   int    `json:"count,omitempty"`
 	LastSeq uint64 `json:"last_seq,omitempty"`
+	// FirstError is the error of the first of Count events as it was
+	// recorded, when normalising took something out of it: the host that
+	// refused the connection, the status, the key. Left out at the shorter
+	// detail levels.
+	FirstError string `json:"first_error,omitempty"`
 	// Path is the chain of ancestors, the root request first; empty for a
 	// failed root. PathOmitted steps were left out after the first one.
 	Path        []dStep `json:"path"`
@@ -234,6 +256,12 @@ type dChange struct {
 	Seq     uint64 `json:"seq"`
 	Op      string `json:"op"`
 	Outcome string `json:"outcome"` // effective, rolled_back or unknown
+	// RolledBackBy is the first event of the transaction that failed after a
+	// change that was rolled back: where to look for why the change did not
+	// stay. That the failure caused the rollback is likely, not recorded.
+	// Absent when nothing of the transaction failed after the change (the
+	// application rolled back on its own).
+	RolledBackBy uint64 `json:"rolled_back_by,omitempty"`
 	// Uncertain: a flag says the key or the row image is incomplete, so the
 	// fields below are not established fact.
 	Uncertain        bool     `json:"uncertain,omitempty"`
@@ -271,8 +299,8 @@ type dNode struct {
 	MaxDurationNs int64  `json:"max_duration_ns,omitempty"`
 	Mutations     int    `json:"mutations,omitempty"`
 	Error         string `json:"error,omitempty"`
-	// Code is an outcome that is not an error: a gRPC status such as
-	// NotFound, which the call's line would otherwise not show.
+	// Code is an outcome that the line would otherwise not show: a gRPC
+	// status such as NotFound, or an HTTP status of 400 and above.
 	Code string `json:"code,omitempty"`
 	// Flags are the event's flags (the first few), so that a count under
 	// "flags" in the verdict can be traced to its events.
@@ -308,7 +336,17 @@ func dataText(s string, limit int) string {
 }
 
 // digestSource is a session as read, before anything is left out.
+// drillDownNote is DrillDownNote's text. It names no address: a digest is the
+// same text wherever it was read from.
+const drillDownNote = "Give these commands the --cp and --collector this digest was read with: without them they ask the services of TSESSION_CONTROLPLANE_URL and TSESSION_COLLECTOR_URL, or the defaults."
+
 type digestSource struct {
+	// urlFlags: --cp or --collector was given on the command line.
+	urlFlags bool
+	// from: the digest was read from this file with --from. The commands of
+	// the digest work in no other way, so each carries it (see shellWord);
+	// the session is the file's and is not named.
+	from     string
 	rep      *sessionReport
 	failures []dFailure
 	entities []dEntity
@@ -350,11 +388,32 @@ func (src *digestSource) buildTree(tr client.Trace) {
 	}
 }
 
-// outcomeCode is what a call returned when that is not in its error: a gRPC
-// status other than OK.
+// outcomeCode is what a call returned when that is not in its error, or is
+// lost from it when errors are merged: a gRPC status other than OK, or an
+// HTTP status of 400 and above ("HTTP 404"). A 4xx is not a failed event, so
+// without the code a request the test was refused reads like one that went
+// well.
 func outcomeCode(e *core.Event) string {
-	if c := e.Attrs["grpc.code"]; c != "" && c != "OK" {
+	if c := e.Attrs["grpc.code"]; c != "" {
+		// A gRPC call: its response is a message of the application, and a
+		// field "status" in it is not an HTTP status.
+		if c == "OK" {
+			return ""
+		}
 		return c
+	}
+	if s := e.Attrs["http.status"]; s != "" { // thttp.StatusAttr: set for 400 and above
+		return "HTTP " + s
+	}
+	// Events of an SDK that does not set the attribute: the status is in
+	// the recorded response, when that was small enough to be kept whole.
+	if (e.Kind == core.KindAPIIn || e.Kind == core.KindAPIOut) && len(e.Resp.Inline) > 0 {
+		var r struct {
+			Status int `json:"status"`
+		}
+		if json.Unmarshal(e.Resp.Inline, &r) == nil && r.Status >= 400 {
+			return "HTTP " + strconv.Itoa(r.Status)
+		}
 	}
 	return ""
 }
@@ -483,7 +542,11 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 			g := &src.failures[at]
 			if g.Count == 0 {
 				g.Count = 1
+				raw := g.Error
 				g.Name, g.Error = dataText(normalizeName(g.Name), digestNameMax), dataText(normalizeName(g.Error), digestErrMax)
+				if raw != g.Error {
+					g.FirstError = raw
+				}
 			}
 			g.Count, g.LastSeq = g.Count+1, f.Seq
 			continue
@@ -498,6 +561,26 @@ func (src *digestSource) buildFailures(tr client.Trace) {
 func (src *digestSource) buildEntities(evs []core.Event) {
 	type key struct{ store, entity, pk string }
 	byKey := map[key]*dEntity{}
+	// The failed events of every transaction, by seq.
+	txFailed := map[string][]uint64{}
+	for i := range evs {
+		if e := &evs[i]; e.TxID != "" && e.Err != "" {
+			txFailed[e.TxID] = append(txFailed[e.TxID], e.Seq)
+		}
+	}
+	for _, seqs := range txFailed {
+		slices.Sort(seqs)
+	}
+	// failedAfter is the first failed event of the transaction after seq; 0
+	// when there is none. One before it did not undo a change made later:
+	// the application went on after it.
+	failedAfter := func(tx string, seq uint64) uint64 {
+		seqs := txFailed[tx]
+		if i, _ := slices.BinarySearch(seqs, seq+1); i < len(seqs) {
+			return seqs[i]
+		}
+		return 0
+	}
 	for i := range evs {
 		e := &evs[i]
 		flags := digestFlags(e.Flags)
@@ -527,6 +610,7 @@ func (src *digestSource) buildEntities(evs []core.Event) {
 			default:
 				ent.RolledBack++
 				ch.Outcome = "rolled_back"
+				ch.RolledBackBy = failedAfter(e.TxID, e.Seq)
 			}
 			if uncertain {
 				ent.Uncertain++
@@ -626,7 +710,7 @@ func failureAt(f dFailure, level int) dFailure {
 	if level == detailLeast {
 		name, errMax, keep = 60, 80, 1
 	}
-	f.Name, f.Error = clip(f.Name, name), clip(f.Error, errMax)
+	f.Name, f.Error, f.FirstError = clip(f.Name, name), clip(f.Error, errMax), ""
 	if n := len(f.Path); n > keep {
 		path := []dStep{f.Path[0]}
 		if keep == 2 {
@@ -722,7 +806,8 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 		nameMax, reasonMax, countsMax, keyMax, only = 40, 100, 4, 24, detailLeast
 	}
 	id := dataText(info.ID, 64)
-	d = &digest{Schema: digestSchema, Notice: digestNotice, MaxBytes: budget,
+	command := func(what string) string { return drillCommand(src.fromArg(tight), id, what) }
+	d = &digest{fromFile: src.from != "", Schema: digestSchema, Notice: digestNotice, MaxBytes: budget,
 		Session: dSession{ID: id, Name: dataText(displayName(info), nameMax), State: dataText(info.State, 20),
 			Live: info.State != "" && !info.Done()},
 		Verdict: dVerdict{Recording: "complete"},
@@ -730,11 +815,14 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 			PendingAsync: sum.PendingAsync, Dropped: max(sum.DroppedEvents, info.DroppedEvents), Quarantined: sum.Quarantined},
 		Failures: []dFailure{}, Mutations: []dEntity{}, Tree: []dNode{},
 		DrillDown: []dDrillDown{
-			{"tracectl show " + id + " <seq>", "one event in full: request, response, mutations with diffs"},
-			{"tracectl history " + id + " <store> <entity> <key>", "every change to one entity"},
-			{"tracectl trace " + id + " --errors", "the failed branches of the call tree"},
-			{"tracectl events " + id + " --errors", "the failed events"},
+			{command("show ID <seq>"), "one event in full: request, response, mutations with diffs"},
+			{command("history ID <store> <entity> <key>"), "every change to one entity"},
+			{command("trace ID --errors"), "the failed branches of the call tree"},
+			{command("events ID --errors"), "the failed events"},
 		},
+	}
+	if src.urlFlags && !tight {
+		d.DrillDownNote = drillDownNote
 	}
 	// The reasons are part of the verdict and always stay; what is cut of
 	// them (a long one shortened, the unconfirmed beyond the first few) is
@@ -754,7 +842,9 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 		for _, r := range src.rep.reasons {
 			d.Verdict.Reasons = append(d.Verdict.Reasons, reason(r))
 		}
-	case info.State == "":
+	case info.State == "", d.Session.Live:
+		// Not known for a running session: what its services still hold has not arrived, and whether all of
+		// it does is decided when the session ends.
 		d.Verdict.Recording = "unknown"
 	}
 	for i, w := range info.DeliveryUnconfirmed {
@@ -775,6 +865,9 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	default:
 		d.Verdict.Status = "passed"
 	}
+	if d.Verdict.CommandStatus = src.rep.command; src.rep.commandFailed() != "" {
+		d.Verdict.Status = "failed"
+	}
 	byEntity := map[string]int{}
 	for store, ents := range sum.Mutations {
 		for ent, n := range ents {
@@ -792,7 +885,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	// The notes are sized before anything is chosen: as if every section
 	// had been cut.
 	note := func(k digestKept) []dOmitted {
-		return k.notes(id, len(src.failures), len(src.entities), len(src.lines), cut, reasonsCut)
+		return k.notes(command, len(src.failures), len(src.entities), len(src.lines), cut, reasonsCut)
 	}
 	d.Omitted = note(digestKept{failLevel: detailLeast, mutLevel: detailLeast})
 	room := target - len(r.render(d))
@@ -880,12 +973,33 @@ type digestKept struct {
 	failLevel, mutLevel       int
 }
 
-// notes says what is missing and which command prints it.
-func (k digestKept) notes(id string, failures, entities, lines, counts, reasons int) []dOmitted {
+// drillCommand is the tracectl command that reads more of a session. what
+// is the command with ID for the session: "show ID <seq>". With from (the
+// file of --from as a command names it) it reads the file, which holds the
+// one session: the session is not named.
+func drillCommand(from, id, what string) string {
+	if from != "" {
+		return "tracectl --from " + from + " " + strings.Replace(what, " ID", "", 1)
+	}
+	return "tracectl " + strings.Replace(what, "ID", id, 1)
+}
+
+// fromArg is the file of --from as the digest's commands name it; empty
+// without --from. tight: the digest is short of room.
+func (src *digestSource) fromArg(tight bool) string {
+	if src.from == "" {
+		return ""
+	}
+	return shellWord(src.from, tight)
+}
+
+// notes says what is missing and which command prints it; command makes a
+// command of "show ID <seq>".
+func (k digestKept) notes(command func(string) string, failures, entities, lines, counts, reasons int) []dOmitted {
 	out := []dOmitted{}
 	add := func(section, what string, get ...string) {
 		for i := range get {
-			get[i] = "tracectl " + strings.Replace(get[i], "ID", id, 1)
+			get[i] = command(get[i])
 		}
 		out = append(out, dOmitted{Section: section, What: what, Get: get})
 	}
@@ -969,7 +1083,11 @@ func mdStep(seq uint64, service, kind, name string) string {
 
 func mdFailure(b *strings.Builder, f *dFailure) {
 	if f.Count > 1 {
-		fmt.Fprintf(b, "%dx %s #%d..#%d ERR %s\n", f.Count, mdStep(f.Seq, f.Service, f.Kind, f.Name), f.Seq, f.LastSeq, mdQuote(f.Error))
+		first := ""
+		if f.FirstError != "" {
+			first = " (the first: " + mdQuote(f.FirstError) + ")"
+		}
+		fmt.Fprintf(b, "%dx %s #%d..#%d ERR %s%s\n", f.Count, mdStep(f.Seq, f.Service, f.Kind, f.Name), f.Seq, f.LastSeq, mdQuote(f.Error), first)
 	} else {
 		fmt.Fprintf(b, "%s ERR %s\n", mdStep(f.Seq, f.Service, f.Kind, f.Name), mdQuote(f.Error))
 	}
@@ -1019,6 +1137,9 @@ func mdEntity(b *strings.Builder, e *dEntity) {
 	for _, c := range e.Changes {
 		outcome := map[string]string{"effective": "effective", "rolled_back": "ROLLED BACK"}[c.Outcome]
 		fmt.Fprintf(b, "  #%d %s %s", c.Seq, mdToken(c.Op), cmp.Or(outcome, "outcome unknown"))
+		if c.RolledBackBy != 0 {
+			fmt.Fprintf(b, " (a later statement of its transaction failed: #%d)", c.RolledBackBy)
+		}
 		if c.Uncertain {
 			b.WriteString(" UNCERTAIN")
 		}
@@ -1126,9 +1247,17 @@ func (digestMarkdown) render(d *digest) []byte {
 
 	b.WriteString("\n### Verdict\n\n")
 	c := d.Counts
+	cmdFailed := d.Verdict.CommandStatus != nil && *d.Verdict.CommandStatus != 0
 	switch d.Verdict.Status {
 	case "failed":
-		b.WriteString("**Failed**: " + plural(c.Failures, "failed event") + ".")
+		switch {
+		case cmdFailed && c.Failures == 0:
+			fmt.Fprintf(&b, "**Failed**: the command of the run failed (exit status %d); no failed events were recorded.", *d.Verdict.CommandStatus)
+		case cmdFailed:
+			fmt.Fprintf(&b, "**Failed**: %s, and the command of the run failed (exit status %d).", plural(c.Failures, "failed event"), *d.Verdict.CommandStatus)
+		default:
+			b.WriteString("**Failed**: " + plural(c.Failures, "failed event") + ".")
+		}
 	case "incomplete":
 		b.WriteString("**Incomplete**: no failed events were recorded, but the recording is missing data.")
 	case "empty":
@@ -1139,8 +1268,16 @@ func (digestMarkdown) render(d *digest) []byte {
 	if d.Session.Live {
 		b.WriteString(" **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.")
 	}
-	state := cmp.Or(mdEscape(d.Session.State, 40), "unknown (the control plane no longer knows this session)")
-	fmt.Fprintf(&b, "\n\n- state: %s; recording: %s\n", state, d.Verdict.Recording)
+	unknown := "unknown (the control plane no longer knows this session)"
+	if d.fromFile {
+		unknown = "unknown (the file does not say how its session ended)"
+	}
+	state := cmp.Or(mdEscape(d.Session.State, 40), unknown)
+	recording := d.Verdict.Recording
+	if d.Session.Live && recording == "unknown" {
+		recording = "not yet known (the session is still running)"
+	}
+	fmt.Fprintf(&b, "\n\n- state: %s; recording: %s\n", state, recording)
 	for _, r := range d.Verdict.Reasons {
 		b.WriteString("- incomplete: " + mdEscape(r, 2*digestErrMax) + "\n")
 	}
@@ -1206,6 +1343,9 @@ func (digestMarkdown) render(d *digest) []byte {
 	b.WriteString("\n### Drill down\n\n")
 	for _, dd := range d.DrillDown {
 		fmt.Fprintf(&b, "- %s: %s\n", mdCode(dd.Command), dd.Prints)
+	}
+	if d.DrillDownNote != "" {
+		fmt.Fprintf(&b, "- %s\n", d.DrillDownNote)
 	}
 	return b.Bytes()
 }

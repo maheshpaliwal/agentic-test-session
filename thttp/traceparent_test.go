@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -168,4 +170,79 @@ func TestHandlerIgnoresOwnKeyCopiedByOlderSDK(t *testing.T) {
 	if len(in) != 1 || in[0].ParentID != forwarder || in[0].TraceID != trace {
 		panic(fmt.Sprintf("api.in = %+v, want parent %s (the forwarder; the first sender is %s)", in, forwarder, sender))
 	}
+}
+
+// A request that was refused or failed carries its status as an attribute,
+// also when the response is too large to be recorded whole; one that went
+// well carries none.
+func TestStatusAttrOfARefusedRequest(t *testing.T) {
+	rec := setup(t, active("s1"))
+	big := strings.Repeat("x", 64<<10)
+	back := httptest.NewServer(Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/missing":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(big))
+		case "/broken":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})))
+	defer back.Close()
+	client := Client(nil)
+	// The front service passes the request on and answers 200 whatever comes back: the statuses under test
+	// are those of the back service (api.in there) and of the call to it (api.out here).
+	front := httptest.NewServer(Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, _ := http.NewRequestWithContext(r.Context(), "GET", back.URL+r.URL.Path, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	})))
+	defer front.Close()
+	for _, path := range []string{"/ok", "/missing", "/broken"} {
+		req, _ := http.NewRequest("GET", front.URL+path, nil)
+		req.Header.Set(core.KeySession, "s1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			panic(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	want := []string{"", "404", "503"}
+	evs := rec.Events()
+	backHost := strings.TrimPrefix(back.URL, "http://")
+	// api.out: the three calls of the front service. api.in: the three requests the back service got.
+	outs := kind(evs, core.KindAPIOut)
+	var ins []core.Event
+	for _, e := range kind(evs, core.KindAPIIn) {
+		if e.ParentID != "" { // reached through the front service
+			ins = append(ins, e)
+		}
+	}
+	for label, list := range map[string][]core.Event{"api.out to " + backHost: outs, "api.in of the back service": ins} {
+		if len(list) != 3 {
+			panic(fmt.Sprintf("%s: %d events, want 3", label, len(list)))
+		}
+		slices.SortFunc(list, func(a, b core.Event) int { return strings.Compare(statusOrder(a.Name), statusOrder(b.Name)) })
+		for i, e := range list {
+			if got := e.Attrs[StatusAttr]; got != want[i] {
+				t.Errorf("%s, %s: %s = %q, want %q", label, e.Name, StatusAttr, got, want[i])
+			}
+		}
+	}
+}
+
+// statusOrder sorts the three requests of the test as ok, missing, broken.
+func statusOrder(name string) string {
+	switch {
+	case strings.Contains(name, "/ok"):
+		return "0"
+	case strings.Contains(name, "/missing"):
+		return "1"
+	}
+	return "2"
 }

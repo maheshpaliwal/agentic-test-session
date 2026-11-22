@@ -114,6 +114,37 @@ type Session struct {
 	// delivery confirmed fails on it (tracectl --fail-on-unconfirmed,
 	// tsessiontest.RequireDeliveryConfirmed).
 	DeliveryUnconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+	// StoppedInstances are the SDK instances that said, while the session
+	// ran, that they stopped recording after an internal error (see
+	// StoppedInstance). The note is kept here, with the session, so that the
+	// verdict still sees it after a restart of the control plane. At most
+	// maxStoppedInstances; StoppedInstancesMore when there were more.
+	StoppedInstances     []StoppedInstance `json:"stopped_instances,omitempty"`
+	StoppedInstancesMore bool              `json:"stopped_instances_more,omitempty"`
+}
+
+// StoppedInstance is the word of one SDK instance that it stopped recording
+// after an internal error while a session ran (DeliveryBatch.Stopped). It is
+// the caller's own word, like a delivery report: what the session's verdict
+// makes of it depends on whether anything ties the instance to the session
+// (see stoppedReasons).
+type StoppedInstance struct {
+	Service  string `json:"service,omitempty"`
+	Instance string `json:"instance"`
+	// Why is what the instance said last, cleaned and bounded.
+	Why string `json:"why"`
+	// At is when the control plane was first told.
+	At time.Time `json:"at"`
+	// Connected: an instance of that name followed the active set and had
+	// announced delivery reports when the control plane was told.
+	Connected bool `json:"connected,omitempty"`
+	// Changes is how often the note was replaced by one that said something
+	// else. An instance says three things at most (it restarts, it records
+	// again, it stays stopped) and may say the first two again after another
+	// panic; beyond maxStoppedChanges what it says is no longer stored, so
+	// that a caller who varies the text cannot make the control plane write
+	// every running session over and over.
+	Changes int `json:"changes,omitempty"`
 }
 
 // ActiveSet is the payload of GET /v1/active and the SSE stream.
@@ -217,8 +248,8 @@ func NewMemStore() *MemStore { return &MemStore{m: map[string]Session{}} }
 // Put implements Store.
 func (s *MemStore) Put(x Session) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.m[x.ID] = x
-	s.mu.Unlock()
 	return nil
 }
 
@@ -232,7 +263,7 @@ func (s *MemStore) Delete(id string) error {
 // no archive).
 func (s *MemStore) Evict(ids ...string) {
 	s.mu.Lock()
-	for _, id := range ids {
+	for _, id := range ids { // deletes only: cannot panic
 		delete(s.m, id)
 	}
 	s.mu.Unlock()
@@ -256,7 +287,7 @@ func sortSessions(s []Session) {
 // List implements Store.
 func (s *MemStore) List() []Session {
 	s.mu.RLock()
-	out := mapx.Values(s.m)
+	out := mapx.Values(s.m) // a copy of the values: cannot panic
 	s.mu.RUnlock()
 	sortSessions(out)
 	return out

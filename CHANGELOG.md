@@ -1,6 +1,7 @@
 # Changelog
 
-Everything below is relative to the last state of `main` before this work. Benchmark figures were measured once
+Everything below is relative to the last state of `main` before this work; part of it has since been merged
+there, so someone upgrading from a recent `main` has already met the older entries. Benchmark figures were measured once
 on a development laptop, mostly against in-process fakes; treat them as indications, not guarantees.
 
 ## Unreleased
@@ -9,11 +10,44 @@ on a development laptop, mostly against in-process fakes; treat them as indicati
 
 Before deploying:
 
+- `GET /healthz` of the collector and the control plane can answer `503 degraded: <reason>`: while a background
+  loop of theirs restarts after a panic, and once the panic budget is spent. `tracectl doctor` then prints
+  `DEGRADED <reason>` and exits 1. A health check that restarts on the first non-200 will restart sooner than
+  the service would have exited by itself.
+- Both services exit 1 after 5 panics of their background loops (sweep, janitor, retention) within 10 minutes,
+  after an orderly shutdown of at most 30 seconds (longer than the collector's own stop, see "Give the collector
+  at least 25 seconds" below). Run them under a supervisor that restarts them; the Compose file has
+  `restart: on-failure:5` (not tried with Docker).
+- Embedders of `controlplane.Manager`: start it with `m.RunInBackground(ctx)` where you had `go m.Run(ctx)`; a
+  bare `Run` has no panic recovery and no panic budget.
+- A custom `controlplane.Collector` must fill `DrainStatus.Instances` (and may implement `InstanceCounter`);
+  without them every session with delivery reports ends `delivery_unconfirmed`.
+- SDKs started with `runtime.Start` ask their collector's `/healthz` every 30 seconds while idle. Behind a proxy
+  that answers that path with a 5xx the service shows as `CANNOT REACH COLLECTOR` in `tracectl doctor`, and
+  `doctor --require-delivery` fails; a negative `runtime.Config.Exporter.ReachCheck` turns the check off.
+- Stopping a session can take up to 10 seconds longer, while the control plane waits for a service that is
+  silent or cannot deliver (`--delivery-grace`, `TSESSION_CP_DELIVERY_GRACE`; 0 turns the check off), and 12 to
+  18 seconds while a service's delivery reports are failing.
+- The first line of every export carries a `tsession_session` object next to the event. Decoders that refuse
+  unknown fields, and golden files of exports, change.
+- `tsession.digest/v1` changed within the version: a running session has `recording: unknown` (it was
+  `complete`), failures that did the same thing are one entry, `omitted.section` can be `verdict`, and fields
+  were added (`code`, `first_error`, `rolled_back_by`, `drill_down_note`, `hidden`). A reader that only adds
+  what it knows is unaffected; one that compared the text is not.
+- HTTP events answered with 400 or above carry the attribute `http.status`. Recordings compared across versions
+  differ in it, and the digest no longer merges requests with different statuses into one line.
+- `tracectl list --state` refuses a word that is not a state, and `--cp` / `--collector` (and their environment
+  variables) are refused without a scheme; both exited 0 or failed later. The dashboard binary exits 2 with a
+  stack trace on a start-up error (it exited 1 with one line). Ten log lines of the services moved from warn to
+  error level.
 - Custom implementations need new methods: `collector/store.Store.DeleteSession(ctx, sessionID) error` (a missing
   id is not an error), `controlplane.Store.Delete(id string) error`, `controlplane.Collector.Delete(ctx, id) error`.
   `controlplane.Evictor.Evict` is now `Evict(ids ...string)`. A store that keeps the old `Evict(id string)` still
   compiles, because the interface is optional, but is then silently not used for eviction.
-- `collector.Config` and `controlplane.Config` gained fields; unkeyed struct literals no longer compile.
+- These structs gained fields, so unkeyed literals of them no longer compile: `collector.Config` and
+  `controlplane.Config` (`OnPanicBudgetSpent` among them), `runtime.ExporterConfig` (`ReachCheck`),
+  `controlplane.Session`, `Subscriber`, `ActiveSet` and `DrainStatus`, `collector.DrainStatus`, `Status` and
+  `Entity`, `client.Info`, `Subscriber` and `Entity`.
 - `tsql` records rows under the primary key the database catalog names, where it used `id`, and records no diff
   for an `UPDATE` whose row cannot be read back. Tests that assert on recorded keys or diffs of tables keyed by
   something other than `id` will see different values, and the database user needs to read the catalog
@@ -45,10 +79,14 @@ Before deploying:
   `ResourceExhausted`, `Canceled`) are no longer failed events: a session whose only "failures" were such calls
   now passes `--fail-on-error` and `RequireNoFailures`. Assert on the attribute `grpc.code` if a test relied on
   them failing.
-- `sdk/client/tsessiontest` panics where it called `t.Fatalf` (a session that cannot be started or stopped, a
-  failed `RequireMutation`, `RequireNoMutation` or `Ambient`): the message is the same, but a panic ends the
-  whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped.
-  `RequireNoFailures` still reports with `t.Errorf` and stops with `t.FailNow`.
+- `sdk/client/tsessiontest` panics where it called `t.Fatalf` for a broken set-up (a session that cannot be
+  started or stopped, `Ambient` without a surrounding `tracectl run`, `Stop` or a `Require` function on the
+  ambient session, a summary, mutations or events that cannot be read, `RequireMutation` on a session that was
+  not sealed): the message is the same, but a panic ends
+  the whole test binary, so the package's later tests do not run and `t.Cleanup` functions are skipped. An
+  assertion that does not hold (`RequireNoFailures`, `RequireDeliveryConfirmed`, `RequireMutation`,
+  `RequireNoMutation`) reports with `t.Errorf` and stops with `t.FailNow`: it fails its test only, and the
+  cleanup of `Run` names the session and saves it to `$TSESSION_ARTIFACT_DIR`.
 - Delivery accounting: upgrade the collector with or before the control plane, otherwise every session with
   reports is `delivery_unconfirmed`. A proxy between services and control plane must pass `POST /v1/delivery`;
   if it answers 404 or 403 a session the service took part in ends `incomplete`, and one it did not take part in
@@ -108,6 +146,63 @@ Rolling back:
 
 ### Added
 
+- `tracectl run --require-services N` does not run the command with fewer than N services connected (exit 3),
+  and exits 3 after it when a service that was connected at the start is gone when the command ends, naming it.
+  A service that is killed during a run could leave a session that reads as complete; this is the check for it
+  where the run is driven by `tracectl run`.
+- `tracectl run --export` writes the exit status of its command into the file (`command_status` in
+  `tsession_session`), and `tracectl --from FILE ... --fail-on-error` fails on a status other than 0: a run whose
+  tests failed without a failed event passed a gate that had the artifact alone. `client.Session.Export` takes
+  functions that edit the verdict before it is written. The README has a two-job CI example and the exit
+  statuses of `--from` in one place.
+- `docs/LIMITS.md`: what the tool does not record, what a verdict can miss, and what the preflight and an
+  export cannot tell, in one place; the README links it from its first screen and says what adopting it costs.
+  `docs/PROTOCOL.md` documents `name`, `name_auto` and `events` of an export's `tsession_session`.
+- `tracectl --from` and `dashboard -open` read a gzip'ed export as it is, and `-` for standard input
+  (`gunzip -c run.ndjson.gz | tracectl --from - digest`). `--from` after the command is refused with the order
+  that works, where the command reported an unknown flag.
+- `tracectl run --export FILE` writes the session as `export -o FILE` does, when the run ends: the artifact a
+  CI job keeps. The `--digest` and `--report` files of that run then name commands that read it
+  (`tracectl --from run.ndjson show <seq>`), which still work when the services of the run are gone; without
+  `--export` they name the session, as before.
+- `tracectl --from FILE` reads a session saved with `tracectl export -o FILE`, with no service running: `digest`,
+  `summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`, `status` and `list`, with the
+  output and the exit status of the live session. The session argument can be left out. `--from` given twice is
+  `diff`'s baseline and candidate. A digest read from a file names the file in its drill-down commands
+  (`tracectl --from run.ndjson show <seq>`). Commands that start, stop or change a session, and `--from` with
+  `--cp` or `--collector`, exit 2; a missing, empty, cut-short or foreign file is one line and exit 1. A CI job
+  or an agent that holds the artifact needs nothing else. `tracectl` links the dashboard's offline backend for
+  it and is about 0.5 MB larger. Go API: `(*dashboard.Demo).Files()` and `dashboard.OpenedFile`.
+- `tracectl run --digest FILE --max-bytes N`, as `digest --max-bytes`.
+- `ExporterConfig.ReachCheck` (zero, off, for `NewExporter`; `runtime.Start` sets 30 s),
+  `client.Info.StoppedInstances`, `client.Subscriber.Collector`; a session has `stopped_instances` (at most 64)
+  and `stopped_instances_more`, left out of `GET /v1/sessions`.
+- A collector URL that leads nowhere shows before any session: the SDK checks its collector's `/healthz` while
+  idle (every 30 s, not per event) and tells the control plane; `GET /v1/subscribers` gains `collector`, and
+  `tracectl doctor` prints `CANNOT REACH COLLECTOR: <error>` for such a service and exits 3 under
+  `--require-delivery`, also with no session running. Any HTTP answer but a 5xx counts as reached, so a wrong
+  URL at which another HTTP server answers is not detected.
+- `tsessiontest.RequireEvent` and `tsessiontest.RequireFailure` with `tsessiontest.EventFilter` (service, kind,
+  part of the name): assert that a call, a query or a job was recorded, or that a failure the test provoked was
+  met where it should be. Both return the matching events.
+- `thttp` sets the attribute `http.status` (`thttp.StatusAttr`) on a request that was answered with 400 or
+  above, on both sides. The status was only in the recorded response, which is cut when the body is large; the
+  digest's `code` reads the attribute. Requests that went well carry no such attribute.
+- `tracectl digest`: failures merged into one entry keep the first one's error as it was recorded
+  (`(the first: "dial tcp 10.0.0.7:8080: connect: connection refused")`, `first_error` in JSON), so the host or
+  key that normalising takes out is still there. Left out when the budget is tight.
+- `tracectl digest`: a change that was rolled back names the first event of its transaction that failed after it
+  (`ROLLED BACK (a later statement of its transaction failed: #12)`, `rolled_back_by` in JSON); that this
+  failure caused the rollback is likely, not recorded. A digest read with `--cp` or `--collector` on the
+  command line says that its drill-down commands need the same flags (`drill_down_note`; left out when the
+  budget is tight).
+- The SDK tells the control plane when it stops recording (`stopped` in `POST /v1/delivery`): the sessions
+  running at that moment that it took part in end incomplete, naming the service and instance; for the others
+  it is a `delivery_unconfirmed` line. `Manager.Health`, `Collector.Health`;
+  label `compaction` on `tsession_controlplane_goroutine_panics_total`; "Health and panics" in `docs/CONFIG.md`.
+- `dashboard -demo`: the incomplete session carries a delivery report and the reason drawn from it, and one
+  update changes a masked column, so the delivery table and the "changed (value hidden)" row can be seen without
+  any service running.
 - `tracectl list` ends a session's line with `INCOMPLETE` when its record is known to have gaps and with
   `DELIVERY-UNCONFIRMED` when the delivery of some instance could not be confirmed. Lines of other sessions are
   unchanged.
@@ -138,9 +233,11 @@ Rolling back:
     (parallel sessions, 500 sessions stopping together, slow or briefly unreachable collector and report
     endpoint, idle services frozen or half-open); healthy drain time unchanged.
   - Not detected: a service killed before it ever reports, a service on an older SDK, and a session that ends
-    sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off).
+    sooner after a service's last word than the grace (10 s, `--delivery-grace`; 0 turns the check off), or less
+    than about 10 s after the control plane's first session following a time without any began; a process cut
+    off from both its reports and its stream.
   - Reported as `incomplete` although nothing is missing: a service whose reports are blocked while its events
-    all arrived, and one frozen for longer than the grace after delivering and before reporting. The control
+    all arrived, and one frozen until the grace after the stop is over, after delivering and before reporting. The control
     plane cannot know that without the report, and the reason says so.
   - The endpoint is unauthenticated, like stop and abort. `docs/PROTOCOL.md` lists what a caller who can reach
     the control plane or the collector can do: make a session incomplete, hold a drain up to `max_drain`, and,
@@ -200,7 +297,7 @@ Rolling back:
 - **Go tests under `tracectl run`.** `client.AttachEnv` returns the session named in `TSESSION_ID`, and
   `tsessiontest.Ambient(t, o)` joins it from a test without stopping it. `tsessiontest.Run` still starts one
   session per test and ignores the variable. There are no assertions on the shared session: its verdict exists
-  only once `tracectl run` has sealed it, so `tsessiontest.Stop` and `Require*` fail the test when given that
+  only once `tracectl run` has sealed it, so `tsessiontest.Stop` and `Require*` panic when given that
   session and never stop it. An empty header-mode session makes `tracectl run` say why.
 - **Delete and retention.** `DELETE /v1/sessions/{id}` on the control plane, `tracectl delete` and a two-click
   Delete in the dashboard remove a finished session with its events, seal and bundle. The collector's
@@ -254,6 +351,38 @@ Rolling back:
 
 ### Changed
 
+- `tsessiontest`: a failed `RequireMutation` or `RequireNoMutation` fails its test, not the test binary (it
+  panicked), and names what was asked for (`matching entity "orders", op "update"`). The hint of a failed test
+  reads `tracectl digest <id>`, where it read `tracectl summary <id>`. The docs say what a failed event is (a 404
+  is not one), that a second stop is allowed, and what panics.
+- `dashboard -demo`: the start of a job carries no error, as the SDK records it (`worker.start` is a point
+  event; a failed job fails at its `worker.end`). The demo session has 7 failed events where it had 10.
+- `tracectl diff` says when a side is incomplete (`note: b is incomplete: ...`, and `"recording": "incomplete"`
+  on that side in JSON): what such a side lacks may be events that were lost, not what the run did.
+- `tracectl digest` shows an HTTP status of 400 and above on a request's line (`code "HTTP 404"`, `"code"` in
+  JSON). A 4xx is not a failed event, so a request the test was refused read like one that went well.
+  Requests with different statuses are no longer merged into one line.
+- `--fail-on-incomplete` on a session that is still running prints a note on standard error that it can only
+  judge what has arrived so far; the exit status is unchanged. `docs/DIGEST.md` documents `hidden` of a changed
+  field.
+- A panic in a background goroutine of the SDK, the collector or the control plane no longer ends the process
+  (for the SDK, the host application): the goroutine restarts with a backoff, and what was lost is reported. A
+  drain that panics three times ends its session SEALED and incomplete; `max_drain` counts from the stop, also
+  across restarts of the drain. The SDK stops recording at the first panic of its subscriber until it has the
+  active set again. A panic under a lock no longer leaves the lock held.
+  Known limits: a subscriber that stays stopped is reported once, and later sessions seal without that service's
+  events and without a mark (it then counts as a service that is not connected, which `doctor --require-services`
+  sees); any caller that reaches the control plane can send `stopped`; panics of the seal retry and of compaction are outside the budget.
+- `tracectl list` refuses a reply whose sessions have no state (`--cp` pointing at the collector) with exit 1; it
+  printed a row of blanks. `tracectl summary` of a session without events says that nothing was recorded.
+- `tracectl start --name X` notes on standard error when an earlier session is also named X, with its id and
+  state: the name stands for the new session from then on. An id that neither the control plane nor the
+  collector knows is reported as "no session with id ..." before the HTTP status.
+- `tracectl digest` of a running session says `recording: not yet known (the session is still running)` and
+  carries `"recording": "unknown"`; it said `complete`, also while a service could not deliver its events.
+- `tracectl list --state` accepts a state in any case and refuses a word that is not a state, naming the six; it
+  printed nothing and exited 0. `--cp` and `--collector` without a scheme (`127.0.0.1:7070`) are refused with the
+  URL to write. An unknown command prints one line, not the whole usage text before it.
 - Collector and control plane log lines that carry an error are at error level (ten were warnings).
 - The dashboard binary panics on a start-up error (a refused listen address, an unreadable `-open` file) where
   it called `log.Fatalf`: the message is the same, followed by a stack trace, and the exit status is 2, not 1.
@@ -316,6 +445,102 @@ Rolling back:
 
 ### Fixed
 
+- From the review of the command status and `--require-services`:
+  - `summary`, `report` and `digest` say that the command of the run failed (`**Failed**: the command of the run
+    failed (exit status 7); no failed events were recorded.`, `verdict.command_status` in the digest's JSON), for
+    a file read with `--from` and for the files `tracectl run` writes itself. They printed "Passed" for a run
+    that exited 7, and an agent that read the digest without a gate took the run for a good one;
+  - the export of a run in which `--require-services` found a service gone is incomplete and says which: the
+    run exited 3 and its file passed every gate;
+  - `--require-services` counts replicas (of two that are called the same, one can be gone) and looks for a
+    service for 6 seconds before it calls it gone (an SDK whose stream was cut reconnects within 5);
+  - a `command_status` outside 0 to 255 is refused.
+  Not changed: a gate asked through `dashboard -open` does not see the command's status (`docs/LIMITS.md`).
+- `dashboard -open` shows a file without a verdict, or of a session that had not ended, as incomplete with the
+  reason: a gate asked through the dashboard passed where `tracectl --from` on the same file did not.
+- `tracectl --from` on a relative name that is not there says in which directory it looked (a command copied
+  from a digest is often run elsewhere); `--from - < /dev/null` is an empty file, not "a terminal".
+- `tracectl --from`, from the re-check of the fixes above: a verdict with a count and no state is read as
+  unproven (it passed as a sealed session); a `tsession_session` member written twice on the first line, or a
+  member of the verdict written twice, is refused (the last one was read, so a clean verdict could follow one
+  that said incomplete); a drain that timed out makes the session incomplete whatever `incomplete` says; a
+  session id may hold letters, digits and `_.:-` only. A file that does not say how its session ended is called
+  that in the gates, the digest and the report, where the words were the ones for a session the control plane
+  has forgotten (and the report read "The session is still ,"). `tracectl diff` notes a side of which it is not
+  known how it ended (`"recording": "unknown"`).
+- `tracectl run --export` finds a `--digest` or `--report` on the same file also when it is named by an
+  absolute path or through a link, and once more after the export is written (the export is then kept and the
+  other file not written).
+- `tracectl --from -` with a terminal on standard input says that it reads an export from there and how to pipe
+  one in; it waited for input without a word.
+- `tracectl --from` passed all three gates on files that proved nothing (a review's findings). Now:
+  - a verdict that does not decode (`"events":"3"`, `"incomplete":"true"`), a negative count, a `state` that is
+    none, a second verdict, or another number of events than the count is refused (exit 1); such a verdict was
+    dropped, and the file judged without it;
+  - a file without a verdict or without the count is read as a session whose state is not known, with a note:
+    `--fail-on-incomplete` and `--fail-on-unconfirmed` fail on it, as they do on a live session the control
+    plane has forgotten. That is also what an export written while the control plane did not answer gives;
+  - a session that had not ended when it was exported (`ACTIVE`, `DRAINING`: `run --export` of a session that
+    did not seal) fails `--fail-on-incomplete`; it got a note and exit 0;
+  - reasons or a seal error make the session incomplete whatever `incomplete` next to them says.
+  `dashboard -open` stays a viewer: it refuses what cannot be read and shows the rest.
+- `tracectl --from`: a session is named by its id first, then by its name or its file's name; a reference that
+  fits two sessions is refused (a file named like another file's session id won), and a session name that begins
+  with `ts_` works. Session names from a file are printed without control characters, and a session id that
+  is not printable ASCII is refused. No more than 512 MB of events are read from one file (a 36 MB gzip file
+  took 2.6 GB of memory).
+- `tracectl run --export FILE` with `--digest` or `--report` on the same file is refused (the second overwrote
+  the export and the run still said it wrote it); the export is made private (0600) also when the file was
+  there; an export that fails part-way is removed. `--from - --from -` says that it was given twice.
+- `tracectl --from` and `dashboard -open` given two exports of one session name both files and say that only one
+  can be read at a time; a file given twice is said to be given twice. Both read "was already opened from
+  another file".
+- `tracectl --from FILE`, from a walkthrough of it:
+  - a file that lost whole lines (a download that stopped at the end of a line) is refused: the export now says
+    how many events it wrote (`events` in `tsession_session`). The first 5 of 32 lines read as "5 events, 0
+    failures" and passed every gate. A file that lost its first line still cannot be told from an old export.
+  - a session exported while it ran is shown as running (`**Live**`, `recording: not yet known`), not as sealed
+    and complete;
+  - the export stores the session's name (`name`), and the session is shown and can be named by it; it was
+    named after the file;
+  - the commands a Markdown report names read the file (`tracectl --from run.ndjson trace --errors`); they
+    named the session, and run as printed would have asked the services at the default addresses.
+- Delivery accounting, two silent misses from its fifth review: an instance with an old stream that lingers behind
+  a proxy and a new one that was never heard of is judged by the newest connection, and is named again; a stream
+  on which a report got no answer or a 5xx is opened anew once after the grace (never two within a grace, one
+  extra stream per outage), so a service whose first report's answer was lost is named again.
+- What an SDK told the control plane about reaching its collector is told again after a time: every check
+  period (30 s) while it cannot, every ten periods while it can. A report from another caller that named the
+  instance and said the opposite stood until the SDK's own state changed, so `tracectl doctor` could pass for a
+  service whose collector did not answer.
+- An instance that said it stopped recording, sent no report and is gone is asked for by name when the
+  collector's list of instances is cut short: its events then make the session incomplete, where it was
+  "unconfirmed".
+- The `stopped` note of one instance on one session is replaced by one that says something else at most 8 times
+  (`changes` on the note). A caller that varied the text made the control plane write every running session on
+  every request: about 113 MB of journal from 300 small requests against 10 sessions, by the reviewer's count.
+- `tracectl doctor` with `--cp` at a service that answers `/healthz` and is no control plane (the collector's
+  address) says so and exits 1; it printed "ok" and "this control plane is too old". Its list of connected
+  services shows the instance name, which was blank. The README's sample-service step no longer puts a
+  foreground command before the `curl` it asks for.
+- The SDK's `stopped` note (it stopped recording after a panic) makes a session incomplete only when a delivery
+  report or events in the collector tie that instance to it; for the other running sessions it is one
+  `delivery_unconfirmed` line. One note, from any caller, marked every running session incomplete. The notes are
+  stored with the session and survive a restart of the control plane, which lost them. A service that stops
+  recording before its first event of a session is therefore "unconfirmed" there: the default gates pass, and
+  `--fail-on-unconfirmed` fails.
+- `/healthz` is degraded while a seal retry or a compaction that panicked waits for its next attempt (at most
+  30 s for a compaction); both stay outside the panic budget.
+- Delivery accounting, from its fourth review: a connected service that was heard of and is merely silent (frozen,
+  or the report endpoint briefly down) is no longer named under `delivery_unconfirmed` in sessions it left no
+  report and no events in (46 to 80 of 200 sessions in the reviewer's runs, now 0); an SDK whose reports fail for
+  the grace reopens its stream and is named. A refused delivery report is not retried while no session runs.
+  Reports that begin to fail during a run are named after about 12 s, where it was 10.
+- Panic recovery, from its review: a session that a panicking sweep left DRAINING is announced to the SDKs when
+  the next sweep starts its drain (they were not told, so they did not flush or send their last delivery
+  report); the restart backoff of a background loop starts over after a run longer than ten minutes, so a panic
+  every few days no longer leaves `/healthz` degraded for up to 30 seconds each time; a drain that is run again
+  after a panic counts its session once in `sessions_finished_total`.
 - Control plane and client: a large answer from the collector was not read to its end, so its connection could
   not be reused and every poll opened a new one; repeated rounds of 500 sessions ran a machine out of ports.
 - `tredis`: values that were recorded although the key or field is sensitive: the reply of `SET ... GET`,
@@ -423,6 +648,26 @@ Rolling back:
 
 ### Performance
 
+- Span and trace ids come from the runtime's random generator, without a system call: a span id takes 14 ns
+  where it took 310 (parallel benchmark on a laptop; the system call was more than half the CPU of starting a
+  span on macOS). They identify spans and are not secrets; the instance suffix still comes from the system.
+- From a measured audit of the SDK's hot paths (figures are medians of interleaved runs on a loaded laptop):
+  - a request that carries no session header no longer allocates to find that out: reading the header costs 11 ns
+    and no allocation, where it cost 48 ns and one (`core.HTTPHeaderCarrier.Get`); `thttp.Handler` without an
+    active session takes about 120 ns per request, where it took about 160;
+  - `core.RedactJSON` looks for a sensitive key before it parses, and returns a document without one as it is.
+    The audit measured a recorded `tsql` insert at 4.6 µs and 66 allocations, where it was 7.2 µs and 109, and a
+    Redis `GET` at 12 allocations where it was 25; documents that do hold a secret cost what they did;
+  - `core.RedactText` skips the regular expressions that cannot match and runs the last one once per match: a
+    64 KB request through `thttp.Handler` takes about 1.6 ms, where it took about 2.0;
+  - `tgrpc`'s server interceptors read nothing while no session is active, and otherwise read the metadata key
+    by key instead of copying all of it (the audit: 121 ns and 1 allocation, where it was 279 ns and 4);
+  - a Redis key masked with the process secret reuses the keyed hash (the audit: 52 allocations, where it was 59).
+  `core/redact_same_test.go` holds the fast paths of `RedactJSON` and `RedactText` to the plain implementations
+  on 500,000 generated inputs, valid and broken.
+- The control plane indexes a session's delivery reports once per judgement, not once per unheard instance: with
+  1,000 streams and 1,280 reports a judgement takes 2.6 ms and 1.1 MB where it took 407 ms and 430 MB (the
+  developer's benchmark, `BenchmarkJudgeDelivery`), and no longer stalls the API while it holds the lock.
 - Collector retention sweep on the in-memory and Postgres stores reads only the sealed sessions that may be
   due instead of listing every session and reading every seal. With 10,000 sealed sessions and nothing due, a
   Postgres sweep went from about 0.4–1 s to about 1 ms. Its cost still grows with the number of never-sealed
@@ -450,7 +695,7 @@ Rolling back:
   assertion therefore stops its package's test binary at once; the other packages still run.
 - `internal/slicex`, `internal/mapx`, `internal/set`; hand-written loops and `sort.Slice` calls replaced by them
   or by the standard `slices` / `maps` / `cmp` packages.
-- `slicex.FilterMap` and `slicex.ToMap` are back, with `slicex.Count` and `mapx.MapKeys`; 23 more loops in
+- `slicex.Count` and `mapx.MapKeys` join `slicex.FilterMap` and `slicex.ToMap`; 23 more loops in
   `core`, `cmd/tracectl`, `contrib/tsql`, `contrib/tqueue`, `contrib/tdynamo` and `internal/redisx` use them, the
   standard library, or one shared function (`refsOf`, `identsOf`, `digestFlags`) where the same loop stood twice.
 - The go-redis v8 and v9 wrappers share one implementation (`internal/redisx.Tracer`).

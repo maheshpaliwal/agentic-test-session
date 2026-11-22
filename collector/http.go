@@ -34,9 +34,7 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/sessions/{id}/seal", c.handleSeal)
 	mux.HandleFunc("DELETE /v1/internal/sessions/{id}", c.handleDelete)
 	mux.Handle("GET /metrics", c.tel.reg.Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
+	mux.HandleFunc("GET /healthz", c.handleHealth)
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/internal/") && !c.internalPeerOK(r) {
 			writeErr(w, http.StatusForbidden, errors.New("internal endpoint: peer not allowed"))
@@ -59,12 +57,24 @@ func (c *Collector) Handler() http.Handler {
 	// container probes using service names work.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte("ok"))
+			c.handleHealth(w, r)
 			return
 		}
 		guarded.ServeHTTP(w, r)
 	})
+}
+
+// handleHealth serves GET /healthz: "ok", or 503 and which background loop
+// panicked and waits for its restart (see Health). The names are constants
+// of the code, so it reveals nothing, also to a Host the guard would refuse.
+func (c *Collector) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if why := c.Health(); why != "" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("degraded: " + why + "\n"))
+		return
+	}
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (c *Collector) internalPeerOK(r *http.Request) bool {

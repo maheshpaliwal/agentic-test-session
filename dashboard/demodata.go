@@ -187,9 +187,11 @@ func demoEvents(sid string, base time.Time) []core.Event {
 	b.add("updinv", tr, api, core.KindDBWrite, "UPDATE inventory SET stock = stock - $1 WHERE sku = $2", "api", 31, 35, chain(
 		tx("tx_01"), req(m{"args": []any{2, "SKU-APPLE-1"}}),
 		mut(core.Mutation{Store: "postgres", Entity: "inventory", PK: m{"sku": "SKU-APPLE-1"}, Op: "update", Source: "sdk",
-			Before: pj(m{"sku": "SKU-APPLE-1", "stock": 40, "reserved": 3}),
-			After:  pj(m{"sku": "SKU-APPLE-1", "stock": 38, "reserved": 3}),
-			Diff:   []core.FieldChange{{Field: "stock", Old: 40, New: 38}}})))
+			Before: pj(m{"sku": "SKU-APPLE-1", "stock": 40, "reserved": 3, "supplier_token": core.RedactedValue}),
+			After:  pj(m{"sku": "SKU-APPLE-1", "stock": 38, "reserved": 3, "supplier_token": core.RedactedValue}),
+			// A masked column that changed: both sides read the same, and the row says so.
+			Diff: []core.FieldChange{{Field: "stock", Old: 40, New: 38},
+				{Field: "supplier_token", Old: core.RedactedValue, New: core.RedactedValue}}})))
 	b.add("updinv2", tr, api, core.KindDBWrite, "UPDATE inventory SET stock = stock - $1 WHERE sku = $2", "api", 35, 39, chain(
 		tx("tx_01"), req(m{"args": []any{1, "SKU-MILK-2"}}),
 		mut(core.Mutation{Store: "postgres", Entity: "inventory", PK: m{"sku": "SKU-MILK-2"}, Op: "update", Source: "sdk",
@@ -227,7 +229,7 @@ func demoEvents(sid string, base time.Time) []core.Event {
 		resp(m{"message_id": "msg_synth_0002"}), attrs("queue", "orders.notify", "broker", "sqs"), flags("redacted")))
 
 	// fulfil worker: attempt 1 fails (retry), attempt 2 succeeds
-	b.add("w1a", tr, wk1, core.KindWorkerStart, "orders.fulfil", "", 200, 262, chain(link("pub1"), attempt(1), errs("inventory lock timeout")))
+	b.add("w1a", tr, wk1, core.KindWorkerStart, "orders.fulfil", "", 200, 262, chain(link("pub1"), attempt(1)))
 	b.add("w1a_db", tr, wk1, core.KindDBRead, "SELECT * FROM inventory WHERE sku = $1 FOR UPDATE NOWAIT", "w1a", 205, 255, chain(
 		errs("ERROR: could not obtain lock on row in relation \"inventory\" (SQLSTATE 55P03)")))
 	b.add("w1a_end", tr, wk1, core.KindWorkerEnd, "orders.fulfil", "w1a", 260, 261, chain(attempt(1), errs("inventory lock timeout")))
@@ -249,11 +251,11 @@ func demoEvents(sid string, base time.Time) []core.Event {
 		httpReq("POST", "https://mail.example.invalid/v1/send", reqHdr("X-Api-Key"), m{"template": "order_confirmation", "to": "[REDACTED]"}),
 		httpResp(503, hdr("Content-Type", "application/json", "Retry-After", "30"), m{"error": "service unavailable"}),
 		errs("503 Service Unavailable"), attrs("http.status", "503", "host", "mail.example.invalid")}
-	b.add("w2a", tr, wk2, core.KindWorkerStart, "orders.notify", "", 220, 301, chain(link("pub2"), attempt(1), errs("mail provider unavailable")))
+	b.add("w2a", tr, wk2, core.KindWorkerStart, "orders.notify", "", 220, 301, chain(link("pub2"), attempt(1)))
 	b.add("w2a_api", tr, wk2, core.KindAPIOut, "POST https://mail.example.invalid/v1/send", "w2a", 225, 295, chain(mailCall...))
 	b.add("w2a_end", tr, wk2, core.KindWorkerEnd, "orders.notify", "w2a", 298, 299, chain(attempt(1), errs("mail provider unavailable")))
 	b.add("w2a_retry", tr, wk2, core.KindWorkerRetry, "orders.notify", "w2a", 299, 300, chain(attempt(1), attrs("backoff_ms", "700", "next_attempt", "2")))
-	b.add("w2b", tr, wk2, core.KindWorkerStart, "orders.notify", "", 1000, 1090, chain(link("pub2"), attempt(2), errs("mail provider unavailable")))
+	b.add("w2b", tr, wk2, core.KindWorkerStart, "orders.notify", "", 1000, 1090, chain(link("pub2"), attempt(2)))
 	b.add("w2b_api", tr, wk2, core.KindAPIOut, "POST https://mail.example.invalid/v1/send", "w2b", 1005, 1080, chain(mailCall...))
 	b.add("w2b_end", tr, wk2, core.KindWorkerEnd, "orders.notify", "w2b", 1085, 1086, chain(link("pub2"), attempt(2), errs("mail provider unavailable")))
 	b.add("w2b_dlq", tr, wk2, core.KindWorkerDLQ, "orders.notify", "w2b", 1086, 1087, chain(link("pub2"),

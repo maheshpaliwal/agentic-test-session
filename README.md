@@ -15,6 +15,10 @@ Start a *session*, exercise the system, stop the session. tsession then shows, f
 It is not a general-purpose APM: traffic outside a session is not recorded. It records request and response
 payloads, masked by field name only, so run it against test data. See [`SECURITY.md`](SECURITY.md).
 
+What it costs: the services are Go, each gets one import and a wrapper around its handlers and clients, and
+three small processes run next to them (collector, control plane, dashboard). What it can miss is listed in one
+place: [`docs/LIMITS.md`](docs/LIMITS.md).
+
 The screenshots below come from the built-in demo, which needs nothing else running:
 
 ```bash
@@ -139,10 +143,49 @@ go install ./cmd/tracectl                # puts tracectl on your PATH; or: go ru
 
 tracectl doctor                          # both services answer; which services are connected
                                          # (CI preflight: --require-services N exits 3 with fewer than N
-                                         #  connected SDK instances; replicas count one each)
+                                         #  connected SDK instances; replicas count one each.
+                                         #  --require-delivery exits 3 when a connected service says that it
+                                         #  cannot reach its collector: see below)
 ID=$(tracectl start --name my-run --id-only)   # without --id-only: the session as JSON
-curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders
+curl -H "x-tsession-id: $ID" http://127.0.0.1:8080/orders   # a request to YOUR service from step 2
 tracectl stop my-run --wait              # drains async work, then seals
+```
+
+`doctor` lists every connected service. "Connected" means that the service follows the control plane; whether it
+can also deliver is a second question, and a service with a wrong `TSESSION_COLLECTOR_URL` used to look healthy
+until a session ran and its events were missing. Each service now asks its collector's `/healthz` when it starts
+and every 30 seconds while it has nothing to send (so an outage shorter than that can pass unseen), and tells the control plane what it found, with no session
+running:
+
+```
+connected services  2
+  inventory                inventory-1                  connected 12s
+  orders-api               orders-api-1                 connected 12s  CANNOT REACH COLLECTOR: Get http://collector:7071/healthz: dial tcp: lookup collector: no such host
+note: orders-api cannot reach its collector, so nothing it records would arrive: check TSESSION_COLLECTOR_URL of orders-api (it must be the collector's address as seen from that service)
+```
+
+`tracectl doctor --require-services N --require-delivery` is the preflight for CI: exit 3 when fewer than N services
+are connected, or when one of them says that it cannot reach its collector. A service says so within a few seconds of
+starting (at once when the connection is refused, after its 2 s timeout when nothing answers), and takes it back
+about 5 s after the collector answers. During a run the same flag also fails on a
+service that holds events it cannot deliver (`CANNOT DELIVER`) or whose reports do not arrive
+(`NO DELIVERY REPORTS`). What the check cannot see: a service built with an SDK from before it says nothing about
+its collector and passes (not known is not a failure), and a URL at which something other than a collector answers
+HTTP counts as reached. Credentials in a collector URL are never shown.
+
+No service wired yet? The repository has one that needs no database. Start it in a second terminal, with the
+four variables of step 2; it stays in the foreground:
+
+```bash
+cd integration && DELIVERYAPP_LISTEN=127.0.0.1:8080 TSESSION_ENABLED=true TSESSION_SERVICE=sample \
+  TSESSION_CONTROLPLANE_URL=http://127.0.0.1:7070 TSESSION_COLLECTOR_URL=http://127.0.0.1:7071 \
+  go run ./cmd/deliveryapp
+```
+
+Then, in the terminal where `$ID` is set, send it a request in place of the `curl` above:
+
+```bash
+curl -X POST -H "x-tsession-id: $ID" http://127.0.0.1:8080/work
 ```
 
 `stop`, `abort`, `rename` and `wait` print the session as JSON; `status` adds `name:` and `bindings:` lines after
@@ -179,8 +222,8 @@ but does not count as a failure. A gRPC call follows the same line: the
 statuses that say the callee failed count (`Internal`, `Unavailable`, `Unknown`, `DeadlineExceeded`,
 `Unimplemented`, `DataLoss`), `NotFound` or `Canceled` do not (see the `contrib/tgrpc` doc comment).
 
-Exit status: `0` ok, `1` failed (including bad arguments to a command), `2` unknown command or global flag,
-`3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
+Exit status: `0` ok, `1` failed (including bad arguments to a command; `run` and `--from` exit `2` for those),
+`2` unknown command or global flag, `3` a `--fail-on-*` check failed. `tracectl run` exits with its command's status instead when that failed.
 
 ## Architecture
 
@@ -237,6 +280,11 @@ tracectl run --name my-run --digest digest.md -- ./run-e2e.sh   # record the tes
 tracectl digest my-run --fail-on-error --fail-on-incomplete --fail-on-empty   # the one call to read the result
 tracectl show my-run 17                                         # then drill down: one event in full
 tracectl history my-run postgres orders 42                      # every change to one row
+
+# no services running, only the artifact of a run (tracectl run --export run.ndjson -- ..., or
+# tracectl export my-run -o run.ndjson):
+tracectl --from run.ndjson digest --fail-on-error --fail-on-incomplete --fail-on-empty
+tracectl --from run.ndjson show 17                              # the digest names these commands itself
 ```
 
 `digest` is the whole session in at most `--max-bytes` (default 16384): verdict and counts, each failure with its
@@ -247,6 +295,14 @@ alter the digest's structure; a model can still be swayed by what it says. `--fo
 object (schema `tsession.digest/v1`); `summary`, `events`, `entities`, `history`, `trace`, `show` and `diff`
 take `--json`. Exit statuses are those above: `0` from the `digest` line means no failed events, complete, not
 empty. A live session works too and says so. Details: [`docs/DIGEST.md`](docs/DIGEST.md).
+
+`--from FILE` reads an export instead of the services: nothing has to run and nothing is asked. It works with
+the commands that read (`digest`, `summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`,
+`status`, `list`); they print what they print for the session the file was exported from and exit as they do
+for it, `--fail-on-*` gates included. The session need not be named (the file holds one); when it is, by its id,
+its name or the file's name without the extension, it has to be the file's. Any other command with `--from`
+exits 2. A session that was exported while it ran is shown as running: its events are those that had arrived.
+`--from` goes before the command. The file may be gzip'ed, and `--from -` reads standard input.
 
 | `tracectl run` exits | It means | Next |
 |---|---|---|
@@ -270,12 +326,19 @@ sess := tsessiontest.Run(t, client.Options{})   // stopped when the test ends
 // ... drive the system with sess.Header() or sess.Transport(nil) ...
 tsessiontest.RequireNoFailures(t, sess)
 tsessiontest.RequireMutation(t, sess, client.MutationFilter{Store: "postgres", Entity: "orders", Op: "insert"})
+tsessiontest.RequireEvent(t, sess, tsessiontest.EventFilter{Service: "orders-api", Kind: core.KindAPIOut, Name: "/charge"})
 ```
+
+A failed event is one that carries an error: an HTTP 500 or above, a failed query, a failed job. A request that
+was refused (a 404) is not one. A test that provokes a failure asserts on it with `tsessiontest.RequireFailure`
+in place of `RequireNoFailures`. An assertion that does not hold fails its test; a set-up that is broken (no
+control plane) panics, which ends the package's test binary.
 
 Stopping a session waits for it to go quiet (3s by default), so each such test takes a few seconds; lower
 `client.Options.QuiesceSeconds` if your system has no asynchronous work.
 When a service still holds events it cannot deliver, or its reports do not arrive, the stop waits about ten
-seconds more for it (`--delivery-grace` on the control plane) before it calls the session incomplete.
+seconds more for it (`--delivery-grace` on the control plane), and 12 to 18 seconds while its reports are
+failing, before it calls the session incomplete.
 
 `sdk/client` gives the same data directly (`Start`, `StopAndWait`, `Summary`, `Events`, `Mutations`, `History`,
 `Trace`).
@@ -312,17 +375,61 @@ tracectl report my-run --format junit -o tsession-junit.xml
 # keep a run after the job is gone: export it, then open the file without the services. The export carries
 # the session's verdict (alone, when there are no events), so the gates exit for the file as for the session.
 tracectl export my-run -o run.ndjson
-go run ./cmd/dashboard -open run.ndjson      # the UI, and it prints the flags for the next line
-# the same commands as on a live session (summary, events, trace, entities, history, show, report, digest, diff)
-tracectl --cp http://127.0.0.1:7072/api/cp --collector http://127.0.0.1:7072/api/col digest run
+# read the file with the same commands as a live session (summary, events, trace, entities, history, show,
+# report, digest, diff, status, list); nothing else has to run, and the session need not be named
+tracectl --from run.ndjson digest --fail-on-error --fail-on-incomplete
+tracectl --from run.ndjson report --format junit -o report.xml
+tracectl --from baseline.ndjson --from run.ndjson diff --fail-on-diff   # two files: baseline, then candidate
+go run ./cmd/dashboard -open run.ndjson      # or the UI; it prints the --cp and --collector that read it too
 
 # or let failed Go tests save theirs
 TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
 ```
 
+Two jobs, the second without any service: the first records and keeps the files whatever happens, the
+second gates on the artifact. `run --export` writes the status of its command into the file, so the gate also
+fails for a run whose tests failed without a failed event. `--require-services 3` (the number of services you
+expect) does not run the tests with fewer connected, and fails the run when one of them is gone at the end: a
+service that is killed takes what it had not delivered with it, and nothing else may show that.
+
+```yaml
+# GitHub Actions; the same three commands work in any CI system
+jobs:
+  e2e:
+    runs-on: ubuntu-latest      # with your services, the collector and the control plane started before this step
+    steps:
+      - run: >
+          tracectl run --name "e2e-${{ github.run_id }}" --require-services 3
+          --export run.ndjson --digest digest.md --report report.md
+          -- ./run-e2e.sh
+      - if: always()            # also when the tests failed: that is when the files are wanted
+        uses: actions/upload-artifact@v4
+        with: { name: tsession, path: "run.ndjson\ndigest.md\nreport.md" }
+  gate:
+    runs-on: ubuntu-latest      # needs tracectl only: no service runs here
+    needs: e2e
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: tsession }
+      - run: tracectl --from run.ndjson report --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
+```
+
+`tracectl --from FILE <command> --fail-on-*` exits `0` when the checks hold, `3` when one does not (failed
+events or a failed command, an incomplete or unproven recording, no events), `1` when the file cannot be read as
+an export (missing, cut short, not an export) and `2` for a command that does not read. Several artifacts are
+gated one by one: `for f in artifacts/*.ndjson; do tracectl --from "$f" summary --fail-on-error || exit; done`.
+`export -o FILE` and `run --export FILE` write the file; `tracectl --from FILE` and `dashboard -open FILE` read
+it, the first for scripts and agents (strict), the second for a person (it shows what it can).
+
 An export holds recorded payloads, masked by field name only. Treat it like test data, not as something safe to
-share; whether it may go to CI storage is a question for your own data-handling policy. The opened session is
-named after the file (`run` above), keeps its id, and is read-only: stop, rename and delete are refused.
+share; whether it may go to CI storage is a question for your own data-handling policy. The opened session
+keeps its id and its name (an export from before the name was stored is named after the file, `run` above), and
+is read-only: stop, rename and delete are refused.
+`tracectl --from` refuses a file that is missing, empty, not an export, or cut short (exit 1; the export says
+how many events it wrote, so a file that lost whole lines is refused too; one whose first line is gone is read
+with a note and fails `--fail-on-incomplete`, see [`docs/LIMITS.md`](docs/LIMITS.md)):
+a gate does not judge a part of a recording. (`dashboard -open` shows a file cut short, marked incomplete.)
 
 ## Storage and retention
 

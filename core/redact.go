@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode"
+	"unicode/utf8"
 )
 
 // RedactedValue replaces the value of any sensitive key.
@@ -186,6 +187,9 @@ func sensitiveParam(name string) bool {
 // RedactJSON masks the values of sensitive keys, recursively. Invalid JSON or
 // JSON with nothing to mask is returned untouched.
 func RedactJSON(b []byte) ([]byte, bool) {
+	if !mayHoldSensitiveKey(b) {
+		return b, false // nothing to mask, or not JSON: no tree is built
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	var v any
@@ -200,6 +204,62 @@ func RedactJSON(b []byte) ([]byte, bool) {
 		return b, false
 	}
 	return out, true
+}
+
+// mayHoldSensitiveKey scans b without parsing it and reports whether it can
+// hold an object key that is sensitive. Every key of a JSON document is a
+// string followed by ':', so a document in which no such string is sensitive
+// has nothing to mask. A key the scan cannot read as the parser would (an
+// escape in it, bytes that are not UTF-8, a string without an end) answers
+// true, and the document is parsed as before.
+func mayHoldSensitiveKey(b []byte) bool {
+	var plain [8][]byte // keys seen that are not sensitive: they repeat
+	np := 0
+scan:
+	for i := 0; i < len(b); i++ {
+		if b[i] != '"' {
+			continue
+		}
+		j, esc := i+1, false
+		for j < len(b) && b[j] != '"' {
+			if b[j] == '\\' {
+				esc = true
+				j++
+			}
+			j++
+		}
+		if j >= len(b) {
+			return true
+		}
+		key := b[i+1 : j]
+		i = j
+		k := j + 1
+		for k < len(b) && (b[k] == ' ' || b[k] == '\t' || b[k] == '\n' || b[k] == '\r') {
+			k++
+		}
+		if k >= len(b) || b[k] != ':' {
+			continue // a value
+		}
+		if esc || !utf8.Valid(key) {
+			return true
+		}
+		for _, p := range plain {
+			if bytes.Equal(p, key) {
+				continue scan
+			}
+		}
+		// The verdict of a key seen before is read without copying the key.
+		if v, ok := matcher.Load().cache.Load(string(key)); ok {
+			if v.(bool) {
+				return true
+			}
+		} else if sensitive(string(key)) {
+			return true
+		}
+		plain[np%len(plain)] = key
+		np++
+	}
+	return false
 }
 
 func redactValue(v any) bool {

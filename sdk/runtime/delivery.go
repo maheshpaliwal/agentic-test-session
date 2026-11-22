@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/ident"
 )
 
@@ -54,6 +55,23 @@ type deliveryBatch struct {
 	Instance       string        `json:"instance"`
 	DeliveredTotal uint64        `json:"delivered_total"`
 	Reports        []batchReport `json:"reports"`
+	// Stopped is set when this process stopped recording after an internal
+	// error, and says how (see Subscriber.panicked). The control plane notes
+	// it on the sessions that run when it hears this: those this process took
+	// part in end incomplete, the others say that it may have missed events.
+	// One that does not know the field ignores it.
+	Stopped string `json:"stopped,omitempty"`
+	// Collector says whether this process could reach its collector when it
+	// last looked (see Exporter.checkCollector); nil while it has not. It is
+	// how a wrong collector URL shows before any event was recorded. A control
+	// plane that does not know the field ignores it.
+	Collector *collectorNote `json:"collector,omitempty"`
+}
+
+// collectorNote is deliveryBatch.Collector.
+type collectorNote struct {
+	Reachable bool   `json:"reachable"`
+	Error     string `json:"error,omitempty"`
 }
 
 // batchReport is one report of a batch: a deliveryReport without what the
@@ -92,6 +110,11 @@ const (
 // reporterConfig tunes a reporter. Zero values get defaults.
 type reporterConfig struct {
 	Tick time.Duration // how often the accounts are looked at (default 250ms)
+	// RetellDown and RetellUp are how long after the control plane was told
+	// that this process cannot, or can, reach its collector it is told the
+	// same again (see reachNews). Defaults: the exporter's ReachCheck, and
+	// reachRetell times that; nothing is told again when that is zero.
+	RetellDown, RetellUp time.Duration
 	// Interval is the least time between two reports of a session that is
 	// not draining (default 5s). A draining one is reported whenever it
 	// changed.
@@ -139,6 +162,14 @@ type reporterConfig struct {
 	// report endpoint that ends within the drain must not cost a session its
 	// report.
 	DrainRetry time.Duration
+	// ReopenGap is the least time between two streams this process opens
+	// anew because its reports fail (default 5s; see reporter.failed). The
+	// gap is a grace of the control plane when that is longer, so this is the
+	// bound that holds whatever period the control plane asks for.
+	ReopenGap time.Duration
+	// Now is the clock (default time.Now): a test runs a day of failures
+	// through the reporter without waiting for it.
+	Now func() time.Time
 }
 
 // reporter sends the delivery accounts of the recorder to the control plane:
@@ -171,9 +202,40 @@ type reporter struct {
 	connects uint64
 	failures int
 	failedAt time.Time // when the last report failed
+	// failingSince is when the first of the failures in a row happened, moved
+	// forward by the time without a session in which nothing was tried: since
+	// when the control plane has been waiting for a word of this process in
+	// vain. askNow: the stream was opened anew for these failures (see
+	// failed), and the first set of the new one has not arrived yet (see
+	// pass). idleAt is when the active set last went from naming a session to
+	// none.
+	failingSince time.Time
+	askNow       bool
+	idleAt       time.Time
+	// reopened: the stream that is open is one this process opened anew
+	// itself (see failed). lost: a request on it got no answer, or the answer
+	// of something that failed (a 5xx), so it may have arrived all the same;
+	// a refusal (4xx) is the answer of something that did not pass it on.
+	// reopenedAt is when a stream was last opened anew.
+	reopened   bool
+	lost       bool
+	reopenedAt time.Time
+	// refused: the last report was refused (a 4xx), not lost. It is not sent
+	// again while no session runs (see pass).
+	refused  bool
 	retryAt  time.Time // no report before this, after a failed one (see paused)
 	kickedAt time.Time
 	urgentOf *snapshot // the active set whose draining sessions the exporter was told of
+	// toldAt is when the control plane last took a batch that said that
+	// recording stopped; wasBlind: the set was unknown at the last pass.
+	toldAt   time.Time
+	wasBlind bool
+	// reachTold is what the control plane was last told, on this stream,
+	// about whether this process reaches its collector; nil when nothing yet.
+	reachTold *collectorReach
+	// reachToldAt is when it was told that: what the control plane holds is
+	// said again from time to time (see reachNews).
+	reachToldAt time.Time
 	// down, outageLogged and lastOutageLog make the reporter say once when
 	// its reports stop arriving and once when they arrive again, at most one
 	// such pair per outageLogGap.
@@ -215,6 +277,14 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	def(&cfg.Timeout, 2*time.Second)
 	def(&cfg.RetryBase, time.Second)
 	def(&cfg.DrainRetry, 200*time.Millisecond)
+	def(&cfg.ReopenGap, 5*time.Second)
+	if exp != nil {
+		def(&cfg.RetellDown, exp.cfg.ReachCheck)
+		def(&cfg.RetellUp, reachRetell*exp.cfg.ReachCheck)
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	def(&cfg.Heartbeat, 5*time.Second)
 	def(&cfg.PassBudget, cfg.Tick)
 	if cfg.Burst <= 0 {
@@ -227,12 +297,13 @@ func newReporter(rec *Recorder, exp *Exporter, sub *Subscriber, service, instanc
 	// reach it trimmed, and a report must name the same instance.
 	r := &reporter{cfg: cfg, rec: rec, exp: exp, sub: sub, service: ident.Clean(service), instance: ident.Clean(instance),
 		sessions: map[string]*reportState{}, stop: make(chan struct{}), done: make(chan struct{})}
-	go r.loop()
+	startLoop("delivery reporter", "the control plane no longer hears what this process delivered, and names it in its sessions",
+		r.stop, r.loop, func() { close(r.done) }, nil)
 	return r
 }
 
+// loop may be started again after a panic (startLoop): it closes nothing.
 func (r *reporter) loop() {
-	defer close(r.done)
 	t := time.NewTicker(r.cfg.Tick)
 	defer t.Stop()
 	for {
@@ -299,6 +370,13 @@ type due struct {
 // arriving in the middle of a session is noticed. A process that follows no
 // session sends nothing.
 //
+// A request that was refused (a 4xx: a proxy on the way, a rule someone has
+// to change) is not sent again while the active set names no session. Nobody
+// waits for a word of this process then, and a fleet of idle services that
+// each ask every few seconds, for as long as the refusal lasts, is load for
+// nothing. It is tried again when a session begins, at once, and once on
+// every stream that is opened: what is behind a new stream may take it.
+//
 // While the stream is down this process learns of a drain late, from a poll,
 // or not at all. Its reports then do not wait for FirstDelay or Interval:
 // what the control plane was not told before it seals a session, it cannot
@@ -310,7 +388,14 @@ type due struct {
 //
 // The set read here is the raw one: under the kill switch IsActive is false
 // for every session, and what was recorded before must still be accounted.
+//
+// When the subscriber panicked this process has stopped recording and does
+// not know the set (snapshot.blind). The control plane is told (see
+// Subscriber.panicked), also when nothing else is due. Until the set is
+// known again no account is forgotten, and what was recorded before is
+// reported on like that of a running session.
 func (r *reporter) pass() {
+	faultpoint.Hit("reporter.pass")
 	accts := r.rec.accounts()
 	sn := r.sub.snap.Load()
 	if sn != r.urgentOf {
@@ -318,22 +403,52 @@ func (r *reporter) pass() {
 		r.exp.setUrgent(sn.draining)
 	}
 	if c := r.sub.connects.Load(); c != r.connects {
-		r.connects, r.mode, r.hello = c, modeBatch, true
+		r.connects, r.mode, r.hello, r.refused = c, modeBatch, true, false
+		r.reachTold = nil // what is behind a new stream knows nothing of it
+		r.reopened, r.lost = r.askNow, false
+		if r.askNow {
+			// The stream this process opened anew itself (see failed): the
+			// control plane names a connection it has not heard of within a
+			// second, so it is asked at once, whatever the pause has grown
+			// to. If the outage is just over, nothing is named.
+			r.askNow, r.retryAt = false, time.Time{}
+		}
 		for _, st := range r.sessions {
 			st.resend = true
 		}
 	}
 	streaming := r.sub.streaming.Load()
-	now := time.Now()
+	now := r.cfg.Now()
+	r.renote(sn, now)
 	if busy := len(sn.active) > 0; busy != r.busy {
 		// The first session after none: the control plane expects to hear of
 		// this process now, so a pause that refused requests left behind (there
 		// was nothing to send, and nothing to end it) is over.
 		if r.busy = busy; busy {
 			r.retryAt = time.Time{}
+			if r.failures > 0 {
+				// The time without a session since the last failure: nothing
+				// was tried in it, and nobody waited for a word of this
+				// process. It is not time in which the reports failed.
+				from := r.idleAt
+				if r.failedAt.After(from) {
+					from = r.failedAt
+				}
+				r.failingSince = r.failingSince.Add(now.Sub(from))
+			}
+		} else {
+			r.idleAt = now
 		}
 	}
-	hello := streaming && r.mode == modeBatch && (r.hello || r.beat(sn, now))
+	// arrive: the control plane is to be told that the reports of this
+	// process arrive. Not while it refuses them and has no session.
+	arrive := streaming && (r.hello || r.beat(sn, now)) && (!r.refused || r.busy || sn.blind)
+	// reach: whether this process reaches its collector is news to the control
+	// plane. It is told at once, also while no session runs: that is when a
+	// wrong collector URL can still be put right before it costs a run. Not
+	// while the control plane refuses the requests of an idle process.
+	reach := streaming && r.reachNews() && (!r.refused || r.busy)
+	hello := r.mode == modeBatch && (arrive || reach || r.sub.stopNote.Load() != nil)
 	if len(accts) == 0 && len(r.sessions) == 0 && !hello {
 		return
 	}
@@ -341,7 +456,7 @@ func (r *reporter) pass() {
 	stuck, turned, urgent := false, false, false
 	var todo []due
 	for sid, a := range accts {
-		if _, live := sn.active[sid]; !live {
+		if _, live := sn.active[sid]; !live && !sn.blind {
 			r.rec.forget(sid)
 			delete(accts, sid)
 			continue
@@ -399,6 +514,55 @@ func (r *reporter) pass() {
 	}
 }
 
+// renote makes the control plane hear again that this process does not
+// record, while that is so and passing: every KickEvery while the subscriber
+// is being started again, and once when it has the set again. The control
+// plane marks the sessions that run when it is told, so one telling at the
+// panic would miss a session that began during the restarts, which take up
+// to half a minute. A subscriber that stays stopped is told once (see
+// Subscriber.panicked): from then on this process is like a service that is
+// not connected, and takes no part in later sessions.
+func (r *reporter) renote(sn *snapshot, now time.Time) {
+	switch {
+	case sn.blind && !r.sub.gaveUp.Load():
+		if r.sub.stopNote.Load() == nil && now.Sub(r.toldAt) >= r.cfg.KickEvery {
+			r.sub.note(noteRestarting)
+		}
+	case r.wasBlind && !sn.blind:
+		r.sub.note(noteResumed)
+	}
+	r.wasBlind = sn.blind
+}
+
+// reachNews reports whether the exporter knows something about reaching the
+// collector that the control plane was not told on this stream: that it can
+// or cannot, or another reason why not.
+//
+// What was told is also told again: the endpoint takes a report from any
+// caller, and one that named this instance and said the opposite would
+// otherwise stand until something changed here. A process that cannot reach
+// its collector says so again every check period, so that a forged "it can"
+// hides a wrong collector URL for that long at most; one that can says so
+// every reachRetell periods, which keeps an idle fleet nearly silent.
+func (r *reporter) reachNews() bool {
+	cur := r.exp.reach.Load()
+	if cur == nil {
+		return false
+	}
+	if r.reachTold == nil || *cur != *r.reachTold {
+		return true
+	}
+	every := r.cfg.RetellDown
+	if cur.ok {
+		every = r.cfg.RetellUp
+	}
+	return every > 0 && r.cfg.Now().Sub(r.reachToldAt) >= every
+}
+
+// reachRetell is how many check periods pass before a process that reaches
+// its collector tells the control plane so again.
+const reachRetell = 10
+
 // beat reports whether a heartbeat is due: the active set names a session,
 // and the control plane has not answered a batch of this process for the
 // heartbeat period (the one it asked for, or cfg.Heartbeat). A tick early
@@ -426,7 +590,7 @@ func (r *reporter) period(sn *snapshot) time.Duration {
 // pause grows with every failure in a row (see failed); while the report of a
 // draining session waits (urgent) it is DrainRetry at most.
 func (r *reporter) paused(urgent bool) bool {
-	now := time.Now()
+	now := r.cfg.Now()
 	if !now.Before(r.retryAt) {
 		return false
 	}
@@ -439,7 +603,7 @@ func (r *reporter) flush(todo []due, hello bool, total uint64, urgent bool) {
 	if r.mode == modeOff || r.paused(urgent) {
 		return
 	}
-	began := time.Now()
+	began := r.cfg.Now()
 	for i := 0; len(todo) > 0 || hello; i++ {
 		if r.mode == modeSingle {
 			if i == r.cfg.Burst || len(todo) == 0 || !r.send(todo[0].sid, todo[0].st, todo[0].d) {
@@ -457,7 +621,7 @@ func (r *reporter) flush(todo []due, hello bool, total uint64, urgent bool) {
 		todo, hello = todo[n:], false
 		// A request that took long has kept the accounts waiting: the rest
 		// is sent by the next pass, from what the accounts say then.
-		if time.Since(began) >= r.cfg.PassBudget {
+		if r.cfg.Now().Sub(began) >= r.cfg.PassBudget {
 			return
 		}
 	}
@@ -475,6 +639,14 @@ const (
 // failed, or the control plane does not know the endpoint.
 func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 	b := deliveryBatch{Service: r.service, Instance: r.instance, DeliveredTotal: total, Reports: make([]batchReport, len(chunk))}
+	note := r.sub.stopNote.Load()
+	if note != nil {
+		b.Stopped = *note
+	}
+	reach := r.exp.reach.Load()
+	if reach != nil {
+		b.Collector = &collectorNote{Reachable: reach.ok, Error: reach.err}
+	}
 	for i, x := range chunk {
 		b.Reports[i] = batchReport{Session: x.sid, Recorded: x.d.Recorded, Delivered: x.d.Delivered, Dropped: x.d.Dropped,
 			Buffered: x.d.Buffered, LastError: x.d.LastError, Final: x.d.Final}
@@ -482,7 +654,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 	code, answer := r.postBatch(b, r.cfg.Timeout)
 	switch {
 	case code/100 == 2:
-		now := time.Now()
+		now := r.cfg.Now()
 		for i, x := range chunk {
 			status := "accepted" // an answer that says nothing of a report: the control plane has it
 			if i < len(answer.Results) {
@@ -500,7 +672,14 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 				x.st.closed = true
 			}
 		}
-		r.hello, r.beatAt = false, time.Now()
+		r.hello, r.beatAt = false, r.cfg.Now()
+		if reach != nil {
+			r.reachTold, r.reachToldAt = reach, r.beatAt
+		}
+		if note != nil {
+			r.toldAt = r.beatAt
+		}
+		r.sub.stopNote.CompareAndSwap(note, nil) // told; a newer note stays
 		r.sub.setAnnounce(true)
 		r.up()
 		return true
@@ -523,7 +702,7 @@ func (r *reporter) sendBatch(chunk []due, total uint64) bool {
 func (r *reporter) send(sid string, st *reportState, d deliveryReport) bool {
 	switch code := r.post(sid, d, r.cfg.Timeout); {
 	case code/100 == 2:
-		st.sent, st.last, st.sentAt, st.resend = true, d, time.Now(), false
+		st.sent, st.last, st.sentAt, st.resend = true, d, r.cfg.Now(), false
 		r.up()
 	case r.noEndpoint(code):
 		// A control plane without the endpoint: say nothing, it is not an error.
@@ -564,22 +743,72 @@ func (r *reporter) noEndpoint(code int) bool {
 // paused). The outage is logged once: at the first refusal, and at the second
 // failure in a row otherwise (a single lost request is retried without a
 // word).
+//
+// When the reports have failed for a whole grace of the control plane (two
+// heartbeat periods: a request is made when that time is up, and it fails
+// too), the stream is opened anew. The control plane does not name an
+// instance it has heard of and that is silent now unless something ties it to
+// the session: such an instance is frozen or idle far more often than cut
+// off. One it has never heard of on its connection is named, in every
+// session, and that is what this process becomes: connected, and never heard
+// of. A process that is frozen cannot do that, and one whose reports fail for
+// less than the grace does not. (Opening the stream anew when the outage is
+// first noticed, after two failures, would name every instance behind an
+// endpoint that is merely slow.)
+//
+// Which streams: one on which the control plane may have heard of this
+// process. That is one on which a report was answered (not hello), and one on
+// which none was but a request was lost rather than refused: it may have
+// arrived, with only its answer lost on the way back. The control plane then
+// takes this process for one it has heard of, and this process cannot know.
+// (The fifth review: the first report arrived, its answer did not, nothing
+// arrived since; no session named the instance.)
+//
+// Which not: a stream on which every request was refused (4xx). Nothing of
+// this process arrived on it, which is what the control plane takes it for
+// already; another stream would only take the process off the control plane's
+// list for a moment, and give it another grace in the drain of a session it
+// took part in (a new connection is a sign of life). And a stream this
+// process opened anew itself, until a report is answered on it: one new
+// stream per outage says all there is to say. Without that rule every failure
+// after the grace opened another (11,624 streams in 17 seconds, once).
+//
+// And never two within a grace of the control plane, nor within ReopenGap,
+// whatever else is the case: streams that keep breaking by themselves during
+// an outage, each followed by a lost request, would otherwise be answered
+// with one more stream each. Nor while the stream opened anew has not
+// delivered its first set (askNow): ending it then would start over.
 func (r *reporter) failed(code int) {
-	refused := code/100 == 4
+	r.refused = code/100 == 4
 	r.failures++
 	steps := 2
-	if refused {
+	if r.refused {
 		steps = 5
 	}
-	r.failedAt = time.Now()
+	r.failedAt = r.cfg.Now()
+	if r.failures == 1 {
+		r.failingSince = r.failedAt
+	}
+	r.lost = r.lost || !r.refused
 	// Never longer than a heartbeat period: when the outage is over, the
 	// control plane hears of this process as soon as it would of a healthy one.
-	r.retryAt = r.failedAt.Add(min(r.cfg.RetryBase<<min(r.failures-1, steps), r.period(r.sub.snap.Load())))
-	if r.down || !refused && r.failures < 2 {
+	period := r.period(r.sub.snap.Load())
+	r.retryAt = r.failedAt.Add(min(r.cfg.RetryBase<<min(r.failures-1, steps), period))
+	if heard := !r.hello || r.lost && !r.reopened; heard && !r.askNow && r.mode == modeBatch {
+		gap := max(2*period, r.cfg.ReopenGap)
+		if grace := r.failingSince.Add(2 * period); r.failedAt.Before(grace) {
+			if grace.Before(r.retryAt) {
+				r.retryAt = grace // the request that says whether the grace went by without a word
+			}
+		} else if (r.reopenedAt.IsZero() || r.failedAt.Sub(r.reopenedAt) >= gap) && r.sub.reopen() {
+			r.askNow, r.reopenedAt = true, r.failedAt
+		}
+	}
+	if r.down || !r.refused && r.failures < 2 {
 		return
 	}
 	r.down = true
-	if now := time.Now(); r.lastOutageLog.IsZero() || now.Sub(r.lastOutageLog) >= outageLogGap {
+	if now := r.cfg.Now(); r.lastOutageLog.IsZero() || now.Sub(r.lastOutageLog) >= outageLogGap {
 		r.lastOutageLog, r.outageLogged = now, true
 		what := "did not answer"
 		if code != 0 {
@@ -592,7 +821,7 @@ func (r *reporter) failed(code int) {
 
 // up notes that the control plane answered a report.
 func (r *reporter) up() {
-	r.failures = 0
+	r.failures, r.askNow, r.refused = 0, false, false
 	if r.down {
 		r.down = false
 		if r.outageLogged {
@@ -663,7 +892,7 @@ func (r *reporter) close(timeout time.Duration) {
 	var last []batchReport
 	for sid, a := range r.rec.accounts() {
 		st := r.sessions[sid]
-		if _, live := sn.active[sid]; !live || st != nil && st.closed {
+		if _, live := sn.active[sid]; !live && !sn.blind || st != nil && st.closed {
 			continue
 		}
 		d := r.report(a, true, total)

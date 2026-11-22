@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 )
 
@@ -59,6 +61,12 @@ type Config struct {
 	// TimeUnit is the duration of one "second" in ttl/quiesce/max_drain
 	// fields. Tests shrink it; default time.Second.
 	TimeUnit time.Duration
+	// OnPanicBudgetSpent is called once when the sweep has panicked
+	// gosafe.PanicBudget times within gosafe.PanicBudgetWindow: the sweep is
+	// not started again, and the service is to end (cmd/controlplane shuts
+	// down and exits 1). Nil leaves the Manager running and degraded (see
+	// Health), which only suits a Manager that is part of another process.
+	OnPanicBudgetSpent func(reason string)
 }
 
 // Manager owns the session FSM.
@@ -66,6 +74,8 @@ type Manager struct {
 	cfg Config
 	log *slog.Logger
 	tel *telemetry
+	// watch is the health of the Manager's goroutines (see Health).
+	watch *gosafe.Watch
 
 	mu      sync.Mutex
 	kill    bool
@@ -153,6 +163,10 @@ func NewManager(cfg Config) *Manager {
 		rootCtx: ctx, stop: cancel,
 	}
 	m.tel = newTelemetry(m)
+	m.watch = gosafe.NewWatch(m.budgetSpent)
+	if pc, ok := cfg.Store.(panicCounter); ok {
+		pc.countPanics(m.countPanic, m.watch)
+	}
 	// Resume drains and pending seals that were in flight when a persistent
 	// store was last written. Archived sessions can have a seal pending; the
 	// finished ones need nothing, so a store that can leave them out does.
@@ -186,6 +200,13 @@ func NewManager(cfg Config) *Manager {
 	}
 	m.retrySealsLocked(time.Now())
 	return m
+}
+
+// panicCounter is a Store with goroutines of its own (FileStore's
+// compaction): it is given what counts their panics, and the Watch that
+// says while one of them has panicked and was not repeated yet (see Health).
+type panicCounter interface {
+	countPanics(count func(goroutine string), watch *gosafe.Watch)
 }
 
 // MaxDurationSeconds bounds ttl/quiesce/max_drain (7 days); it also keeps
@@ -397,23 +418,10 @@ func (m *Manager) Abort(id string) (Session, error) {
 // cancelled and waited for, so that it cannot reach the collector after the
 // delete. If the collector delete then fails, the retries resume.
 func (m *Manager) Delete(ctx context.Context, id string) error {
-	m.mu.Lock()
-	s, err := m.stored(id)
-	// A session the store has but cannot read (ErrStore) is an archived one,
-	// and only finished sessions are archived: it can still be deleted, here
-	// and in the collector. Refusing would leave it undeletable until a
-	// restart, which then forgets it while the collector keeps its events.
-	unreadable := errors.Is(err, ErrStore)
-	if err != nil && !unreadable {
-		m.mu.Unlock()
+	inFlight, err := m.beginDelete(id)
+	if err != nil {
 		return err
 	}
-	if !unreadable && !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
-		m.mu.Unlock()
-		return fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
-	}
-	inFlight := m.disarmSealRetryLocked(id)
-	m.mu.Unlock()
 	if inFlight != nil {
 		select {
 		case <-inFlight:
@@ -438,6 +446,27 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// beginDelete checks that id can be deleted and stops its seal retries; it
+// returns the attempt in flight, if any (see disarmSealRetryLocked). The
+// store is read under the lock, so the unlock is deferred.
+func (m *Manager) beginDelete(id string) (inFlight <-chan struct{}, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, err := m.stored(id)
+	// A session the store has but cannot read (ErrStore) is an archived one,
+	// and only finished sessions are archived: it can still be deleted, here
+	// and in the collector. Refusing would leave it undeletable until a
+	// restart, which then forgets it while the collector keeps its events.
+	unreadable := errors.Is(err, ErrStore)
+	if err != nil && !unreadable {
+		return nil, err
+	}
+	if !unreadable && !s.State.Terminal() { // terminal states never change, so no lock is needed across the collector call
+		return nil, fmt.Errorf("%w: session is %s; only finished sessions can be deleted", ErrBadState, s.State)
+	}
+	return m.disarmSealRetryLocked(id), nil
+}
+
 // Sweep ends ACTIVE sessions whose TTL has elapsed as of now. They go through
 // DRAINING and the normal seal path (reason=ttl); drain() records the final
 // state (EXPIRED on a clean seal, SEALED+incomplete+seal_error otherwise).
@@ -446,8 +475,17 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 func (m *Manager) Sweep(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	faultpoint.Hit("sweep.top")
 	changed := false
 	for _, s := range m.live {
+		if s.State == StateDraining && m.cancels[s.ID] == nil && m.rootCtx.Err() == nil {
+			// Nobody drains it: whatever moved it to DRAINING panicked before
+			// it had started the drain (a sweep, say, which is started again).
+			// It had not told the subscribers either: they flush and send
+			// their last delivery reports on that word.
+			m.startDrainLocked(s.ID)
+			changed = true
+		}
 		if s.State != StateActive {
 			continue
 		}
@@ -456,6 +494,7 @@ func (m *Manager) Sweep(now time.Time) {
 			if err := m.putLocked(s); err != nil {
 				m.log.Error("persist expiring session", "id", s.ID, "err", err)
 			}
+			faultpoint.Hit("sweep.expired")
 			m.startDrainLocked(s.ID)
 			changed = true
 		}
@@ -588,6 +627,12 @@ type Subscriber struct {
 	// request to it failed; nil otherwise. It is how an operator sees, during
 	// a run, a service that follows and reports and cannot deliver.
 	Pending *PendingDelivery `json:"delivery_pending,omitempty"`
+	// Collector is what the follower last said, on this connection, about
+	// whether it can reach its collector; nil when it has not said (an SDK
+	// that does not look, or one that has not looked yet): not known, which
+	// is not the same as not reachable. It is how an operator sees a wrong
+	// collector URL before any session runs.
+	Collector *CollectorReach `json:"collector,omitempty"`
 	// since and heard are ConnectedAt and LastDeliveryReport as the drain
 	// counts from them: with the monotonic clock reading, which a step of the
 	// wall clock does not move. reported is when a request that carried a
@@ -598,7 +643,16 @@ type Subscriber struct {
 // Subscribers lists the current followers of the active set, by service and
 // instance. It answers "is my service connected?" when a session stays empty.
 func (m *Manager) Subscribers() []Subscriber {
+	out := m.subscribers()
+	slices.SortFunc(out, func(a, b Subscriber) int {
+		return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance), a.ConnectedAt.Compare(b.ConnectedAt))
+	})
+	return out
+}
+
+func (m *Manager) subscribers() []Subscriber {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	out := make([]Subscriber, 0, len(m.subs))
 	now := time.Now()
 	pending := m.pendingLocked()
@@ -612,10 +666,6 @@ func (m *Manager) Subscribers() []Subscriber {
 		}
 		out = append(out, s)
 	}
-	m.mu.Unlock()
-	slices.SortFunc(out, func(a, b Subscriber) int {
-		return cmp.Or(cmp.Compare(a.Service, b.Service), cmp.Compare(a.Instance, b.Instance), a.ConnectedAt.Compare(b.ConnectedAt))
-	})
 	return out
 }
 
@@ -634,13 +684,15 @@ func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 	ch := make(chan ActiveSet, 1)
 	sub.since = time.Now()
 	sub.ConnectedAt = sub.since.UTC()
-	m.mu.Lock()
-	m.subs[ch] = sub
-	ch <- m.activeLocked()
-	m.mu.Unlock()
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.subs[ch] = sub
+		ch <- m.activeLocked()
+	}()
 	return ch, func() {
 		m.mu.Lock()
-		delete(m.subs, ch)
+		delete(m.subs, ch) // a delete: cannot panic
 		m.mu.Unlock()
 	}
 }
@@ -648,11 +700,11 @@ func (m *Manager) subscribe(sub Subscriber) (chan ActiveSet, func()) {
 // delivered records that the follower behind ch was sent generation gen.
 func (m *Manager) delivered(ch chan ActiveSet, gen uint64) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if s, ok := m.subs[ch]; ok && gen > s.Generation {
 		s.Generation = gen
 		m.subs[ch] = s
 	}
-	m.mu.Unlock()
 }
 
 func (m *Manager) broadcastLocked() {

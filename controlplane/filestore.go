@@ -14,8 +14,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
+	"github.com/maheshpaliwal/agentic-test-session/internal/gosafe"
 	"github.com/maheshpaliwal/agentic-test-session/internal/mapx"
 )
 
@@ -126,6 +129,13 @@ type FileStore struct {
 	// ops are the calls that change the archive file through its handle.
 	// Tests replace them to make them fail.
 	ops archOps
+
+	// panicCount counts the panics of the store's goroutines, nil until a
+	// Manager sets it (see countPanics).
+	panicCount atomic.Pointer[func(goroutine string)]
+	// watch is told while a compaction has panicked and none went through
+	// since; nil (which watches nothing) until a Manager sets it.
+	watch atomic.Pointer[gosafe.Watch]
 
 	// testHookListed, if set, runs in list between taking the entries from
 	// the index and reading their lines.
@@ -258,14 +268,14 @@ func (c *archCache) put(id string, gen uint64, off int64, s Session, evict bool)
 // drop removes the entry of id, if there is one.
 func (c *archCache) drop(id string) {
 	c.mu.Lock()
-	delete(c.m, id)
+	delete(c.m, id) // a delete: cannot panic
 	c.mu.Unlock()
 }
 
 // reset removes every entry.
 func (c *archCache) reset() {
 	c.mu.Lock()
-	clear(c.m)
+	clear(c.m) // a clear: cannot panic
 	c.mu.Unlock()
 }
 
@@ -703,7 +713,7 @@ func (f *FileStore) archiveForAppend() (*os.File, error) {
 		return nil, err
 	}
 	f.amu.Lock()
-	f.ar = fh
+	f.ar = fh // one assignment: cannot panic
 	f.amu.Unlock()
 	f.archSize = st.Size()
 	return fh, nil
@@ -714,7 +724,7 @@ func (f *FileStore) archiveForAppend() (*os.File, error) {
 // eviction or removed when the store is opened. Caller holds f.wmu.
 func (f *FileStore) removeArchive() {
 	f.amu.Lock()
-	ar := f.ar
+	ar := f.ar // assignments and a clear of the cache: cannot panic
 	f.ar = nil
 	f.archGen++ // the next archive file starts at offset 0 again
 	f.cache.reset()
@@ -730,7 +740,7 @@ func (f *FileStore) removeArchive() {
 // syncArchive fsyncs the archive file, if there is one.
 func (f *FileStore) syncArchive() error {
 	f.amu.RLock()
-	ar := f.ar
+	ar := f.ar // one read: cannot panic
 	f.amu.RUnlock()
 	if ar == nil {
 		return nil
@@ -852,7 +862,7 @@ func (f *FileStore) Evict(ids ...string) {
 	// for the next snapshot.
 	rearchived := false
 	f.amu.RLock()
-	for _, s := range moved {
+	for _, s := range moved { // map reads only: cannot panic
 		if _, ok := f.arch[s.ID]; ok {
 			rearchived = true
 			break
@@ -1015,7 +1025,7 @@ func (f *FileStore) Delete(id string) error {
 	}
 	_, hot := f.MemStore.Get(id)
 	f.amu.RLock()
-	ref, archived := f.arch[id]
+	ref, archived := f.arch[id] // one map read: cannot panic
 	f.amu.RUnlock()
 	if !hot && !archived {
 		return nil
@@ -1026,6 +1036,7 @@ func (f *FileStore) Delete(id string) error {
 		return err
 	}
 	if archived {
+		// Two deletes and a length under amu: cannot panic.
 		f.amu.Lock()
 		delete(f.arch, id) // first: readers must not be sent to a line that is being overwritten
 		f.cache.drop(id)   // under amu: list caches a line only while the index points at it
@@ -1037,7 +1048,7 @@ func (f *FileStore) Delete(id string) error {
 			// bring this older archived record back as the session's current
 			// state.
 			f.amu.Lock()
-			f.arch[id] = ref
+			f.arch[id] = ref // the index held id a moment ago, so it is not nil: cannot panic
 			f.amu.Unlock()
 			return err
 		}
@@ -1152,30 +1163,39 @@ type archEntry struct {
 // asked first about an archived session and must accept every index entry
 // whose session keep would accept; it saves reading the lines of the others.
 func (f *FileStore) list(keepRef func(archRef) bool, keep func(s Session, hot bool) bool) ([]Session, int) {
-	f.MemStore.mu.RLock()
-	f.amu.RLock()
-	n := len(f.m)
-	if keepRef == nil {
-		n += len(f.arch)
-	}
-	out := make([]Session, 0, n)
-	for _, s := range f.m {
-		if keep(s, true) {
-			out = append(out, s)
+	var (
+		out      []Session
+		archived []archEntry
+		ar       *os.File
+		gen      uint64
+	)
+	// keep and keepRef are the caller's: the unlocks are deferred, or a panic
+	// of one would leave every writer of the store waiting.
+	func() {
+		f.MemStore.mu.RLock()
+		defer f.MemStore.mu.RUnlock()
+		f.amu.RLock()
+		defer f.amu.RUnlock()
+		n := len(f.m)
+		if keepRef == nil {
+			n += len(f.arch)
 		}
-	}
-	var archived []archEntry
-	if keepRef == nil {
-		archived = make([]archEntry, 0, len(f.arch))
-	}
-	for id, r := range f.arch {
-		if _, hot := f.m[id]; !hot && (keepRef == nil || keepRef(r)) {
-			archived = append(archived, archEntry{id, r})
+		out = make([]Session, 0, n)
+		for _, s := range f.m {
+			if keep(s, true) {
+				out = append(out, s)
+			}
 		}
-	}
-	ar, gen := f.ar, f.archGen
-	f.amu.RUnlock()
-	f.MemStore.mu.RUnlock()
+		if keepRef == nil {
+			archived = make([]archEntry, 0, len(f.arch))
+		}
+		for id, r := range f.arch {
+			if _, hot := f.m[id]; !hot && (keepRef == nil || keepRef(r)) {
+				archived = append(archived, archEntry{id, r})
+			}
+		}
+		ar, gen = f.ar, f.archGen
+	}()
 
 	if f.testHookListed != nil {
 		f.testHookListed()
@@ -1221,11 +1241,13 @@ func (f *FileStore) readArchived(entries []archEntry, ar *os.File, gen uint64, e
 				// Only while the index still points at this line: Delete and
 				// Evict have removed the entry of a line they replaced, and it
 				// must not come back.
-				f.amu.RLock()
-				if r, ok := f.arch[e.id]; ok && r.off == e.ref.off && f.archGen == gen && f.ar != nil {
-					f.cache.put(e.id, gen, e.ref.off, s, evict)
-				}
-				f.amu.RUnlock()
+				func() {
+					f.amu.RLock()
+					defer f.amu.RUnlock()
+					if r, ok := f.arch[e.id]; ok && r.off == e.ref.off && f.archGen == gen && f.ar != nil {
+						f.cache.put(e.id, gen, e.ref.off, s, evict)
+					}
+				}()
 			} else if s, hot = f.MemStore.Get(e.id); !hot {
 				// Look it up again, under the lock: no error and no session
 				// means it was deleted meanwhile. An error means the store
@@ -1301,32 +1323,39 @@ func (f *FileStore) ListPage(q PageQuery) (Page, error) {
 			cands = append(cands, c)
 		}
 	}
-	f.MemStore.mu.RLock()
-	f.amu.RLock()
-	for _, s := range f.m {
-		if q.matches(s) {
-			consider(pageCand{pageKey: keyOf(s), hot: true})
-			if !exact {
-				hot[s.ID] = s
+	var (
+		ar  *os.File
+		gen uint64
+	)
+	// Matching and sorting run under the locks: the unlocks are deferred.
+	func() {
+		f.MemStore.mu.RLock()
+		defer f.MemStore.mu.RUnlock()
+		f.amu.RLock()
+		defer f.amu.RUnlock()
+		for _, s := range f.m {
+			if q.matches(s) {
+				consider(pageCand{pageKey: keyOf(s), hot: true})
+				if !exact {
+					hot[s.ID] = s
+				}
 			}
 		}
-	}
-	for id, r := range f.arch {
-		if _, isHot := f.m[id]; !isHot && keepRef(r) {
-			consider(pageCand{pageKey: pageKey{r.created, id}, ref: r})
-		}
-	}
-	if exact {
-		cands = top.sorted()
-		for _, c := range cands {
-			if c.hot {
-				hot[c.id] = f.m[c.id]
+		for id, r := range f.arch {
+			if _, isHot := f.m[id]; !isHot && keepRef(r) {
+				consider(pageCand{pageKey: pageKey{r.created, id}, ref: r})
 			}
 		}
-	}
-	ar, gen := f.ar, f.archGen
-	f.amu.RUnlock()
-	f.MemStore.mu.RUnlock()
+		if exact {
+			cands = top.sorted()
+			for _, c := range cands {
+				if c.hot {
+					hot[c.id] = f.m[c.id]
+				}
+			}
+		}
+		ar, gen = f.ar, f.archGen
+	}()
 
 	if f.testHookListed != nil {
 		f.testHookListed()
@@ -1399,7 +1428,7 @@ func (f *FileStore) Compact() error {
 func (f *FileStore) lockIdle() {
 	for {
 		f.wmu.Lock()
-		running := f.compacting
+		running := f.compacting // one read: cannot panic
 		if running == nil {
 			return
 		}
@@ -1428,7 +1457,7 @@ func (f *FileStore) Close() error {
 	}
 	f.closed = true
 	f.amu.Lock()
-	ar := f.ar
+	ar := f.ar // assignments and a clear of the cache: cannot panic
 	f.ar = nil
 	f.cache.reset() // no archived session is served from now on
 	f.amu.Unlock()
@@ -1461,6 +1490,7 @@ func (f *FileStore) compactLocked() error {
 	}
 	f.journalSize = 0
 	f.compactAt = max(f.compactMin, f.snapSize)
+	f.watch.Load().Release("compaction") // one went through
 	return nil
 }
 
@@ -1510,13 +1540,65 @@ func (f *FileStore) maybeCompactLocked() {
 		// Copy the hot set now, in step with the journal; marshalling and
 		// writing it happens without the lock.
 		f.MemStore.mu.RLock()
-		hot := mapx.Values(f.m)
+		hot := mapx.Values(f.m) // a copy of the values: cannot panic
 		f.MemStore.mu.RUnlock()
 		done := make(chan struct{})
 		f.compacting = done
-		go f.compactInBackground(hot, f.journalSize, f.archiveUnsynced, done)
+		upto, syncArchive := f.journalSize, f.archiveUnsynced
+		// One compaction: not run again by the helper, the journal growing
+		// starts the next. After a panic the bookkeeping comes first: a
+		// logger that panics must not leave Close waiting for the compaction.
+		//
+		// It has no Watch for the same reason: the helper never waits for its
+		// restart. Its OnPanic says that the service is degraded instead (see
+		// compactionDegraded). Its panics do not count against the panic
+		// budget, which ends the service: a compaction that fails loses
+		// nothing (the journal is whole, and only longer), and the store
+		// compacts when it is opened, so a service ended for it would meet the
+		// same panic before it could serve at all.
+		gosafe.Go(gosafe.Options{Name: "compaction", OnPanic: func(p gosafe.Panic) {
+			defer gosafe.Slog(f.log, f.countPanic)(p)
+			defer f.watch.Load().Hold("compaction", time.Now().Add(compactionDegraded))
+			f.compactionPanicked(done, syncArchive)
+		}}, func() { f.compactInBackground(hot, upto, syncArchive, done) })
 		f.archiveUnsynced = false
 	}
+}
+
+// countPanics implements panicCounter: the Manager counts the panics of a
+// compaction in tsession_controlplane_goroutine_panics_total.
+func (f *FileStore) countPanics(count func(goroutine string), watch *gosafe.Watch) {
+	f.panicCount.Store(&count)
+	f.watch.Store(watch)
+}
+
+// compactionDegraded is how long a control plane is degraded after a
+// compaction panicked, unless one goes through before: the longest a loop
+// waits for its restart. The next compaction has no time of its own, it
+// waits for the journal to grow, and a store that is written seldom must not
+// leave the service degraded for good: the journal is whole, and only longer.
+const compactionDegraded = gosafe.DefaultMaxBackoff
+
+func (f *FileStore) countPanic(goroutine string) {
+	if count := f.panicCount.Load(); count != nil {
+		(*count)(goroutine)
+	}
+}
+
+// compactionPanicked puts right what a compaction that panicked before its
+// last step left undone: it is over (Close waits for that), the next one
+// waits for the journal to grow, and the archive is still to be synced. The
+// journal was not cut, so nothing is lost.
+func (f *FileStore) compactionPanicked(done chan struct{}, syncArchive bool) {
+	f.wmu.Lock()
+	defer f.wmu.Unlock()
+	if f.compacting != done {
+		return // it panicked in its last step, which had ended it already
+	}
+	f.compacting = nil
+	close(done)
+	f.compactAt = f.journalSize + max(f.compactMin, f.snapSize)
+	f.archiveUnsynced = f.archiveUnsynced || syncArchive
 }
 
 // compactInBackground writes hot, the hot set as of journal offset upto, as
@@ -1534,6 +1616,7 @@ func (f *FileStore) compactInBackground(hot []Session, upto int64, syncArchive b
 		data []byte
 		err  error
 	)
+	faultpoint.Hit("compaction.write")
 	if syncArchive {
 		err = f.syncArchive()
 	}
@@ -1551,6 +1634,7 @@ func (f *FileStore) compactInBackground(hot []Session, upto int64, syncArchive b
 	// Whatever happens next, wait for the journal to grow again before the
 	// next attempt.
 	f.compactAt = f.journalSize + max(f.compactMin, f.snapSize)
+	faultpoint.Hit("compaction.finish")
 	if err != nil {
 		f.archiveUnsynced = f.archiveUnsynced || syncArchive
 		return
@@ -1576,6 +1660,7 @@ func (f *FileStore) compactInBackground(hot []Session, upto int64, syncArchive b
 	}
 	f.journalSize = int64(len(rest))
 	f.compactAt = f.journalSize + max(f.compactMin, f.snapSize)
+	f.watch.Load().Release("compaction") // one went through
 }
 
 // writeTemp writes data to a new temp file next to the store, fsyncs it and

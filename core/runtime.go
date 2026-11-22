@@ -2,9 +2,11 @@ package core
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
+	mrand "math/rand/v2"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -143,11 +145,30 @@ func randHex(nBytes int) string {
 	return hex.EncodeToString(b)
 }
 
+// Trace and span ids have to be unlikely to repeat; they are not secrets,
+// and nothing is protected by one being hard to guess. They come from the
+// runtime's generator (math/rand/v2: seeded from the system once, a state per
+// thread, no lock), where they came from the system's source of randomness
+// at the price of a system call per span.
+
 // NewTraceID returns a random 32-hex-digit trace id (W3C trace-id size).
-func NewTraceID() string { return randHex(16) }
+func NewTraceID() string {
+	var b [16]byte
+	binary.LittleEndian.PutUint64(b[:8], mrand.Uint64())
+	binary.LittleEndian.PutUint64(b[8:], mrand.Uint64())
+	var out [32]byte
+	hex.Encode(out[:], b[:])
+	return string(out[:])
+}
 
 // NewSpanID returns a random 16-hex-digit span id (W3C parent-id size).
-func NewSpanID() string { return randHex(8) }
+func NewSpanID() string {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], mrand.Uint64())
+	var out [16]byte
+	hex.Encode(out[:], b[:])
+	return string(out[:])
+}
 
 var (
 	hlcMu   sync.Mutex

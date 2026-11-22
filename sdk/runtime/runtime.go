@@ -81,6 +81,11 @@ func Start(cfg Config) error {
 	cfg.ControlPlaneURL = cmp.Or(cfg.ControlPlaneURL, "http://127.0.0.1:7070")
 	cfg.CollectorURL = cmp.Or(cfg.CollectorURL, "http://127.0.0.1:7071")
 	cfg.Exporter.CollectorURL = cfg.CollectorURL
+	if cfg.Exporter.ReachCheck == 0 {
+		// A collector URL that leads nowhere is seen before the first event:
+		// the reporter tells the control plane, and `tracectl doctor` shows it.
+		cfg.Exporter.ReachCheck = 30 * time.Second
+	}
 	if cfg.Encoder != nil {
 		cfg.Exporter.Encoder = cfg.Encoder
 	}
@@ -113,7 +118,7 @@ func Start(cfg Config) error {
 // Flush synchronously exports buffered events (bounded). No-op if not started.
 func Flush(timeout time.Duration) bool {
 	mu.Lock()
-	s := cur
+	s := cur // one read: cannot panic
 	mu.Unlock()
 	if s == nil {
 		return true
@@ -124,7 +129,7 @@ func Flush(timeout time.Duration) bool {
 // Stop flushes, shuts down background work and restores core to disabled.
 func Stop() {
 	mu.Lock()
-	s := cur
+	s := cur // a read and an assignment: cannot panic
 	cur = nil
 	mu.Unlock()
 	if s == nil {

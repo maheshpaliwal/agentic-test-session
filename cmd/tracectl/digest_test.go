@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -546,8 +547,16 @@ func TestDigestBudget(t *testing.T) {
 	for i := range sessions {
 		info, sum, tr, evs := randomSession(r, []int{0, 1, 8, 60, 300, 1200}[i%6])
 		src := newDigestSource(info, sum, tr, evs)
+		// Every third session was read from a file, and its commands name it:
+		// the longest name that is repeated, with and without quotes.
+		switch i % 6 {
+		case 2:
+			src.from = strings.Repeat("f", fromArgMax)
+		case 5:
+			src.from = strings.Repeat("f ", fromArgMax/2)
+		}
 		for _, budget := range []int{digestMinBytes, digestMinBytes + r.IntN(4000), 8 << 10, digestDefaultBytes, 64 << 10, 4 << 20} {
-			what := fmt.Sprintf("session %d (%d events, %d failures), budget %d", i, len(evs), len(sum.Failures), budget)
+			what := fmt.Sprintf("session %d (%d events, %d failures, from %.3q), budget %d", i, len(evs), len(sum.Failures), src.from, budget)
 			md, err := src.fit(digestMarkdown{}, budget)
 			if err != nil || len(md) > budget {
 				panic(fmt.Sprintf("%s: markdown is %d bytes: %v", what, len(md), err))
@@ -558,6 +567,16 @@ func TestDigestBudget(t *testing.T) {
 				panic(fmt.Sprintf("%s: JSON is %d bytes: %v", what, len(js), err))
 			}
 			d := checkDigestJSON(t, string(js))
+			if src.from != "" {
+				for _, c := range d.DrillDown {
+					if !strings.HasPrefix(c.Command, "tracectl --from ") || strings.Contains(c.Command, info.ID) {
+						panic(fmt.Sprintf("%s: the command %q does not read the file", what, c.Command))
+					}
+				}
+				if budget == 4<<20 && !strings.Contains(d.DrillDown[0].Command, strings.TrimSpace(src.from)) {
+					panic(fmt.Sprintf("%s: with room for everything the file is not named: %q", what, d.DrillDown[0].Command))
+				}
+			}
 
 			status := map[bool]string{true: "failed", false: d.Verdict.Status}[len(sum.Failures) > 0]
 			if d.Verdict.Status != status || d.Counts.Failures != len(sum.Failures) || d.Counts.Events != len(evs) || d.MaxBytes != budget ||
@@ -575,7 +594,8 @@ func TestDigestBudget(t *testing.T) {
 			sections := map[string]bool{}
 			for _, o := range d.Omitted {
 				sections[o.Section] = true
-				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") || !strings.Contains(o.Get[0], reportID) {
+				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") ||
+					strings.Contains(o.Get[0], reportID) != (src.from == "") || strings.HasPrefix(o.Get[0], "tracectl --from ") != (src.from != "") {
 					panic(fmt.Sprintf("%s: omitted entry %+v", what, o))
 				}
 			}
@@ -695,13 +715,17 @@ func TestDigestDeterministic(t *testing.T) {
 func TestDigestLive(t *testing.T) {
 	env := failingEnv(t)
 	env.info.State, env.sum.Sealed = "ACTIVE", false
+	// The gate judges what has arrived and says, on standard error, that this is all it can do.
 	code, out, e := env.tc("digest", reportID, "--fail-on-incomplete")
-	if code != 0 || e != "" {
+	if code != 0 || !strings.Contains(e, "note: the session is still running (ACTIVE)") {
 		panic(fmt.Sprintf("live digest: %d %s", code, e))
+	}
+	if code, _, e := env.tc("digest", reportID); code != 0 || e != "" {
+		panic(fmt.Sprintf("live digest without a gate: %d %s", code, e))
 	}
 	wantAll(t, checkDigestMarkdown(t, out)["### Verdict"],
 		"**Failed**: 3 failed events. **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.\n",
-		"- state: ACTIVE; recording: complete\n")
+		"- state: ACTIVE; recording: not yet known (the session is still running)\n")
 	_, out, _ = env.tc("digest", reportID, "--json")
 	if d := checkDigestJSON(t, out); !d.Session.Live || d.Session.State != "ACTIVE" {
 		panic(fmt.Sprintf("live digest: %+v", d.Session))
@@ -785,9 +809,56 @@ func TestCLIRunDigest(t *testing.T) {
 	}{
 		{[]string{"--digest", "-", "--", "true"}, "--digest needs a file"},
 		{[]string{"--digest", "no/such/dir/d.md", "--", "true"}, "its directory does not exist"},
+		// As digest --max-bytes, and before the command runs.
+		{[]string{"--digest", md, "--max-bytes", "100", "--", "true"}, "--max-bytes must be at least 4096"},
+		{[]string{"--digest", md, "--max-bytes", "-1", "--", "true"}, "--max-bytes must be at least 4096"},
+		{[]string{"--max-bytes", "8192", "--", "true"}, "--max-bytes needs --digest FILE"},
 	} {
 		if code, _, e := env.tc(append([]string{"run"}, tt.flags...)...); code != 2 || !strings.Contains(e, tt.want) {
 			t.Errorf("%v: exit %d, stderr %q; want exit 2 and %q", tt.flags, code, e, tt.want)
+		}
+	}
+}
+
+// run --digest --max-bytes bounds the file as digest --max-bytes bounds its
+// output; without it the digest has the default budget.
+func TestCLIRunDigestMaxBytes(t *testing.T) {
+	var evs []core.Event
+	for i := range 200 { // two hundred different failures: more than 4096 bytes hold
+		evs = append(evs, core.Event{Seq: uint64(i + 1), Service: "api", Kind: core.KindAPIIn,
+			Name: fmt.Sprintf("GET /orders/%c%c%c?%s", 'a'+i/26, 'a'+i%26, 'a'+i%7, strings.Repeat("q", 40)), Err: "HTTP 500 " + strings.Repeat("e", 80)})
+	}
+	env := newRunEnv(t, evs...)
+	dir := t.TempDir()
+	size := func(name string, flags ...string) (int, string) {
+		path := filepath.Join(dir, name)
+		if code, _, e := env.run("ok", append([]string{"--digest", path}, flags...)); code != 0 {
+			panic(fmt.Sprintf("run %v: exit %d\n%s", flags, code, e))
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			panic(err)
+		}
+		return len(b), string(b)
+	}
+	for _, name := range []string{"d.md", "d.json"} {
+		def, _ := size(name)
+		if def <= digestMinBytes || def > digestDefaultBytes {
+			panic(fmt.Sprintf("%s: the default digest of the session is %d bytes: the test needs one between %d and %d", name, def, digestMinBytes, digestDefaultBytes))
+		}
+		small, out := size(name, "--max-bytes", "4096")
+		if small > 4096 || small == 0 {
+			t.Errorf("%s: --max-bytes 4096 wrote %d bytes", name, small)
+		}
+		if name == "d.json" {
+			if d := checkDigestJSON(t, out); d.MaxBytes != 4096 || len(d.Omitted) == 0 || d.Counts.Failures != 200 {
+				t.Errorf("--max-bytes 4096: max_bytes %d, %d omitted, %d failures counted", d.MaxBytes, len(d.Omitted), d.Counts.Failures)
+			}
+		} else if sec := checkDigestMarkdown(t, out); !strings.Contains(sec["### Omitted"], "distinct failures are not listed") {
+			t.Errorf("--max-bytes 4096: the digest does not say what it left out:\n%s", out)
+		}
+		if big, _ := size(name, "--max-bytes", "400000"); big < def {
+			t.Errorf("%s: --max-bytes 400000 wrote %d bytes, the default %d", name, big, def)
 		}
 	}
 }
@@ -876,5 +947,240 @@ func TestDigestTreeOutcomes(t *testing.T) {
 	}
 	if codes != 1 || flags != 1 {
 		t.Errorf("JSON tree: %d lines with code NotFound, %d with the flag; want one each", codes, flags)
+	}
+}
+
+func TestOutcomeCode(t *testing.T) {
+	resp := func(s string) core.PayloadRef { return core.PayloadRef{Inline: json.RawMessage(s)} }
+	for _, tc := range []struct {
+		name string
+		ev   core.Event
+		want string
+	}{
+		{"http ok", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":200}`)}, ""},
+		{"http refused", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":404}`)}, "HTTP 404"},
+		{"http failed downstream", core.Event{Kind: core.KindAPIOut, Resp: resp(`{"status":503}`)}, "HTTP 503"},
+		{"no response", core.Event{Kind: core.KindAPIOut}, ""},
+		{"a status that is data of another kind", core.Event{Kind: core.KindDBRead, Resp: resp(`{"status":404}`)}, ""},
+		{"a response that is not an object", core.Event{Kind: core.KindAPIIn, Resp: resp(`"x"`)}, ""},
+		{"grpc", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "NotFound"}}, "NotFound"},
+		{"grpc ok", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}}, ""},
+		{"grpc ok whose message has a status field", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "OK"}, Resp: resp(`{"sku":"A","status":500}`)}, ""},
+		{"grpc failed whose message has a status field", core.Event{Kind: core.KindAPIOut, Attrs: map[string]string{"grpc.code": "NotFound"}, Resp: resp(`{"status":500}`)}, "NotFound"},
+		{"the attribute, with a response that was cut", core.Event{Kind: core.KindAPIIn, Attrs: map[string]string{"http.status": "404"}, Resp: resp(`"{\"status\":404,\"body\":\"xxx…"`)}, "HTTP 404"},
+		{"a status that is not a number", core.Event{Kind: core.KindAPIIn, Resp: resp(`{"status":"404"}`)}, ""},
+	} {
+		if got := outcomeCode(&tc.ev); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDigestLinksARollbackToTheFailureOfItsTransaction(t *testing.T) {
+	no := false
+	rolled := []core.Mutation{{Store: "postgres", Entity: "orders", Op: "insert", Effective: &no}}
+	src := &digestSource{}
+	src.buildEntities([]core.Event{ // not in the order of seq, as a store may return them
+		{Seq: 5, TxID: "tx_1", Kind: core.KindDBWrite, Err: "aborted"},
+		{Seq: 1, TxID: "tx_1", Kind: core.KindDBRead, Err: "handled: the application went on"},
+		{Seq: 2, TxID: "tx_1", Kind: core.KindDBWrite, Mutations: rolled},
+		{Seq: 3, TxID: "tx_1", Kind: core.KindDBWrite, Err: "constraint"},
+		{Seq: 6, TxID: "tx_2", Kind: core.KindDBWrite, Mutations: rolled}, // rolled back by the application: nothing failed
+		{Seq: 7, Kind: core.KindDBWrite, Mutations: rolled},               // no transaction id
+		{Seq: 8, Kind: core.KindDBWrite, Err: "outside any transaction"},
+	})
+	got := map[uint64]uint64{}
+	for _, e := range src.entities {
+		for _, c := range e.Changes {
+			got[c.Seq] = c.RolledBackBy
+		}
+	}
+	// #2: the first failure after it (#3), not the one before it (#1) nor the later one (#5).
+	if want := map[uint64]uint64{2: 3, 6: 0, 7: 0}; !maps.Equal(got, want) {
+		panic(fmt.Sprintf("rolled_back_by by seq: got %v, want %v", got, want))
+	}
+}
+
+func TestDigestSaysThatDrillDownNeedsTheURLFlags(t *testing.T) {
+	env := failingEnv(t)
+	_, out, _ := env.tc("digest", reportID)
+	if !strings.Contains(checkDigestMarkdown(t, out)["### Drill down"], "- "+drillDownNote+"\n") {
+		panic("the markdown digest read with --cp lacks the note:\n" + out)
+	}
+	_, out, _ = env.tc("digest", reportID, "--json")
+	if !strings.Contains(out, `"drill_down_note"`) {
+		panic("the JSON digest read with --cp lacks the note")
+	}
+}
+
+// Failures that are merged lose the values normalising takes out; the entry
+// keeps the first one's error as recorded, where the host or the key is.
+func TestDigestKeepsTheFirstErrorOfMergedFailures(t *testing.T) {
+	env := newReportEnv(t,
+		core.Event{Seq: 1, Service: "front", Kind: core.KindAPIOut, Name: "POST /work", StartNs: 1, EndNs: 2,
+			Err: "dial tcp 127.0.0.1:18282: connect: connection refused"},
+		core.Event{Seq: 2, Service: "front", Kind: core.KindAPIOut, Name: "POST /work", StartNs: 3, EndNs: 4,
+			Err: "dial tcp 127.0.0.1:18283: connect: connection refused"},
+		core.Event{Seq: 3, Service: "front", Kind: core.KindAPIOut, Name: "GET /same", StartNs: 5, EndNs: 6, Err: "refused"},
+		core.Event{Seq: 4, Service: "front", Kind: core.KindAPIOut, Name: "GET /same", StartNs: 7, EndNs: 8, Err: "refused"})
+	_, out, _ := env.tc("digest", reportID, "--json")
+	d := checkDigestJSON(t, out)
+	if len(d.Failures) != 2 || d.Failures[0].Count != 2 || d.Failures[0].FirstError != "dial tcp 127.0.0.1:18282: connect: connection refused" ||
+		d.Failures[0].Error == d.Failures[0].FirstError {
+		panic(fmt.Sprintf("merged with different values: %+v", d.Failures))
+	}
+	// Nothing was taken out of the second pair's error: it is not repeated.
+	if d.Failures[1].Count != 2 || d.Failures[1].FirstError != "" {
+		panic(fmt.Sprintf("merged with equal text: %+v", d.Failures[1]))
+	}
+	_, md, _ := env.tc("digest", reportID)
+	wantAll(t, checkDigestMarkdown(t, md)["### Failures"], `(the first: "dial tcp 127.0.0.1:18282: connect: connection refused")`)
+}
+
+// What the digest prints of a rollback, of the URL flags and of an empty
+// session, each pinned where a review found the code could be removed
+// without a test noticing.
+func TestDigestRollbackTextAndURLNote(t *testing.T) {
+	no := false
+	env := newReportEnv(t,
+		core.Event{Seq: 1, Service: "api", Kind: core.KindDBWrite, Name: "INSERT INTO ledger", TxID: "tx_1", StartNs: 1, EndNs: 2,
+			Mutations: []core.Mutation{{Store: "postgres", Entity: "ledger", Op: "insert", Effective: &no}}},
+		core.Event{Seq: 2, Service: "api", Kind: core.KindDBWrite, Name: "UPDATE customers", TxID: "tx_1", StartNs: 3, EndNs: 4, Err: "check constraint"})
+	_, md, _ := env.tc("digest", reportID)
+	sec := checkDigestMarkdown(t, md)
+	wantAll(t, sec["### Mutations"], "#1 insert ROLLED BACK (a later statement of its transaction failed: #2)")
+	wantAll(t, sec["### Drill down"], "- "+drillDownNote+"\n")
+
+	// Either URL flag alone is a reason for the note; neither is not. The environment gives the addresses
+	// here, as it does for the commands the digest names.
+	t.Setenv("TSESSION_CONTROLPLANE_URL", env.url)
+	t.Setenv("TSESSION_COLLECTOR_URL", env.url)
+	for _, tc := range []struct {
+		flags []string
+		note  bool
+	}{{nil, false}, {[]string{"--cp", env.url}, true}, {[]string{"--collector", env.url}, true}} {
+		var out, errb bytes.Buffer
+		if code := run(append(tc.flags, "digest", reportID), &out, &errb); code != 0 {
+			panic(fmt.Sprintf("%v: exit %d: %s", tc.flags, code, errb.String()))
+		}
+		if got := strings.Contains(out.String(), drillDownNote); got != tc.note {
+			t.Errorf("flags %v: the note is printed: %v, want %v", tc.flags, got, tc.note)
+		}
+	}
+}
+
+func TestSummaryOfAnEmptySessionSaysSo(t *testing.T) {
+	env := newReportEnv(t)
+	_, out, _ := env.tc("summary", reportID)
+	if !strings.Contains(out, "events     0: the session recorded nothing, so nothing was checked (see tracectl doctor)\n") {
+		panic("summary of an empty session:\n" + out)
+	}
+}
+
+// The first error as recorded is detail: the shorter levels of a failure
+// entry do not carry it.
+func TestFirstErrorIsLeftOutAtTheShorterLevels(t *testing.T) {
+	f := dFailure{Seq: 1, Count: 2, Name: "POST /work", Error: "dial tcp ?", FirstError: "dial tcp 127.0.0.1:1", Path: []dStep{}}
+	if got := failureAt(f, detailFull); got.FirstError != f.FirstError {
+		panic(fmt.Sprintf("full detail: %q", got.FirstError))
+	}
+	for _, level := range []int{detailShort, detailLeast} {
+		if got := failureAt(f, level); got.FirstError != "" {
+			panic(fmt.Sprintf("level %d keeps %q", level, got.FirstError))
+		}
+	}
+}
+
+// run --export writes the artifact a later job reads with --from, and the
+// digest and the report of the same run name commands that read it: the
+// services of the run are gone by then.
+func TestCLIRunExport(t *testing.T) {
+	env := newRunEnv(t, failedEvents()...)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	code, _, e := env.run("ok", []string{"--export", "run.ndjson", "--digest", "digest.md", "--report", "report.md", "--fail-on-error"})
+	if code != exitCheckFailed || !strings.Contains(e, "to run.ndjson; read it with no service running: tracectl --from run.ndjson digest") {
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
+	}
+	md, err := os.ReadFile("digest.md")
+	if err != nil {
+		panic(err)
+	}
+	sec := checkDigestMarkdown(t, string(md))
+	wantAll(t, sec["### Drill down"], "`tracectl --from run.ndjson show <seq>`")
+	if strings.Contains(string(md), drillDownNote) || strings.Contains(string(md), "tracectl show "+runID) {
+		panic("the digest of a run with --export names commands that need the services:\n" + string(md))
+	}
+	rep, err := os.ReadFile("report.md")
+	if err != nil || !strings.Contains(string(rep), "`tracectl --from run.ndjson trace --errors`") {
+		panic(fmt.Sprintf("report: %v\n%s", err, rep))
+	}
+	// The file is an export: one line per event, the first with the session's verdict and how many events
+	// there are. (That --from reads an export like the live session is held by the integration tests; the
+	// events of this fixture carry no session id.)
+	raw, err := os.ReadFile("run.ndjson")
+	if err != nil || strings.Count(string(raw), "\n") != 3 || !strings.Contains(strings.SplitN(string(raw), "\n", 2)[0], `"tsession_session":{"events":3,"command_status":0,"state":"SEALED"}`) {
+		panic(fmt.Sprintf("the export: %v\n%s", err, raw))
+	}
+	for _, tt := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"--export", "-", "--", "true"}, "--export needs a file"},
+		{[]string{"--export", "no/such/dir/run.ndjson", "--", "true"}, "its directory does not exist"},
+	} {
+		if code, _, e := env.tc(append([]string{"run"}, tt.flags...)...); code != 2 || !strings.Contains(e, tt.want) {
+			t.Errorf("%v: exit %d, stderr %q; want exit 2 and %q", tt.flags, code, e, tt.want)
+		}
+	}
+}
+
+// run --export and --digest (or --report) on one file: the second would
+// overwrite the first, and the run would still say that it wrote the export.
+func TestCLIRunExportAndDigestOnOneFile(t *testing.T) {
+	env := newRunEnv(t, failedEvents()...)
+	t.Chdir(t.TempDir())
+	for _, flags := range [][]string{
+		{"--export", "x.md", "--digest", "x.md", "--", "true"},
+		{"--export", "x.md", "--report", "./x.md", "--", "true"},
+		{"--export", "x.md", "--digest", filepath.Join(mustAbs("."), "x.md"), "--", "true"},
+	} {
+		if code, _, e := env.tc(append([]string{"run"}, flags...)...); code != 2 || !strings.Contains(e, "name the same file") {
+			t.Errorf("%v: exit %d, stderr %q", flags, code, e)
+		}
+	}
+	// An export onto a file that was readable by others is private afterwards.
+	if err := os.WriteFile("run.ndjson", []byte("old\n"), 0o644); err != nil {
+		panic(err)
+	}
+	if code, _, e := env.run("ok", []string{"--export", "run.ndjson"}); code != 0 {
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
+	}
+	if st, err := os.Stat("run.ndjson"); err != nil || st.Mode().Perm() != 0o600 {
+		panic(fmt.Sprintf("the export's mode: %v %v", st.Mode().Perm(), err))
+	}
+}
+
+func mustAbs(p string) string {
+	a, err := filepath.Abs(p)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+// A digest path that is a link to the export is the export: seen when both
+// exist, before the command runs.
+func TestCLIRunExportAndDigestThroughALink(t *testing.T) {
+	env := newRunEnv(t, failedEvents()...)
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("run.ndjson", nil, 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.Symlink("run.ndjson", "link.md"); err != nil {
+		t.Skip("no symbolic links here: ", err)
+	}
+	if code, _, e := env.tc("run", "--export", "run.ndjson", "--digest", "link.md", "--", "true"); code != 2 || !strings.Contains(e, "name the same file") {
+		panic(fmt.Sprintf("exit %d, stderr %q", code, e))
 	}
 }

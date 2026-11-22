@@ -10,13 +10,17 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 
+	"github.com/maheshpaliwal/agentic-test-session/dashboard"
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 const usage = `usage: tracectl [--cp URL] [--collector URL] <command> [flags]
+       tracectl --from FILE [--from FILE]... <read command> [flags]   read an export, ask no service (see below)
 
 session lifecycle (control plane):
   (--name templates: {bind} {bind.<name>} {initiated_by} {time} {date}; with no --name the server auto-names)
@@ -38,13 +42,21 @@ session lifecycle (control plane):
 
 record a command (control plane and collector):
   run [start's session flags, except --id-only] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
-      [--fail-on-unconfirmed] [--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D]
-      -- <command> [args...]
+      [--fail-on-unconfirmed] [--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]]
+      [--export FILE] [--require-services N] [--timeout D] -- <command> [args...]
                                 start a session, run the command with the session id in $TSESSION_ID, stop
                                 the session, wait for the seal (at most --timeout, default 2m) and print the
                                 summary. The command is not run through a shell. Its stdin, stdout and stderr
                                 pass through; tracectl prints to stderr only and writes the report to FILE.
-                                --digest FILE writes what "digest" prints (JSON if FILE ends in .json).
+                                --digest FILE writes what "digest" prints (JSON if FILE ends in .json),
+                                in at most --max-bytes bytes (as digest --max-bytes; default 16384).
+                                --export FILE writes the session as "export -o FILE" does: the artifact
+                                to keep, which "tracectl --from FILE" reads with no service running. The
+                                digest and the report then name commands that read it.
+                                --require-services N: exit 3 without running the command unless N
+                                services are connected, and exit 3 after it when one of them is gone
+                                (killed, crashed): what it had not delivered is lost, and the
+                                recording can read as complete without it.
                                 The session is stopped and sealed also when the command fails.
                                 A Go test joins the session with tsessiontest.Ambient or client.AttachEnv;
                                 tsessiontest.Run still starts a session of its own per test.
@@ -112,10 +124,30 @@ session results (collector):
   doctor [--json] [--require-services N] [--require-delivery]
                                 check that the control plane and collector answer and list the
                                 services connected to the control plane; one that reports events
-                                it cannot deliver is marked. --require-delivery exits 3 on such a
-                                service, or one whose reports do not arrive: a check for DURING a
-                                run (it sees only services that report, and only running sessions)
+                                it cannot deliver is marked. --require-delivery exits 3 on a
+                                service that says it cannot reach its collector (also before a
+                                run), and during a run on one that holds events it cannot deliver
+                                or whose reports do not arrive (those two show only for the
+                                sessions running now)
   version                       print the tracectl version
+
+read an export instead of the services:
+  --from FILE                   FILE was written by "tracectl export -o FILE". No service is asked and none
+                                has to run. Works with the commands that read: digest, summary, report,
+                                events, trace, show, entities, history, diff, status, list; they print what
+                                they print for the session the file was exported from, and the --fail-on
+                                flags exit as they do for it. Any other command, or --from together with
+                                --cp or --collector, exits 2.
+                                The session need not be named: "tracectl --from run.ndjson digest",
+                                "tracectl --from run.ndjson show 17". It may be, by its id, its name or
+                                the file's name without the extension (run); a session the files do not
+                                hold is an error. --from goes before the command. FILE may be gzip'ed,
+                                and "-" reads standard input. Repeat --from to read several files: "list" lists them,
+                                "tracectl --from a.ndjson --from b.ndjson diff" compares a (baseline) with
+                                b (candidate), and any other command then has to name its session.
+                                A file that is missing, empty, not an export or cut short is refused
+                                (exit 1). A session exported while it ran is shown as running. The
+                                commands a digest or a report names carry --from FILE.
 
 exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
              3 a --fail-on-* check failed; run: see above
@@ -138,6 +170,9 @@ type cli struct {
 	stdin  io.Reader // read by the command of run only
 	stdout io.Writer
 	stderr io.Writer
+	// files are the exports of --from, in the order given: the commands then
+	// read these and ask no service.
+	files []dashboard.OpenedFile
 }
 
 // commands maps a command name to its implementation. Each receives the
@@ -178,6 +213,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	root.SetOutput(stderr)
 	cp := root.String("cp", "", "control plane URL")
 	col := root.String("collector", "", "collector URL")
+	var from fromFlag
+	root.Var(&from, "from", "read this export file instead of asking the services (repeatable)")
 	root.Usage = func() { fmt.Fprintln(stderr, usage) }
 	if err := root.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -190,17 +227,55 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name, rest := root.Arg(0), root.Args()[1:]
+	if name != "version" && len(from) == 0 {
+		for _, u := range []struct{ flag, env, value string }{{"--cp", "TSESSION_CONTROLPLANE_URL", *cp}, {"--collector", "TSESSION_COLLECTOR_URL", *col}} {
+			from, v := u.flag, u.value
+			if v == "" {
+				from, v = "$"+u.env, os.Getenv(u.env)
+			}
+			if v != "" && !strings.Contains(v, "://") {
+				fmt.Fprintf(stderr, "tracectl: %s %q is not a URL: it needs a scheme, as in http://%s\n", from, v, v)
+				return 2
+			}
+		}
+	}
 	cmd, ok := commands[name]
 	if !ok {
-		fmt.Fprintln(stderr, usage)
-		fmt.Fprintf(stderr, "tracectl: unknown command %q\n", name)
+		fmt.Fprintf(stderr, "tracectl: unknown command %q; run 'tracectl --help' for the list of commands\n", name)
 		return 2
+	}
+	// --from is a flag of tracectl, not of a command: after the command it would be an unknown flag there.
+	// (What follows "--" belongs to the command that run runs.)
+	for _, a := range rest {
+		if a == "--" {
+			break
+		}
+		if a == "--from" || a == "-from" || strings.HasPrefix(a, "--from=") || strings.HasPrefix(a, "-from=") {
+			fmt.Fprintf(stderr, "tracectl: --from goes before the command: tracectl --from FILE %s ...\n", name)
+			return 2
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	c := &cli{opts: client.Options{BaseURL: *cp, CollectorURL: *col, InitiatedBy: "api"}, stdin: os.Stdin, stdout: stdout, stderr: stderr}
-	err := cmd(c, ctx, rest)
+	var err error
+	if len(from) > 0 {
+		// Before a file is opened: what cannot work says so, whatever the file.
+		switch {
+		case *cp != "" || *col != "":
+			fmt.Fprintln(stderr, "tracectl: --from reads a file and asks no service: it cannot be combined with --cp or --collector")
+			return 2
+		case !slices.Contains(fromCommands, name):
+			fmt.Fprintf(stderr, "tracectl: %s does not work with --from: a file can be read, not started, stopped or changed, and no service is asked; the commands that read it are %s\n",
+				name, strings.Join(fromCommands, ", "))
+			return 2
+		}
+		err = c.openFrom(from)
+	}
+	if err == nil {
+		err = cmd(c, ctx, rest)
+	}
 	var ce checkError
 	var ee exitError
 	switch {
@@ -238,9 +313,9 @@ func (c *cli) flags(name string) *flag.FlagSet {
 // session parses fs with exactly one positional argument (a session id or
 // name) and resolves it.
 func (c *cli) session(ctx context.Context, fs *flag.FlagSet, args []string) (*client.Session, error) {
-	pos, err := parseArgs(fs, args, 1, "<id|name>")
+	pos, err := c.parseArgs(fs, args, 1, "<id|name>")
 	if err != nil {
 		return nil, err
 	}
-	return resolve(ctx, c.opts, pos[0])
+	return c.resolve(ctx, pos[0])
 }

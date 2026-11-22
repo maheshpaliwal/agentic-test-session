@@ -45,28 +45,52 @@ func (c mdCarrier) Has(key string) bool { return len(c.md.Get(strings.ToLower(ke
 
 func (c mdCarrier) Set(key, val string) { c.md.Set(strings.ToLower(key), val) }
 
-// mdAttrs adapts incoming metadata to core.Attributes for session bindings:
-// header bindings match metadata keys, jwt_claim reads the (UNVERIFIED) bearer
-// token in the authorization metadata. Cookie and query sources do not exist
-// in gRPC and never match. Lookups are lazy: nothing is read unless an active
-// binding asks for the key.
-type mdAttrs struct{ md metadata.MD }
+// inMD reads the incoming metadata of ctx key by key. Unlike
+// metadata.FromIncomingContext it does not copy the whole of it: a call that
+// carries no session header, which is every call outside a session, costs one
+// lookup.
+type inMD struct{ ctx context.Context }
 
-func (a mdAttrs) Get(source, name string) string {
-	switch source {
-	case core.SourceHeader:
-		return mdCarrier(a).Get(name)
-	case core.SourceJWTClaim:
-		return core.JWTClaimFromAuthorization(mdCarrier(a).Get("authorization"), name)
+func (c *inMD) Get(key string) string {
+	if v := metadata.ValueFromIncomingContext(c.ctx, strings.ToLower(key)); len(v) > 0 {
+		return v[0]
 	}
 	return ""
 }
 
-// beginIngress starts the api.in span for an incoming call. The incoming
-// metadata is only read, so it is used as is, without a copy.
+// Has implements core.PresenceCarrier.
+func (c *inMD) Has(key string) bool {
+	return len(metadata.ValueFromIncomingContext(c.ctx, strings.ToLower(key))) > 0
+}
+
+// Set is never called: incoming metadata is only read.
+func (c *inMD) Set(string, string) {}
+
+// inAttrs adapts incoming metadata to core.Attributes for session bindings:
+// header bindings match metadata keys, jwt_claim reads the (UNVERIFIED) bearer
+// token in the authorization metadata. Cookie and query sources do not exist
+// in gRPC and never match. Lookups are lazy: nothing is read unless an active
+// binding asks for the key.
+type inAttrs struct{ c *inMD }
+
+func (a inAttrs) Get(source, name string) string {
+	switch source {
+	case core.SourceHeader:
+		return a.c.Get(name)
+	case core.SourceJWTClaim:
+		return core.JWTClaimFromAuthorization(a.c.Get("authorization"), name)
+	}
+	return ""
+}
+
+// beginIngress starts the api.in span for an incoming call. While no session
+// is active nothing is read at all.
 func beginIngress(ctx context.Context, method string) (context.Context, *core.Span) {
-	md, _ := metadata.FromIncomingContext(ctx)
-	return core.BeginIngressAttrs(ctx, core.KindAPIIn, method, mdCarrier{md}, mdAttrs{md})
+	if !core.AnyActive() {
+		return ctx, nil
+	}
+	in := &inMD{ctx}
+	return core.BeginIngressAttrs(ctx, core.KindAPIIn, method, in, inAttrs{in})
 }
 
 // toJSON renders a message as JSON (protojson for protobuf, encoding/json

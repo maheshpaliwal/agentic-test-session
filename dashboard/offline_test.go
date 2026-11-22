@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -151,6 +153,20 @@ func TestOfflineToleratesATornLastLineOnly(t *testing.T) {
 	if err != nil {
 		panic(fmt.Sprintf("an export cut mid-line must still open: %v", err))
 	}
+	// Who must not judge a part of a recording is told that it is one.
+	if fs := d.Files(); len(fs) != 1 || fs[0].Path != good || fs[0].SessionID != "ts_t" || fs[0].Truncated == nil ||
+		!strings.Contains(fs[0].Truncated.Error(), "cut.ndjson:3: not an exported event") {
+		panic(fmt.Sprintf("the files of a cut export: %+v", fs))
+	}
+	whole := writeExport(t, "whole.ndjson", core.Event{SessionID: "ts_w", Seq: 1, Kind: core.KindAPIIn})
+	if d2, err := NewOffline([]string{whole, good}); err != nil {
+		panic(err)
+	} else if fs := d2.Files(); len(fs) != 2 || fs[0].Path != whole || fs[0].SessionID != "ts_w" || fs[0].Truncated != nil || fs[1].SessionID != "ts_t" {
+		panic(fmt.Sprintf("the files, in the order given: %+v", fs))
+	}
+	if fs := NewDemo().Files(); fs != nil {
+		panic(fmt.Sprintf("the demo has no files: %+v", fs))
+	}
 	s := d.sess[0]
 	if len(s.events) != 2 || !s.Incomplete || s.DroppedEvents != 0 || !s.StartedAt.Equal(time.Unix(5, 0)) {
 		panic(fmt.Sprintf("session from a cut file: events=%d incomplete=%v dropped=%d started=%s", len(s.events), s.Incomplete, s.DroppedEvents, s.StartedAt))
@@ -258,6 +274,12 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 	const warn = "service batch (instance b-1): the collector has 5 events, more than the 3 of the instance's last report"
 	write := func(name string, meta *core.ExportSession, metaOn int) string {
 		t.Helper()
+		if meta != nil && meta.Events == nil { // as an export has it: how many events it holds
+			n := len(evs)
+			m := *meta
+			m.Events = &n
+			meta = &m
+		}
 		var b strings.Builder
 		for i := range evs {
 			m := meta
@@ -300,12 +322,15 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 
 	meta := &core.ExportSession{State: "SEALED", Incomplete: true, IncompleteReasons: []string{reason}, DeliveryUnconfirmed: []string{warn},
 		DrainTimedOut: true, MaxDrainSeconds: 60}
-	for _, on := range []int{0, 1} { // on the first line; a reader does not insist on which
-		s := open(write("verdict.ndjson", meta, on))
-		if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason || len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != warn ||
-			!s.DrainTimedOut || s.MaxDrainSeconds != 60 || s.State != "SEALED" || s.Name != "verdict" {
-			panic(fmt.Sprintf("session opened from an export with a verdict (on line %d): %+v", on+1, s))
-		}
+	s := open(write("verdict.ndjson", meta, 0))
+	if !s.Incomplete || len(s.IncompleteReasons) != 1 || s.IncompleteReasons[0] != reason || len(s.DeliveryUnconfirmed) != 1 || s.DeliveryUnconfirmed[0] != warn ||
+		!s.DrainTimedOut || s.MaxDrainSeconds != 60 || s.State != "SEALED" || s.Name != "verdict" {
+		panic(fmt.Sprintf("session opened from an export with a verdict: %+v", s))
+	}
+	// The verdict is on the first line. One on another line is not the export's: the file is refused,
+	// where it was read as if it were (and a second, contradicting one was passed over).
+	if _, err := New(Config{Open: []string{write("late.ndjson", meta, 1)}}); err == nil || !strings.Contains(err.Error(), "late.ndjson:2: a second tsession_session") {
+		panic(fmt.Sprintf("a verdict on the second line: %v", err))
 	}
 	// A session that was complete says so, and stays complete.
 	if s := open(write("fine.ndjson", &core.ExportSession{State: "SEALED"}, 0)); s.Incomplete || len(s.IncompleteReasons)+len(s.DeliveryUnconfirmed) != 0 || s.DrainTimedOut {
@@ -315,8 +340,10 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 	if s := open(write("seal.ndjson", &core.ExportSession{State: "SEALED", Incomplete: true, SealError: "collector unavailable"}, 0)); !s.Incomplete || s.SealError != "collector unavailable" {
 		panic(fmt.Sprintf("a failed seal: %+v", s))
 	}
-	// An export from before the verdict was carried: judged on its events.
-	if s := open(writeExport(t, "old.ndjson", evs...)); s.Incomplete || len(s.IncompleteReasons) != 0 {
+	// An export from before the verdict was carried, or one that lost its first line: it is shown, and
+	// it is not shown as complete. Nothing in it says how the session ended or that the file is whole,
+	// and a gate asked through the dashboard must not pass where tracectl --from does not.
+	if s := open(writeExport(t, "old.ndjson", evs...)); !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "does not say how the session ended") {
 		panic(fmt.Sprintf("an export without a verdict: %+v", s))
 	}
 }
@@ -329,7 +356,8 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 func TestOfflineOpensASessionWithoutEvents(t *testing.T) {
 	const reason = "service orders-api (instance o-1): 0 of 6 recorded events reached the collector (last error: connection refused)"
 	started := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
-	line, err := core.ExportHeader("ts_none", &core.ExportSession{State: "SEALED", Incomplete: true, IncompleteReasons: []string{reason},
+	none := 0 // an export says how many events it holds, also when that is none
+	line, err := core.ExportHeader("ts_none", &core.ExportSession{State: "SEALED", Events: &none, Incomplete: true, IncompleteReasons: []string{reason},
 		StartedAt: started, EndedAt: started.Add(12 * time.Second)})
 	if err != nil {
 		panic(err)
@@ -390,5 +418,90 @@ func TestOfflineOpensASessionWithoutEvents(t *testing.T) {
 	}
 	if _, err := New(Config{Open: []string{p}}); err != nil {
 		panic(err)
+	}
+}
+
+// An export is held in memory, several times its size, and a small gzip file
+// can hold any amount: no more than maxExportBytes are read of one.
+func TestOfflineRefusesAFileThatIsTooLarge(t *testing.T) {
+	old := maxExportBytes
+	maxExportBytes = 4 << 10
+	defer func() { maxExportBytes = old }()
+	var b strings.Builder
+	for seq := 1; b.Len() < 16<<10; seq++ {
+		fmt.Fprintf(&b, `{"session_id":"ts_big","seq":%d,"service":"api","kind":"api.in","name":"GET /x","start_ns":1,"end_ns":2}`+"\n", seq)
+	}
+	p := filepath.Join(t.TempDir(), "big.ndjson")
+	if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
+		panic(err)
+	}
+	if _, err := NewOffline([]string{p}); err == nil || !strings.Contains(err.Error(), "too large to open") {
+		panic(fmt.Sprintf("a file over the limit: %v", err))
+	}
+	// As gzip, where the file itself is small.
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	_, _ = zw.Write([]byte(b.String()))
+	_ = zw.Close()
+	if z.Len() >= 4<<10 {
+		panic(fmt.Sprintf("the gzip file is %d bytes: not smaller than the limit, so the test proves nothing", z.Len()))
+	}
+	pz := filepath.Join(t.TempDir(), "big.ndjson.gz")
+	if err := os.WriteFile(pz, z.Bytes(), 0o600); err != nil {
+		panic(err)
+	}
+	if _, err := NewOffline([]string{pz}); err == nil || !strings.Contains(err.Error(), "too large to open") {
+		panic(fmt.Sprintf("a gzip file that expands over the limit: %v", err))
+	}
+}
+
+// The size limit is on what is read: a file of exactly the limit opens, one
+// byte more does not.
+func TestOfflineSizeLimitIsExact(t *testing.T) {
+	line := `{"session_id":"ts_big","seq":1,"service":"api","kind":"api.in","name":"GET /x","start_ns":1,"end_ns":2}` + "\n"
+	old := maxExportBytes
+	defer func() { maxExportBytes = old }()
+	p := filepath.Join(t.TempDir(), "one.ndjson")
+	if err := os.WriteFile(p, []byte(line), 0o600); err != nil {
+		panic(err)
+	}
+	maxExportBytes = int64(len(line))
+	if _, err := NewOffline([]string{p}); err != nil {
+		panic(fmt.Sprintf("a file of exactly the limit: %v", err))
+	}
+	maxExportBytes = int64(len(line)) - 1
+	if _, err := NewOffline([]string{p}); err == nil || !strings.Contains(err.Error(), "too large to open") {
+		panic(fmt.Sprintf("a file one byte over the limit: %v", err))
+	}
+}
+
+// What makes an opened session incomplete, each on its own and with the flag
+// next to it saying complete: reasons, a seal that failed, a drain that ran
+// out of time.
+func TestOfflineIncompleteWhateverTheFlagSays(t *testing.T) {
+	n := 1
+	e := core.Event{SessionID: "ts_i", Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9}
+	for name, meta := range map[string]core.ExportSession{
+		"reasons":   {State: "SEALED", Events: &n, IncompleteReasons: []string{"lost"}},
+		"seal":      {State: "SEALED", Events: &n, SealError: "timeout"},
+		"drain":     {State: "SEALED", Events: &n, DrainTimedOut: true, MaxDrainSeconds: 60},
+		"the flag":  {State: "SEALED", Events: &n, Incomplete: true},
+		"none (ok)": {State: "SEALED", Events: &n},
+	} {
+		line, err := core.ExportLine(&e, &meta)
+		if err != nil {
+			panic(err)
+		}
+		p := filepath.Join(t.TempDir(), "f.ndjson")
+		if err := os.WriteFile(p, append(line, '\n'), 0o600); err != nil {
+			panic(err)
+		}
+		d, err := NewOffline([]string{p})
+		if err != nil {
+			panic(err)
+		}
+		if got, want := d.find("ts_i").Incomplete, name != "none (ok)"; got != want {
+			t.Errorf("%s: incomplete = %v, want %v", name, got, want)
+		}
 	}
 }

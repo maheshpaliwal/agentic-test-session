@@ -36,12 +36,31 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 		printJSON(c.stdout, sum)
 	} else {
 		printSummary(c.stdout, s.Info(), sum)
+		if st := c.commandStatus(s.ID); st != nil && *st != 0 {
+			fmt.Fprintf(c.stdout, "command    failed (exit status %d): the command of the run that wrote the file\n", *st)
+		}
 	}
-	return g.check(s.Info(), sum, len(sum.Failures))
+	return g.of(c).check(c.stderr, s.Info(), sum, len(sum.Failures))
 }
 
 // gates are the --fail-on-* checks of summary, report, digest and run.
-type gates struct{ onError, onIncomplete, onEmpty, onUnconfirmed bool }
+type gates struct {
+	onError, onIncomplete, onEmpty, onUnconfirmed bool
+	// file: the session is read from a file of --from. What such a session
+	// lacks will not arrive: where a running session gets a note, the file
+	// of one fails the gate.
+	file bool
+	// commandOf returns the exit status of the command of the run that wrote
+	// the file of session id; nil when the file does not carry one.
+	commandOf func(id string) *int
+}
+
+// of returns g for the sessions c reads: from the services, or from files.
+func (g *gates) of(c *cli) *gates {
+	g.file = len(c.files) > 0
+	g.commandOf = c.commandStatus
+	return g
+}
 
 func (g *gates) register(fs *flag.FlagSet) {
 	fs.BoolVar(&g.onError, "fail-on-error", false, "exit 3 when the session recorded failed events")
@@ -52,10 +71,17 @@ func (g *gates) register(fs *flag.FlagSet) {
 
 // check returns a checkError naming every gate the session fails; failures
 // is the number of failed events the caller found.
-func (g *gates) check(info client.Info, sum client.Summary, failures int) error {
+func (g *gates) check(stderr io.Writer, info client.Info, sum client.Summary, failures int) error {
 	var failed []string
 	if g.onError && failures > 0 {
 		failed = append(failed, fmt.Sprintf("%d failed event(s)", failures))
+	}
+	// The run that wrote the file failed, whatever was recorded: a test that asserts on a response fails
+	// without a failed event, and the file alone would pass.
+	if g.onError && g.commandOf != nil {
+		if st := g.commandOf(info.ID); st != nil && *st != 0 {
+			failed = append(failed, fmt.Sprintf("the command of the run that wrote the file failed (exit status %d)", *st))
+		}
 	}
 	// The control plane knows about a failed seal and a drain that timed out;
 	// the collector's summary does not.
@@ -70,7 +96,21 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 	case info.State == "":
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
-		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+		if g.file {
+			failed = append(failed, "the file does not say how its session ended or how many events it holds, so whether it is complete is unknown")
+		} else {
+			failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+		}
+	case !info.Done() && g.file:
+		failed = append(failed, fmt.Sprintf("the session had not ended when the file was written (%s), so the file does not hold all of it and whether it is complete is not known; export the session once it has ended",
+			dataText(info.State, 20)))
+	case !info.Done():
+		// Still running: what its services hold has not all arrived, and the
+		// verdict on it is given when it ends. The gate judges what there is
+		// and says so; the exit status stays what it was for scripts that
+		// look at a session while it runs.
+		fmt.Fprintf(stderr, "tracectl: note: the session is still running (%s): --fail-on-incomplete can only judge what has arrived so far; stop it first for a verdict (tracectl stop %s --wait)\n",
+			dataText(info.State, 20), dataText(info.ID, 64))
 	}
 	if g.onUnconfirmed && !g.onIncomplete && (sum.Incomplete || info.Incomplete || info.SealError != "") {
 		// The stricter gate on its own: a session known to have lost events
@@ -86,7 +126,11 @@ func (g *gates) check(info client.Info, sum client.Summary, failures int) error 
 	case len(info.DeliveryUnconfirmed) > 0:
 		failed = append(failed, "delivery is unconfirmed ("+strings.Join(info.DeliveryUnconfirmed, "; ")+")")
 	case info.State == "" && !g.onIncomplete:
-		failed = append(failed, "the control plane no longer knows this session, so whether its delivery was confirmed is unknown")
+		if g.file {
+			failed = append(failed, "the file does not say how its session ended, so whether its delivery was confirmed is unknown")
+		} else {
+			failed = append(failed, "the control plane no longer knows this session, so whether its delivery was confirmed is unknown")
+		}
 	}
 	if g.onEmpty && sum.EventCount == 0 {
 		failed = append(failed, emptySession)
@@ -116,7 +160,11 @@ func printSummary(w io.Writer, info client.Info, sum client.Summary) {
 		state += ", delivery unconfirmed"
 	}
 	fmt.Fprintf(w, "session    %s  %s  (%s)\n", info.ID, displayName(info), state)
-	fmt.Fprintf(w, "events     %d over %s\n", sum.EventCount, time.Duration(sum.DurationNs).Round(time.Millisecond))
+	events := fmt.Sprintf("events     %d over %s", sum.EventCount, time.Duration(sum.DurationNs).Round(time.Millisecond))
+	if sum.EventCount == 0 {
+		events = "events     0: the session recorded nothing, so nothing was checked (see tracectl doctor)"
+	}
+	fmt.Fprintln(w, events)
 	fmt.Fprintf(w, "failures   %d\n", len(sum.Failures))
 	if sum.PendingAsync > 0 {
 		label := "pending"
@@ -307,6 +355,14 @@ func (c *cli) history(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "print as JSON")
 	unknown := fs.Bool("unknown-key", false, "the changes recorded without a key, in place of <pk> (the same as '' or '{}')")
 	pos, err := positionals(fs, args)
+	if err == nil {
+		// With --from the session need not be named: one argument fewer.
+		n := 4
+		if *unknown {
+			n = 3
+		}
+		pos, err = c.fromSessions("history", pos, n)
+	}
 	if err != nil {
 		return err
 	}
@@ -318,7 +374,7 @@ func (c *cli) history(ctx context.Context, args []string) error {
 	case len(pos) != 4:
 		return errors.New(historyUsage)
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}
@@ -331,7 +387,7 @@ func (c *cli) history(ctx context.Context, args []string) error {
 	}
 	key, err := resolveKey(ents, pos[1], pos[2], pos[3])
 	if err != nil {
-		return fmt.Errorf("%w\n  `tracectl entities %s` lists what the session changed", err, pos[0])
+		return fmt.Errorf("%w\n  `%s` lists what the session changed", err, drillCommand(c.fromWord(s.ID), pos[0], "entities ID"))
 	}
 	h, err := s.History(ctx, pos[1], pos[2], key)
 	if err != nil {

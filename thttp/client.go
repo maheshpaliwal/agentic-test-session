@@ -43,6 +43,7 @@ func (t tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if resp.StatusCode >= 500 {
 				span.SetErr(fmt.Errorf("HTTP %d", resp.StatusCode))
 			}
+			setStatusAttr(span, resp.StatusCode)
 			span.SetResp(message{Status: resp.StatusCode, Headers: redactHeaders(resp.Header), Body: respCap.body(resp.Header.Get("Content-Type")), BodySize: respCap.size()})
 		}
 		if reqCap.cut() || respCap.cut() {

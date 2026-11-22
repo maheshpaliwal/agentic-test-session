@@ -2,14 +2,19 @@ package dashboard
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/maheshpaliwal/agentic-test-session/controlplane"
 	"github.com/maheshpaliwal/agentic-test-session/core"
@@ -26,36 +31,135 @@ const maxExportLine = 64 << 20
 // after the file, so a run can be opened without the services that recorded
 // it: attach the export to a failed CI job and open it locally. The read
 // endpoints answer as the real services do, so tracectl reads the file too.
-func NewOffline(paths []string) (*Demo, error) {
+func NewOffline(paths []string) (*Demo, error) { return newOffline(paths, false) }
+
+// NewOfflineStrict is NewOffline for a reader that acts on the verdict of a
+// file (tracectl --from and its --fail-on gates). A file that does not say
+// how its session ended, or how many events it holds (its first line is
+// lost, it was written by an older tracectl, or the control plane could not
+// be asked when it was exported), is opened with an unknown state, as a
+// session the control plane has forgotten is read from the collector: it can
+// be read, and no gate passes on it. NewOffline shows such a file as a
+// sealed session, for a person to look at. OpenedFile.Unproven names them.
+func NewOfflineStrict(paths []string) (*Demo, error) { return newOffline(paths, true) }
+
+func newOffline(paths []string, strict bool) (*Demo, error) {
 	d := &Demo{now: time.Now, readOnly: true}
-	for _, p := range paths {
+	for i, p := range paths {
+		if slices.Contains(paths[:i], p) { // before it is read: standard input is read once
+			return nil, fmt.Errorf("%s was given twice", p)
+		}
 		s, err := loadExport(p)
 		if err != nil {
 			return nil, err
 		}
-		if d.find(s.ID) != nil {
-			return nil, fmt.Errorf("%s: session %s was already opened from another file", p, s.ID)
+		switch {
+		case strict:
+			// tracectl --from has its own words for both cases, and fails its gates on them.
+			if s.unproven {
+				s.State = ""
+			}
+		case s.unproven:
+			// The viewer shows the session, and says what the file leaves open, so that the
+			// completeness gate asked through the dashboard does not pass on it either. (The status
+			// of the run's command is not served: the error gate sees it with tracectl --from only.)
+			s.Incomplete = true
+			s.IncompleteReasons = append(s.IncompleteReasons, "the file does not say how the session ended or how many events it holds (its first line is lost, or it was exported by an older tracectl or without the control plane)")
+		case !s.State.Terminal():
+			s.Incomplete = true
+			s.IncompleteReasons = append(s.IncompleteReasons, fmt.Sprintf("the session had not ended when the file was written (%s): the file holds the events that had arrived", s.State))
+		}
+		if prev := d.find(s.ID); prev != nil {
+			// Sessions are told apart by their id, so two exports of one session cannot be open
+			// together: not to list them, and not to compare an earlier export with a later one.
+			return nil, fmt.Errorf("%s and %s are exports of the same session (%s): only one of them can be read at a time, and two exports of one session cannot be compared",
+				prev.path, p, s.ID)
 		}
 		d.sess = append(d.sess, s)
 	}
 	return d, nil
 }
 
+// OpenedFile is one file given to NewOffline and the session read from it.
+type OpenedFile struct {
+	Path      string
+	SessionID string
+	// Truncated is set when the last line of the file was cut short (an
+	// interrupted export, a partial download). The session is served
+	// without that line and marked incomplete; a reader that must not judge
+	// a part of a recording refuses the file instead.
+	Truncated error
+	// Name is the session's name: the one the export stored, or the file's
+	// name without its extension.
+	Name string
+	// Unproven: the file does not say how its session ended or how many
+	// events it holds (see NewOfflineStrict).
+	Unproven bool
+	// CommandStatus is the exit status of the command of the `tracectl run`
+	// that wrote the file; nil for a file written otherwise.
+	CommandStatus *int
+}
+
+// Files returns the files the sessions were opened from, in the order they
+// were given to NewOffline; nil for the demo.
+func (d *Demo) Files() []OpenedFile {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []OpenedFile
+	for _, s := range d.sess {
+		if s.path != "" {
+			out = append(out, OpenedFile{Path: s.path, SessionID: s.ID, Name: s.Name, Truncated: s.torn, Unproven: s.unproven, CommandStatus: s.commandStatus})
+		}
+	}
+	return out
+}
+
+// openExport opens the export at path for reading: the file, or standard
+// input for "-", and what gzip made of either (an artifact store often
+// compresses), which the first two bytes tell.
+func openExport(path string) (io.Reader, func(), error) {
+	in, done := io.Reader(os.Stdin), func() {}
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		in, done = f, func() { _ = f.Close() }
+	}
+	br := bufio.NewReader(in)
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		zr, err := gzip.NewReader(br)
+		if err != nil {
+			done()
+			return nil, nil, fmt.Errorf("%s: gzip: %w", path, err)
+		}
+		return zr, done, nil
+	}
+	return br, done, nil
+}
+
 func loadExport(path string) (*demoSess, error) {
-	f, err := os.Open(path)
+	f, done, err := openExport(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer done()
 	var evs []core.Event
-	var meta *core.ExportSession // the session's verdict, on the line of an event (the first)
+	var meta *core.ExportSession // the session's verdict, on the first line
 	id := ""                     // the session of the file
 	seqs := map[uint64]int{}     // seq -> line that holds it
 	torn := false                // the previous line did not parse
 	var tornErr error
-	sc := bufio.NewScanner(f)
+	// No more than maxExportBytes are read (after decompression): the events are held in memory, several
+	// times their size, and a small gzip file can hold any amount of them.
+	limited := &io.LimitedReader{R: f, N: maxExportBytes + 1}
+	sc := bufio.NewScanner(limited)
 	sc.Buffer(make([]byte, 0, 64<<10), maxExportLine)
+	firstLine := true // the next line with text is the file's first
 	for line := 1; sc.Scan(); line++ {
+		if limited.N <= 0 {
+			return nil, fmt.Errorf("%s: more than %d MB of events: too large to open; read the session from the services, or export a shorter one", path, maxExportBytes>>20)
+		}
 		if len(strings.TrimSpace(sc.Text())) == 0 {
 			continue
 		}
@@ -67,13 +171,28 @@ func loadExport(path string) (*demoSess, error) {
 			torn, tornErr = true, fmt.Errorf("%s:%d: not an exported event: %w", path, line, err)
 			continue
 		}
+		// The verdict is on the first line and nowhere else. One that cannot be read is not passed over, and
+		// neither is a second one: which of two would be the session's?
+		m, present, verr := core.ExportVerdict(sc.Bytes())
+		if sid, _, ok := core.ExportHeaderOf(sc.Bytes()); ok && id != "" && sid != id {
+			return nil, fmt.Errorf("%s:%d: two sessions (%s and %s) in one file", path, line, id, clipID(sid))
+		}
+		switch {
+		case verr != nil:
+			return nil, fmt.Errorf("%s:%d: %w", path, line, verr)
+		case present && !firstLine:
+			return nil, fmt.Errorf("%s:%d: a second %s: an export has one, on its first line", path, line, core.ExportSessionKey)
+		case present:
+			meta = m
+		}
+		firstLine = false
 		// The line of a session without events: its id and its verdict.
-		if sid, m, ok := core.ExportHeaderOf(sc.Bytes()); ok {
+		if sid, _, ok := core.ExportHeaderOf(sc.Bytes()); ok {
+			if !plainID(sid) {
+				return nil, fmt.Errorf("%s:%d: the session id is not one (%q)", path, line, clipID(sid))
+			}
 			if id != "" && sid != id {
 				return nil, fmt.Errorf("%s:%d: two sessions (%s and %s) in one file", path, line, id, sid)
-			}
-			if meta == nil {
-				meta = m
 			}
 			id = sid
 			continue
@@ -88,8 +207,8 @@ func loadExport(path string) (*demoSess, error) {
 			return nil, fmt.Errorf("%s:%d: seq %d was already used on line %d", path, line, e.Seq, first)
 		}
 		seqs[e.Seq] = line
-		if meta == nil {
-			meta = core.ExportSessionOf(sc.Bytes())
+		if !plainID(e.SessionID) {
+			return nil, fmt.Errorf("%s:%d: the session id is not one (%q)", path, line, clipID(e.SessionID))
 		}
 		if id != "" && e.SessionID != id {
 			return nil, fmt.Errorf("%s:%d: events of two sessions (%s and %s) in one file", path, line, id, e.SessionID)
@@ -100,12 +219,22 @@ func loadExport(path string) (*demoSess, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if limited.N <= 0 {
+		return nil, fmt.Errorf("%s: more than %d MB of events: too large to open; read the session from the services, or export a shorter one", path, maxExportBytes>>20)
+	}
 	if id == "" {
 		if torn {
 			return nil, tornErr
 		}
 		return nil, fmt.Errorf("%s: no events, and no session: an export of a session without events holds one line with its verdict", path)
 	}
+	// Another number of events than the export wrote: the file was cut at the end of a line, which no line
+	// shows, or lines were added to it.
+	if meta != nil && meta.Events != nil && len(evs) != *meta.Events && !torn {
+		torn, tornErr = true, fmt.Errorf("%s: holds %d of the %d events that were exported", path, len(evs), *meta.Events)
+	}
+	// Without the verdict and the count the file does not say how its session ended, nor that it is whole.
+	unproven := meta == nil || meta.Events == nil || meta.State == ""
 	slicex.SortBy(evs, func(e core.Event) uint64 { return e.Seq })
 	var first, last int64
 	for i := range evs {
@@ -133,7 +262,10 @@ func loadExport(path string) (*demoSess, error) {
 	cv := &colView{id: id, evs: evs, sealed: true, pending: open, dropped: dropped,
 		// A file cut short mid-line (an interrupted export) still opens; what it holds is not everything.
 		incomplete: len(open) > 0 || dropped > 0 || torn}
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := strings.TrimSuffix(filepath.Base(path), ".gz")
+	if name = strings.TrimSuffix(name, filepath.Ext(name)); path == "-" {
+		name = "stdin"
+	}
 	// To the nanosecond: a recording is often shorter than a second, and whole
 	// seconds would show its duration as zero.
 	start, end := time.Unix(0, first).UTC(), time.Unix(0, last).UTC()
@@ -144,11 +276,32 @@ func loadExport(path string) (*demoSess, error) {
 	// seal failed. An export from before the verdict was carried has none,
 	// and the session is then judged on its events alone.
 	if meta != nil {
-		sess.Incomplete = sess.Incomplete || meta.Incomplete
+		// The session's own name, where the export carries it; the file's name stands in for an export
+		// from before that.
+		if n := cleanName(meta.Name); n != "" {
+			sess.Name, sess.NameAuto = n, meta.NameAuto
+		}
+		// A session that was exported while it ran is not a finished one: its events are those that had
+		// arrived, and nothing was sealed.
+		if st := controlplane.State(meta.State); st != "" && !st.Terminal() {
+			sess.State, sess.EndedAt, cv.sealed = st, time.Time{}, false
+		} else if st != "" {
+			sess.State = st
+		}
+		// Reasons or a failed seal are incompleteness, whatever the flag next to them says.
+		// A drain that ran out of time is one too: the control plane never ends such a session complete.
+		sess.Incomplete = sess.Incomplete || meta.Incomplete || len(meta.IncompleteReasons) > 0 || meta.SealError != "" || meta.DrainTimedOut
 		sess.IncompleteReasons, sess.DeliveryUnconfirmed = meta.IncompleteReasons, meta.DeliveryUnconfirmed
 		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
 	}
-	return &demoSess{Session: sess, events: evs, sealed: true, file: cv, path: path}, nil
+	ds := &demoSess{Session: sess, events: evs, sealed: cv.sealed, file: cv, path: path, unproven: unproven}
+	if meta != nil {
+		ds.commandStatus = meta.CommandStatus
+	}
+	if torn {
+		ds.torn = tornErr
+	}
+	return ds, nil
 }
 
 // readOnlyAPI refuses everything that would change a session, and says that
@@ -171,4 +324,51 @@ func (d *Demo) readOnlyAPI(next http.Handler) http.Handler {
 		}
 		writeJSON(w, http.StatusMethodNotAllowed, m{"error": msg})
 	})
+}
+
+// maxExportBytes is the most that is read of one export, after decompression.
+// A variable for the tests.
+var maxExportBytes int64 = 512 << 20
+
+// plainID reports whether id can be a session id: letters, digits and
+// "_.:-" (the control plane's are "ts_" and hex digits), not beginning with
+// "-", and not too long. What a file calls its session is printed to
+// terminals and put into commands.
+func plainID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == ':' || c == '-') {
+			return false
+		}
+	}
+	return id[0] != '-'
+}
+
+func clipID(id string) string {
+	if len(id) > 40 {
+		return id[:40] + "..."
+	}
+	return id
+}
+
+// cleanName is a session name from a file without what would steer a
+// terminal: control and format characters are dropped, and white space
+// becomes a blank.
+func cleanName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co) || r == utf8.RuneError:
+			return -1
+		}
+		return r
+	}, name)
+	if name = strings.Join(strings.Fields(name), " "); len(name) > 200 {
+		name = strings.ToValidUTF8(name[:200], "")
+	}
+	return strings.TrimSpace(name)
 }

@@ -122,7 +122,7 @@ func (v *CounterVec) With(values ...string) *Counter {
 	}
 	key := strings.Join(values, "\xff")
 	v.mu.RLock()
-	c := v.children[key]
+	c := v.children[key] // one map read: cannot panic
 	v.mu.RUnlock()
 	if c != nil {
 		return c
@@ -140,10 +140,10 @@ func (v *CounterVec) kind() string { return "counter" }
 func (v *CounterVec) help() string { return v.desc }
 func (v *CounterVec) write(w io.Writer, name string) {
 	v.mu.RLock()
+	defer v.mu.RUnlock() // w is the caller's: a panic of it must not leave With waiting
 	for _, k := range slices.Sorted(maps.Keys(v.children)) {
 		fmt.Fprintf(w, "%s%s %d\n", name, labelSet(v.labels, strings.Split(k, "\xff")), v.children[k].v.Load())
 	}
-	v.mu.RUnlock()
 }
 
 // Sample is one labelled gauge value produced at scrape time.
@@ -255,15 +255,21 @@ func formatFloat(f float64) string {
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
-// WriteTo renders every metric, sorted by name, in the text exposition format.
-func (r *Registry) WriteTo(w io.Writer) (int64, error) {
+// sorted lists the metrics by name.
+func (r *Registry) sorted() ([]string, []collector) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	names := slices.Sorted(maps.Keys(r.metrics))
 	cs := make([]collector, len(names))
 	for i, n := range names {
 		cs[i] = r.metrics[n]
 	}
-	r.mu.Unlock()
+	return names, cs
+}
+
+// WriteTo renders every metric, sorted by name, in the text exposition format.
+func (r *Registry) WriteTo(w io.Writer) (int64, error) {
+	names, cs := r.sorted()
 
 	var b strings.Builder
 	for i, n := range names {

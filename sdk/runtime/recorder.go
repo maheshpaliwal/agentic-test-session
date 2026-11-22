@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 )
 
 // Recorder is a bounded ring buffer implementing core.Recorder. Record never
@@ -115,6 +116,8 @@ func (r *Recorder) deliveredTotal() uint64 {
 // sight until they are gone (see account).
 func (r *Recorder) forget(sid string) {
 	r.mu.Lock()
+	defer r.mu.Unlock() // deferred: Record, on the host's path, waits for this lock
+	faultpoint.Hit("recorder.forget")
 	if a := r.acct[sid]; a != nil {
 		if a.buffered() == 0 {
 			r.dropAccountLocked(sid)
@@ -122,7 +125,6 @@ func (r *Recorder) forget(sid string) {
 			a.gone = true
 		}
 	}
-	r.mu.Unlock()
 }
 
 func (r *Recorder) dropAccountLocked(sid string) {
@@ -184,28 +186,36 @@ func (r *Recorder) at(i int) *slot { return &r.buf[(r.head+i)%len(r.buf)] }
 
 // Record implements core.Recorder.
 func (r *Recorder) Record(e core.Event) {
+	if r.put(&e) {
+		select {
+		case r.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// put is Record under the lock; it reports whether the exporter is to be
+// woken. It is a function of its own so that the unlock is deferred: Record
+// runs on the host's request path, and a panic in here that left the lock
+// held (the wrappers recover it) would block every later Record for good.
+// A single defer at the top of a function without a loop around it costs
+// nothing that the benchmarks can measure.
+func (r *Recorder) put(e *core.Event) (wake bool) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	a := r.accountLocked(e.SessionID)
 	a.recorded++
 	a.gone = false
 	if r.n == len(r.buf) && !r.evictLocked(e.SessionID) {
 		a.dropped++
 		r.drops[e.SessionID]++
-		r.mu.Unlock()
-		return
+		return false
 	}
 	r.nextID++
 	s := r.at(r.n) // an empty slot: sent is false
-	s.ev, s.id = e, r.nextID
+	s.ev, s.id = *e, r.nextID
 	r.n++
-	full := r.n >= r.wakeAt
-	r.mu.Unlock()
-	if full {
-		select {
-		case r.wake <- struct{}{}:
-		default:
-		}
-	}
+	return r.n >= r.wakeAt
 }
 
 // evictScan bounds how far evictLocked looks, and with it the time Record
@@ -254,7 +264,7 @@ func (r *Recorder) evictLocked(sid string) bool {
 // caller must not change it afterwards.
 func (r *Recorder) setHeld(held map[string]struct{}) {
 	r.mu.Lock()
-	r.held = held
+	r.held = held // one assignment: cannot panic
 	r.mu.Unlock()
 }
 
@@ -404,8 +414,8 @@ func (r *Recorder) addDropsLocked(evs []core.Event) {
 // AddDropCount adds n dropped events (e.g. rejected by the collector) to a session.
 func (r *Recorder) AddDropCount(sessionID string, n uint64) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.drops[sessionID] += n
-	r.mu.Unlock()
 }
 
 // Len is the number of buffered events.

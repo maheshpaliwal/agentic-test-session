@@ -16,12 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 const (
 	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed] " +
-		"[--report FILE [--format markdown|junit]] [--digest FILE] [--timeout D] -- <command> [args...]"
+		"[--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]] [--export FILE] [--require-services N] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.
 	sessionEnv = client.SessionEnv
@@ -69,6 +71,10 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	reportPath := fl.String("report", "", "write a report of the session to this file")
 	format := fl.String("format", "", "format of --report: markdown (default) or junit")
 	digestPath := fl.String("digest", "", "write a digest of the session to this file: Markdown, or JSON if the name ends in .json")
+	maxBytes := fl.Int("max-bytes", digestDefaultBytes, "the --digest file is never larger than this many bytes")
+	exportPath := fl.String("export", "", "write the session's events to this file, as export -o does: an artifact that tracectl --from FILE reads with no service running; the --digest and --report files then name commands that read it")
+	needServices := fl.Int("require-services", 0, "exit 3 without running the command unless at least this many services are connected, and exit 3 after it "+
+		"when one that was connected is gone when the command ends (killed or crashed: what it had not delivered is lost, and nothing else may show it)")
 	timeout := fl.Duration("timeout", 2*time.Minute, "how long to wait for the session to stop and seal")
 	if err := fl.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -83,16 +89,35 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return runUsage("no command to run")
 	case *timeout <= 0:
 		return runUsage("--timeout must be more than zero: the session has to be stopped and sealed")
+	case *needServices < 0:
+		return runUsage("--require-services must not be negative")
 	case *reportPath == "-":
 		return runUsage("--report needs a file: standard output belongs to the command")
 	case *digestPath == "-":
 		return runUsage("--digest needs a file: standard output belongs to the command")
+	case *exportPath == "-":
+		return runUsage("--export needs a file: standard output belongs to the command")
 	case *reportPath == "" && *format != "":
 		return runUsage("--format needs --report FILE")
+	case *maxBytes < digestMinBytes:
+		// Now, not after the command has run: as digest --max-bytes.
+		return runUsage("--max-bytes must be at least %d", digestMinBytes)
+	case *digestPath == "" && *maxBytes != digestDefaultBytes:
+		return runUsage("--max-bytes needs --digest FILE")
 	}
 	if *digestPath != "" {
 		if st, err := os.Stat(filepath.Dir(*digestPath)); err != nil || !st.IsDir() {
 			return runUsage("--digest %s: its directory does not exist", *digestPath)
+		}
+	}
+	if *exportPath != "" {
+		if st, err := os.Stat(filepath.Dir(*exportPath)); err != nil || !st.IsDir() {
+			return runUsage("--export %s: its directory does not exist", *exportPath)
+		}
+		for _, o := range []struct{ flag, path string }{{"--digest", *digestPath}, {"--report", *reportPath}} {
+			if o.path != "" && sameFile(o.path, *exportPath) {
+				return runUsage("--export and %s name the same file (%s): the second would overwrite the first", o.flag, o.path)
+			}
 		}
 	}
 	if *reportPath != "" {
@@ -129,6 +154,19 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 
 	opts.Bindings = binds.list
 	warnJWT(c.stderr, opts.Bindings)
+	// The services that are connected now: enough of them, or nothing is run; and each is looked for
+	// again when the command ends.
+	var connected []string
+	if *needServices > 0 {
+		subs, err := client.Subscribers(ctx, c.opts)
+		if err != nil {
+			return fmt.Errorf("--require-services: listing the connected services: %w", err)
+		}
+		if len(subs) < *needServices {
+			return checkError{msg: fmt.Sprintf("check failed: %d service(s) connected, --require-services wants %d; the command was not run (see tracectl doctor)", len(subs), *needServices)}
+		}
+		connected = slicex.Map(subs, who)
+	}
 	s, err := client.Start(ctx, opts)
 	if err != nil {
 		return err
@@ -142,6 +180,8 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	relay := &signalRelay{abort: abort}
 	relayDone := make(chan struct{})
 	defer close(relayDone)
+	// Bare on purpose: tracectl is a command, and one that went on without its
+	// signal relay could not be interrupted; a panic must end it, loudly.
 	go relay.run(sigs, relayDone)
 
 	// The id, and where tracectl found the services if it was told on the
@@ -163,6 +203,10 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		relay.attach(nil)
 		code, outcome = exitStatus(err)
 	}
+
+	// Before the session is stopped: a service that was connected and is gone took what it had not
+	// delivered with it, and may have reported nothing that shows it.
+	goneErr := c.servicesGone(waitCtx, connected)
 
 	// Stop and seal, whatever the command did.
 	failed := false // the session could not be stopped, sealed or read
@@ -203,9 +247,33 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		readCtx, cancel := context.WithTimeout(waitCtx, runResultsTimeout)
 		// In header mode without bindings only what carries the id is recorded.
 		byID := opts.Mode != "exclusive" && len(opts.Bindings) == 0
-		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render)
+		// The export first: the report and the digest then name commands that
+		// read it, which still work when the services of the run are gone.
+		if *exportPath != "" {
+			if xerr := c.runExport(readCtx, s, *exportPath, code, goneErr); xerr != nil {
+				failed = true
+				fmt.Fprintf(c.stderr, "tracectl: exporting session %s: %v\n", s.ID, xerr)
+				*exportPath = ""
+			}
+		}
+		// Once more now that the export exists: a name that only now turns out to be the same file (a
+		// file system that does not tell cases apart, a link made meanwhile) would overwrite it.
+		for _, o := range []struct {
+			flag string
+			path *string
+		}{{"--digest", digestPath}, {"--report", reportPath}} {
+			if *exportPath != "" && *o.path != "" && sameFile(*o.path, *exportPath) {
+				failed = true
+				fmt.Fprintf(c.stderr, "tracectl: %s %s is the file of --export: it is not written, the export is kept\n", o.flag, *o.path)
+				*o.path = ""
+				if o.flag == "--report" {
+					render = nil
+				}
+			}
+		}
+		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render, *exportPath, code)
 		if err == nil && *digestPath != "" {
-			err = c.runDigest(readCtx, s, *digestPath)
+			err = c.runDigest(readCtx, s, *digestPath, *maxBytes, *exportPath, code)
 		}
 		cancel()
 		if err != nil {
@@ -215,6 +283,12 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	}
 	if gateErr != nil && !failed { // the checks of a session that was not sealed or read say nothing
 		fmt.Fprintln(c.stderr, "tracectl:", gateErr)
+	}
+	if goneErr != nil {
+		fmt.Fprintln(c.stderr, "tracectl:", goneErr)
+		if gateErr == nil {
+			gateErr = goneErr
+		}
 	}
 	if outcome != "" {
 		fmt.Fprintln(c.stderr, "tracectl:", outcome)
@@ -230,11 +304,66 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	return nil
 }
 
+// servicesGoneWait is how long a service that was connected is looked for
+// before it is called gone (an SDK reconnects within 5s), and
+// servicesGonePoll how often. Variables for the tests.
+var (
+	servicesGoneWait = 6 * time.Second
+	servicesGonePoll = 500 * time.Millisecond
+)
+
+// servicesGone names the services of connected (as who names them) that are
+// not connected any more; nil when all are, and when none was asked for.
+func (c *cli) servicesGone(ctx context.Context, connected []string) error {
+	if len(connected) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, servicesGoneWait+5*time.Second)
+	defer cancel()
+	// A service that reconnects (the control plane restarted, a stream was cut) is back within its backoff:
+	// it is looked for until servicesGoneWait is over before it is called gone.
+	var gone []string
+	var err error
+	for deadline := time.Now().Add(servicesGoneWait); ; {
+		var subs []client.Subscriber
+		if subs, err = client.Subscribers(ctx, c.opts); err == nil {
+			// By count, not by name alone: of two replicas that are called the same, one can be gone.
+			left := map[string]int{}
+			for _, s := range subs {
+				left[who(s)]++
+			}
+			gone = gone[:0]
+			for _, w := range connected {
+				if left[w] == 0 {
+					gone = append(gone, w)
+					continue
+				}
+				left[w]--
+			}
+			if len(gone) == 0 {
+				return nil
+			}
+		}
+		if !time.Now().Before(deadline) || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(servicesGonePoll):
+		}
+	}
+	if err != nil {
+		return checkError{msg: "check failed: --require-services: whether the services are still connected could not be read: " + err.Error()}
+	}
+	return checkError{msg: fmt.Sprintf("check failed: --require-services: %d service(s) connected when the run began are gone: %s; what they had not delivered is lost, "+
+		"and the recording can read as complete without it", len(gone), strings.Join(gone, ", "))}
+}
+
 // runResults prints the summary of the session run recorded, writes its
 // report and returns the verdict of the gates. byID says that the session
 // records only requests that carry its id; an empty one then gets a hint.
 func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID bool, reportPath, format string,
-	render func(*sessionReport) ([]byte, error)) (gateErr, err error) {
+	render func(*sessionReport) ([]byte, error), exported string, commandStatus int) (gateErr, err error) {
 	if render == nil {
 		sum, err := s.Summary(ctx)
 		if err != nil {
@@ -242,7 +371,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 		}
 		printSummary(c.stderr, s.Info(), sum)
 		c.hintUntagged(byID, sum)
-		return g.check(s.Info(), sum, len(sum.Failures)), nil
+		return g.of(c).check(c.stderr, s.Info(), sum, len(sum.Failures)), nil
 	}
 	rep, err := loadReport(ctx, s)
 	if err != nil {
@@ -250,7 +379,11 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	}
 	printSummary(c.stderr, rep.info, rep.sum)
 	c.hintUntagged(byID, rep.sum)
-	gateErr = g.check(rep.info, rep.sum, len(rep.failures))
+	gateErr = g.of(c).check(c.stderr, rep.info, rep.sum, len(rep.failures))
+	if exported != "" {
+		rep.from = shellWord(exported, false)
+	}
+	rep.command = &commandStatus
 	out, err := render(rep)
 	if err != nil {
 		return gateErr, err
@@ -258,8 +391,64 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	return gateErr, c.writeReportFile(reportPath, format, out)
 }
 
-// runDigest writes the digest of the session run recorded to path.
-func (c *cli) runDigest(ctx context.Context, s *client.Session, path string) error {
+// runDigest writes the digest of the session run recorded to path, in at
+// most maxBytes bytes.
+// sameFile reports whether a and b name one file: the same path once both
+// are made absolute, or, when both exist, the same file by another name (a
+// link, a name in another case on a file system that does not tell them
+// apart).
+func sameFile(a, b string) bool {
+	if x, err := filepath.Abs(a); err == nil {
+		if y, err := filepath.Abs(b); err == nil && x == y {
+			return true
+		}
+	}
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	return err == nil && os.SameFile(sa, sb)
+}
+
+// runExport writes the events of the session run recorded to path, as
+// export -o does, and says how to read the file.
+func (c *cli) runExport(ctx context.Context, s *client.Session, path string, commandStatus int, gone error) (err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // events may hold sensitive payloads
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			// A part of an export is worse than none: it would be read as the session.
+			_ = os.Remove(path)
+		}
+	}()
+	// A file that was there keeps its mode when it is opened: make it private as a new one is.
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	// With the status of the command: a later job that has the file alone then fails as this run does.
+	// And with what --require-services found: the file of a run in which a service went away must not
+	// read as complete to a job that has only the file.
+	n, err := s.Export(ctx, f, func(m *core.ExportSession) {
+		m.CommandStatus = &commandStatus
+		if gone != nil {
+			m.Incomplete = true
+			m.IncompleteReasons = append(m.IncompleteReasons, strings.TrimPrefix(gone.Error(), "check failed: "))
+		}
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.stderr, "wrote %d events to %s; read it with no service running: tracectl --from %s digest\n", n, path, shellWord(path, false))
+	return nil
+}
+
+func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, maxBytes int, exported string, commandStatus int) error {
 	format := "markdown"
 	if strings.HasSuffix(path, ".json") {
 		format = "json"
@@ -272,7 +461,13 @@ func (c *cli) runDigest(ctx context.Context, s *client.Session, path string) err
 	if err != nil {
 		return err
 	}
-	out, err := src.fit(render, digestDefaultBytes)
+	src.rep.command = &commandStatus
+	// With an export the digest names commands that read it; otherwise, as
+	// digest does, the session and the URL flags they need.
+	if src.from = exported; src.from == "" {
+		src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
+	}
+	out, err := src.fit(render, maxBytes)
 	if err != nil {
 		return err
 	}

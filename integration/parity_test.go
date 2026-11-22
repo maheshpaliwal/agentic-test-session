@@ -700,6 +700,45 @@ func tracectlAt(t *testing.T, bin string, be backend, args ...string) (int, stri
 	return cmd.ProcessState.ExitCode(), out.String(), errb.String()
 }
 
+// tracectlFrom runs the tracectl binary in dir on export files there, with
+// --from: no service is given, and the addresses of the environment are ones
+// where nothing listens.
+func tracectlFrom(t *testing.T, bin, dir string, files []string, args ...string) (int, string, string) {
+	t.Helper()
+	var argv []string
+	for _, f := range files {
+		argv = append(argv, "--from", f)
+	}
+	var out, errb bytes.Buffer
+	cmd := exec.Command(bin, append(argv, args...)...)
+	cmd.Dir, cmd.Stdout, cmd.Stderr = dir, &out, &errb
+	cmd.Env = append(os.Environ(), "TSESSION_CONTROLPLANE_URL=http://127.0.0.1:9", "TSESSION_COLLECTOR_URL=http://127.0.0.1:9")
+	err := cmd.Run()
+	if _, exited := err.(*exec.ExitError); err != nil && !exited {
+		panic(fmt.Sprintf("tracectl --from %v %v: %v", files, args, err))
+	}
+	return cmd.ProcessState.ExitCode(), out.String(), errb.String()
+}
+
+// fromDigest is the digest of session id as --from prints it, made from the
+// digest read with --cp and --collector. The two differ in the commands they
+// name and in nothing else: the one names the session and notes that its
+// commands need the addresses, the other names the file (word: as a shell
+// reads it) and needs no note.
+func fromDigest(digest, id, word string) string {
+	digest = regexp.MustCompile(`(?m)^- Give these commands the --cp and --collector [^\n]*\n`).ReplaceAllString(digest, "")
+	digest = regexp.MustCompile(`,"drill_down_note":"[^"]*"`).ReplaceAllString(digest, "")
+	return regexp.MustCompile(`tracectl (\w+) `+regexp.QuoteMeta(id)).ReplaceAllString(digest, "tracectl --from "+strings.ReplaceAll(word, "$", "$$")+" $1")
+}
+
+// reader is a way to read the exports of the fixture with tracectl.
+type reader struct {
+	name string
+	run  func(args ...string) (int, string, string)
+	// from: with --from. The digest then names the file in its commands.
+	from bool
+}
+
 // startDashboard runs the dashboard binary on a free loopback port and
 // returns the backend named by the tracectl flags it prints.
 func startDashboard(t *testing.T, bin string, args ...string) backend {
@@ -748,9 +787,12 @@ func statusDoc(t *testing.T, out string) string {
 }
 
 // The binaries, as a person or an agent uses them: `tracectl export`, then
-// `dashboard -open` on the file, then the same tracectl commands with the
-// flags the dashboard printed. Every read command prints for the file what
-// it prints for the session on the live services.
+// either `dashboard -open` on the file and the same tracectl commands with
+// the flags the dashboard printed, or the same tracectl commands with
+// `--from` and nothing else running. Every read command prints for the file
+// what it prints for the session on the live services, byte for byte, and
+// exits as it does for it; the one exception is in the commands a digest
+// names (see fromDigest).
 func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs two binaries")
@@ -761,8 +803,9 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 	dash := buildBinary(t, dir, "dashboard", ".", "./cmd/dashboard")
 
 	// Export with the CLI this time; it writes what the client wrote.
-	var open []string
+	var open, rel []string
 	for i, id := range f.ids {
+		rel = append(rel, f.names[i]+".ndjson")
 		file := filepath.Join(dir, f.names[i]+".ndjson")
 		if code, _, errOut := tracectlAt(t, tracectl, f.live, "export", id, "-o", file); code != 0 {
 			panic(fmt.Sprintf("tracectl export: %d %s", code, errOut))
@@ -775,6 +818,19 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 		open = append(open, "-open", file)
 	}
 	file := startDashboard(t, dash, open...)
+	live := reader{name: "the session", run: func(args ...string) (int, string, string) { return tracectlAt(t, tracectl, f.live, args...) }}
+	files := []reader{
+		{name: "the file (dashboard -open)", run: func(args ...string) (int, string, string) { return tracectlAt(t, tracectl, file, args...) }},
+		{name: "the file (--from)", from: true, run: func(args ...string) (int, string, string) { return tracectlFrom(t, tracectl, dir, rel, args...) }},
+	}
+	all := append([]reader{live}, files...)
+	// The file of a session as a digest names it: in quotes when it holds a space.
+	word := func(i int) string {
+		if strings.Contains(rel[i], " ") {
+			return "'" + rel[i] + "'"
+		}
+		return rel[i]
+	}
 
 	for i, id := range f.ids {
 		// The session without events: every command but the ones that name an
@@ -816,44 +872,54 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 			if empty && (args[0] == "show" || args[0] == "history") {
 				continue
 			}
-			wantCode, want, wantErr := tracectlAt(t, tracectl, f.live, args...)
-			code, got, gotErr := tracectlAt(t, tracectl, file, args...)
-			// Before the output is read: a tracectl that could not reach the
-			// services prints nothing to stdout, and what went wrong is on
-			// stderr. (A run under load failed here with "printed no session
-			// document: EOF" and nothing else; the cause was on the stderr this
-			// did not show.)
-			if (wantCode != 0 && wantCode != 3) || (code != 0 && code != 3) {
-				panic(fmt.Sprintf("tracectl %v: exit %d on the session, %d on the file\n--- session\n%s%s\n--- file\n%s%s", args, wantCode, code, want, wantErr, got, gotErr))
-			}
-			if args[0] == "status" && len(args) == 2 {
-				// The session document, less what a file does not hold.
-				want, got = statusDoc(t, want), statusDoc(t, got)
-			}
-			// A list of nothing prints nothing.
-			silent := empty && slices.Contains([]string{"events", "entities", "trace"}, args[0])
-			if strings.TrimSpace(want) == "" && !silent || (wantCode != 0 && wantCode != 3) {
-				panic(fmt.Sprintf("tracectl %v on the live session: exit %d\n%s%s", args, wantCode, want, wantErr))
-			}
-			if code != wantCode || got != want || gotErr != wantErr {
-				t.Errorf("tracectl %v: exit %d on the file, %d on the session\n--- file\n%s%s\n--- session\n%s%s", args, code, wantCode, got, gotErr, want, wantErr)
+			wantCode, liveOut, wantErr := live.run(args...)
+			for _, r := range files {
+				want := liveOut
+				code, got, gotErr := r.run(args...)
+				if r.from && (args[0] == "digest" || args[0] == "report" && !slices.Contains(args, "junit")) {
+					// The commands a digest and a Markdown report name read the file.
+					if want = fromDigest(want, id, word(i)); want == liveOut || !strings.Contains(want, "tracectl --from "+word(i)+" show <seq>") {
+						panic(fmt.Sprintf("the %s of the live session names no command to rewrite:\n%s", args[0], liveOut))
+					}
+				}
+				// Before the output is read: a tracectl that could not reach the
+				// services prints nothing to stdout, and what went wrong is on
+				// stderr. (A run under load failed here with "printed no session
+				// document: EOF" and nothing else; the cause was on the stderr this
+				// did not show.)
+				if (wantCode != 0 && wantCode != 3) || (code != 0 && code != 3) {
+					panic(fmt.Sprintf("tracectl %v: exit %d on the session, %d on the file\n--- session\n%s%s\n--- file\n%s%s", args, wantCode, code, want, wantErr, got, gotErr))
+				}
+				if args[0] == "status" && len(args) == 2 {
+					// The session document, less what a file does not hold.
+					want, got = statusDoc(t, want), statusDoc(t, got)
+				}
+				// A list of nothing prints nothing.
+				silent := empty && slices.Contains([]string{"events", "entities", "trace"}, args[0])
+				if strings.TrimSpace(want) == "" && !silent || (wantCode != 0 && wantCode != 3) {
+					panic(fmt.Sprintf("tracectl %v on the live session: exit %d\n%s%s", args, wantCode, want, wantErr))
+				}
+				if code != wantCode || got != want || gotErr != wantErr {
+					t.Errorf("tracectl %v: exit %d on %s, %d on the session\n--- file\n%s%s\n--- session\n%s%s", args, code, r.name, wantCode, got, gotErr, want, wantErr)
+				}
 			}
 		}
 	}
 	// The session with the undelivered events: the collector's summary shows
 	// nothing, the gates fail on the control plane's verdict, on both.
 	und := f.ids[2]
-	for be, name := range map[backend]string{f.live: "the session", file: "the file"} {
-		if code, out, errOut := tracectlAt(t, tracectl, be, "summary", und, "--fail-on-error"); code != 0 || !strings.Contains(out, "(SEALED, incomplete, delivery unconfirmed)") {
+	for _, r := range all {
+		name := r.name
+		if code, out, errOut := r.run("summary", und, "--fail-on-error"); code != 0 || !strings.Contains(out, "(SEALED, incomplete, delivery unconfirmed)") {
 			t.Errorf("summary --fail-on-error of %s: exit %d\n%s%s", name, code, out, errOut)
 		}
 		for _, cmd := range []string{"summary", "report", "digest"} {
-			if code, _, errOut := tracectlAt(t, tracectl, be, cmd, und, "--fail-on-incomplete"); code != 3 ||
+			if code, _, errOut := r.run(cmd, und, "--fail-on-incomplete"); code != 3 ||
 				!strings.Contains(errOut, "service orders-api (instance orders-api-1): 0 of 7 recorded events reached the collector, 7 dropped by the SDK") {
 				t.Errorf("%s --fail-on-incomplete of %s: exit %d %s", cmd, name, code, errOut)
 			}
 		}
-		if code, _, errOut := tracectlAt(t, tracectl, be, "summary", und, "--fail-on-unconfirmed"); code != 3 ||
+		if code, _, errOut := r.run("summary", und, "--fail-on-unconfirmed"); code != 3 ||
 			!strings.Contains(errOut, "delivery is unconfirmed (service inventory (instance inventory-1): the collector has 3 events, more than the 2 of the instance's last report") {
 			t.Errorf("summary --fail-on-unconfirmed of %s: exit %d %s", name, code, errOut)
 		}
@@ -863,11 +929,12 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 	// it. It is the case delivery accounting exists for. Every gate of every
 	// command exits for the file as for the session.
 	none := f.ids[3]
-	for be, name := range map[backend]string{f.live: "the session", file: "the file"} {
+	for _, r := range all {
+		name := r.name
 		for _, cmd := range []string{"summary", "report", "digest"} {
 			for flag, want := range map[string]int{"--fail-on-error": 0, "--fail-on-incomplete": 3, "--fail-on-empty": 3,
 				"--fail-on-unconfirmed": 3} { // the stricter gate includes the plain one: the session is incomplete
-				code, _, errOut := tracectlAt(t, tracectl, be, cmd, none, flag)
+				code, _, errOut := r.run(cmd, none, flag)
 				if code != want || want == 3 && !strings.Contains(errOut, "check failed") {
 					t.Errorf("%s %s of %s (no events): exit %d, want %d\n%s", cmd, flag, name, code, want, errOut)
 				}
@@ -876,15 +943,16 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 				}
 			}
 		}
-		if _, out, _ := tracectlAt(t, tracectl, be, "summary", none); !strings.Contains(out, "(SEALED, incomplete)") || !strings.Contains(out, "events     0") ||
+		if _, out, _ := r.run("summary", none); !strings.Contains(out, "(SEALED, incomplete)") || !strings.Contains(out, "events     0") ||
 			!strings.Contains(out, "0 of 6 recorded events reached the collector") {
 			t.Errorf("summary of %s (no events):\n%s", name, out)
 		}
 	}
 
 	// The second session's drain ran into its limit: the file says so too.
-	for be, name := range map[backend]string{f.live: "the session", file: "the file"} {
-		if _, out, _ := tracectlAt(t, tracectl, be, "report", f.ids[1]); !strings.Contains(out, "Drain timed out: asynchronous work was still outstanding after the 15s drain limit.") {
+	for _, r := range all {
+		name := r.name
+		if _, out, _ := r.run("report", f.ids[1]); !strings.Contains(out, "Drain timed out: asynchronous work was still outstanding after the 15s drain limit.") {
 			t.Errorf("report of %s does not say that the drain timed out:\n%s", name, out)
 		}
 	}
@@ -894,6 +962,31 @@ func TestTracectlReadsAnExportLikeTheLiveSession(t *testing.T) {
 		if code, out, errOut := tracectlAt(t, tracectl, file, args...); code != 1 || out != "" || !strings.Contains(errOut, "read-only") ||
 			!(strings.Contains(errOut, "is a file (checkout.ndjson") || strings.Contains(errOut, "opened from files")) {
 			t.Errorf("tracectl %v on a file: exit %d\n%s%s", args, code, out, errOut)
+		}
+	}
+
+	// With --from nothing is asked, so what would change a session is refused
+	// before the file is opened: bad usage, as --from with an address is.
+	for _, args := range [][]string{{"start"}, {"stop", f.ids[0]}, {"abort", f.ids[0]}, {"rename", f.ids[0], "x"}, {"delete", f.ids[0]}, {"kill", "on"},
+		{"run", "--", "true"}, {"wait", f.ids[0]}, {"doctor"}, {"export", f.ids[0]}} {
+		if code, out, errOut := tracectlFrom(t, tracectl, dir, rel, args...); code != 2 || out != "" || !strings.Contains(errOut, args[0]+" does not work with --from") {
+			t.Errorf("tracectl --from %v: exit %d\n%s%s", args, code, out, errOut)
+		}
+	}
+	// One file: the session need not be named, and the answer is the same.
+	for i, id := range f.ids {
+		for _, args := range [][]string{{"summary"}, {"digest", "--fail-on-error"}, {"report", "--format", "junit"}, {"status", "--short"}, {"trace"}, {"events", "--errors"}, {"entities"}} {
+			wantCode, want, wantErr := tracectlFrom(t, tracectl, dir, rel, append([]string{args[0], id}, args[1:]...)...)
+			if code, got, gotErr := tracectlFrom(t, tracectl, dir, rel[i:i+1], args...); code != wantCode || got != want || gotErr != wantErr || want == "" && args[0] != "trace" && args[0] != "events" && args[0] != "entities" {
+				t.Errorf("tracectl --from %s %v: exit %d, with the session named %d\n--- left out\n%s%s\n--- named\n%s%s", rel[i], args, code, wantCode, got, gotErr, want, wantErr)
+			}
+		}
+	}
+	// Two files are a baseline and a candidate.
+	for _, flags := range [][]string{nil, {"--json"}, {"--fail-on-diff"}} {
+		wantCode, want, wantErr := live.run(append([]string{"diff", f.ids[0], f.ids[1]}, flags...)...)
+		if code, got, gotErr := tracectlFrom(t, tracectl, dir, rel[:2], append([]string{"diff"}, flags...)...); code != wantCode || got != want || gotErr != wantErr || want == "" {
+			t.Errorf("tracectl --from %s --from %s diff %v: exit %d, on the sessions %d\n--- files\n%s%s\n--- sessions\n%s%s", rel[0], rel[1], flags, code, wantCode, got, gotErr, want, wantErr)
 		}
 	}
 

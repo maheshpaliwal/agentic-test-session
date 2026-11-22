@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/faultpoint"
 	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 )
 
@@ -43,6 +44,10 @@ type snapshot struct {
 	// heartbeat is how often the control plane asked to hear from this
 	// process while the set names a session; zero when it did not say.
 	heartbeat time.Duration
+	// blind: this is not a set of the control plane. The subscriber panicked
+	// and names no session until it has fetched the set anew (see panicked):
+	// nothing is recorded, and nothing follows from a session not being named.
+	blind bool
 }
 
 // Subscriber tracks the control plane's active set and implements
@@ -61,8 +66,10 @@ type Subscriber struct {
 	// (see setAnnounce).
 	reportsAs string
 	announce  atomic.Bool
-	// streamCancel ends the stream that is open, nil when none is.
+	// streamCancel ends the stream that is open, nil when none is. again: it
+	// was ended on purpose, to open another (see reopen).
 	streamCancel atomic.Pointer[context.CancelFunc]
+	again        atomic.Bool
 	snap         atomic.Pointer[snapshot]
 	ready        atomic.Bool
 	streaming    atomic.Bool
@@ -72,6 +79,11 @@ type Subscriber struct {
 	// signalled for each, and when the set names a session after naming none.
 	connects atomic.Uint64
 	opened   chan struct{}
+	// stopNote is what the reporter still has to tell the control plane
+	// about this process having stopped recording (see panicked); nil when
+	// there is nothing to tell. gaveUp: the loop stays stopped.
+	stopNote atomic.Pointer[string]
+	gaveUp   atomic.Bool
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -107,8 +119,45 @@ func newSubscriber(controlPlaneURL, service, instance, reportsAs string) *Subscr
 	}
 	s.snap.Store(&snapshot{})
 	s.announce.Store(reportsAs != "")
-	go s.run(ctx)
+	startLoop("subscriber", "nothing more is recorded", ctx.Done(), func() { s.run(ctx) }, func() { close(s.done) }, s.panicked)
 	return s
+}
+
+// panicked is told of every panic of the subscriber's loop. Recording stops
+// at once, at the first panic and not only when the loop stays stopped: the
+// set this process has is no longer followed, so a session that ended or a
+// kill switch that was thrown would go unnoticed for as long as the restarts
+// take. It resumes when the loop, started again, has fetched the set anew.
+//
+// A service that silently stopped recording would leave its sessions
+// complete with its events missing. So the reporter, which goes on, tells
+// the control plane (stopNote), and that notes it on the sessions that run
+// then: those this process took part in end incomplete, and the others say
+// that it may have missed events of theirs. It tells it again for as long as
+// the loop is being started again, and once more when recording has resumed
+// (see reporter.renote): a session that began meanwhile is missing events too.
+func (s *Subscriber) panicked(final bool) {
+	old := s.snap.Load()
+	s.snap.Store(&snapshot{blind: true, reports: old.reports, heartbeat: old.heartbeat})
+	if final {
+		s.gaveUp.Store(true)
+		s.note(noteStopped)
+		return
+	}
+	s.note(noteRestarting)
+}
+
+// What the control plane is told (deliveryBatch.Stopped).
+const (
+	noteRestarting = "its subscriber panicked; it records again once it has fetched the active sessions anew"
+	noteResumed    = "its subscriber had panicked and it recorded nothing for a time; it records again now"
+	noteStopped    = "its subscriber panicked repeatedly and stays stopped; it records nothing more until the service is restarted"
+)
+
+// note gives the reporter something to tell the control plane, now.
+func (s *Subscriber) note(text string) {
+	s.stopNote.Store(&text)
+	s.wake()
 }
 
 // setAnnounce says whether the stream names the instance this process sends
@@ -123,6 +172,23 @@ func (s *Subscriber) setAnnounce(on bool) {
 	if cancel := s.streamCancel.Load(); cancel != nil {
 		(*cancel)()
 	}
+}
+
+// reopen ends the stream that is open; the loop opens another at once,
+// without the pause and the poll that follow a stream that broke. To the
+// control plane this process is then a new connection, of which it has heard
+// nothing yet (see reporter.failed), and for the moment between the two it is
+// not connected at all: a session whose drain ends in that moment does not
+// look at it. Nothing happens while no stream is open, and reopen then
+// reports false: the next stream is a new connection anyway.
+func (s *Subscriber) reopen() bool {
+	cancel := s.streamCancel.Load()
+	if cancel == nil {
+		return false
+	}
+	s.again.Store(true)
+	(*cancel)()
+	return true
 }
 
 // IsActive reports whether id is ACTIVE/DRAINING and the kill switch is off.
@@ -197,6 +263,7 @@ func (s *Subscriber) Close() {
 }
 
 func (s *Subscriber) apply(a activeSet) {
+	faultpoint.Hit("subscriber.apply")
 	sn := &snapshot{active: set.Of(a.Active...), draining: set.Of(a.Draining...), exclusive: a.Exclusive, kill: a.Kill,
 		bindings: core.NewBindingSet(a.Bindings), reports: a.DeliveryReports,
 		heartbeat: time.Duration(max(a.DeliveryHeartbeatMs, 0)) * time.Millisecond}
@@ -217,13 +284,17 @@ func (s *Subscriber) wake() {
 	}
 }
 
+// run follows the active set until ctx ends. It may be started again after
+// a panic (startLoop), so it closes nothing itself.
 func (s *Subscriber) run(ctx context.Context) {
-	defer close(s.done)
 	backoff := 200 * time.Millisecond
 	for ctx.Err() == nil {
 		got := s.stream(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if s.again.Swap(false) {
+			continue // ended on purpose (see reopen): nothing is wrong with it
 		}
 		if got {
 			backoff = 200 * time.Millisecond

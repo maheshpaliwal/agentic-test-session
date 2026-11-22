@@ -32,7 +32,7 @@ func TestResultsOfASessionTheControlPlaneForgot(t *testing.T) {
 	env.sum = client.Summary{}
 	for _, args := range [][]string{{"summary", "ts_typo0001", "--fail-on-error", "--fail-on-incomplete"}, {"events", "ts_typo0001"},
 		{"report", "ts_typo0001", "--fail-on-error"}, {"export", "ts_typo0001"}} {
-		if code, out, e := env.tc(args...); code != 1 || !strings.Contains(e, "404") {
+		if code, out, e := env.tc(args...); code != 1 || !strings.Contains(e, "404") || !strings.Contains(e, `no session with id "ts_typo0001"`) {
 			panic(fmt.Sprintf("%v with an unknown id: exit %d\n%s\n%s", args, code, out, e))
 		}
 	}
@@ -67,5 +67,13 @@ func TestStartIDOnly(t *testing.T) {
 	}
 	if code, _, e := env.tc("status", strings.TrimSpace(out)); code != 0 {
 		panic(fmt.Sprintf("the printed id does not resolve: %d %s", code, e))
+	}
+	// A second session under the same name: started, with a note that names the earlier one, and still only
+	// the id on standard output.
+	first := strings.TrimSpace(out)
+	code, out, e = env.tc("start", "--name", "run-1", "--id-only")
+	if code != 0 || !strings.HasPrefix(out, "ts_") || strings.Count(out, "\n") != 1 || strings.TrimSpace(out) == first ||
+		!strings.Contains(e, first) || !strings.Contains(e, `also named "run-1"`) {
+		panic(fmt.Sprintf("second start with the name: %d %q %q", code, out, e))
 	}
 }

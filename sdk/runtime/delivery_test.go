@@ -174,6 +174,13 @@ type reportCP struct {
 	sizes  []int    // the reports of every accepted batch
 	// announced is the X-Tsession-Delivery-Instance of every stream opened.
 	announced []string
+	// stopped is what the accepted batches said about recording having
+	// stopped (deliveryBatch.Stopped), in order.
+	stopped []string
+	// reach is what the accepted batches said about reaching the collector
+	// (deliveryBatch.Collector), in order; bare counts those that said nothing.
+	reach []collectorNote
+	bare  int
 }
 
 func newReportCP(t *testing.T, state string) *reportCP {
@@ -243,6 +250,14 @@ func (cp *reportCP) batch(w http.ResponseWriter, r *http.Request) {
 		cp.hellos++
 	} else {
 		cp.posts++
+	}
+	if b.Stopped != "" {
+		cp.stopped = append(cp.stopped, b.Stopped)
+	}
+	if b.Collector != nil {
+		cp.reach = append(cp.reach, *b.Collector)
+	} else {
+		cp.bare++
 	}
 	cp.sizes = append(cp.sizes, len(b.Reports))
 	results := make([]map[string]string, len(b.Reports))
@@ -610,7 +625,9 @@ func TestReporterFallsBackToOneReportPerRequest(t *testing.T) {
 	pass()           // asks for the batch endpoint: 404
 	eventually(t, "a stream that does not announce reports", func() bool {
 		s := cp.streams()
-		return len(s) == 2 && s[1] == "" && sub.streaming.Load()
+		// connects: the new stream has delivered its first set, which is when
+		// the reporter starts over (streaming is set a moment before).
+		return len(s) == 2 && s[1] == "" && sub.streaming.Load() && sub.connects.Load() == 2
 	})
 	pass() // asks again on the new stream
 	if posts, hellos, _ := cp.seen(); posts != 2 || hellos != 0 {

@@ -99,8 +99,18 @@ The gates of `tracectl summary`, `report`, `digest` and `run` exit 3 when they f
 | `--fail-on-empty` | the session recorded no events. |
 | `--fail-on-unconfirmed` | the control plane could not tell whether every event of every service instance reached the collector (`delivery_unconfirmed`): the strict form of the delivery check, like `tsessiontest.RequireDeliveryConfirmed`. For environments where every connected service is yours; in a large shared one a single service whose delivery reports are blocked fails every run. See "Which gate" in PROTOCOL.md. |
 
-The gates give an export opened with `dashboard -open` the exit status they give the live session: the export
-carries the session's verdict (see "Export file" in PROTOCOL.md).
+The gates give an export read with `tracectl --from FILE`, or opened with `dashboard -open`, the exit status
+they give the live session: the export carries the session's verdict (see "Export file" in PROTOCOL.md).
+
+`tracectl --from FILE` (repeatable) reads exports instead of the services, for the commands that read: `digest`,
+`summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`, `status`, `list`. Nothing is
+asked: `--cp`, `--collector` and their environment variables are not used, `--from` together with `--cp` or
+`--collector` exits 2, and so does any other command. With one file the session need not be named; with two,
+`diff` without sessions compares the first (baseline) with the second (candidate); otherwise name the session by
+its id, its name or its file's name without the extension. A file that is missing, empty, not an export or cut
+short (in its last line, or by whole lines: the export says how many events it wrote) is refused with exit 1.
+`tracectl run --export FILE` writes such a file when the run ends; `docs/LIMITS.md` says what a file has to
+hold for the gates to pass on it.
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
 command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or
@@ -112,6 +122,60 @@ default one hour) must be longer than the command takes, or the session expires 
 
 `TSESSION_ARTIFACT_DIR` makes `sdk/client/tsessiontest` save the session of a failed test into that directory;
 use an absolute path.
+
+## The SDK's collector check
+
+A service started with `runtime.Start` (or the `autoinit` import) asks its collector's `/healthz` when it starts
+and every 30 seconds while it has nothing to send, and tells the control plane what it found; `tracectl doctor`
+shows a service that cannot reach its collector. It is never asked per event. Any HTTP answer but a 5xx counts as
+reached. Two cases to know:
+
+- A proxy in front of the collector that accepts ingest and answers `/healthz` with 502 or 503 shows as
+  `CANNOT REACH COLLECTOR` for as long as the service is idle, although events would arrive.
+- `runtime.Config.Exporter.ReachCheck` sets the period; a negative value turns the check off (zero means the
+  default of 30 s). There is no environment variable for it. An `Exporter` made with `runtime.NewExporter` does
+  not check unless `ReachCheck` is set.
+
+## Health and panics
+
+`GET /healthz` of the collector and the control plane answers `200 ok`. A panic in one of their background
+goroutines does not end the service: it is logged at error level with its stack, counted
+(`tsession_*_goroutine_panics_total`), and the goroutine is started again after a backoff (100 ms, doubling up to
+30 s). While a goroutine waits for that restart `/healthz` answers `503` with `degraded: ` and the name of the
+goroutine; `tracectl doctor` prints it as `DEGRADED` and fails. The Docker health checks of `docker/docker-compose.yml`
+tolerate it: a container is unhealthy only after a minute of failed checks.
+
+A loop that panics every time must not leave a service that looks alive and does nothing. The loops a service cannot
+do without (collector: `janitor`, `retention`; control plane: `sweep`) share a **panic budget**: 5 panics within 10
+minutes (`gosafe.PanicBudget`, `gosafe.PanicBudgetWindow`; constants, not settings; the window is six retention
+sweeps when those are more than 100 s apart, so a sweep that panics every time is found out). The panic that uses it up is
+logged, `/healthz` answers `503 degraded: the panic budget is spent: ...`, and the service shuts down in order (as on
+SIGTERM, within 30 s) and **exits with status 1**, so that whatever supervises it starts it again with clean state.
+Run the services under something that restarts them (`restart: on-failure` in Compose, a Deployment, systemd).
+
+The drain of one session is not part of that budget: after 3 panics it is given up, and the session ends `SEALED` and
+incomplete with an `incomplete_reasons` entry that says that the control plane failed. A pending seal whose attempts
+panic is retried with backoff until the 24 h after which a failing seal is given up. A compaction of the session
+store that panics is replaced by the next one, when the journal has grown again.
+
+Seal retries and compactions are one goroutine per attempt, so none of them waits for a restart. `/healthz` is
+degraded for them all the same (`seal_retry`, `compaction`): after a seal attempt panicked, until the next attempt is
+due (its backoff, up to a minute); after a compaction panicked, until a compaction goes through, 30 s at most (a
+store that is seldom written must not stay degraded: nothing is lost, the journal is only longer). Their panics do
+not count against the panic budget. That budget ends the service so that it starts with clean state; a seal retry
+is the work of one finished session, which says itself that its seal failed (`seal_error`), and a store that could
+not compact compacts when it is opened, so a service ended for it would meet the same panic before it could serve.
+
+The SDK inside an instrumented service restarts each of its three loops at most 5 times and then leaves it stopped;
+the application is never ended. When its subscriber panics it stops recording at once and tells the control plane,
+again every second while the subscriber is being restarted and once more when recording has resumed. The control
+plane notes that on the sessions that run when it is told (stored with them, so its own restart does not lose it),
+and when such a session ends it is incomplete (`stopped recording after an internal error`) if the service took
+part in it, by a delivery report or by events at the collector; a session that has nothing of the service says so
+under `delivery_unconfirmed`, a warning: the service may have missed events it should have recorded. A
+subscriber that stays stopped says so once. From then on the service records nothing and is no longer listed by
+`tracectl doctor`, like a service that is not running; sessions started later do not name it, so use
+`tracectl doctor --require-services N` before a run to notice it.
 
 ## Metrics
 
@@ -127,6 +191,7 @@ value.
 | `tsession_build_info` | gauge | `service` (`collector`), `version`, `goversion` | Build information; the value is always 1. |
 | `tsession_collector_buffered_events` | gauge | none | Events waiting in reorder windows, not yet in the store. |
 | `tsession_collector_deleted_sessions_total` | counter | `cause`: `api`, `retention` | Sessions deleted, by cause (api or retention). |
+| `tsession_collector_goroutine_panics_total` | counter | `goroutine`: `janitor`, `retention`, `retention_stop` | Panics recovered in a background loop, by goroutine (each is logged with its stack, and the loop is restarted with backoff; /healthz answers 503 meanwhile). |
 | `tsession_collector_ingest_errors_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Ingest requests that failed, by cause (backpressure, shutdown or storage). |
 | `tsession_collector_ingest_failed_sessions_total` | counter | `cause`: `backpressure`, `shutdown`, `storage` | Sessions whose events an ingest request could not take, by cause (backpressure, shutdown or storage). |
 | `tsession_collector_ingest_partial_failures_total` | counter | none | Ingest requests that failed for some of their sessions and were accepted for the others. |
@@ -142,6 +207,7 @@ value.
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
 | `tsession_build_info` | gauge | `service` (`controlplane`), `version`, `goversion` | Build information; the value is always 1. |
+| `tsession_controlplane_goroutine_panics_total` | counter | `goroutine`: `sweep`, `drain`, `seal_retry`, `compaction` | Panics recovered in a background goroutine, by goroutine (each is logged with its stack; sweep and drain are restarted with backoff, and /healthz answers 503 meanwhile). |
 | `tsession_controlplane_kill_switch` | gauge | none | 1 while the global kill switch is on. |
 | `tsession_controlplane_seal_failures_total` | counter | none | Sessions whose collector seal failed after all retries (recorded incomplete). |
 | `tsession_controlplane_seal_retries_total` | counter | `result`: `success`, `failure` | Background attempts to seal a session whose seal failed past its budget, by result. |

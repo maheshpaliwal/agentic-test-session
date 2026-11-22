@@ -13,6 +13,7 @@ import (
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
+	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 // diff compares two sessions read from the same collector: a is the baseline,
@@ -23,22 +24,25 @@ func (c *cli) diff(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "print the differences as one JSON object")
 	failOnDiff := fs.Bool("fail-on-diff", false, "exit 3 when the sessions differ")
 	ignoreCounts := fs.Bool("ignore-counts", false, "treat a mutation or event present in both sessions as equal whatever its count")
-	pos, err := parseArgs(fs, args, 2, "<id|name a> <id|name b>")
+	pos, err := c.parseArgs(fs, args, 2, "<id|name a> <id|name b>")
 	if err != nil {
 		return err
 	}
 	var refs [2]sessionRef
 	var evs [2][]core.Event
 	for i, ref := range pos {
-		s, err := resolve(ctx, c.opts, ref)
+		s, err := c.resolve(ctx, ref)
 		if err != nil {
 			return err
 		}
 		info := s.Info()
-		refs[i] = sessionRef{ID: info.ID, Name: info.Name}
 		if evs[i], err = s.Events(ctx); err != nil {
 			return err
 		}
+		// What the collector knows of lost events (dropped, quarantined) is in its summary, not in the
+		// session. A summary that cannot be read does not stop the comparison.
+		sum, _ := s.Summary(ctx)
+		refs[i] = sessionRef{ID: info.ID, Name: info.Name, Recording: recordingOf(info, sum)}
 	}
 	rep := diffEvents(evs[0], evs[1], *ignoreCounts)
 	rep.A, rep.B = refs[0], refs[1]
@@ -177,6 +181,23 @@ func restoreOutcomes(s string, outcomes []string) string {
 type sessionRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Recording is "incomplete" for a session known to have lost events,
+	// "unknown" for one of which it is not known how it ended (the control
+	// plane has forgotten it, or its file does not say), and absent
+	// otherwise. What differs from such a side may be what it has not got,
+	// not what the run did.
+	Recording string `json:"recording,omitempty"`
+}
+
+// recordingOf is the Recording of a session reference.
+func recordingOf(info client.Info, sum client.Summary) string {
+	switch {
+	case sum.Incomplete || info.Incomplete || len(info.IncompleteReasons) > 0 || info.SealError != "":
+		return "incomplete"
+	case info.State == "":
+		return "unknown"
+	}
+	return ""
 }
 
 // diffReport is what differs between two sessions; it is also the --json
@@ -424,6 +445,14 @@ func printDiff(w io.Writer, rep diffReport) {
 	out := bufio.NewWriter(w)
 	defer out.Flush()
 	fmt.Fprintf(out, "a  %s  %s\nb  %s  %s\n", rep.A.ID, rep.A.Name, rep.B.ID, rep.B.Name)
+	for _, side := range []struct{ label, recording string }{{"a", rep.A.Recording}, {"b", rep.B.Recording}} {
+		switch side.recording {
+		case "incomplete":
+			fmt.Fprintf(out, "note: %s is incomplete: what it lacks may be events that were lost, not what the run did\n", side.label)
+		case "unknown":
+			fmt.Fprintf(out, "note: how %s ended is not known: what it lacks may be events that are missing, not what the run did\n", side.label)
+		}
+	}
 	if !rep.Differs {
 		fmt.Fprintln(out, "no differences")
 		return

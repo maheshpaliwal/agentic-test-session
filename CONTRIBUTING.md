@@ -17,6 +17,15 @@ starts its own throwaway Postgres and Redis from local binaries (`integration/sc
 - Servers bind loopback by default; do not add defaults that listen on all interfaces.
 - Keep Redis-client-independent logic in `internal/redisx`, not duplicated across `tredis` and `tredisv8`.
 - Binaries share plumbing from `internal/svc` (env defaults, CSV lists, graceful `Serve`); wrappers guard recording code with `defer core.Recover()`.
+- Start goroutines with `internal/gosafe` (in the SDK: `startLoop` in `sdk/runtime`), not a bare `go`: a panic is logged
+  at error level and the goroutine is restarted with backoff or ends, as its `Options` say. A bare `go` that must stay
+  (its panic has to end the process, or it has a recover of its own) carries a one-line comment that says why.
+- Unlock a mutex with `defer`. A goroutine that recovers a panic (every `gosafe` goroutine, and a wrapper with
+  `core.Recover`) turns a lock that a panic left held into a silent deadlock, which is worse than the crash it replaced.
+  A region without `defer` is a few statements that cannot panic (no index, no write to a map that may be nil, no call
+  that can panic) and says so in a one-line comment. On a hot path, move the locked part into a function of its own so
+  that the `defer` is the only one in it (`Recorder.put`). To prove what code promises about a panic, mark the place
+  with `faultpoint.Hit` and make it panic in a test with `faultpoint.PanicAt`; never on a path that runs per event.
 - Use synthetic data in tests and examples: no real credentials, hostnames, customer data or employer-specific names.
 
 ## Pull requests

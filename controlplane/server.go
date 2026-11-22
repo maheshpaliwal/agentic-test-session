@@ -38,11 +38,18 @@ func (m *Manager) Handler() http.Handler {
 		AllowedHosts:   m.cfg.AllowedHosts,
 		AllowedOrigins: m.cfg.AllowedOrigins,
 	})
-	// /healthz is static and unauthenticated by design (container healthchecks
-	// use the pod IP as Host); it exposes nothing and is outside the guard.
+	// /healthz is unauthenticated by design (container healthchecks use the
+	// pod IP as Host) and outside the guard. It says "ok", or 503 and which
+	// background goroutine panicked and waits for its restart (see Health):
+	// the names are constants of the code, so it still exposes nothing.
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if why := m.Health(); why != "" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "degraded: "+why+"\n")
+			return
+		}
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	root.Handle("/", guarded)
@@ -144,10 +151,10 @@ func (m *Manager) hList(w http.ResponseWriter, r *http.Request) {
 	// A list carries the verdict of every session (incomplete_reasons,
 	// delivery_unconfirmed) and leaves the reports behind it to GET
 	// /v1/sessions/{id}: up to MaxDeliveryInstances of them per session are too
-	// much for a page of sessions.
+	// much for a page of sessions. So are the notes of stopped instances.
 	out := make([]Session, len(p.Sessions))
 	for i, s := range p.Sessions {
-		s.Delivery = nil
+		s.Delivery, s.StoppedInstances = nil, nil
 		out[i] = s
 	}
 	writeJSON(w, http.StatusOK, out)

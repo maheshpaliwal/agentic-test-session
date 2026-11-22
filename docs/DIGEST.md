@@ -9,6 +9,8 @@ tracectl digest my-run                                  # Markdown, at most 1638
 tracectl digest my-run --format json --max-bytes 8192   # one line of JSON (also: --json)
 tracectl digest my-run -o digest.md --fail-on-error --fail-on-incomplete --fail-on-empty
 tracectl run --digest digest.md -- ./run-e2e.sh         # written after the seal; digest.json for JSON
+tracectl run --digest digest.md --max-bytes 8192 -- ./run-e2e.sh   # the same bound for run's digest
+tracectl --from run.ndjson digest                       # of an export (tracectl export -o), no service running
 ```
 
 It reads the summary, the call tree and the events of the session from the collector and needs nothing else. The
@@ -21,12 +23,14 @@ name by the SDK, like everything recorded).
 1. **Verdict**: `failed`, `incomplete`, `empty` or `passed`; the session state; whether the recording is
    complete and, if not, why; the service instances whose delivery the control plane could not confirm
    (`delivery unconfirmed`, a warning that does not change the verdict); counts by service, kind, entity and flag. A session that is not sealed is marked
-   live: everything in the digest can still change.
-2. **Failures**: every failed event (service, kind, name, error), with the chain of its ancestors from the root
+   live: everything in the digest can still change, and whether its recording is complete is `not yet known`.
+2. **Failures**: the failed events (service, kind, name, error; those that did the same thing in the same
+   place as one entry with a count and the first one's error as recorded), with the chain of its ancestors from the root
    request down. An async edge (a worker run under the publish that caused it) is marked `~>`. At most 5
    ancestors are listed: the root and the 4 nearest.
 3. **Mutations**: per store, entity and key, each change with its operation, transaction outcome (`effective`,
-   `rolled back`, `outcome unknown`), the changed fields (`before -> after`, `∅` for no value) and the flags of
+   `rolled back`, `outcome unknown`), for one that was rolled back the first statement of its transaction that
+   failed after it, the changed fields (`before -> after`, `∅` for no value) and the flags of
    its event. A change is marked `UNCERTAIN` when one of those flags is a `core.UncertainFlag` (`pk_unknown`,
    `pk_not_unique`, `after_unavailable`, `image_skipped:...`, ...; see `contrib/tsql/doc.go`): its key or row
    image is incomplete, so its values are not established fact. An update whose new values were not captured
@@ -41,10 +45,32 @@ name by the SDK, like everything recorded).
 5. **Omitted**: what was left out to fit the budget, each with the commands that print it. That includes the
    verdict's own text: a reason that was shortened, and the unconfirmed instances beyond the first four, are
    counted here (`tracectl status <id>` prints them whole).
-6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`).
+6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`), and a
+   note that they need the `--cp` and `--collector` the digest was read with, when it was read with them.
+   A digest read with `--from FILE` has no note: its commands, here and under "Omitted", read the file
+   (`tracectl --from run.ndjson show <seq>`), since they work in no other way.
 
 The output for the same recorded session is the same, byte for byte: entities are sorted by the number of their
 mutations, most first (so that a cut drops the least changed), then by store, entity and key, failures and changes by `seq`, counts by size and then name (in JSON: by name).
+
+### The digest of a file
+
+`tracectl --from FILE digest` reads an export and no service. It is the digest of the session the file was
+exported from, byte for byte and with the same exit status, except for the commands it names: they carry
+`--from` and the file, do not name the session (the file holds one), and there is no note about `--cp` and
+`--collector`.
+
+The file is named as it was given on the command line, so that the commands can be run as they are printed, from
+the directory the digest was made in. The digest of one file is therefore the same bytes for the same command
+line, and differs in these commands (only) when the file is read by another name. The name is put in single
+quotes where a shell needs them. It is replaced by the word `FILE`, for the reader to fill in, when it
+
+- is longer than 200 bytes, or longer than 40 bytes in a digest so short of room that the session's own text is
+  clipped (step 3 of the budget): the name is repeated in up to fifteen commands;
+- starts with `-`, or holds a single quote, a backquote, a control character or anything outside ASCII: it would
+  not stay one word on one line.
+
+`tracectl run --digest` and a digest read from the services are not affected: no file name is in them.
 
 ## The budget
 
@@ -93,13 +119,14 @@ Lists are never `null`.
 | `schema` | string | `"tsession.digest/v1"` |
 | `notice` | string | the fixed notice above |
 | `session` | object | `id`, `name`, `state` (empty: the control plane no longer knows the session), `live` (not sealed yet) |
-| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown`; `incomplete_reasons`: strings, when incomplete; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
+| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown` (also while the session is still running); `incomplete_reasons`: strings, when incomplete; `command_status`: number, the exit status of the command of the run, present for a `tracectl run` and for the file one exported; other than 0 makes `status` `failed` whatever was recorded; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
 | `counts` | object | `events`, `failures`, `mutations`, `duration_ns`, `pending_async`, `dropped_events`, `quarantined`; and the maps `by_service`, `by_kind`, `mutations_by_entity` (key `store/entity`), `flags`, each with its 16 largest entries |
 | `failures` | list | in `seq` order, see below |
 | `mutations` | list | one object per changed entity, see below |
 | `tree` | list | the lines of the call tree in pre-order, see below |
 | `omitted` | list | `section` (`verdict`, `counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out. `verdict`: how many of `incomplete_reasons` and `delivery_unconfirmed` are shortened or not listed |
-| `drill_down` | list | `command`, `prints` |
+| `drill_down` | list | `command`, `prints`. Read with `--from FILE`: the commands are `tracectl --from FILE ...` and do not name the session (see "The digest of a file"); so are those of `omitted[].get` |
+| `drill_down_note` | string | present when the digest was read with `--cp` or `--collector` on the command line: the commands of `drill_down` need the same flags. Left out when the budget is tight, and when the digest was read with `--from` |
 | `max_bytes` | number | the budget this digest was made for |
 
 A failure: `seq`, `service`, `kind`, `name`, `error`, `in_tree` (false: the call tree does not hold the event),
@@ -109,21 +136,50 @@ the first).
 
 Failed events that did the same thing in the same place (same service, kind, normalised name and error, under
 the same chain of ancestors) are one entry with `count` (above 1) and `last_seq`; its `seq` and `path` are those
-of the first, and its `name` and `error` are normalised. `counts.failures` is still the number of failed events.
+of the first, and its `name` and `error` are normalised; `first_error` is the first one's error as recorded,
+when normalising took something out of it (the host, the key), and is left out when the budget is tight.
+`counts.failures` is still the number of failed events.
 In Markdown such an entry reads `300x #1 api api.in "POST /orders/?/pay" #1..#599 ERR "HTTP 500"`. The call tree
 merges them the same way, by its own rule (consecutive siblings).
 
 A changed entity: `store`, `entity`, `key` (the primary key as JSON text; empty when unknown), `mutations` (how
 many), `effective`, `rolled_back`, `outcome_unknown`, `uncertain` (how many of each), `changes`,
-`changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`), `uncertain`,
-`flags`, `after_unavailable`, `fields`, `fields_omitted`. A field: `field`, `before`, `after`; the values are
+`changes_omitted`. A change: `seq`, `op`, `outcome` (`effective` \| `rolled_back` \| `unknown`),
+`rolled_back_by` (the `seq` of the first event of the same transaction that failed after a change that was rolled
+back; absent when none did. That it caused the rollback is likely, not recorded), `uncertain`,
+`flags`, `after_unavailable`, `fields`, `fields_omitted`. A field: `field`, `before`, `after`, `hidden` (true when
+the column is masked and changed: `before` and `after` then read the same); the values are
 compact JSON text, clipped, or `null` for no value.
 
 A tree line: `depth` (0 for a root; a line's parent is the nearest line above it with a smaller depth), `seq`,
-`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome that is not an
-error: a gRPC status other than `OK`), `flags` (the event's flags), `hidden` (lines below it that were left
+`service`, `kind`, `name`, `async`, `duration_ns`, `mutations`, `error`, `code` (an outcome the line would
+otherwise not show: a gRPC status other than `OK`, or an HTTP status of 400 and above as `HTTP 404`; from an SDK
+older than the `http.status` attribute, a response too large to be recorded whole has none), `flags` (the event's flags), `hidden` (lines below it that were left
 out). A merged run also has `count` (above 1), `last_seq` and `max_duration_ns`; its `duration_ns` and
 `mutations` are totals and its `name` is normalised.
 
 Optional numbers, booleans and lists (`async`, `count`, `hidden`, `flags`, `fields`, ...) are left out when zero,
 false or empty; `path` is always there.
+
+### For a parser
+
+- **Types.** `seq`, `last_seq`, `count`, `depth`, `mutations`, `hidden`, `path_omitted`, `changes_omitted`,
+  `fields_omitted`, `rolled_back_by` and every count are non-negative integers; `duration_ns` and
+  `max_duration_ns` are integers in nanoseconds; `live`, `in_tree`, `async`, `uncertain`, `after_unavailable`
+  and a field's `hidden` are booleans; everything else is a string or a list of strings. A field's `before`
+  and `after` are the only members that can be `null`.
+- **Present or absent.** The top-level lists (`failures`, `mutations`, `tree`, `omitted`, `drill_down`) and a
+  failure's `path` are always present, empty when there is nothing; they are never `null`. Lists inside an
+  entry (`flags`, `fields`, `changes`, `incomplete_reasons`, `delivery_unconfirmed`) are left out when empty.
+- **`verdict.status`** is the first that applies: `failed` (a failed event, or a `command_status` other than
+  0), `incomplete`, `empty` (no events), `passed`. A session can be failed and incomplete: `status` is `failed` and `recording` is `incomplete`.
+- **`session.state`**: `CREATED`, `ACTIVE`, `DRAINING`, `SEALED`, `ABORTED`, `EXPIRED`, or empty.
+- **`kind`** is one of `api.in`, `api.out`, `db.read`, `db.write`, `db.tx.begin`, `db.tx.commit`,
+  `db.tx.rollback`, `cache.read`, `cache.write`, `queue.publish`, `queue.consume`, `worker.start`, `worker.end`,
+  `worker.retry`, `worker.dlq`, `session.start`, `session.stop`, `sdk.dropped`. Treat an unknown one as data:
+  kinds are added.
+- **`op`** is what the wrapper recorded, in lower case: `insert`, `update`, `delete`, `upsert`, a Redis command
+  such as `set`, a Mongo or DynamoDB operation. It is not a closed list.
+- **Bounds.** At most 8 flags per change and per tree line, 12 fields per change, 20 changes per entity, 5
+  ancestors per failure, 4 unconfirmed instances. A tree line's `error` is clipped at 120 runes; a failure's at
+  300.

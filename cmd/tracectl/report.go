@@ -37,7 +37,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	path := fs.String("o", "", "write to this file instead of stdout")
 	var g gates
 	g.register(fs)
-	pos, err := parseArgs(fs, args, 1, reportArgs)
+	pos, err := c.parseArgs(fs, args, 1, reportArgs)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("usage: tracectl report %s: %w", reportArgs, err)
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}
@@ -53,6 +53,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	rep.from, rep.command = c.fromWord(s.ID), c.commandStatus(s.ID)
 	out, err := render(rep)
 	if err != nil {
 		return err
@@ -64,7 +65,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	} else if _, err := c.stdout.Write(out); err != nil {
 		return err
 	}
-	return g.check(rep.info, rep.sum, len(rep.failures))
+	return g.of(c).check(c.stderr, rep.info, rep.sum, len(rep.failures))
 }
 
 // reportRenderer returns the renderer of a --format value.
@@ -116,6 +117,22 @@ type sessionReport struct {
 	incomplete bool
 	reasons    []string // why it is incomplete; plain text, not yet escaped
 	mutations  []mutationRow
+	// from is the file of --from as a command names it; empty without it.
+	// The commands the report names then read the file.
+	from string
+	// command is the exit status of the command of the run: tracectl run's
+	// own, or the one its export carries; nil when there was none.
+	command *int
+}
+
+// commandFailed is the sentence a verdict gets for a run whose command
+// failed; empty otherwise. No failed event may show that failure (a test
+// that asserts on a response), and "Passed" would then be read as the run's.
+func (r *sessionReport) commandFailed() string {
+	if r.command == nil || *r.command == 0 {
+		return ""
+	}
+	return fmt.Sprintf("the command of the run failed (exit status %d)", *r.command)
 }
 
 // reportRoot is one trace root with the failed events of its tree, async
@@ -369,7 +386,17 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	default:
 		verdict = "**Passed**: no failed events."
 	}
-	if !info.Done() {
+	if cf := rep.commandFailed(); cf != "" {
+		if strings.HasPrefix(verdict, "**Passed**") {
+			verdict = "**Failed**: " + cf + "; no failed events were recorded."
+		} else {
+			verdict += " Also, " + cf + "."
+		}
+	}
+	switch {
+	case info.State == "":
+		verdict += " How the session ended is not known, so whether this is all of it is not known either."
+	case !info.Done():
 		verdict += " The session is still " + mdEscape(info.State, 40) + ", so this report can change."
 	}
 	if len(info.DeliveryUnconfirmed) > 0 {
@@ -433,7 +460,7 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 		}
 	}
 
-	fmt.Fprintf(&b, "\nDig further: %s, %s\n", mdCode("tracectl trace "+info.ID+" --errors"), mdCode("tracectl show "+info.ID+" <seq>"))
+	fmt.Fprintf(&b, "\nDig further: %s, %s\n", mdCode(drillCommand(rep.from, info.ID, "trace ID --errors")), mdCode(drillCommand(rep.from, info.ID, "show ID <seq>")))
 	return b.Bytes(), nil
 }
 

@@ -35,6 +35,22 @@ func parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, e
 	return pos, nil
 }
 
+// parseArgs is parseArgs for a command that reads sessions: with --from, the
+// sessions it was not given are those of the files.
+func (c *cli) parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, error) {
+	pos, err := positionals(fs, args)
+	if err == nil {
+		pos, err = c.fromSessions(fs.Name(), pos, n)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(pos) != n {
+		return nil, fmt.Errorf("usage: tracectl %s %s", fs.Name(), what)
+	}
+	return pos, nil
+}
+
 // positionals parses fs and returns the positional arguments, which flags may
 // precede, separate or follow.
 func positionals(fs *flag.FlagSet, args []string) ([]string, error) {
@@ -68,9 +84,13 @@ func resolve(ctx context.Context, o client.Options, ref string) (*client.Session
 			// has never seen: fall back only when it really holds events, or
 			// a mistyped id would read as an empty, passing session.
 			d := client.Detached(o, ref)
-			if sum, serr := d.Summary(ctx); serr == nil && sum.EventCount > 0 {
+			sum, serr := d.Summary(ctx)
+			if serr == nil && sum.EventCount > 0 {
 				fmt.Fprintf(os.Stderr, "tracectl: the control plane no longer knows %s; reading what the collector holds\n", ref)
 				return d, nil
+			}
+			if serr == nil {
+				return nil, fmt.Errorf("no session with id %q: the control plane does not know it and the collector holds no events for it (tracectl list shows the sessions): %w", ref, err)
 			}
 		}
 		return s, err

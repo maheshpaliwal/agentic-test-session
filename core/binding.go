@@ -160,25 +160,32 @@ func JWTClaim(token, claim string) string {
 	h := sha256.Sum256([]byte(token))
 	now := jwtNow()
 	jwtCache.Lock()
-	e, ok := jwtCache.m[h]
+	e, ok := jwtCache.m[h] // one map read: cannot panic
 	jwtCache.Unlock()
 	if !ok || now.After(e.exp) {
 		e = jwtEntry{claims: decodeJWTClaims(token), exp: now.Add(jwtCacheTTL)}
-		jwtCache.Lock()
-		if len(jwtCache.m) >= jwtCacheMax {
-			for k, v := range jwtCache.m {
-				if now.After(v.exp) {
-					delete(jwtCache.m, k)
-				}
-			}
-			if len(jwtCache.m) >= jwtCacheMax {
-				clear(jwtCache.m)
-			}
-		}
-		jwtCache.m[h] = e
-		jwtCache.Unlock()
+		cacheJWT(h, e, now)
 	}
 	return e.claims[claim]
+}
+
+// cacheJWT caches e, making room first. The unlock is deferred: this runs on
+// the host's request path, where a wrapper recovers a panic, and the lock is
+// shared by every request.
+func cacheJWT(h [32]byte, e jwtEntry, now time.Time) {
+	jwtCache.Lock()
+	defer jwtCache.Unlock()
+	if len(jwtCache.m) >= jwtCacheMax {
+		for k, v := range jwtCache.m {
+			if now.After(v.exp) {
+				delete(jwtCache.m, k)
+			}
+		}
+		if len(jwtCache.m) >= jwtCacheMax {
+			clear(jwtCache.m)
+		}
+	}
+	jwtCache.m[h] = e
 }
 
 // JWTClaimFromAuthorization is JWTClaim(BearerToken(authz), claim).

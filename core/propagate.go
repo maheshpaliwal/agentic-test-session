@@ -101,7 +101,13 @@ func (m MapCarrier) Set(k, v string) { m[strings.ToLower(k)] = v }
 type HTTPHeaderCarrier http.Header
 
 // Get implements Carrier.
-func (h HTTPHeaderCarrier) Get(k string) string { return http.Header(h).Get(k) }
+func (h HTTPHeaderCarrier) Get(k string) string {
+	// As http.Header.Get, with canonicalKey: no allocation for tsession's keys.
+	if v := h[canonicalKey(k)]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
 
 // Has implements PresenceCarrier. A header sent with an empty value counts,
 // and so does one stored under a key that is not in canonical form

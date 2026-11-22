@@ -24,9 +24,19 @@ func (c *cli) start(ctx context.Context, args []string) error {
 	}
 	opts.Bindings = binds.list
 	warnJWT(c.stderr, opts.Bindings)
+	// A name can be given to any number of sessions and then stands for the newest: say so once, here, where
+	// the earlier session stops being reachable by it. A failed lookup is not a reason to refuse the start.
+	var earlier *client.Info
+	if opts.Name != "" {
+		earlier, _ = latestNamed(ctx, c.opts, opts.Name)
+	}
 	s, err := client.Start(ctx, opts)
 	if err != nil {
 		return err
+	}
+	if earlier != nil {
+		fmt.Fprintf(c.stderr, "tracectl: note: an earlier session is also named %q (%s, %s); the name now stands for the new session, name the earlier one by its id\n",
+			opts.Name, earlier.ID, earlier.State)
 	}
 	if *idOnly {
 		_, err = fmt.Fprintln(c.stdout, s.ID)
@@ -171,9 +181,18 @@ func (c *cli) list(ctx context.Context, args []string) error {
 	if *limit < 0 {
 		return errors.New("--limit must be a positive number")
 	}
+	*state = strings.ToUpper(strings.TrimSpace(*state))
+	if *state != "" && !slices.Contains(sessionStates, *state) {
+		return fmt.Errorf("--state %q is not a session state; the states are %s", *state, strings.Join(sessionStates, ", "))
+	}
 	list, more, err := listNewest(ctx, c.opts, *state, *limit)
 	if err != nil {
 		return err
+	}
+	// Every session of a control plane has a state. A collector answers the same path with its own list,
+	// which decodes into sessions without one: that is --cp pointing at the wrong service, not a list.
+	if len(c.files) == 0 && slices.ContainsFunc(list, func(i client.Info) bool { return i.State == "" }) {
+		return errors.New("the service at --cp did not answer like a control plane (it lists sessions without a state); is --cp the collector's address?")
 	}
 	for _, i := range list {
 		line := fmt.Sprintf("%-30s %-9s %-9s %s", i.ID, i.State, i.Mode, displayName(i))
@@ -187,6 +206,9 @@ func (c *cli) list(ctx context.Context, args []string) error {
 	}
 	return nil
 }
+
+// sessionStates are the states a session can be in, as the control plane names them.
+var sessionStates = []string{"CREATED", "ACTIVE", "DRAINING", "SEALED", "ABORTED", "EXPIRED"}
 
 // listMarks says, at the end of a list line, that a session's record is known to be incomplete or that the
 // delivery of some instance could not be confirmed; empty for a session with neither.

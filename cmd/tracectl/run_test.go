@@ -68,6 +68,10 @@ type runEnv struct {
 	dropStops int  // this many stop requests get no answer: the connection is closed
 	neverSeal bool // the session stays DRAINING
 	onStop    func()
+	// subs answers GET /v1/subscribers; the argument counts the requests
+	// from 1. Nil: the control plane does not know the endpoint.
+	subs     func(request int) []client.Subscriber
+	subsReqs int
 
 	mu      sync.Mutex
 	started []client.Info // the sessions asked for, as sent
@@ -86,6 +90,16 @@ func newRunEnv(t *testing.T, evs ...core.Event) *runEnv {
 		return in
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/subscribers", func(w http.ResponseWriter, r *http.Request) {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		if env.subs == nil {
+			http.NotFound(w, r)
+			return
+		}
+		env.subsReqs++
+		json.NewEncoder(w).Encode(env.subs(env.subsReqs))
+	})
 	mux.HandleFunc("POST /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		env.mu.Lock()
 		defer env.mu.Unlock()
@@ -387,4 +401,151 @@ func TestCLIRunRetriesTheStop(t *testing.T) {
 		panic(fmt.Sprintf("exit %d\n%s", code, e))
 	}
 	env.wantSession(1, "SEALED")
+}
+
+// run --require-services: enough services are connected or the command is
+// not run, and a service that was connected and is gone when the command
+// ends fails the run, which may otherwise read as complete.
+func TestCLIRunRequireServices(t *testing.T) {
+	defer func(w, p time.Duration) { servicesGoneWait, servicesGonePoll = w, p }(servicesGoneWait, servicesGonePoll)
+	servicesGoneWait, servicesGonePoll = 60*time.Millisecond, 10*time.Millisecond
+	api := client.Subscriber{Service: "api", Instance: "api-1"}
+	worker := client.Subscriber{Service: "worker", Instance: "worker-1"}
+
+	// Too few: nothing is started and nothing is run.
+	env := newRunEnv(t)
+	env.subs = func(int) []client.Subscriber { return []client.Subscriber{api} }
+	code, _, e := env.run("ok", []string{"--require-services", "2"})
+	if code != exitCheckFailed || !strings.Contains(e, "1 service(s) connected, --require-services wants 2; the command was not run") {
+		panic(fmt.Sprintf("too few services: exit %d\n%s", code, e))
+	}
+	env.wantSession(0, "")
+
+	// Both stay: the run is what it is without the flag.
+	env = newRunEnv(t)
+	env.subs = func(int) []client.Subscriber { return []client.Subscriber{api, worker} }
+	if code, _, e := env.run("ok", []string{"--require-services", "2"}); code != 0 {
+		panic(fmt.Sprintf("both services stay: exit %d\n%s", code, e))
+	}
+	env.wantSession(1, "SEALED")
+
+	// The worker is gone when the command ends: the run fails and names it; the session is still stopped.
+	env = newRunEnv(t)
+	env.subs = func(request int) []client.Subscriber {
+		if request == 1 {
+			return []client.Subscriber{api, worker}
+		}
+		return []client.Subscriber{api}
+	}
+	code, _, e = env.run("ok", []string{"--require-services", "2"})
+	if code != exitCheckFailed || !strings.Contains(e, "1 service(s) connected when the run began are gone: worker (worker-1)") {
+		panic(fmt.Sprintf("a service that went away: exit %d\n%s", code, e))
+	}
+	env.wantSession(1, "SEALED")
+
+	// A command that failed keeps its own status.
+	env = newRunEnv(t)
+	env.subs = func(request int) []client.Subscriber {
+		if request == 1 {
+			return []client.Subscriber{api, worker}
+		}
+		return nil
+	}
+	if code, _, e := env.run("exit7", []string{"--require-services", "1"}); code != 7 || !strings.Contains(e, "are gone: api (api-1), worker (worker-1)") {
+		panic(fmt.Sprintf("a failed command and services gone: exit %d\n%s", code, e))
+	}
+
+	// A control plane that cannot list its services: said before anything is run.
+	env = newRunEnv(t)
+	if code, _, e := env.run("ok", []string{"--require-services", "1"}); code != 1 || !strings.Contains(e, "--require-services: listing the connected services") {
+		panic(fmt.Sprintf("no subscribers endpoint: exit %d\n%s", code, e))
+	}
+	env.wantSession(0, "")
+	if code, _, e := env.tc("run", "--require-services", "-1", "--", "true"); code != 2 || !strings.Contains(e, "must not be negative") {
+		panic(fmt.Sprintf("a negative number: exit %d\n%s", code, e))
+	}
+}
+
+// What --require-services tells apart beyond names: one of two replicas
+// that are called the same is gone; a service that is away for a moment
+// (its stream was cut, the control plane restarted) and back is not.
+func TestCLIRunRequireServicesCountsAndWaits(t *testing.T) {
+	defer func(w, p time.Duration) { servicesGoneWait, servicesGonePoll = w, p }(servicesGoneWait, servicesGonePoll)
+	servicesGoneWait, servicesGonePoll = 2*time.Second, 10*time.Millisecond
+	replica := client.Subscriber{Service: "api"} // no instance name: two of them read the same
+
+	env := newRunEnv(t)
+	env.subs = func(request int) []client.Subscriber {
+		if request == 1 {
+			return []client.Subscriber{replica, replica}
+		}
+		return []client.Subscriber{replica}
+	}
+	servicesGoneWait = 60 * time.Millisecond
+	if code, _, e := env.run("ok", []string{"--require-services", "2"}); code != exitCheckFailed || !strings.Contains(e, "1 service(s) connected when the run began are gone") {
+		panic(fmt.Sprintf("one of two replicas gone: exit %d\n%s", code, e))
+	}
+
+	// Away at the first look after the command, back at the third: not gone.
+	servicesGoneWait = 2 * time.Second
+	env = newRunEnv(t)
+	env.subs = func(request int) []client.Subscriber {
+		if request == 2 || request == 3 {
+			return nil
+		}
+		return []client.Subscriber{replica, replica}
+	}
+	if code, _, e := env.run("ok", []string{"--require-services", "2"}); code != 0 {
+		panic(fmt.Sprintf("services that came back: exit %d\n%s", code, e))
+	}
+}
+
+// The files of a run say what the run was: the status of a command that
+// failed without a failed event, and a service that went away. A job that
+// has only the files fails as the run did.
+func TestCLIRunExportCarriesWhatFailedTheRun(t *testing.T) {
+	defer func(w, p time.Duration) { servicesGoneWait, servicesGonePoll = w, p }(servicesGoneWait, servicesGonePoll)
+	servicesGoneWait, servicesGonePoll = 60*time.Millisecond, 10*time.Millisecond
+	t.Chdir(t.TempDir())
+	firstLine := func(file string) string {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			panic(err)
+		}
+		return strings.SplitN(string(b), "\n", 2)[0]
+	}
+
+	// A command that exits 7, and no failed event.
+	env := newRunEnv(t, core.Event{Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9})
+	code, _, e := env.run("exit7", []string{"--export", "seven.ndjson", "--digest", "seven.md", "--report", "seven-report.md"})
+	if code != 7 {
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
+	}
+	if l := firstLine("seven.ndjson"); !strings.Contains(l, `"command_status":7`) {
+		panic("the export of a run whose command exited 7: " + l)
+	}
+	for file, want := range map[string]string{
+		"seven.md":        "**Failed**: the command of the run failed (exit status 7); no failed events were recorded.",
+		"seven-report.md": "**Failed**: the command of the run failed (exit status 7); no failed events were recorded.",
+	} {
+		if b, err := os.ReadFile(file); err != nil || !strings.Contains(string(b), want) || strings.Contains(string(b), "**Passed**") {
+			panic(fmt.Sprintf("%s: %v\n%s", file, err, b))
+		}
+	}
+
+	// A service that went away: the export is incomplete and says why.
+	env = newRunEnv(t, core.Event{Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9})
+	env.subs = func(request int) []client.Subscriber {
+		if request == 1 {
+			return []client.Subscriber{{Service: "worker", Instance: "worker-1"}}
+		}
+		return nil
+	}
+	if code, _, e := env.run("ok", []string{"--require-services", "1", "--export", "gone.ndjson"}); code != exitCheckFailed {
+		panic(fmt.Sprintf("exit %d\n%s", code, e))
+	}
+	if l := firstLine("gone.ndjson"); !strings.Contains(l, `"incomplete":true`) || !strings.Contains(l, "connected when the run began are gone: worker (worker-1)") ||
+		!strings.Contains(l, `"command_status":0`) {
+		panic("the export of a run in which a service went away: " + l)
+	}
 }
