@@ -436,6 +436,8 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl --from -` with a terminal on standard input says that it reads an export from there and how to pipe
+  one in; it waited for input without a word.
 - `tracectl --from` passed all three gates on files that proved nothing (a review's findings). Now:
   - a verdict that does not decode (`"events":"3"`, `"incomplete":"true"`), a negative count, a `state` that is
     none, a second verdict, or another number of events than the count is refused (exit 1); such a verdict was

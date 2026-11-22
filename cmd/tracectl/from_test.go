@@ -708,3 +708,18 @@ func TestFromSmallRules(t *testing.T) {
 		t.Errorf("a file that starts with 0x1f: exit %d, %q", code, errOut)
 	}
 }
+
+// --from - with a terminal on standard input would wait without a word.
+func TestFromStandardInputThatIsATerminal(t *testing.T) {
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		t.Skip("no terminal to test with: ", err)
+	}
+	defer tty.Close()
+	old := os.Stdin
+	os.Stdin = tty
+	defer func() { os.Stdin = old }()
+	if code, out, e := fromTC(t, []string{"-"}, "summary"); code != 1 || out != "" || !strings.Contains(e, "which is a terminal") {
+		panic(fmt.Sprintf("exit %d, stdout %q, stderr %q", code, out, e))
+	}
+}

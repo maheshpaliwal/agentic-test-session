@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -98,6 +99,12 @@ func (w *memResponse) Write(b []byte) (int, error) {
 
 // openFrom opens the files of --from and points the commands at them.
 func (c *cli) openFrom(paths []string) error {
+	// Standard input that is a terminal would be waited on without a word.
+	if slices.Contains(paths, "-") {
+		if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
+			return errors.New("--from - reads an export from standard input, which is a terminal: pipe one into it (gunzip -c run.ndjson.gz | tracectl --from - digest), or name the file")
+		}
+	}
 	d, err := dashboard.NewOfflineStrict(paths)
 	if err != nil {
 		return err
