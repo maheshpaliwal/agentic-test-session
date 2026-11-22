@@ -146,6 +146,15 @@ Rolling back:
 
 ### Added
 
+- `tracectl --from FILE` reads a session saved with `tracectl export -o FILE`, with no service running: `digest`,
+  `summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`, `status` and `list`, with the
+  output and the exit status of the live session. The session argument can be left out. `--from` given twice is
+  `diff`'s baseline and candidate. A digest read from a file names the file in its drill-down commands
+  (`tracectl --from run.ndjson show <seq>`). Commands that start, stop or change a session, and `--from` with
+  `--cp` or `--collector`, exit 2; a missing, empty, cut-short or foreign file is one line and exit 1. A CI job
+  or an agent that holds the artifact needs nothing else. `tracectl` links the dashboard's offline backend for
+  it and is about 0.5 MB larger. Go API: `(*dashboard.Demo).Files()` and `dashboard.OpenedFile`.
+- `tracectl run --digest FILE --max-bytes N`, as `digest --max-bytes`.
 - `ExporterConfig.ReachCheck` (zero, off, for `NewExporter`; `runtime.Start` sets 30 s),
   `client.Info.StoppedInstances`, `client.Subscriber.Collector`; a session has `stopped_instances` (at most 64)
   and `stopped_instances_more`, left out of `GET /v1/sessions`.
