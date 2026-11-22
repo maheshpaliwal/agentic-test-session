@@ -396,6 +396,7 @@ service that is killed takes what it had not delivered with it, and nothing else
 # GitHub Actions; the same three commands work in any CI system
 jobs:
   e2e:
+    runs-on: ubuntu-latest      # with your services, the collector and the control plane started before this step
     steps:
       - run: >
           tracectl run --name "e2e-${{ github.run_id }}" --require-services 3
@@ -405,6 +406,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with: { name: tsession, path: "run.ndjson\ndigest.md\nreport.md" }
   gate:
+    runs-on: ubuntu-latest      # needs tracectl only: no service runs here
     needs: e2e
     if: always()
     steps:
