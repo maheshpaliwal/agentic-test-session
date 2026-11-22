@@ -59,7 +59,8 @@ is silent or cannot deliver, and 12 to 18 s while a service's delivery reports a
 ## Reading an export (`tracectl --from`, `dashboard -open`)
 
 - `tracectl --from` passes its gates only on a file that proves what it holds: a verdict on its first line
-  with the number of events (`events` in `tsession_session`), that many events, and a session that had ended.
+  with the number of events (`events` in `tsession_session`) and the state, that many events, and a session
+  that had ended.
   A file that lost lines, holds a verdict that does not read, or a second verdict, is refused. One without a
   verdict or without the count (its first line is lost, it was written by an older `tracectl`, or the control
   plane could not be asked at the export) is read with a note, and `--fail-on-incomplete` and

@@ -141,6 +141,9 @@ func loadDigest(ctx context.Context, s *client.Session) (*digestSource, error) {
 // The digest as it is printed with --format json. Every string that holds
 // recorded text went through dataText.
 type digest struct {
+	// fromFile: the session was read from a file of --from (for wording only).
+	fromFile bool
+
 	Schema    string       `json:"schema"`
 	Notice    string       `json:"notice"`
 	Session   dSession     `json:"session"`
@@ -798,7 +801,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	}
 	id := dataText(info.ID, 64)
 	command := func(what string) string { return drillCommand(src.fromArg(tight), id, what) }
-	d = &digest{Schema: digestSchema, Notice: digestNotice, MaxBytes: budget,
+	d = &digest{fromFile: src.from != "", Schema: digestSchema, Notice: digestNotice, MaxBytes: budget,
 		Session: dSession{ID: id, Name: dataText(displayName(info), nameMax), State: dataText(info.State, 20),
 			Live: info.State != "" && !info.Done()},
 		Verdict: dVerdict{Recording: "complete"},
@@ -1248,7 +1251,11 @@ func (digestMarkdown) render(d *digest) []byte {
 	if d.Session.Live {
 		b.WriteString(" **Live**: the session is not sealed, so counts, failures and transaction outcomes can still change.")
 	}
-	state := cmp.Or(mdEscape(d.Session.State, 40), "unknown (the control plane no longer knows this session)")
+	unknown := "unknown (the control plane no longer knows this session)"
+	if d.fromFile {
+		unknown = "unknown (the file does not say how its session ended)"
+	}
+	state := cmp.Or(mdEscape(d.Session.State, 40), unknown)
 	recording := d.Verdict.Recording
 	if d.Session.Live && recording == "unknown" {
 		recording = "not yet known (the session is still running)"

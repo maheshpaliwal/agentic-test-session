@@ -556,7 +556,10 @@ an older `tracectl`, or a hand-written one) a file that lost whole lines cannot 
 neither can a file that lost its first line: `tracectl --from` reads such a file as a session whose state is
 not known, on which no completeness gate passes. Write `events` in anything that produces exports. The verdict
 is on the first line only: a reader refuses a file with a second one, with one that does not decode (a number
-written as a string), with a negative count, or with a `state` that is not a session state. It
+written as a string), with a negative count, with a `state` that is not a session state, or with a member written twice (in any
+case: a decoder reads the last, so a verdict could be followed by one that takes it back). A verdict without
+`state` proves as little as one without `events`. A drain that timed out is incompleteness whatever
+`incomplete` says, as are reasons and a seal error. It
 is final for a session that has ended. `dashboard -open FILE` gives the opened session that verdict, so
 `tracectl summary`, `report` and `digest` against it print what they print for the live session and their
 `--fail-on-*` flags exit the same. The delivery reports themselves (`delivery`) are not in the file.

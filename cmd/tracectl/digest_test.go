@@ -1143,6 +1143,7 @@ func TestCLIRunExportAndDigestOnOneFile(t *testing.T) {
 	for _, flags := range [][]string{
 		{"--export", "x.md", "--digest", "x.md", "--", "true"},
 		{"--export", "x.md", "--report", "./x.md", "--", "true"},
+		{"--export", "x.md", "--digest", filepath.Join(mustAbs("."), "x.md"), "--", "true"},
 	} {
 		if code, _, e := env.tc(append([]string{"run"}, flags...)...); code != 2 || !strings.Contains(e, "name the same file") {
 			t.Errorf("%v: exit %d, stderr %q", flags, code, e)
@@ -1157,5 +1158,29 @@ func TestCLIRunExportAndDigestOnOneFile(t *testing.T) {
 	}
 	if st, err := os.Stat("run.ndjson"); err != nil || st.Mode().Perm() != 0o600 {
 		panic(fmt.Sprintf("the export's mode: %v %v", st.Mode().Perm(), err))
+	}
+}
+
+func mustAbs(p string) string {
+	a, err := filepath.Abs(p)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+// A digest path that is a link to the export is the export: seen when both
+// exist, before the command runs.
+func TestCLIRunExportAndDigestThroughALink(t *testing.T) {
+	env := newRunEnv(t, failedEvents()...)
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("run.ndjson", nil, 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.Symlink("run.ndjson", "link.md"); err != nil {
+		t.Skip("no symbolic links here: ", err)
+	}
+	if code, _, e := env.tc("run", "--export", "run.ndjson", "--digest", "link.md", "--", "true"); code != 2 || !strings.Contains(e, "name the same file") {
+		panic(fmt.Sprintf("exit %d, stderr %q", code, e))
 	}
 }

@@ -436,6 +436,17 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl --from`, from the re-check of the fixes above: a verdict with a count and no state is read as
+  unproven (it passed as a sealed session); a `tsession_session` member written twice on the first line, or a
+  member of the verdict written twice, is refused (the last one was read, so a clean verdict could follow one
+  that said incomplete); a drain that timed out makes the session incomplete whatever `incomplete` says; a
+  session id may hold letters, digits and `_.:-` only. A file that does not say how its session ended is called
+  that in the gates, the digest and the report, where the words were the ones for a session the control plane
+  has forgotten (and the report read "The session is still ,"). `tracectl diff` notes a side of which it is not
+  known how it ended (`"recording": "unknown"`).
+- `tracectl run --export` finds a `--digest` or `--report` on the same file also when it is named by an
+  absolute path or through a link, and once more after the export is written (the export is then kept and the
+  other file not written).
 - `tracectl --from -` with a terminal on standard input says that it reads an export from there and how to pipe
   one in; it waited for input without a word.
 - `tracectl --from` passed all three gates on files that proved nothing (a review's findings). Now:

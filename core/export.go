@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -147,6 +148,15 @@ func ExportVerdict(line []byte) (meta *ExportSession, present bool, err error) {
 	if v.Meta == nil {
 		return nil, false, nil // the text is inside a recorded value, not a key of the line
 	}
+	// A member written twice is read as its last: a verdict that says "incomplete" could be followed by one
+	// that does not, and the reader would see the second only. The same for a key in another case, which the
+	// decoder takes for the same member.
+	if n := countKey(line, ExportSessionKey); n != 1 {
+		return nil, true, fmt.Errorf("it has %d members named %s (in any case): which one is the verdict cannot be told", n, ExportSessionKey)
+	}
+	if k, dup := repeatedKey(v.Meta); dup {
+		return nil, true, fmt.Errorf("its %s has the member %q twice", ExportSessionKey, k)
+	}
 	meta = &ExportSession{}
 	// Members this version does not know are passed over: a later version adds them.
 	if err := json.Unmarshal(v.Meta, meta); err != nil {
@@ -159,4 +169,53 @@ func ExportVerdict(line []byte) (meta *ExportSession, present bool, err error) {
 		return nil, true, fmt.Errorf("its %s has the state %q, which is none", ExportSessionKey, meta.State)
 	}
 	return meta, true, nil
+}
+
+// objectKeys calls fn with every key of the JSON object b, in order, and
+// reports whether b is an object that could be walked to its end.
+func objectKeys(b []byte, fn func(key string)) bool {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	for dec.More() {
+		t, err := dec.Token()
+		k, ok := t.(string)
+		if err != nil || !ok {
+			return false
+		}
+		fn(k)
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// countKey is how many keys of the object b are key, compared as the JSON
+// decoder compares them to a field (without regard to case).
+func countKey(b []byte, key string) int {
+	n := 0
+	objectKeys(b, func(k string) {
+		if strings.EqualFold(k, key) {
+			n++
+		}
+	})
+	return n
+}
+
+// repeatedKey returns a key the object b has twice, compared without regard
+// to case.
+func repeatedKey(b []byte) (string, bool) {
+	seen := map[string]struct{}{}
+	rep := ""
+	objectKeys(b, func(k string) {
+		f := strings.ToLower(k)
+		if _, dup := seen[f]; dup && rep == "" {
+			rep = k
+		}
+		seen[f] = struct{}{}
+	})
+	return rep, rep != ""
 }

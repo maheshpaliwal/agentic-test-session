@@ -181,16 +181,21 @@ func restoreOutcomes(s string, outcomes []string) string {
 type sessionRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// Recording is "incomplete" for a session known to have lost events and
-	// absent otherwise. What differs from such a side may be what it has not
-	// got, not what the run did.
+	// Recording is "incomplete" for a session known to have lost events,
+	// "unknown" for one of which it is not known how it ended (the control
+	// plane has forgotten it, or its file does not say), and absent
+	// otherwise. What differs from such a side may be what it has not got,
+	// not what the run did.
 	Recording string `json:"recording,omitempty"`
 }
 
 // recordingOf is the Recording of a session reference.
 func recordingOf(info client.Info, sum client.Summary) string {
-	if sum.Incomplete || info.Incomplete || len(info.IncompleteReasons) > 0 || info.SealError != "" {
+	switch {
+	case sum.Incomplete || info.Incomplete || len(info.IncompleteReasons) > 0 || info.SealError != "":
 		return "incomplete"
+	case info.State == "":
+		return "unknown"
 	}
 	return ""
 }
@@ -441,8 +446,11 @@ func printDiff(w io.Writer, rep diffReport) {
 	defer out.Flush()
 	fmt.Fprintf(out, "a  %s  %s\nb  %s  %s\n", rep.A.ID, rep.A.Name, rep.B.ID, rep.B.Name)
 	for _, side := range []struct{ label, recording string }{{"a", rep.A.Recording}, {"b", rep.B.Recording}} {
-		if side.recording == "incomplete" {
+		switch side.recording {
+		case "incomplete":
 			fmt.Fprintf(out, "note: %s is incomplete: what it lacks may be events that were lost, not what the run did\n", side.label)
+		case "unknown":
+			fmt.Fprintf(out, "note: how %s ended is not known: what it lacks may be events that are missing, not what the run did\n", side.label)
 		}
 	}
 	if !rep.Differs {

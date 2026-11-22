@@ -109,7 +109,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 			return runUsage("--export %s: its directory does not exist", *exportPath)
 		}
 		for _, o := range []struct{ flag, path string }{{"--digest", *digestPath}, {"--report", *reportPath}} {
-			if o.path != "" && filepath.Clean(o.path) == filepath.Clean(*exportPath) {
+			if o.path != "" && sameFile(o.path, *exportPath) {
 				return runUsage("--export and %s name the same file (%s): the second would overwrite the first", o.flag, o.path)
 			}
 		}
@@ -233,6 +233,21 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 				*exportPath = ""
 			}
 		}
+		// Once more now that the export exists: a name that only now turns out to be the same file (a
+		// file system that does not tell cases apart, a link made meanwhile) would overwrite it.
+		for _, o := range []struct {
+			flag string
+			path *string
+		}{{"--digest", digestPath}, {"--report", reportPath}} {
+			if *exportPath != "" && *o.path != "" && sameFile(*o.path, *exportPath) {
+				failed = true
+				fmt.Fprintf(c.stderr, "tracectl: %s %s is the file of --export: it is not written, the export is kept\n", o.flag, *o.path)
+				*o.path = ""
+				if o.flag == "--report" {
+					render = nil
+				}
+			}
+		}
 		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render, *exportPath)
 		if err == nil && *digestPath != "" {
 			err = c.runDigest(readCtx, s, *digestPath, *maxBytes, *exportPath)
@@ -293,6 +308,24 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 
 // runDigest writes the digest of the session run recorded to path, in at
 // most maxBytes bytes.
+// sameFile reports whether a and b name one file: the same path once both
+// are made absolute, or, when both exist, the same file by another name (a
+// link, a name in another case on a file system that does not tell them
+// apart).
+func sameFile(a, b string) bool {
+	if x, err := filepath.Abs(a); err == nil {
+		if y, err := filepath.Abs(b); err == nil && x == y {
+			return true
+		}
+	}
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	return err == nil && os.SameFile(sa, sb)
+}
+
 // runExport writes the events of the session run recorded to path, as
 // export -o does, and says how to read the file.
 func (c *cli) runExport(ctx context.Context, s *client.Session, path string) (err error) {

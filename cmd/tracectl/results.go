@@ -82,7 +82,11 @@ func (g *gates) check(stderr io.Writer, info client.Info, sum client.Summary, fa
 	case info.State == "":
 		// Read through the collector only: whether the seal failed or the
 		// drain timed out is not known, so the gate cannot pass.
-		failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+		if g.file {
+			failed = append(failed, "the file does not say how its session ended or how many events it holds, so whether it is complete is unknown")
+		} else {
+			failed = append(failed, "the control plane no longer knows this session, so whether it is complete is unknown")
+		}
 	case !info.Done() && g.file:
 		failed = append(failed, fmt.Sprintf("the session had not ended when the file was written (%s), so the file does not hold all of it and whether it is complete is not known; export the session once it has ended",
 			dataText(info.State, 20)))
@@ -108,7 +112,11 @@ func (g *gates) check(stderr io.Writer, info client.Info, sum client.Summary, fa
 	case len(info.DeliveryUnconfirmed) > 0:
 		failed = append(failed, "delivery is unconfirmed ("+strings.Join(info.DeliveryUnconfirmed, "; ")+")")
 	case info.State == "" && !g.onIncomplete:
-		failed = append(failed, "the control plane no longer knows this session, so whether its delivery was confirmed is unknown")
+		if g.file {
+			failed = append(failed, "the file does not say how its session ended, so whether its delivery was confirmed is unknown")
+		} else {
+			failed = append(failed, "the control plane no longer knows this session, so whether its delivery was confirmed is unknown")
+		}
 	}
 	if g.onEmpty && sum.EventCount == 0 {
 		failed = append(failed, emptySession)

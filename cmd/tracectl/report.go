@@ -373,7 +373,10 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 	default:
 		verdict = "**Passed**: no failed events."
 	}
-	if !info.Done() {
+	switch {
+	case info.State == "":
+		verdict += " How the session ended is not known, so whether this is all of it is not known either."
+	case !info.Done():
 		verdict += " The session is still " + mdEscape(info.State, 40) + ", so this report can change."
 	}
 	if len(info.DeliveryUnconfirmed) > 0 {

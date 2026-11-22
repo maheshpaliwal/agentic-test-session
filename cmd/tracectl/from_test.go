@@ -575,6 +575,13 @@ func TestFromDoesNotPassAFileThatProvesNothing(t *testing.T) {
 		{"a session that had not ended", []string{with(1, `{"state":"ACTIVE","events":2}`), ev(2)}, exitCheckFailed, "had not ended when the file was written (ACTIVE)"},
 		{"a session that was draining", []string{with(1, `{"state":"DRAINING","events":2}`), ev(2)}, exitCheckFailed, "had not ended when the file was written (DRAINING)"},
 		{"reasons under a flag that says complete", []string{with(1, `{"state":"SEALED","incomplete":false,"incomplete_reasons":["lost"],"events":2}`), ev(2)}, exitCheckFailed, "session is incomplete (lost)"},
+		{"a count and no state", []string{with(1, `{"events":2}`), ev(2)}, exitCheckFailed, "whether it is complete is unknown"},
+		{"a drain that timed out, and nothing else", []string{with(1, `{"state":"SEALED","drain_timed_out":true,"events":2}`), ev(2)}, exitCheckFailed, "session is incomplete"},
+		{"two verdicts on one line, the clean one last", []string{with(1, `{"state":"SEALED","incomplete":true,"events":2}`)[:len(with(1, `{"state":"SEALED","incomplete":true,"events":2}`))-1] + `,"tsession_session":{"state":"SEALED","events":2}}`, ev(2)}, 1, "2 members named tsession_session"},
+		{"a verdict in another case after the real one", []string{with(1, `{"state":"SEALED","incomplete":true,"events":2}`)[:len(with(1, `{"state":"SEALED","incomplete":true,"events":2}`))-1] + `,"TSESSION_SESSION":{"state":"SEALED","events":2}}`, ev(2)}, 1, "2 members named tsession_session"},
+		{"a state written twice", []string{with(1, `{"state":"ACTIVE","state":"SEALED","events":2}`), ev(2)}, 1, `the member "state" twice`},
+		{"a flag written twice", []string{with(1, `{"state":"SEALED","incomplete":true,"incomplete":false,"events":2}`), ev(2)}, 1, `the member "incomplete" twice`},
+		{"a session id with shell characters", []string{strings.Replace(with(1, `{"state":"SEALED","events":1}`), `"ts_a"`, `"ts_a;id|sh"`, 1)}, 1, "the session id is not one"},
 		{"a failed seal under a flag that says complete", []string{with(1, `{"state":"SEALED","seal_error":"timeout","events":2}`), ev(2)}, exitCheckFailed, "session is incomplete"},
 	} {
 		if err := os.WriteFile("f.ndjson", []byte(strings.Join(tt.lines, "\n")+"\n"), 0o600); err != nil {

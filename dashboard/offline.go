@@ -218,7 +218,7 @@ func loadExport(path string) (*demoSess, error) {
 		torn, tornErr = true, fmt.Errorf("%s: holds %d of the %d events that were exported", path, len(evs), *meta.Events)
 	}
 	// Without the verdict and the count the file does not say how its session ended, nor that it is whole.
-	unproven := meta == nil || meta.Events == nil
+	unproven := meta == nil || meta.Events == nil || meta.State == ""
 	slicex.SortBy(evs, func(e core.Event) uint64 { return e.Seq })
 	var first, last int64
 	for i := range evs {
@@ -273,7 +273,8 @@ func loadExport(path string) (*demoSess, error) {
 			sess.State = st
 		}
 		// Reasons or a failed seal are incompleteness, whatever the flag next to them says.
-		sess.Incomplete = sess.Incomplete || meta.Incomplete || len(meta.IncompleteReasons) > 0 || meta.SealError != ""
+		// A drain that ran out of time is one too: the control plane never ends such a session complete.
+		sess.Incomplete = sess.Incomplete || meta.Incomplete || len(meta.IncompleteReasons) > 0 || meta.SealError != "" || meta.DrainTimedOut
 		sess.IncompleteReasons, sess.DeliveryUnconfirmed = meta.IncompleteReasons, meta.DeliveryUnconfirmed
 		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
 	}
@@ -310,19 +311,21 @@ func (d *Demo) readOnlyAPI(next http.Handler) http.Handler {
 // A variable for the tests.
 var maxExportBytes int64 = 512 << 20
 
-// plainID reports whether id can be a session id: printable ASCII without
-// spaces, and not too long. What a file calls its session is printed to
+// plainID reports whether id can be a session id: letters, digits and
+// "_.:-" (the control plane's are "ts_" and hex digits), not beginning with
+// "-", and not too long. What a file calls its session is printed to
 // terminals and put into commands.
 func plainID(id string) bool {
 	if id == "" || len(id) > 128 {
 		return false
 	}
 	for i := 0; i < len(id); i++ {
-		if c := id[i]; c <= ' ' || c >= 0x7f || c == '\'' || c == '"' || c == '`' || c == '\\' || c == '$' {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == ':' || c == '-') {
 			return false
 		}
 	}
-	return true
+	return id[0] != '-'
 }
 
 func clipID(id string) string {
