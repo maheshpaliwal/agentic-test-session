@@ -282,7 +282,7 @@ func TestFromErrors(t *testing.T) {
 		{[]string{cut}, []string{"summary", "--fail-on-error"}, 1, "export the session again"},
 		{[]string{cutOnly}, []string{"digest"}, 1, cutOnly + ":1: not an exported event"},
 		{[]string{mixed}, []string{"digest"}, 1, "mixed.ndjson:5: events of two sessions (ts_a and ts_z) in one file"},
-		{[]string{good, good}, []string{"list"}, 1, "session ts_a was already opened from another file"},
+		{[]string{good, good}, []string{"list"}, 1, "run.ndjson was given twice"},
 		{[]string{good, missing}, []string{"digest", "ts_a"}, 1, "no such file or directory"},
 		// The session, when it is named, is the file's.
 		{[]string{good}, []string{"digest", "ts_other"}, 1, "session ts_other is not in the files of --from: " + good + " holds ts_a"},
@@ -515,5 +515,19 @@ func TestFromAfterTheCommandIsExplained(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run([]string{"--cp", "http://127.0.0.1:1", "run", "--timeout", "0s", "--", "true", "--from", "x"}, &out, &errb); !strings.Contains(errb.String(), "--timeout must be more than zero") {
 		panic(fmt.Sprintf("run -- cmd --from: exit %d, stderr %q", code, errb.String()))
+	}
+}
+
+// Two exports of one session cannot be open together (sessions are told
+// apart by their id): said in those words, naming both files.
+func TestFromTwoExportsOfOneSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	a := exportFile(t, dir, "early.ndjson", fromEvents("ts_a")[:2]...)
+	b := exportFile(t, dir, "late.ndjson", fromEvents("ts_a")...)
+	code, out, e := fromTC(t, []string{a, b}, "diff")
+	if code != 1 || out != "" || !strings.Contains(e, "early.ndjson and late.ndjson are exports of the same session (ts_a)") ||
+		!strings.Contains(e, "cannot be compared") || strings.Count(e, "\n") != 1 {
+		panic(fmt.Sprintf("exit %d, stdout %q, stderr %q", code, out, e))
 	}
 }

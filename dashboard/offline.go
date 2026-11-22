@@ -35,8 +35,14 @@ func NewOffline(paths []string) (*Demo, error) {
 		if err != nil {
 			return nil, err
 		}
-		if d.find(s.ID) != nil {
-			return nil, fmt.Errorf("%s: session %s was already opened from another file", p, s.ID)
+		if prev := d.find(s.ID); prev != nil {
+			if prev.path == p {
+				return nil, fmt.Errorf("%s was given twice", p)
+			}
+			// Sessions are told apart by their id, so two exports of one session cannot be open
+			// together: not to list them, and not to compare an earlier export with a later one.
+			return nil, fmt.Errorf("%s and %s are exports of the same session (%s): only one of them can be read at a time, and two exports of one session cannot be compared",
+				prev.path, p, s.ID)
 		}
 		d.sess = append(d.sess, s)
 	}

@@ -433,6 +433,9 @@ Rolling back:
 
 ### Fixed
 
+- `tracectl --from` and `dashboard -open` given two exports of one session name both files and say that only one
+  can be read at a time; a file given twice is said to be given twice. Both read "was already opened from
+  another file".
 - `tracectl --from FILE`, from a walkthrough of it:
   - a file that lost whole lines (a download that stopped at the end of a line) is refused: the export now says
     how many events it wrote (`events` in `tsession_session`). The first 5 of 32 lines read as "5 events, 0
