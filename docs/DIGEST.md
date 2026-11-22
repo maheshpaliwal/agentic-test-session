@@ -9,6 +9,8 @@ tracectl digest my-run                                  # Markdown, at most 1638
 tracectl digest my-run --format json --max-bytes 8192   # one line of JSON (also: --json)
 tracectl digest my-run -o digest.md --fail-on-error --fail-on-incomplete --fail-on-empty
 tracectl run --digest digest.md -- ./run-e2e.sh         # written after the seal; digest.json for JSON
+tracectl run --digest digest.md --max-bytes 8192 -- ./run-e2e.sh   # the same bound for run's digest
+tracectl --from run.ndjson digest                       # of an export (tracectl export -o), no service running
 ```
 
 It reads the summary, the call tree and the events of the session from the collector and needs nothing else. The
@@ -45,9 +47,30 @@ name by the SDK, like everything recorded).
    counted here (`tracectl status <id>` prints them whole).
 6. **Drill down**: the commands for more detail (`show`, `history`, `trace --errors`, `events --errors`), and a
    note that they need the `--cp` and `--collector` the digest was read with, when it was read with them.
+   A digest read with `--from FILE` has no note: its commands, here and under "Omitted", read the file
+   (`tracectl --from run.ndjson show <seq>`), since they work in no other way.
 
 The output for the same recorded session is the same, byte for byte: entities are sorted by the number of their
 mutations, most first (so that a cut drops the least changed), then by store, entity and key, failures and changes by `seq`, counts by size and then name (in JSON: by name).
+
+### The digest of a file
+
+`tracectl --from FILE digest` reads an export and no service. It is the digest of the session the file was
+exported from, byte for byte and with the same exit status, except for the commands it names: they carry
+`--from` and the file, do not name the session (the file holds one), and there is no note about `--cp` and
+`--collector`.
+
+The file is named as it was given on the command line, so that the commands can be run as they are printed, from
+the directory the digest was made in. The digest of one file is therefore the same bytes for the same command
+line, and differs in these commands (only) when the file is read by another name. The name is put in single
+quotes where a shell needs them. It is replaced by the word `FILE`, for the reader to fill in, when it
+
+- is longer than 200 bytes, or longer than 40 bytes in a digest so short of room that the session's own text is
+  clipped (step 3 of the budget): the name is repeated in up to fifteen commands;
+- starts with `-`, or holds a single quote, a backquote, a control character or anything outside ASCII: it would
+  not stay one word on one line.
+
+`tracectl run --digest` and a digest read from the services are not affected: no file name is in them.
 
 ## The budget
 
@@ -102,8 +125,8 @@ Lists are never `null`.
 | `mutations` | list | one object per changed entity, see below |
 | `tree` | list | the lines of the call tree in pre-order, see below |
 | `omitted` | list | `section` (`verdict`, `counts`, `failures`, `mutations`, `tree`), `what` (text), `get` (commands that print what is missing); empty when nothing was left out. `verdict`: how many of `incomplete_reasons` and `delivery_unconfirmed` are shortened or not listed |
-| `drill_down` | list | `command`, `prints` |
-| `drill_down_note` | string | present when the digest was read with `--cp` or `--collector` on the command line: the commands of `drill_down` need the same flags. Left out when the budget is tight |
+| `drill_down` | list | `command`, `prints`. Read with `--from FILE`: the commands are `tracectl --from FILE ...` and do not name the session (see "The digest of a file"); so are those of `omitted[].get` |
+| `drill_down_note` | string | present when the digest was read with `--cp` or `--collector` on the command line: the commands of `drill_down` need the same flags. Left out when the budget is tight, and when the digest was read with `--from` |
 | `max_bytes` | number | the budget this digest was made for |
 
 A failure: `seq`, `service`, `kind`, `name`, `error`, `in_tree` (false: the call tree does not hold the event),

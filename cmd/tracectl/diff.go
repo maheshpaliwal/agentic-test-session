@@ -24,14 +24,14 @@ func (c *cli) diff(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "print the differences as one JSON object")
 	failOnDiff := fs.Bool("fail-on-diff", false, "exit 3 when the sessions differ")
 	ignoreCounts := fs.Bool("ignore-counts", false, "treat a mutation or event present in both sessions as equal whatever its count")
-	pos, err := parseArgs(fs, args, 2, "<id|name a> <id|name b>")
+	pos, err := c.parseArgs(fs, args, 2, "<id|name a> <id|name b>")
 	if err != nil {
 		return err
 	}
 	var refs [2]sessionRef
 	var evs [2][]core.Event
 	for i, ref := range pos {
-		s, err := resolve(ctx, c.opts, ref)
+		s, err := c.resolve(ctx, ref)
 		if err != nil {
 			return err
 		}

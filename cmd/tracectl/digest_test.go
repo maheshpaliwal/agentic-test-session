@@ -547,8 +547,16 @@ func TestDigestBudget(t *testing.T) {
 	for i := range sessions {
 		info, sum, tr, evs := randomSession(r, []int{0, 1, 8, 60, 300, 1200}[i%6])
 		src := newDigestSource(info, sum, tr, evs)
+		// Every third session was read from a file, and its commands name it:
+		// the longest name that is repeated, with and without quotes.
+		switch i % 6 {
+		case 2:
+			src.from = strings.Repeat("f", fromArgMax)
+		case 5:
+			src.from = strings.Repeat("f ", fromArgMax/2)
+		}
 		for _, budget := range []int{digestMinBytes, digestMinBytes + r.IntN(4000), 8 << 10, digestDefaultBytes, 64 << 10, 4 << 20} {
-			what := fmt.Sprintf("session %d (%d events, %d failures), budget %d", i, len(evs), len(sum.Failures), budget)
+			what := fmt.Sprintf("session %d (%d events, %d failures, from %.3q), budget %d", i, len(evs), len(sum.Failures), src.from, budget)
 			md, err := src.fit(digestMarkdown{}, budget)
 			if err != nil || len(md) > budget {
 				panic(fmt.Sprintf("%s: markdown is %d bytes: %v", what, len(md), err))
@@ -559,6 +567,16 @@ func TestDigestBudget(t *testing.T) {
 				panic(fmt.Sprintf("%s: JSON is %d bytes: %v", what, len(js), err))
 			}
 			d := checkDigestJSON(t, string(js))
+			if src.from != "" {
+				for _, c := range d.DrillDown {
+					if !strings.HasPrefix(c.Command, "tracectl --from ") || strings.Contains(c.Command, info.ID) {
+						panic(fmt.Sprintf("%s: the command %q does not read the file", what, c.Command))
+					}
+				}
+				if budget == 4<<20 && !strings.Contains(d.DrillDown[0].Command, strings.TrimSpace(src.from)) {
+					panic(fmt.Sprintf("%s: with room for everything the file is not named: %q", what, d.DrillDown[0].Command))
+				}
+			}
 
 			status := map[bool]string{true: "failed", false: d.Verdict.Status}[len(sum.Failures) > 0]
 			if d.Verdict.Status != status || d.Counts.Failures != len(sum.Failures) || d.Counts.Events != len(evs) || d.MaxBytes != budget ||
@@ -576,7 +594,8 @@ func TestDigestBudget(t *testing.T) {
 			sections := map[string]bool{}
 			for _, o := range d.Omitted {
 				sections[o.Section] = true
-				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") || !strings.Contains(o.Get[0], reportID) {
+				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") ||
+					strings.Contains(o.Get[0], reportID) != (src.from == "") || strings.HasPrefix(o.Get[0], "tracectl --from ") != (src.from != "") {
 					panic(fmt.Sprintf("%s: omitted entry %+v", what, o))
 				}
 			}
@@ -790,9 +809,56 @@ func TestCLIRunDigest(t *testing.T) {
 	}{
 		{[]string{"--digest", "-", "--", "true"}, "--digest needs a file"},
 		{[]string{"--digest", "no/such/dir/d.md", "--", "true"}, "its directory does not exist"},
+		// As digest --max-bytes, and before the command runs.
+		{[]string{"--digest", md, "--max-bytes", "100", "--", "true"}, "--max-bytes must be at least 4096"},
+		{[]string{"--digest", md, "--max-bytes", "-1", "--", "true"}, "--max-bytes must be at least 4096"},
+		{[]string{"--max-bytes", "8192", "--", "true"}, "--max-bytes needs --digest FILE"},
 	} {
 		if code, _, e := env.tc(append([]string{"run"}, tt.flags...)...); code != 2 || !strings.Contains(e, tt.want) {
 			t.Errorf("%v: exit %d, stderr %q; want exit 2 and %q", tt.flags, code, e, tt.want)
+		}
+	}
+}
+
+// run --digest --max-bytes bounds the file as digest --max-bytes bounds its
+// output; without it the digest has the default budget.
+func TestCLIRunDigestMaxBytes(t *testing.T) {
+	var evs []core.Event
+	for i := range 200 { // two hundred different failures: more than 4096 bytes hold
+		evs = append(evs, core.Event{Seq: uint64(i + 1), Service: "api", Kind: core.KindAPIIn,
+			Name: fmt.Sprintf("GET /orders/%c%c%c?%s", 'a'+i/26, 'a'+i%26, 'a'+i%7, strings.Repeat("q", 40)), Err: "HTTP 500 " + strings.Repeat("e", 80)})
+	}
+	env := newRunEnv(t, evs...)
+	dir := t.TempDir()
+	size := func(name string, flags ...string) (int, string) {
+		path := filepath.Join(dir, name)
+		if code, _, e := env.run("ok", append([]string{"--digest", path}, flags...)); code != 0 {
+			panic(fmt.Sprintf("run %v: exit %d\n%s", flags, code, e))
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			panic(err)
+		}
+		return len(b), string(b)
+	}
+	for _, name := range []string{"d.md", "d.json"} {
+		def, _ := size(name)
+		if def <= digestMinBytes || def > digestDefaultBytes {
+			panic(fmt.Sprintf("%s: the default digest of the session is %d bytes: the test needs one between %d and %d", name, def, digestMinBytes, digestDefaultBytes))
+		}
+		small, out := size(name, "--max-bytes", "4096")
+		if small > 4096 || small == 0 {
+			t.Errorf("%s: --max-bytes 4096 wrote %d bytes", name, small)
+		}
+		if name == "d.json" {
+			if d := checkDigestJSON(t, out); d.MaxBytes != 4096 || len(d.Omitted) == 0 || d.Counts.Failures != 200 {
+				t.Errorf("--max-bytes 4096: max_bytes %d, %d omitted, %d failures counted", d.MaxBytes, len(d.Omitted), d.Counts.Failures)
+			}
+		} else if sec := checkDigestMarkdown(t, out); !strings.Contains(sec["### Omitted"], "distinct failures are not listed") {
+			t.Errorf("--max-bytes 4096: the digest does not say what it left out:\n%s", out)
+		}
+		if big, _ := size(name, "--max-bytes", "400000"); big < def {
+			t.Errorf("%s: --max-bytes 400000 wrote %d bytes, the default %d", name, big, def)
 		}
 	}
 }

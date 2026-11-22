@@ -276,6 +276,10 @@ tracectl run --name my-run --digest digest.md -- ./run-e2e.sh   # record the tes
 tracectl digest my-run --fail-on-error --fail-on-incomplete --fail-on-empty   # the one call to read the result
 tracectl show my-run 17                                         # then drill down: one event in full
 tracectl history my-run postgres orders 42                      # every change to one row
+
+# no services running, only the artifact of a run (tracectl export my-run -o run.ndjson):
+tracectl --from run.ndjson digest --fail-on-error --fail-on-incomplete --fail-on-empty
+tracectl --from run.ndjson show 17                              # the digest names these commands itself
 ```
 
 `digest` is the whole session in at most `--max-bytes` (default 16384): verdict and counts, each failure with its
@@ -286,6 +290,12 @@ alter the digest's structure; a model can still be swayed by what it says. `--fo
 object (schema `tsession.digest/v1`); `summary`, `events`, `entities`, `history`, `trace`, `show` and `diff`
 take `--json`. Exit statuses are those above: `0` from the `digest` line means no failed events, complete, not
 empty. A live session works too and says so. Details: [`docs/DIGEST.md`](docs/DIGEST.md).
+
+`--from FILE` reads an export instead of the services: nothing has to run and nothing is asked. It works with
+the commands that read (`digest`, `summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`,
+`status`, `list`); they print what they print for the session the file was exported from and exit as they do
+for it, `--fail-on-*` gates included. The session need not be named (the file holds one); when it is, by its id
+or by the file's name without the extension, it has to be the file's. Any other command with `--from` exits 2.
 
 | `tracectl run` exits | It means | Next |
 |---|---|---|
@@ -357,9 +367,12 @@ tracectl report my-run --format junit -o tsession-junit.xml
 # keep a run after the job is gone: export it, then open the file without the services. The export carries
 # the session's verdict (alone, when there are no events), so the gates exit for the file as for the session.
 tracectl export my-run -o run.ndjson
-go run ./cmd/dashboard -open run.ndjson      # the UI, and it prints the flags for the next line
-# the same commands as on a live session (summary, events, trace, entities, history, show, report, digest, diff)
-tracectl --cp http://127.0.0.1:7072/api/cp --collector http://127.0.0.1:7072/api/col digest run
+# read the file with the same commands as a live session (summary, events, trace, entities, history, show,
+# report, digest, diff, status, list); nothing else has to run, and the session need not be named
+tracectl --from run.ndjson digest --fail-on-error --fail-on-incomplete
+tracectl --from run.ndjson report --format junit -o report.xml
+tracectl --from baseline.ndjson --from run.ndjson diff --fail-on-diff   # two files: baseline, then candidate
+go run ./cmd/dashboard -open run.ndjson      # or the UI; it prints the --cp and --collector that read it too
 
 # or let failed Go tests save theirs
 TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
@@ -368,6 +381,8 @@ TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
 An export holds recorded payloads, masked by field name only. Treat it like test data, not as something safe to
 share; whether it may go to CI storage is a question for your own data-handling policy. The opened session is
 named after the file (`run` above), keeps its id, and is read-only: stop, rename and delete are refused.
+`tracectl --from` refuses a file that is missing, empty, not an export, or cut short in its last line (exit 1):
+a gate does not judge a part of a recording. (`dashboard -open` shows a file cut short, marked incomplete.)
 
 ## Storage and retention
 

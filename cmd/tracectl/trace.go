@@ -123,7 +123,7 @@ func (p *tracePrinter) print(n *client.TraceNode, level int, linked bool) {
 func (c *cli) show(ctx context.Context, args []string) error {
 	fs := c.flags("show")
 	asJSON := fs.Bool("json", false, "print the raw event as JSON")
-	pos, err := parseArgs(fs, args, 2, "<id|name> <seq>")
+	pos, err := c.parseArgs(fs, args, 2, "<id|name> <seq>")
 	if err != nil {
 		return err
 	}
@@ -131,7 +131,7 @@ func (c *cli) show(ctx context.Context, args []string) error {
 	if err != nil || seq == 0 {
 		return fmt.Errorf("show: %q is not an event sequence number", pos[1])
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}

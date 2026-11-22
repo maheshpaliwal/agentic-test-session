@@ -559,6 +559,9 @@ reads the file as before, without the verdict. An export without the member (wri
 a session the control plane no longer knew) is judged on its events alone: incomplete for dropped events and
 unfinished async work, or when its last line is cut short.
 
+`tracectl --from FILE` reads the file the same way, in the tracectl process and without a dashboard or any
+other service; it refuses a file whose last line is cut short instead of judging a part of a recording.
+
 **A session without events** has no event to carry the verdict, and is the session the verdict matters most
 for: its only service could not deliver anything (a wrong collector URL). Its export is one line that is not an
 event, the session's id and the verdict:
