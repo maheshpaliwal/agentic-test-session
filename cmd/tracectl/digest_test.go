@@ -547,8 +547,16 @@ func TestDigestBudget(t *testing.T) {
 	for i := range sessions {
 		info, sum, tr, evs := randomSession(r, []int{0, 1, 8, 60, 300, 1200}[i%6])
 		src := newDigestSource(info, sum, tr, evs)
+		// Every third session was read from a file, and its commands name it:
+		// the longest name that is repeated, with and without quotes.
+		switch i % 6 {
+		case 2:
+			src.from = strings.Repeat("f", fromArgMax)
+		case 5:
+			src.from = strings.Repeat("f ", fromArgMax/2)
+		}
 		for _, budget := range []int{digestMinBytes, digestMinBytes + r.IntN(4000), 8 << 10, digestDefaultBytes, 64 << 10, 4 << 20} {
-			what := fmt.Sprintf("session %d (%d events, %d failures), budget %d", i, len(evs), len(sum.Failures), budget)
+			what := fmt.Sprintf("session %d (%d events, %d failures, from %.3q), budget %d", i, len(evs), len(sum.Failures), src.from, budget)
 			md, err := src.fit(digestMarkdown{}, budget)
 			if err != nil || len(md) > budget {
 				panic(fmt.Sprintf("%s: markdown is %d bytes: %v", what, len(md), err))
@@ -559,6 +567,16 @@ func TestDigestBudget(t *testing.T) {
 				panic(fmt.Sprintf("%s: JSON is %d bytes: %v", what, len(js), err))
 			}
 			d := checkDigestJSON(t, string(js))
+			if src.from != "" {
+				for _, c := range d.DrillDown {
+					if !strings.HasPrefix(c.Command, "tracectl --from ") || strings.Contains(c.Command, info.ID) {
+						panic(fmt.Sprintf("%s: the command %q does not read the file", what, c.Command))
+					}
+				}
+				if budget == 4<<20 && !strings.Contains(d.DrillDown[0].Command, strings.TrimSpace(src.from)) {
+					panic(fmt.Sprintf("%s: with room for everything the file is not named: %q", what, d.DrillDown[0].Command))
+				}
+			}
 
 			status := map[bool]string{true: "failed", false: d.Verdict.Status}[len(sum.Failures) > 0]
 			if d.Verdict.Status != status || d.Counts.Failures != len(sum.Failures) || d.Counts.Events != len(evs) || d.MaxBytes != budget ||
@@ -576,7 +594,8 @@ func TestDigestBudget(t *testing.T) {
 			sections := map[string]bool{}
 			for _, o := range d.Omitted {
 				sections[o.Section] = true
-				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") || !strings.Contains(o.Get[0], reportID) {
+				if o.What == "" || len(o.Get) == 0 || !strings.HasPrefix(o.Get[0], "tracectl ") ||
+					strings.Contains(o.Get[0], reportID) != (src.from == "") || strings.HasPrefix(o.Get[0], "tracectl --from ") != (src.from != "") {
 					panic(fmt.Sprintf("%s: omitted entry %+v", what, o))
 				}
 			}

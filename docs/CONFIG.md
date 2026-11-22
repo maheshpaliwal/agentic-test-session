@@ -99,8 +99,16 @@ The gates of `tracectl summary`, `report`, `digest` and `run` exit 3 when they f
 | `--fail-on-empty` | the session recorded no events. |
 | `--fail-on-unconfirmed` | the control plane could not tell whether every event of every service instance reached the collector (`delivery_unconfirmed`): the strict form of the delivery check, like `tsessiontest.RequireDeliveryConfirmed`. For environments where every connected service is yours; in a large shared one a single service whose delivery reports are blocked fails every run. See "Which gate" in PROTOCOL.md. |
 
-The gates give an export opened with `dashboard -open` the exit status they give the live session: the export
-carries the session's verdict (see "Export file" in PROTOCOL.md).
+The gates give an export read with `tracectl --from FILE`, or opened with `dashboard -open`, the exit status
+they give the live session: the export carries the session's verdict (see "Export file" in PROTOCOL.md).
+
+`tracectl --from FILE` (repeatable) reads exports instead of the services, for the commands that read: `digest`,
+`summary`, `report`, `events`, `trace`, `show`, `entities`, `history`, `diff`, `status`, `list`. Nothing is
+asked: `--cp`, `--collector` and their environment variables are not used, `--from` together with `--cp` or
+`--collector` exits 2, and so does any other command. With one file the session need not be named; with two,
+`diff` without sessions compares the first (baseline) with the second (candidate); otherwise name the session by
+its id or by its file's name without the extension. A file that is missing, empty, not an export or cut short
+in its last line is refused with exit 1.
 
 `tracectl run -- <command>` sets `TSESSION_ID` to the id of the session it started, in the environment of the
 command only. Nothing joins that session by itself: the command sends the id as the `x-tsession-id` header (or

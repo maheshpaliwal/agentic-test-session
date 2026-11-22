@@ -35,6 +35,22 @@ func parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, e
 	return pos, nil
 }
 
+// parseArgs is parseArgs for a command that reads sessions: with --from, the
+// sessions it was not given are those of the files.
+func (c *cli) parseArgs(fs *flag.FlagSet, args []string, n int, what string) ([]string, error) {
+	pos, err := positionals(fs, args)
+	if err == nil {
+		pos, err = c.fromSessions(fs.Name(), pos, n)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(pos) != n {
+		return nil, fmt.Errorf("usage: tracectl %s %s", fs.Name(), what)
+	}
+	return pos, nil
+}
+
 // positionals parses fs and returns the positional arguments, which flags may
 // precede, separate or follow.
 func positionals(fs *flag.FlagSet, args []string) ([]string, error) {

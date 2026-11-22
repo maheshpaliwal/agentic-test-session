@@ -58,7 +58,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	path := fs.String("o", "", "write to this file instead of stdout")
 	var g gates
 	g.register(fs)
-	pos, err := parseArgs(fs, args, 1, digestArgs)
+	pos, err := c.parseArgs(fs, args, 1, digestArgs)
 	if err != nil {
 		return err
 	}
@@ -75,7 +75,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("usage: tracectl digest %s: %w", digestArgs, err)
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,9 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
+	if src.from = c.fromFile(s.ID); src.from == "" {
+		src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
+	}
 	out, err := src.fit(render, *maxBytes)
 	if err != nil {
 		return err
@@ -151,7 +153,8 @@ type digest struct {
 	DrillDown []dDrillDown `json:"drill_down"`
 	// DrillDownNote is set when the digest was read with --cp or --collector
 	// on the command line: the commands above need the same flags, or they
-	// ask the services of the environment variables or the defaults.
+	// ask the services of the environment variables or the defaults. A digest
+	// read with --from has no note: its commands carry --from themselves.
 	DrillDownNote string `json:"drill_down_note,omitempty"`
 	MaxBytes      int    `json:"max_bytes"`
 }
@@ -331,6 +334,10 @@ const drillDownNote = "Give these commands the --cp and --collector this digest 
 type digestSource struct {
 	// urlFlags: --cp or --collector was given on the command line.
 	urlFlags bool
+	// from: the digest was read from this file with --from. The commands of
+	// the digest work in no other way, so each carries it (see shellWord);
+	// the session is the file's and is not named.
+	from     string
 	rep      *sessionReport
 	failures []dFailure
 	entities []dEntity
@@ -790,6 +797,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 		nameMax, reasonMax, countsMax, keyMax, only = 40, 100, 4, 24, detailLeast
 	}
 	id := dataText(info.ID, 64)
+	command := func(what string) string { return drillCommand(src.fromArg(tight), id, what) }
 	d = &digest{Schema: digestSchema, Notice: digestNotice, MaxBytes: budget,
 		Session: dSession{ID: id, Name: dataText(displayName(info), nameMax), State: dataText(info.State, 20),
 			Live: info.State != "" && !info.Done()},
@@ -798,10 +806,10 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 			PendingAsync: sum.PendingAsync, Dropped: max(sum.DroppedEvents, info.DroppedEvents), Quarantined: sum.Quarantined},
 		Failures: []dFailure{}, Mutations: []dEntity{}, Tree: []dNode{},
 		DrillDown: []dDrillDown{
-			{"tracectl show " + id + " <seq>", "one event in full: request, response, mutations with diffs"},
-			{"tracectl history " + id + " <store> <entity> <key>", "every change to one entity"},
-			{"tracectl trace " + id + " --errors", "the failed branches of the call tree"},
-			{"tracectl events " + id + " --errors", "the failed events"},
+			{command("show ID <seq>"), "one event in full: request, response, mutations with diffs"},
+			{command("history ID <store> <entity> <key>"), "every change to one entity"},
+			{command("trace ID --errors"), "the failed branches of the call tree"},
+			{command("events ID --errors"), "the failed events"},
 		},
 	}
 	if src.urlFlags && !tight {
@@ -865,7 +873,7 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	// The notes are sized before anything is chosen: as if every section
 	// had been cut.
 	note := func(k digestKept) []dOmitted {
-		return k.notes(id, len(src.failures), len(src.entities), len(src.lines), cut, reasonsCut)
+		return k.notes(command, len(src.failures), len(src.entities), len(src.lines), cut, reasonsCut)
 	}
 	d.Omitted = note(digestKept{failLevel: detailLeast, mutLevel: detailLeast})
 	room := target - len(r.render(d))
@@ -953,12 +961,33 @@ type digestKept struct {
 	failLevel, mutLevel       int
 }
 
-// notes says what is missing and which command prints it.
-func (k digestKept) notes(id string, failures, entities, lines, counts, reasons int) []dOmitted {
+// drillCommand is the tracectl command that reads more of a session. what
+// is the command with ID for the session: "show ID <seq>". With from (the
+// file of --from as a command names it) it reads the file, which holds the
+// one session: the session is not named.
+func drillCommand(from, id, what string) string {
+	if from != "" {
+		return "tracectl --from " + from + " " + strings.Replace(what, " ID", "", 1)
+	}
+	return "tracectl " + strings.Replace(what, "ID", id, 1)
+}
+
+// fromArg is the file of --from as the digest's commands name it; empty
+// without --from. tight: the digest is short of room.
+func (src *digestSource) fromArg(tight bool) string {
+	if src.from == "" {
+		return ""
+	}
+	return shellWord(src.from, tight)
+}
+
+// notes says what is missing and which command prints it; command makes a
+// command of "show ID <seq>".
+func (k digestKept) notes(command func(string) string, failures, entities, lines, counts, reasons int) []dOmitted {
 	out := []dOmitted{}
 	add := func(section, what string, get ...string) {
 		for i := range get {
-			get[i] = "tracectl " + strings.Replace(get[i], "ID", id, 1)
+			get[i] = command(get[i])
 		}
 		out = append(out, dOmitted{Section: section, What: what, Get: get})
 	}

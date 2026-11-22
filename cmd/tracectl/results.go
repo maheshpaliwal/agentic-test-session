@@ -318,6 +318,14 @@ func (c *cli) history(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "print as JSON")
 	unknown := fs.Bool("unknown-key", false, "the changes recorded without a key, in place of <pk> (the same as '' or '{}')")
 	pos, err := positionals(fs, args)
+	if err == nil {
+		// With --from the session need not be named: one argument fewer.
+		n := 4
+		if *unknown {
+			n = 3
+		}
+		pos, err = c.fromSessions("history", pos, n)
+	}
 	if err != nil {
 		return err
 	}
@@ -329,7 +337,7 @@ func (c *cli) history(ctx context.Context, args []string) error {
 	case len(pos) != 4:
 		return errors.New(historyUsage)
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}
@@ -342,7 +350,7 @@ func (c *cli) history(ctx context.Context, args []string) error {
 	}
 	key, err := resolveKey(ents, pos[1], pos[2], pos[3])
 	if err != nil {
-		return fmt.Errorf("%w\n  `tracectl entities %s` lists what the session changed", err, pos[0])
+		return fmt.Errorf("%w\n  `%s` lists what the session changed", err, drillCommand(c.fromWord(s.ID), pos[0], "entities ID"))
 	}
 	h, err := s.History(ctx, pos[1], pos[2], key)
 	if err != nil {

@@ -10,14 +10,17 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
+	"github.com/maheshpaliwal/agentic-test-session/dashboard"
 	"github.com/maheshpaliwal/agentic-test-session/internal/svc"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 const usage = `usage: tracectl [--cp URL] [--collector URL] <command> [flags]
+       tracectl --from FILE [--from FILE]... <read command> [flags]   read an export, ask no service (see below)
 
 session lifecycle (control plane):
   (--name templates: {bind} {bind.<name>} {initiated_by} {time} {date}; with no --name the server auto-names)
@@ -119,6 +122,22 @@ session results (collector):
                                 run (it sees only services that report, and only running sessions)
   version                       print the tracectl version
 
+read an export instead of the services:
+  --from FILE                   FILE was written by "tracectl export -o FILE". No service is asked and none
+                                has to run. Works with the commands that read: digest, summary, report,
+                                events, trace, show, entities, history, diff, status, list; they print what
+                                they print for the session the file was exported from, and the --fail-on
+                                flags exit as they do for it. Any other command, or --from together with
+                                --cp or --collector, exits 2.
+                                The session need not be named: "tracectl --from run.ndjson digest",
+                                "tracectl --from run.ndjson show 17". It may be, by its id or by the file's
+                                name without the extension (run); a session the files do not hold is an
+                                error. Repeat --from to read several files: "list" lists them,
+                                "tracectl --from a.ndjson --from b.ndjson diff" compares a (baseline) with
+                                b (candidate), and any other command then has to name its session.
+                                A file that is missing, empty, not an export or cut short in its last
+                                line is refused (exit 1). The commands a digest names carry --from FILE.
+
 exit status: 0 ok, 1 failed (including bad arguments to a command), 2 unknown command or global flag,
              3 a --fail-on-* check failed; run: see above
 
@@ -140,6 +159,9 @@ type cli struct {
 	stdin  io.Reader // read by the command of run only
 	stdout io.Writer
 	stderr io.Writer
+	// files are the exports of --from, in the order given: the commands then
+	// read these and ask no service.
+	files []dashboard.OpenedFile
 }
 
 // commands maps a command name to its implementation. Each receives the
@@ -180,6 +202,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	root.SetOutput(stderr)
 	cp := root.String("cp", "", "control plane URL")
 	col := root.String("collector", "", "collector URL")
+	var from fromFlag
+	root.Var(&from, "from", "read this export file instead of asking the services (repeatable)")
 	root.Usage = func() { fmt.Fprintln(stderr, usage) }
 	if err := root.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -192,7 +216,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name, rest := root.Arg(0), root.Args()[1:]
-	if name != "version" {
+	if name != "version" && len(from) == 0 {
 		for _, u := range []struct{ flag, env, value string }{{"--cp", "TSESSION_CONTROLPLANE_URL", *cp}, {"--collector", "TSESSION_COLLECTOR_URL", *col}} {
 			from, v := u.flag, u.value
 			if v == "" {
@@ -213,7 +237,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 
 	c := &cli{opts: client.Options{BaseURL: *cp, CollectorURL: *col, InitiatedBy: "api"}, stdin: os.Stdin, stdout: stdout, stderr: stderr}
-	err := cmd(c, ctx, rest)
+	var err error
+	if len(from) > 0 {
+		// Before a file is opened: what cannot work says so, whatever the file.
+		switch {
+		case *cp != "" || *col != "":
+			fmt.Fprintln(stderr, "tracectl: --from reads a file and asks no service: it cannot be combined with --cp or --collector")
+			return 2
+		case !slices.Contains(fromCommands, name):
+			fmt.Fprintf(stderr, "tracectl: %s does not work with --from: a file can be read, not started, stopped or changed, and no service is asked; the commands that read it are %s\n",
+				name, strings.Join(fromCommands, ", "))
+			return 2
+		}
+		err = c.openFrom(from)
+	}
+	if err == nil {
+		err = cmd(c, ctx, rest)
+	}
 	var ce checkError
 	var ee exitError
 	switch {
@@ -251,9 +291,9 @@ func (c *cli) flags(name string) *flag.FlagSet {
 // session parses fs with exactly one positional argument (a session id or
 // name) and resolves it.
 func (c *cli) session(ctx context.Context, fs *flag.FlagSet, args []string) (*client.Session, error) {
-	pos, err := parseArgs(fs, args, 1, "<id|name>")
+	pos, err := c.parseArgs(fs, args, 1, "<id|name>")
 	if err != nil {
 		return nil, err
 	}
-	return resolve(ctx, c.opts, pos[0])
+	return c.resolve(ctx, pos[0])
 }

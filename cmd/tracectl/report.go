@@ -37,7 +37,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	path := fs.String("o", "", "write to this file instead of stdout")
 	var g gates
 	g.register(fs)
-	pos, err := parseArgs(fs, args, 1, reportArgs)
+	pos, err := c.parseArgs(fs, args, 1, reportArgs)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("usage: tracectl report %s: %w", reportArgs, err)
 	}
-	s, err := resolve(ctx, c.opts, pos[0])
+	s, err := c.resolve(ctx, pos[0])
 	if err != nil {
 		return err
 	}
