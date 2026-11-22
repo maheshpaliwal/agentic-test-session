@@ -388,7 +388,9 @@ TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
 
 Two jobs, the second without any service: the first records and keeps the files whatever happens, the
 second gates on the artifact. `run --export` writes the status of its command into the file, so the gate also
-fails for a run whose tests failed without a failed event.
+fails for a run whose tests failed without a failed event. `--require-services 3` (the number of services you
+expect) does not run the tests with fewer connected, and fails the run when one of them is gone at the end: a
+service that is killed takes what it had not delivered with it, and nothing else may show that.
 
 ```yaml
 # GitHub Actions; the same three commands work in any CI system
@@ -396,7 +398,7 @@ jobs:
   e2e:
     steps:
       - run: >
-          tracectl run --name "e2e-${{ github.run_id }}"
+          tracectl run --name "e2e-${{ github.run_id }}" --require-services 3
           --export run.ndjson --digest digest.md --report report.md
           -- ./run-e2e.sh
       - if: always()            # also when the tests failed: that is when the files are wanted

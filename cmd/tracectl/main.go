@@ -43,7 +43,7 @@ session lifecycle (control plane):
 record a command (control plane and collector):
   run [start's session flags, except --id-only] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty]
       [--fail-on-unconfirmed] [--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]]
-      [--export FILE] [--timeout D] -- <command> [args...]
+      [--export FILE] [--require-services N] [--timeout D] -- <command> [args...]
                                 start a session, run the command with the session id in $TSESSION_ID, stop
                                 the session, wait for the seal (at most --timeout, default 2m) and print the
                                 summary. The command is not run through a shell. Its stdin, stdout and stderr
@@ -53,6 +53,10 @@ record a command (control plane and collector):
                                 --export FILE writes the session as "export -o FILE" does: the artifact
                                 to keep, which "tracectl --from FILE" reads with no service running. The
                                 digest and the report then name commands that read it.
+                                --require-services N: exit 3 without running the command unless N
+                                services are connected, and exit 3 after it when one of them is gone
+                                (killed, crashed): what it had not delivered is lost, and the
+                                recording can read as complete without it.
                                 The session is stopped and sealed also when the command fails.
                                 A Go test joins the session with tsessiontest.Ambient or client.AttachEnv;
                                 tsessiontest.Run still starts a session of its own per test.

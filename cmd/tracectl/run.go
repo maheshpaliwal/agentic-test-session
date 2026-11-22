@@ -17,12 +17,14 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
+	"github.com/maheshpaliwal/agentic-test-session/internal/set"
+	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
 const (
 	runArgs = "[session flags] [--fail-on-error] [--fail-on-incomplete] [--fail-on-empty] [--fail-on-unconfirmed] " +
-		"[--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]] [--export FILE] [--timeout D] -- <command> [args...]"
+		"[--report FILE [--format markdown|junit]] [--digest FILE [--max-bytes N]] [--export FILE] [--require-services N] [--timeout D] -- <command> [args...]"
 
 	// sessionEnv is the variable in which the command finds the session id.
 	sessionEnv = client.SessionEnv
@@ -72,6 +74,8 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	digestPath := fl.String("digest", "", "write a digest of the session to this file: Markdown, or JSON if the name ends in .json")
 	maxBytes := fl.Int("max-bytes", digestDefaultBytes, "the --digest file is never larger than this many bytes")
 	exportPath := fl.String("export", "", "write the session's events to this file, as export -o does: an artifact that tracectl --from FILE reads with no service running; the --digest and --report files then name commands that read it")
+	needServices := fl.Int("require-services", 0, "exit 3 without running the command unless at least this many services are connected, and exit 3 after it "+
+		"when one that was connected is gone when the command ends (killed or crashed: what it had not delivered is lost, and nothing else may show it)")
 	timeout := fl.Duration("timeout", 2*time.Minute, "how long to wait for the session to stop and seal")
 	if err := fl.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -86,6 +90,8 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return runUsage("no command to run")
 	case *timeout <= 0:
 		return runUsage("--timeout must be more than zero: the session has to be stopped and sealed")
+	case *needServices < 0:
+		return runUsage("--require-services must not be negative")
 	case *reportPath == "-":
 		return runUsage("--report needs a file: standard output belongs to the command")
 	case *digestPath == "-":
@@ -149,6 +155,19 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 
 	opts.Bindings = binds.list
 	warnJWT(c.stderr, opts.Bindings)
+	// The services that are connected now: enough of them, or nothing is run; and each is looked for
+	// again when the command ends.
+	var connected []string
+	if *needServices > 0 {
+		subs, err := client.Subscribers(ctx, c.opts)
+		if err != nil {
+			return fmt.Errorf("--require-services: listing the connected services: %w", err)
+		}
+		if len(subs) < *needServices {
+			return checkError{msg: fmt.Sprintf("check failed: %d service(s) connected, --require-services wants %d; the command was not run (see tracectl doctor)", len(subs), *needServices)}
+		}
+		connected = slicex.Map(subs, who)
+	}
 	s, err := client.Start(ctx, opts)
 	if err != nil {
 		return err
@@ -185,6 +204,10 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		relay.attach(nil)
 		code, outcome = exitStatus(err)
 	}
+
+	// Before the session is stopped: a service that was connected and is gone took what it had not
+	// delivered with it, and may have reported nothing that shows it.
+	goneErr := c.servicesGone(waitCtx, connected)
 
 	// Stop and seal, whatever the command did.
 	failed := false // the session could not be stopped, sealed or read
@@ -262,6 +285,12 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	if gateErr != nil && !failed { // the checks of a session that was not sealed or read say nothing
 		fmt.Fprintln(c.stderr, "tracectl:", gateErr)
 	}
+	if goneErr != nil {
+		fmt.Fprintln(c.stderr, "tracectl:", goneErr)
+		if gateErr == nil {
+			gateErr = goneErr
+		}
+	}
 	if outcome != "" {
 		fmt.Fprintln(c.stderr, "tracectl:", outcome)
 	}
@@ -274,6 +303,27 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		return exitError{code: exitCheckFailed}
 	}
 	return nil
+}
+
+// servicesGone names the services of connected (as who names them) that are
+// not connected any more; nil when all are, and when none was asked for.
+func (c *cli) servicesGone(ctx context.Context, connected []string) error {
+	if len(connected) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	subs, err := client.Subscribers(ctx, c.opts)
+	if err != nil {
+		return checkError{msg: "check failed: --require-services: whether the services are still connected could not be read: " + err.Error()}
+	}
+	now := set.Of(slicex.Map(subs, who)...)
+	gone := slicex.Filter(connected, func(w string) bool { return !now.Has(w) })
+	if len(gone) == 0 {
+		return nil
+	}
+	return checkError{msg: fmt.Sprintf("check failed: --require-services: %d service(s) connected when the run began are gone: %s; what they had not delivered is lost, "+
+		"and the recording can read as complete without it", len(gone), strings.Join(gone, ", "))}
 }
 
 // runResults prints the summary of the session run recorded, writes its

@@ -146,6 +146,10 @@ Rolling back:
 
 ### Added
 
+- `tracectl run --require-services N` does not run the command with fewer than N services connected (exit 3),
+  and exits 3 after it when a service that was connected at the start is gone when the command ends, naming it.
+  A service that is killed during a run could leave a session that reads as complete; this is the check for it
+  where the run is driven by `tracectl run`.
 - `tracectl run --export` writes the exit status of its command into the file (`command_status` in
   `tsession_session`), and `tracectl --from FILE ... --fail-on-error` fails on a status other than 0: a run whose
   tests failed without a failed event passed a gate that had the artifact alone. `client.Session.Export` takes

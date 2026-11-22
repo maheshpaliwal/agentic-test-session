@@ -27,7 +27,9 @@ were instrumented and connected. It is not a proof that nothing else happened.
 raised in these cases (details: [`PROTOCOL.md`](PROTOCOL.md), "Limits" under delivery accounting):
 
 - **A service killed before its first delivery report, or after a report that was in order**, with events that
-  reached nobody: the session is complete and wrong.
+  reached nobody: the session is complete and wrong. `tracectl run --require-services N` fails a run in which a
+  service that was connected at the start is gone when the command ends; a service that is killed and comes
+  back under the same instance name before that, and a session driven without `run`, are still not seen.
 - **A fresh outage of the report endpoint shorter than about 12 seconds** is mostly not detected (3 of 8 sessions
   at 5 s, 1 of 8 at 9 s, 8 of 8 at 15 s in one measured run).
 - **A process cut off from both its reports and its stream, or frozen**, that left neither a report nor events
