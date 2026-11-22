@@ -66,6 +66,7 @@ type demoSess struct {
 	// flags, and are served as they are). path is the file it came from.
 	file *colView
 	path string
+	torn error // the file's last line was cut short: what the parser said of it
 }
 
 // Demo serves the control-plane and collector APIs from memory: synthetic

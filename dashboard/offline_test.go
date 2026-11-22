@@ -151,6 +151,20 @@ func TestOfflineToleratesATornLastLineOnly(t *testing.T) {
 	if err != nil {
 		panic(fmt.Sprintf("an export cut mid-line must still open: %v", err))
 	}
+	// Who must not judge a part of a recording is told that it is one.
+	if fs := d.Files(); len(fs) != 1 || fs[0].Path != good || fs[0].SessionID != "ts_t" || fs[0].Truncated == nil ||
+		!strings.Contains(fs[0].Truncated.Error(), "cut.ndjson:3: not an exported event") {
+		panic(fmt.Sprintf("the files of a cut export: %+v", fs))
+	}
+	whole := writeExport(t, "whole.ndjson", core.Event{SessionID: "ts_w", Seq: 1, Kind: core.KindAPIIn})
+	if d2, err := NewOffline([]string{whole, good}); err != nil {
+		panic(err)
+	} else if fs := d2.Files(); len(fs) != 2 || fs[0].Path != whole || fs[0].SessionID != "ts_w" || fs[0].Truncated != nil || fs[1].SessionID != "ts_t" {
+		panic(fmt.Sprintf("the files, in the order given: %+v", fs))
+	}
+	if fs := NewDemo().Files(); fs != nil {
+		panic(fmt.Sprintf("the demo has no files: %+v", fs))
+	}
 	s := d.sess[0]
 	if len(s.events) != 2 || !s.Incomplete || s.DroppedEvents != 0 || !s.StartedAt.Equal(time.Unix(5, 0)) {
 		panic(fmt.Sprintf("session from a cut file: events=%d incomplete=%v dropped=%d started=%s", len(s.events), s.Incomplete, s.DroppedEvents, s.StartedAt))

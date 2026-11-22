@@ -41,6 +41,31 @@ func NewOffline(paths []string) (*Demo, error) {
 	return d, nil
 }
 
+// OpenedFile is one file given to NewOffline and the session read from it.
+type OpenedFile struct {
+	Path      string
+	SessionID string
+	// Truncated is set when the last line of the file was cut short (an
+	// interrupted export, a partial download). The session is served
+	// without that line and marked incomplete; a reader that must not judge
+	// a part of a recording refuses the file instead.
+	Truncated error
+}
+
+// Files returns the files the sessions were opened from, in the order they
+// were given to NewOffline; nil for the demo.
+func (d *Demo) Files() []OpenedFile {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []OpenedFile
+	for _, s := range d.sess {
+		if s.path != "" {
+			out = append(out, OpenedFile{Path: s.path, SessionID: s.ID, Truncated: s.torn})
+		}
+	}
+	return out
+}
+
 func loadExport(path string) (*demoSess, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -148,7 +173,11 @@ func loadExport(path string) (*demoSess, error) {
 		sess.IncompleteReasons, sess.DeliveryUnconfirmed = meta.IncompleteReasons, meta.DeliveryUnconfirmed
 		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
 	}
-	return &demoSess{Session: sess, events: evs, sealed: true, file: cv, path: path}, nil
+	ds := &demoSess{Session: sess, events: evs, sealed: true, file: cv, path: path}
+	if torn {
+		ds.torn = tornErr
+	}
+	return ds, nil
 }
 
 // readOnlyAPI refuses everything that would change a session, and says that
