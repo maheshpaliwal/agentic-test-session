@@ -445,3 +445,54 @@ func TestOfflineRefusesAFileThatIsTooLarge(t *testing.T) {
 		panic(fmt.Sprintf("a gzip file that expands over the limit: %v", err))
 	}
 }
+
+// The size limit is on what is read: a file of exactly the limit opens, one
+// byte more does not.
+func TestOfflineSizeLimitIsExact(t *testing.T) {
+	line := `{"session_id":"ts_big","seq":1,"service":"api","kind":"api.in","name":"GET /x","start_ns":1,"end_ns":2}` + "\n"
+	old := maxExportBytes
+	defer func() { maxExportBytes = old }()
+	p := filepath.Join(t.TempDir(), "one.ndjson")
+	if err := os.WriteFile(p, []byte(line), 0o600); err != nil {
+		panic(err)
+	}
+	maxExportBytes = int64(len(line))
+	if _, err := NewOffline([]string{p}); err != nil {
+		panic(fmt.Sprintf("a file of exactly the limit: %v", err))
+	}
+	maxExportBytes = int64(len(line)) - 1
+	if _, err := NewOffline([]string{p}); err == nil || !strings.Contains(err.Error(), "too large to open") {
+		panic(fmt.Sprintf("a file one byte over the limit: %v", err))
+	}
+}
+
+// What makes an opened session incomplete, each on its own and with the flag
+// next to it saying complete: reasons, a seal that failed, a drain that ran
+// out of time.
+func TestOfflineIncompleteWhateverTheFlagSays(t *testing.T) {
+	n := 1
+	e := core.Event{SessionID: "ts_i", Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9}
+	for name, meta := range map[string]core.ExportSession{
+		"reasons":   {State: "SEALED", Events: &n, IncompleteReasons: []string{"lost"}},
+		"seal":      {State: "SEALED", Events: &n, SealError: "timeout"},
+		"drain":     {State: "SEALED", Events: &n, DrainTimedOut: true, MaxDrainSeconds: 60},
+		"the flag":  {State: "SEALED", Events: &n, Incomplete: true},
+		"none (ok)": {State: "SEALED", Events: &n},
+	} {
+		line, err := core.ExportLine(&e, &meta)
+		if err != nil {
+			panic(err)
+		}
+		p := filepath.Join(t.TempDir(), "f.ndjson")
+		if err := os.WriteFile(p, append(line, '\n'), 0o600); err != nil {
+			panic(err)
+		}
+		d, err := NewOffline([]string{p})
+		if err != nil {
+			panic(err)
+		}
+		if got, want := d.find("ts_i").Incomplete, name != "none (ok)"; got != want {
+			t.Errorf("%s: incomplete = %v, want %v", name, got, want)
+		}
+	}
+}
