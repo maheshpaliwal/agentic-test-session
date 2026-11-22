@@ -140,7 +140,7 @@ do without (collector: `janitor`, `retention`; control plane: `sweep`) share a *
 minutes (`gosafe.PanicBudget`, `gosafe.PanicBudgetWindow`; constants, not settings; the window is six retention
 sweeps when those are more than 100 s apart, so a sweep that panics every time is found out). The panic that uses it up is
 logged, `/healthz` answers `503 degraded: the panic budget is spent: ...`, and the service shuts down in order (as on
-SIGTERM, within 20 s) and **exits with status 1**, so that whatever supervises it starts it again with clean state.
+SIGTERM, within 30 s) and **exits with status 1**, so that whatever supervises it starts it again with clean state.
 Run the services under something that restarts them (`restart: on-failure` in Compose, a Deployment, systemd).
 
 The drain of one session is not part of that budget: after 3 panics it is given up, and the session ends `SEALED` and

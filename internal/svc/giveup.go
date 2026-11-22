@@ -9,8 +9,10 @@ import (
 )
 
 // GiveUpGrace is how long a service that gives up has to shut down in order
-// before the process is ended as it is.
-const GiveUpGrace = 20 * time.Second
+// before the process is ended as it is. It is longer than the longest orderly
+// stop of a service (the collector's: up to 5s of HTTP shutdown and up to 15s
+// of flushing), so that giving up loses nothing a signal would not.
+const GiveUpGrace = 30 * time.Second
 
 // GiveUp is how a service ends itself when its background loops keep
 // panicking (its panic budget is spent, see gosafe.PanicBudget). A service

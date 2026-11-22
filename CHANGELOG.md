@@ -15,9 +15,9 @@ Before deploying:
   `DEGRADED <reason>` and exits 1. A health check that restarts on the first non-200 will restart sooner than
   the service would have exited by itself.
 - Both services exit 1 after 5 panics of their background loops (sweep, janitor, retention) within 10 minutes,
-  after an orderly shutdown of at most 20 seconds. Run them under a supervisor that restarts them; the Compose
-  file has `restart: on-failure:5` (not tried with Docker). That exit does not wait for the collector's own
-  flush of up to 15 seconds (see "Give the collector at least 25 seconds" below): what it still held is lost.
+  after an orderly shutdown of at most 30 seconds (longer than the collector's own stop, see "Give the collector
+  at least 25 seconds" below). Run them under a supervisor that restarts them; the Compose file has
+  `restart: on-failure:5` (not tried with Docker).
 - Embedders of `controlplane.Manager`: start it with `m.RunInBackground(ctx)` where you had `go m.Run(ctx)`; a
   bare `Run` has no panic recovery and no panic budget.
 - A custom `controlplane.Collector` must fill `DrainStatus.Instances` (and may implement `InstanceCounter`);
