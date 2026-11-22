@@ -53,7 +53,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	rep.from = c.fromWord(s.ID)
+	rep.from, rep.command = c.fromWord(s.ID), c.commandStatus(s.ID)
 	out, err := render(rep)
 	if err != nil {
 		return err
@@ -120,6 +120,19 @@ type sessionReport struct {
 	// from is the file of --from as a command names it; empty without it.
 	// The commands the report names then read the file.
 	from string
+	// command is the exit status of the command of the run: tracectl run's
+	// own, or the one its export carries; nil when there was none.
+	command *int
+}
+
+// commandFailed is the sentence a verdict gets for a run whose command
+// failed; empty otherwise. No failed event may show that failure (a test
+// that asserts on a response), and "Passed" would then be read as the run's.
+func (r *sessionReport) commandFailed() string {
+	if r.command == nil || *r.command == 0 {
+		return ""
+	}
+	return fmt.Sprintf("the command of the run failed (exit status %d)", *r.command)
 }
 
 // reportRoot is one trace root with the failed events of its tree, async
@@ -372,6 +385,13 @@ func renderMarkdown(rep *sessionReport) ([]byte, error) {
 		verdict = "**Empty**: the session recorded no events, so nothing was checked (see `tracectl doctor`)."
 	default:
 		verdict = "**Passed**: no failed events."
+	}
+	if cf := rep.commandFailed(); cf != "" {
+		if strings.HasPrefix(verdict, "**Passed**") {
+			verdict = "**Failed**: " + cf + "; no failed events were recorded."
+		} else {
+			verdict += " Also, " + cf + "."
+		}
 	}
 	switch {
 	case info.State == "":

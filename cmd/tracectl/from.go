@@ -201,6 +201,17 @@ func (c *cli) fromList() string {
 	return strings.Join(slicex.Map(c.files, func(f dashboard.OpenedFile) string { return f.Path + " holds " + f.SessionID }), ", ")
 }
 
+// commandStatus is the exit status of the command of the run that wrote the
+// file of session id; nil without --from and for a file that carries none.
+func (c *cli) commandStatus(id string) *int {
+	for _, f := range c.files {
+		if f.SessionID == id {
+			return f.CommandStatus
+		}
+	}
+	return nil
+}
+
 // fromFile is the file of --from that holds session id, as it was given on
 // the command line; empty without --from.
 func (c *cli) fromFile(id string) string {

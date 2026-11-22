@@ -756,6 +756,10 @@ func TestFromFailsOnTheCommandOfTheRun(t *testing.T) {
 		if code != exitCheckFailed || !strings.Contains(errOut, "the command of the run that wrote the file failed (exit status 7)") {
 			t.Errorf("%s --fail-on-error on a run whose command failed: exit %d, %q", cmd, code, errOut)
 		}
+		// What is printed says so without a gate: "Passed" would be read as the run's.
+		if _, out, _ := fromTC(t, []string{"failed.ndjson"}, cmd); !strings.Contains(out, "exit status 7") || strings.Contains(out, "**Passed**") {
+			t.Errorf("%s of a run whose command failed does not say so:\n%s", cmd, out)
+		}
 		// The other gates ask other questions.
 		if code, _, errOut := fromTC(t, []string{"failed.ndjson"}, cmd, "--fail-on-incomplete", "--fail-on-empty"); code != 0 {
 			t.Errorf("%s without --fail-on-error: exit %d, %q", cmd, code, errOut)

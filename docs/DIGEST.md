@@ -119,7 +119,7 @@ Lists are never `null`.
 | `schema` | string | `"tsession.digest/v1"` |
 | `notice` | string | the fixed notice above |
 | `session` | object | `id`, `name`, `state` (empty: the control plane no longer knows the session), `live` (not sealed yet) |
-| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown` (also while the session is still running); `incomplete_reasons`: strings, when incomplete; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
+| `verdict` | object | `status`: `failed` \| `incomplete` \| `empty` \| `passed`; `recording`: `complete` \| `incomplete` \| `unknown` (also while the session is still running); `incomplete_reasons`: strings, when incomplete; `command_status`: number, the exit status of the command of the run, present for a `tracectl run` and for the file one exported; other than 0 makes `status` `failed` whatever was recorded; `delivery_unconfirmed`: strings (at most 4, then "and N more"), the service instances of which the control plane could not tell whether all their events arrived. The recording is not `incomplete` for them |
 | `counts` | object | `events`, `failures`, `mutations`, `duration_ns`, `pending_async`, `dropped_events`, `quarantined`; and the maps `by_service`, `by_kind`, `mutations_by_entity` (key `store/entity`), `flags`, each with its 16 largest entries |
 | `failures` | list | in `seq` order, see below |
 | `mutations` | list | one object per changed entity, see below |
@@ -171,8 +171,8 @@ false or empty; `path` is always there.
 - **Present or absent.** The top-level lists (`failures`, `mutations`, `tree`, `omitted`, `drill_down`) and a
   failure's `path` are always present, empty when there is nothing; they are never `null`. Lists inside an
   entry (`flags`, `fields`, `changes`, `incomplete_reasons`, `delivery_unconfirmed`) are left out when empty.
-- **`verdict.status`** is the first that applies: `failed` (a failed event), `incomplete`, `empty` (no events),
-  `passed`. A session can be failed and incomplete: `status` is `failed` and `recording` is `incomplete`.
+- **`verdict.status`** is the first that applies: `failed` (a failed event, or a `command_status` other than
+  0), `incomplete`, `empty` (no events), `passed`. A session can be failed and incomplete: `status` is `failed` and `recording` is `incomplete`.
 - **`session.state`**: `CREATED`, `ACTIVE`, `DRAINING`, `SEALED`, `ABORTED`, `EXPIRED`, or empty.
 - **`kind`** is one of `api.in`, `api.out`, `db.read`, `db.write`, `db.tx.begin`, `db.tx.commit`,
   `db.tx.rollback`, `cache.read`, `cache.write`, `queue.publish`, `queue.consume`, `worker.start`, `worker.end`,

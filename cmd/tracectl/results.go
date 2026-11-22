@@ -36,6 +36,9 @@ func (c *cli) summary(ctx context.Context, args []string) error {
 		printJSON(c.stdout, sum)
 	} else {
 		printSummary(c.stdout, s.Info(), sum)
+		if st := c.commandStatus(s.ID); st != nil && *st != 0 {
+			fmt.Fprintf(c.stdout, "command    failed (exit status %d): the command of the run that wrote the file\n", *st)
+		}
 	}
 	return g.of(c).check(c.stderr, s.Info(), sum, len(sum.Failures))
 }
@@ -55,14 +58,7 @@ type gates struct {
 // of returns g for the sessions c reads: from the services, or from files.
 func (g *gates) of(c *cli) *gates {
 	g.file = len(c.files) > 0
-	g.commandOf = func(id string) *int {
-		for _, f := range c.files {
-			if f.SessionID == id {
-				return f.CommandStatus
-			}
-		}
-		return nil
-	}
+	g.commandOf = c.commandStatus
 	return g
 }
 

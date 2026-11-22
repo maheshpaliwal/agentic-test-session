@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/maheshpaliwal/agentic-test-session/core"
-	"github.com/maheshpaliwal/agentic-test-session/internal/set"
 	"github.com/maheshpaliwal/agentic-test-session/internal/slicex"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
@@ -251,7 +250,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		// The export first: the report and the digest then name commands that
 		// read it, which still work when the services of the run are gone.
 		if *exportPath != "" {
-			if xerr := c.runExport(readCtx, s, *exportPath, code); xerr != nil {
+			if xerr := c.runExport(readCtx, s, *exportPath, code, goneErr); xerr != nil {
 				failed = true
 				fmt.Fprintf(c.stderr, "tracectl: exporting session %s: %v\n", s.ID, xerr)
 				*exportPath = ""
@@ -272,9 +271,9 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 				}
 			}
 		}
-		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render, *exportPath)
+		gateErr, err = c.runResults(readCtx, s, &g, byID, *reportPath, *format, render, *exportPath, code)
 		if err == nil && *digestPath != "" {
-			err = c.runDigest(readCtx, s, *digestPath, *maxBytes, *exportPath)
+			err = c.runDigest(readCtx, s, *digestPath, *maxBytes, *exportPath, code)
 		}
 		cancel()
 		if err != nil {
@@ -305,22 +304,56 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 	return nil
 }
 
+// servicesGoneWait is how long a service that was connected is looked for
+// before it is called gone (an SDK reconnects within 5s), and
+// servicesGonePoll how often. Variables for the tests.
+var (
+	servicesGoneWait = 6 * time.Second
+	servicesGonePoll = 500 * time.Millisecond
+)
+
 // servicesGone names the services of connected (as who names them) that are
 // not connected any more; nil when all are, and when none was asked for.
 func (c *cli) servicesGone(ctx context.Context, connected []string) error {
 	if len(connected) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, servicesGoneWait+5*time.Second)
 	defer cancel()
-	subs, err := client.Subscribers(ctx, c.opts)
+	// A service that reconnects (the control plane restarted, a stream was cut) is back within its backoff:
+	// it is looked for until servicesGoneWait is over before it is called gone.
+	var gone []string
+	var err error
+	for deadline := time.Now().Add(servicesGoneWait); ; {
+		var subs []client.Subscriber
+		if subs, err = client.Subscribers(ctx, c.opts); err == nil {
+			// By count, not by name alone: of two replicas that are called the same, one can be gone.
+			left := map[string]int{}
+			for _, s := range subs {
+				left[who(s)]++
+			}
+			gone = gone[:0]
+			for _, w := range connected {
+				if left[w] == 0 {
+					gone = append(gone, w)
+					continue
+				}
+				left[w]--
+			}
+			if len(gone) == 0 {
+				return nil
+			}
+		}
+		if !time.Now().Before(deadline) || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(servicesGonePoll):
+		}
+	}
 	if err != nil {
 		return checkError{msg: "check failed: --require-services: whether the services are still connected could not be read: " + err.Error()}
-	}
-	now := set.Of(slicex.Map(subs, who)...)
-	gone := slicex.Filter(connected, func(w string) bool { return !now.Has(w) })
-	if len(gone) == 0 {
-		return nil
 	}
 	return checkError{msg: fmt.Sprintf("check failed: --require-services: %d service(s) connected when the run began are gone: %s; what they had not delivered is lost, "+
 		"and the recording can read as complete without it", len(gone), strings.Join(gone, ", "))}
@@ -330,7 +363,7 @@ func (c *cli) servicesGone(ctx context.Context, connected []string) error {
 // report and returns the verdict of the gates. byID says that the session
 // records only requests that carry its id; an empty one then gets a hint.
 func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID bool, reportPath, format string,
-	render func(*sessionReport) ([]byte, error), exported string) (gateErr, err error) {
+	render func(*sessionReport) ([]byte, error), exported string, commandStatus int) (gateErr, err error) {
 	if render == nil {
 		sum, err := s.Summary(ctx)
 		if err != nil {
@@ -350,6 +383,7 @@ func (c *cli) runResults(ctx context.Context, s *client.Session, g *gates, byID 
 	if exported != "" {
 		rep.from = shellWord(exported, false)
 	}
+	rep.command = &commandStatus
 	out, err := render(rep)
 	if err != nil {
 		return gateErr, err
@@ -379,7 +413,7 @@ func sameFile(a, b string) bool {
 
 // runExport writes the events of the session run recorded to path, as
 // export -o does, and says how to read the file.
-func (c *cli) runExport(ctx context.Context, s *client.Session, path string, commandStatus int) (err error) {
+func (c *cli) runExport(ctx context.Context, s *client.Session, path string, commandStatus int, gone error) (err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // events may hold sensitive payloads
 	if err != nil {
 		return err
@@ -398,7 +432,15 @@ func (c *cli) runExport(ctx context.Context, s *client.Session, path string, com
 		return err
 	}
 	// With the status of the command: a later job that has the file alone then fails as this run does.
-	n, err := s.Export(ctx, f, func(m *core.ExportSession) { m.CommandStatus = &commandStatus })
+	// And with what --require-services found: the file of a run in which a service went away must not
+	// read as complete to a job that has only the file.
+	n, err := s.Export(ctx, f, func(m *core.ExportSession) {
+		m.CommandStatus = &commandStatus
+		if gone != nil {
+			m.Incomplete = true
+			m.IncompleteReasons = append(m.IncompleteReasons, strings.TrimPrefix(gone.Error(), "check failed: "))
+		}
+	})
 	if err != nil {
 		return err
 	}
@@ -406,7 +448,7 @@ func (c *cli) runExport(ctx context.Context, s *client.Session, path string, com
 	return nil
 }
 
-func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, maxBytes int, exported string) error {
+func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, maxBytes int, exported string, commandStatus int) error {
 	format := "markdown"
 	if strings.HasSuffix(path, ".json") {
 		format = "json"
@@ -419,6 +461,7 @@ func (c *cli) runDigest(ctx context.Context, s *client.Session, path string, max
 	if err != nil {
 		return err
 	}
+	src.rep.command = &commandStatus
 	// With an export the digest names commands that read it; otherwise, as
 	// digest does, the session and the URL flags they need.
 	if src.from = exported; src.from == "" {

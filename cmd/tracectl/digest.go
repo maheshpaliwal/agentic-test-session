@@ -83,6 +83,7 @@ func (c *cli) digest(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	src.rep.command = c.commandStatus(s.ID)
 	if src.from = c.fromFile(s.ID); src.from == "" {
 		src.urlFlags = c.opts.BaseURL != "" || c.opts.CollectorURL != ""
 	}
@@ -177,6 +178,11 @@ type dVerdict struct {
 	// could not tell whether all their events arrived. The recording is not
 	// incomplete for it, and not known to be complete either.
 	Unconfirmed []string `json:"delivery_unconfirmed,omitempty"`
+	// CommandStatus is the exit status of the command of the run, when the
+	// digest is of a tracectl run or of the file one exported; absent
+	// otherwise. Other than 0 makes the status "failed", whatever was
+	// recorded.
+	CommandStatus *int `json:"command_status,omitempty"`
 }
 
 // digestMaxUnconfirmed bounds dVerdict.Unconfirmed: the verdict is the part
@@ -859,6 +865,9 @@ func (src *digestSource) trim(r digestRender, target, budget, treeSize int, tigh
 	default:
 		d.Verdict.Status = "passed"
 	}
+	if d.Verdict.CommandStatus = src.rep.command; src.rep.commandFailed() != "" {
+		d.Verdict.Status = "failed"
+	}
 	byEntity := map[string]int{}
 	for store, ents := range sum.Mutations {
 		for ent, n := range ents {
@@ -1238,9 +1247,17 @@ func (digestMarkdown) render(d *digest) []byte {
 
 	b.WriteString("\n### Verdict\n\n")
 	c := d.Counts
+	cmdFailed := d.Verdict.CommandStatus != nil && *d.Verdict.CommandStatus != 0
 	switch d.Verdict.Status {
 	case "failed":
-		b.WriteString("**Failed**: " + plural(c.Failures, "failed event") + ".")
+		switch {
+		case cmdFailed && c.Failures == 0:
+			fmt.Fprintf(&b, "**Failed**: the command of the run failed (exit status %d); no failed events were recorded.", *d.Verdict.CommandStatus)
+		case cmdFailed:
+			fmt.Fprintf(&b, "**Failed**: %s, and the command of the run failed (exit status %d).", plural(c.Failures, "failed event"), *d.Verdict.CommandStatus)
+		default:
+			b.WriteString("**Failed**: " + plural(c.Failures, "failed event") + ".")
+		}
 	case "incomplete":
 		b.WriteString("**Incomplete**: no failed events were recorded, but the recording is missing data.")
 	case "empty":

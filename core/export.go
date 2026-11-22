@@ -170,6 +170,9 @@ func ExportVerdict(line []byte) (meta *ExportSession, present bool, err error) {
 	if meta.Events != nil && *meta.Events < 0 {
 		return nil, true, fmt.Errorf("its %s counts %d events", ExportSessionKey, *meta.Events)
 	}
+	if meta.CommandStatus != nil && (*meta.CommandStatus < 0 || *meta.CommandStatus > 255) {
+		return nil, true, fmt.Errorf("its %s has the command status %d, which is no exit status", ExportSessionKey, *meta.CommandStatus)
+	}
 	if meta.State != "" && !slices.Contains(ExportStates, meta.State) {
 		return nil, true, fmt.Errorf("its %s has the state %q, which is none", ExportSessionKey, meta.State)
 	}

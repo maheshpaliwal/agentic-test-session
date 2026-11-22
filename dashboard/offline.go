@@ -60,8 +60,9 @@ func newOffline(paths []string, strict bool) (*Demo, error) {
 				s.State = ""
 			}
 		case s.unproven:
-			// The viewer shows the session, and says what the file leaves open: a gate asked through
-			// the dashboard must not pass where tracectl --from does not.
+			// The viewer shows the session, and says what the file leaves open, so that the
+			// completeness gate asked through the dashboard does not pass on it either. (The status
+			// of the run's command is not served: the error gate sees it with tracectl --from only.)
 			s.Incomplete = true
 			s.IncompleteReasons = append(s.IncompleteReasons, "the file does not say how the session ended or how many events it holds (its first line is lost, or it was exported by an older tracectl or without the control plane)")
 		case !s.State.Terminal():

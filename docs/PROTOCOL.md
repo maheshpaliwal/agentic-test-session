@@ -549,7 +549,7 @@ event's own:
 ```
 (one line in the file). `tsession_session` is the session's verdict as the control plane had it when the export
 was written, which no event holds: `name` (and `name_auto` when it was generated), `events` (how many events
-the export holds), `command_status` (the exit status of the command, when `tracectl run --export` wrote the
+the export holds), `command_status` (the exit status of the command, 0 to 255, when `tracectl run --export` wrote the
 file), `state`, `incomplete`, `incomplete_reasons`, `delivery_unconfirmed`, `drain_timed_out` (with
 `max_drain_seconds`, the limit it ran into) and `seal_error`, each omitted when empty. A reader that finds
 another number of events than `events` has a part of the file and refuses it. Without `events` (an export of

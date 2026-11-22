@@ -67,8 +67,11 @@ is silent or cannot deliver, and 12 to 18 s while a service's delivery reports a
   verdict or without the count (its first line is lost, it was written by an older `tracectl`, or the control
   plane could not be asked at the export) is read with a note, and `--fail-on-incomplete` and
   `--fail-on-unconfirmed` fail on it. `--fail-on-error` and `--fail-on-empty` alone still judge what is there.
-- **`dashboard -open` is a viewer and is more lenient**: it shows a file without a verdict as a sealed session,
-  and one that lost lines as incomplete.
+- **`dashboard -open` is a viewer, not a gate.** It shows a file without a verdict, one that lost lines and one
+  of a session that had not ended as incomplete, with the reason. It does not serve the exit status of the
+  run's command: `tracectl ... --fail-on-error` asked through the dashboard passes a run whose command failed
+  without a failed event, where `tracectl --from` fails. Gate on the file with `--from`.
+- `tracectl export -o` does not know the command of a run: only `tracectl run --export` writes its status.
 - A session exported while it ran holds the events that had arrived, is shown as running, and fails
   `--fail-on-incomplete`.
 - An export from before the name was stored is named after its file.

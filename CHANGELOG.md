@@ -445,6 +445,17 @@ Rolling back:
 
 ### Fixed
 
+- From the review of the command status and `--require-services`:
+  - `summary`, `report` and `digest` say that the command of the run failed (`**Failed**: the command of the run
+    failed (exit status 7); no failed events were recorded.`, `verdict.command_status` in the digest's JSON), for
+    a file read with `--from` and for the files `tracectl run` writes itself. They printed "Passed" for a run
+    that exited 7, and an agent that read the digest without a gate took the run for a good one;
+  - the export of a run in which `--require-services` found a service gone is incomplete and says which: the
+    run exited 3 and its file passed every gate;
+  - `--require-services` counts replicas (of two that are called the same, one can be gone) and looks for a
+    service for 6 seconds before it calls it gone (an SDK whose stream was cut reconnects within 5);
+  - a `command_status` outside 0 to 255 is refused.
+  Not changed: a gate asked through `dashboard -open` does not see the command's status (`docs/LIMITS.md`).
 - `dashboard -open` shows a file without a verdict, or of a session that had not ended, as incomplete with the
   reason: a gate asked through the dashboard passed where `tracectl --from` on the same file did not.
 - `tracectl --from` on a relative name that is not there says in which directory it looked (a command copied
