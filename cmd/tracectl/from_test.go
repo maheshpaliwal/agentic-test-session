@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -440,5 +441,79 @@ func TestFromShowsASessionExportedWhileItRanAsLive(t *testing.T) {
 	_, out, _ = fromTC(t, []string{"live.ndjson"}, "report")
 	if !strings.Contains(out, "`tracectl --from live.ndjson trace --errors`") || strings.Contains(out, "tracectl trace ts_a") {
 		panic("the report names commands that ask the services:\n" + out)
+	}
+}
+
+// An artifact store often compresses, and a pipeline hands a file over on
+// standard input: both are read like the file itself.
+func TestFromReadsGzipAndStandardInput(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	plain := exportFile(t, dir, "run.ndjson", fromEvents("ts_a")...)
+	raw, err := os.ReadFile(plain)
+	if err != nil {
+		panic(err)
+	}
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	if _, err := zw.Write(raw); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile("run.ndjson.gz", z.Bytes(), 0o600); err != nil {
+		panic(err)
+	}
+	wantCode, want, _ := fromTC(t, []string{plain}, "summary", "--fail-on-error")
+	if wantCode != exitCheckFailed || want == "" {
+		panic(fmt.Sprintf("the plain file: exit %d\n%s", wantCode, want))
+	}
+	if code, got, e := fromTC(t, []string{"run.ndjson.gz"}, "summary", "--fail-on-error"); code != wantCode || got != want {
+		panic(fmt.Sprintf("the gzip file: exit %d\n%s%s\n--- want\n%s", code, got, e, want))
+	}
+	// Standard input, plain and compressed.
+	for name, content := range map[string][]byte{"plain": raw, "gzip": z.Bytes()} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			panic(err)
+		}
+		go func() { _, _ = w.Write(content); _ = w.Close() }()
+		old := os.Stdin
+		os.Stdin = r
+		code, got, e := fromTC(t, []string{"-"}, "summary", "--fail-on-error")
+		os.Stdin = old
+		_ = r.Close()
+		// The session is named after its file where the export carries no name: "stdin" here, "run" there.
+		if code != wantCode || got != strings.Replace(want, "ts_a  run  ", "ts_a  stdin  ", 1) {
+			panic(fmt.Sprintf("standard input (%s): exit %d\n%s%s\n--- want\n%s", name, code, got, e, want))
+		}
+	}
+	// A digest read from standard input cannot name a file to read again.
+	r, w, _ := os.Pipe()
+	go func() { _, _ = w.Write(raw); _ = w.Close() }()
+	old := os.Stdin
+	os.Stdin = r
+	_, out, _ := fromTC(t, []string{"-"}, "digest")
+	os.Stdin = old
+	_ = r.Close()
+	if !strings.Contains(out, "`tracectl --from FILE show <seq>`") {
+		panic("the digest of standard input:\n" + out)
+	}
+}
+
+// --from after the command would be an unknown flag of the command: said in
+// those words, with the order that works.
+func TestFromAfterTheCommandIsExplained(t *testing.T) {
+	for _, args := range [][]string{{"status", "--short", "--from", "run.ndjson"}, {"digest", "--from=run.ndjson"}} {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--from goes before the command: tracectl --from FILE "+args[0]) {
+			panic(fmt.Sprintf("%v: exit %d, stderr %q", args, code, errb.String()))
+		}
+	}
+	// What follows "--" belongs to the command that run runs.
+	var out, errb bytes.Buffer
+	if code := run([]string{"--cp", "http://127.0.0.1:1", "run", "--timeout", "0s", "--", "true", "--from", "x"}, &out, &errb); !strings.Contains(errb.String(), "--timeout must be more than zero") {
+		panic(fmt.Sprintf("run -- cmd --from: exit %d, stderr %q", code, errb.String()))
 	}
 }

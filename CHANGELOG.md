@@ -146,6 +146,9 @@ Rolling back:
 
 ### Added
 
+- `tracectl --from` and `dashboard -open` read a gzip'ed export as it is, and `-` for standard input
+  (`gunzip -c run.ndjson.gz | tracectl --from - digest`). `--from` after the command is refused with the order
+  that works, where the command reported an unknown flag.
 - `tracectl run --export FILE` writes the session as `export -o FILE` does, when the run ends: the artifact a
   CI job keeps. The `--digest` and `--report` files of that run then name commands that read it
   (`tracectl --from run.ndjson show <seq>`), which still work when the services of the run are gone; without

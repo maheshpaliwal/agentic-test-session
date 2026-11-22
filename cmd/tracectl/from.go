@@ -209,7 +209,7 @@ func shellWord(path string, tight bool) string {
 		limit = fromArgTightMax
 	}
 	switch {
-	case len(path) > limit || strings.HasPrefix(path, "-") || strings.ContainsFunc(path, func(r rune) bool { return !quotable(r) }):
+	case len(path) > limit || strings.HasPrefix(path, "-") || strings.HasPrefix(path, "/dev/") || strings.ContainsFunc(path, func(r rune) bool { return !quotable(r) }):
 		return "FILE"
 	case strings.ContainsFunc(path, func(r rune) bool { return !plain(r) }):
 		return "'" + path + "'"

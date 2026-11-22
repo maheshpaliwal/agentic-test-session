@@ -2,8 +2,10 @@ package dashboard
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -66,12 +68,36 @@ func (d *Demo) Files() []OpenedFile {
 	return out
 }
 
+// openExport opens the export at path for reading: the file, or standard
+// input for "-", and what gzip made of either (an artifact store often
+// compresses), which the first two bytes tell.
+func openExport(path string) (io.Reader, func(), error) {
+	in, done := io.Reader(os.Stdin), func() {}
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		in, done = f, func() { _ = f.Close() }
+	}
+	br := bufio.NewReader(in)
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		zr, err := gzip.NewReader(br)
+		if err != nil {
+			done()
+			return nil, nil, fmt.Errorf("%s: gzip: %w", path, err)
+		}
+		return zr, done, nil
+	}
+	return br, done, nil
+}
+
 func loadExport(path string) (*demoSess, error) {
-	f, err := os.Open(path)
+	f, done, err := openExport(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer done()
 	var evs []core.Event
 	var meta *core.ExportSession // the session's verdict, on the line of an event (the first)
 	id := ""                     // the session of the file
@@ -162,7 +188,10 @@ func loadExport(path string) (*demoSess, error) {
 	cv := &colView{id: id, evs: evs, sealed: true, pending: open, dropped: dropped,
 		// A file cut short mid-line (an interrupted export) still opens; what it holds is not everything.
 		incomplete: len(open) > 0 || dropped > 0 || torn}
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := strings.TrimSuffix(filepath.Base(path), ".gz")
+	if name = strings.TrimSuffix(name, filepath.Ext(name)); path == "-" {
+		name = "stdin"
+	}
 	// To the nanosecond: a recording is often shorter than a second, and whole
 	// seconds would show its duration as zero.
 	start, end := time.Unix(0, first).UTC(), time.Unix(0, last).UTC()

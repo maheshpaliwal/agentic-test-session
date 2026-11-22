@@ -298,7 +298,7 @@ the commands that read (`digest`, `summary`, `report`, `events`, `trace`, `show`
 for it, `--fail-on-*` gates included. The session need not be named (the file holds one); when it is, by its id,
 its name or the file's name without the extension, it has to be the file's. Any other command with `--from`
 exits 2. A session that was exported while it ran is shown as running: its events are those that had arrived.
-`--from` goes before the command.
+`--from` goes before the command. The file may be gzip'ed, and `--from -` reads standard input.
 
 | `tracectl run` exits | It means | Next |
 |---|---|---|

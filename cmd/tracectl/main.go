@@ -135,7 +135,8 @@ read an export instead of the services:
                                 The session need not be named: "tracectl --from run.ndjson digest",
                                 "tracectl --from run.ndjson show 17". It may be, by its id, its name or
                                 the file's name without the extension (run); a session the files do not
-                                hold is an error. --from goes before the command. Repeat --from to read several files: "list" lists them,
+                                hold is an error. --from goes before the command. FILE may be gzip'ed,
+                                and "-" reads standard input. Repeat --from to read several files: "list" lists them,
                                 "tracectl --from a.ndjson --from b.ndjson diff" compares a (baseline) with
                                 b (candidate), and any other command then has to name its session.
                                 A file that is missing, empty, not an export or cut short is refused
@@ -236,6 +237,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		fmt.Fprintf(stderr, "tracectl: unknown command %q; run 'tracectl --help' for the list of commands\n", name)
 		return 2
+	}
+	// --from is a flag of tracectl, not of a command: after the command it would be an unknown flag there.
+	// (What follows "--" belongs to the command that run runs.)
+	for _, a := range rest {
+		if a == "--" {
+			break
+		}
+		if a == "--from" || a == "-from" || strings.HasPrefix(a, "--from=") || strings.HasPrefix(a, "-from=") {
+			fmt.Fprintf(stderr, "tracectl: --from goes before the command: tracectl --from FILE %s ...\n", name)
+			return 2
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
