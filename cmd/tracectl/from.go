@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,12 +102,22 @@ func (w *memResponse) Write(b []byte) (int, error) {
 func (c *cli) openFrom(paths []string) error {
 	// Standard input that is a terminal would be waited on without a word.
 	if slices.Contains(paths, "-") {
-		if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
+		// (The null device is a character device too, and is no terminal: it reads as an empty file.)
+		null, _ := os.Stat(os.DevNull)
+		if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 && (null == nil || !os.SameFile(st, null)) {
 			return errors.New("--from - reads an export from standard input, which is a terminal: pipe one into it (gunzip -c run.ndjson.gz | tracectl --from - digest), or name the file")
 		}
 	}
 	d, err := dashboard.NewOfflineStrict(paths)
 	if err != nil {
+		// A digest names its file as it was given when the digest was written: a relative name is one of
+		// another directory when the command is run elsewhere.
+		var pe *fs.PathError
+		if errors.As(err, &pe) && errors.Is(err, fs.ErrNotExist) && !filepath.IsAbs(pe.Path) {
+			if wd, werr := os.Getwd(); werr == nil {
+				return fmt.Errorf("%w (looked for in %s; a command copied from a digest or a report names the file as it was called where that was written)", err, wd)
+			}
+		}
 		return err
 	}
 	c.files = d.Files()

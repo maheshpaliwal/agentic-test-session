@@ -53,8 +53,20 @@ func newOffline(paths []string, strict bool) (*Demo, error) {
 		if err != nil {
 			return nil, err
 		}
-		if strict && s.unproven {
-			s.State = ""
+		switch {
+		case strict:
+			// tracectl --from has its own words for both cases, and fails its gates on them.
+			if s.unproven {
+				s.State = ""
+			}
+		case s.unproven:
+			// The viewer shows the session, and says what the file leaves open: a gate asked through
+			// the dashboard must not pass where tracectl --from does not.
+			s.Incomplete = true
+			s.IncompleteReasons = append(s.IncompleteReasons, "the file does not say how the session ended or how many events it holds (its first line is lost, or it was exported by an older tracectl or without the control plane)")
+		case !s.State.Terminal():
+			s.Incomplete = true
+			s.IncompleteReasons = append(s.IncompleteReasons, fmt.Sprintf("the session had not ended when the file was written (%s): the file holds the events that had arrived", s.State))
 		}
 		if prev := d.find(s.ID); prev != nil {
 			// Sessions are told apart by their id, so two exports of one session cannot be open
@@ -82,6 +94,9 @@ type OpenedFile struct {
 	// Unproven: the file does not say how its session ended or how many
 	// events it holds (see NewOfflineStrict).
 	Unproven bool
+	// CommandStatus is the exit status of the command of the `tracectl run`
+	// that wrote the file; nil for a file written otherwise.
+	CommandStatus *int
 }
 
 // Files returns the files the sessions were opened from, in the order they
@@ -92,7 +107,7 @@ func (d *Demo) Files() []OpenedFile {
 	var out []OpenedFile
 	for _, s := range d.sess {
 		if s.path != "" {
-			out = append(out, OpenedFile{Path: s.path, SessionID: s.ID, Name: s.Name, Truncated: s.torn, Unproven: s.unproven})
+			out = append(out, OpenedFile{Path: s.path, SessionID: s.ID, Name: s.Name, Truncated: s.torn, Unproven: s.unproven, CommandStatus: s.commandStatus})
 		}
 	}
 	return out
@@ -279,6 +294,9 @@ func loadExport(path string) (*demoSess, error) {
 		sess.DrainTimedOut, sess.MaxDrainSeconds, sess.SealError = meta.DrainTimedOut, meta.MaxDrainSeconds, meta.SealError
 	}
 	ds := &demoSess{Session: sess, events: evs, sealed: cv.sealed, file: cv, path: path, unproven: unproven}
+	if meta != nil {
+		ds.commandStatus = meta.CommandStatus
+	}
 	if torn {
 		ds.torn = tornErr
 	}

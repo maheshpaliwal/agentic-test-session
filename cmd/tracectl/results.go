@@ -47,11 +47,22 @@ type gates struct {
 	// lacks will not arrive: where a running session gets a note, the file
 	// of one fails the gate.
 	file bool
+	// commandOf returns the exit status of the command of the run that wrote
+	// the file of session id; nil when the file does not carry one.
+	commandOf func(id string) *int
 }
 
 // of returns g for the sessions c reads: from the services, or from files.
 func (g *gates) of(c *cli) *gates {
 	g.file = len(c.files) > 0
+	g.commandOf = func(id string) *int {
+		for _, f := range c.files {
+			if f.SessionID == id {
+				return f.CommandStatus
+			}
+		}
+		return nil
+	}
 	return g
 }
 
@@ -68,6 +79,13 @@ func (g *gates) check(stderr io.Writer, info client.Info, sum client.Summary, fa
 	var failed []string
 	if g.onError && failures > 0 {
 		failed = append(failed, fmt.Sprintf("%d failed event(s)", failures))
+	}
+	// The run that wrote the file failed, whatever was recorded: a test that asserts on a response fails
+	// without a failed event, and the file alone would pass.
+	if g.onError && g.commandOf != nil {
+		if st := g.commandOf(info.ID); st != nil && *st != 0 {
+			failed = append(failed, fmt.Sprintf("the command of the run that wrote the file failed (exit status %d)", *st))
+		}
 	}
 	// The control plane knows about a failed seal and a drain that timed out;
 	// the collector's summary does not.

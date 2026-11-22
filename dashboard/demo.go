@@ -69,6 +69,8 @@ type demoSess struct {
 	torn error // the file's last line was cut short: what the parser said of it
 	// unproven: the file has no verdict, or no count of its events.
 	unproven bool
+	// commandStatus: see OpenedFile.CommandStatus.
+	commandStatus *int
 }
 
 // Demo serves the control-plane and collector APIs from memory: synthetic

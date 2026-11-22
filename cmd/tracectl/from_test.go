@@ -730,3 +730,63 @@ func TestFromStandardInputThatIsATerminal(t *testing.T) {
 		panic(fmt.Sprintf("exit %d, stdout %q, stderr %q", code, out, e))
 	}
 }
+
+// A run whose command failed without a failed event (a test that asserts on
+// a response) is a failed run: the file says so, and the error gate fails on
+// it as tracectl run exited with the command's status.
+func TestFromFailsOnTheCommandOfTheRun(t *testing.T) {
+	t.Chdir(t.TempDir())
+	e := core.Event{SessionID: "ts_a", Seq: 1, Service: "api", Kind: core.KindAPIIn, Name: "GET /", StartNs: 1e9, EndNs: 2e9}
+	write := func(name string, status *int) {
+		n := 1
+		line, err := core.ExportLine(&e, &core.ExportSession{State: "SEALED", Events: &n, CommandStatus: status})
+		if err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(name, append(line, '\n'), 0o600); err != nil {
+			panic(err)
+		}
+	}
+	seven, zero := 7, 0
+	write("failed.ndjson", &seven)
+	write("ok.ndjson", &zero)
+	write("exported.ndjson", nil) // by tracectl export: no command
+	for _, cmd := range []string{"summary", "report", "digest"} {
+		code, _, errOut := fromTC(t, []string{"failed.ndjson"}, cmd, "--fail-on-error")
+		if code != exitCheckFailed || !strings.Contains(errOut, "the command of the run that wrote the file failed (exit status 7)") {
+			t.Errorf("%s --fail-on-error on a run whose command failed: exit %d, %q", cmd, code, errOut)
+		}
+		// The other gates ask other questions.
+		if code, _, errOut := fromTC(t, []string{"failed.ndjson"}, cmd, "--fail-on-incomplete", "--fail-on-empty"); code != 0 {
+			t.Errorf("%s without --fail-on-error: exit %d, %q", cmd, code, errOut)
+		}
+		for _, f := range []string{"ok.ndjson", "exported.ndjson"} {
+			if code, _, errOut := fromTC(t, []string{f}, cmd, "--fail-on-error"); code != 0 {
+				t.Errorf("%s --fail-on-error on %s: exit %d, %q", cmd, f, code, errOut)
+			}
+		}
+	}
+}
+
+// A file that is not there, named relatively: the error says where it was
+// looked for (a command copied from a digest is run elsewhere).
+func TestFromMissingRelativeFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	code, _, e := fromTC(t, []string{"run.ndjson"}, "digest")
+	if code != 1 || !strings.Contains(e, "no such file") || !strings.Contains(e, "looked for in ") || strings.Count(e, "\n") != 1 {
+		panic(fmt.Sprintf("exit %d, stderr %q", code, e))
+	}
+	// Standard input from the null device is an empty file, not a terminal.
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		panic(err)
+	}
+	defer null.Close()
+	old := os.Stdin
+	os.Stdin = null
+	defer func() { os.Stdin = old }()
+	if code, _, e := fromTC(t, []string{"-"}, "summary"); code != 1 || strings.Contains(e, "terminal") {
+		panic(fmt.Sprintf("--from - < /dev/null: exit %d, stderr %q", code, e))
+	}
+}

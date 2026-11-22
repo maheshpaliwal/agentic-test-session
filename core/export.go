@@ -34,6 +34,11 @@ type ExportSession struct {
 	// line (a download that stopped) looks whole otherwise, and would be
 	// judged on the events that happen to be there.
 	Events *int `json:"events,omitempty"`
+	// CommandStatus is the exit status of the command that `tracectl run`
+	// ran in the session, when the export was written by it; nil otherwise.
+	// A run can fail without a failed event (a test that asserts on a
+	// response): a reader that judges the file alone would pass it.
+	CommandStatus *int `json:"command_status,omitempty"`
 	// State is the session's state when it was exported.
 	State      string `json:"state,omitempty"`
 	Incomplete bool   `json:"incomplete,omitempty"`

@@ -274,6 +274,12 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 	const warn = "service batch (instance b-1): the collector has 5 events, more than the 3 of the instance's last report"
 	write := func(name string, meta *core.ExportSession, metaOn int) string {
 		t.Helper()
+		if meta != nil && meta.Events == nil { // as an export has it: how many events it holds
+			n := len(evs)
+			m := *meta
+			m.Events = &n
+			meta = &m
+		}
 		var b strings.Builder
 		for i := range evs {
 			m := meta
@@ -334,8 +340,10 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 	if s := open(write("seal.ndjson", &core.ExportSession{State: "SEALED", Incomplete: true, SealError: "collector unavailable"}, 0)); !s.Incomplete || s.SealError != "collector unavailable" {
 		panic(fmt.Sprintf("a failed seal: %+v", s))
 	}
-	// An export from before the verdict was carried: judged on its events.
-	if s := open(writeExport(t, "old.ndjson", evs...)); s.Incomplete || len(s.IncompleteReasons) != 0 {
+	// An export from before the verdict was carried, or one that lost its first line: it is shown, and
+	// it is not shown as complete. Nothing in it says how the session ended or that the file is whole,
+	// and a gate asked through the dashboard must not pass where tracectl --from does not.
+	if s := open(writeExport(t, "old.ndjson", evs...)); !s.Incomplete || len(s.IncompleteReasons) != 1 || !strings.Contains(s.IncompleteReasons[0], "does not say how the session ended") {
 		panic(fmt.Sprintf("an export without a verdict: %+v", s))
 	}
 }
@@ -348,7 +356,8 @@ func TestOfflineKeepsTheVerdictOfTheExport(t *testing.T) {
 func TestOfflineOpensASessionWithoutEvents(t *testing.T) {
 	const reason = "service orders-api (instance o-1): 0 of 6 recorded events reached the collector (last error: connection refused)"
 	started := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
-	line, err := core.ExportHeader("ts_none", &core.ExportSession{State: "SEALED", Incomplete: true, IncompleteReasons: []string{reason},
+	none := 0 // an export says how many events it holds, also when that is none
+	line, err := core.ExportHeader("ts_none", &core.ExportSession{State: "SEALED", Events: &none, Incomplete: true, IncompleteReasons: []string{reason},
 		StartedAt: started, EndedAt: started.Add(12 * time.Second)})
 	if err != nil {
 		panic(err)

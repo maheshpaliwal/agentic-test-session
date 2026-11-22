@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maheshpaliwal/agentic-test-session/core"
 	"github.com/maheshpaliwal/agentic-test-session/sdk/client"
 )
 
@@ -227,7 +228,7 @@ func (c *cli) runCommand(ctx context.Context, args []string) error {
 		// The export first: the report and the digest then name commands that
 		// read it, which still work when the services of the run are gone.
 		if *exportPath != "" {
-			if xerr := c.runExport(readCtx, s, *exportPath); xerr != nil {
+			if xerr := c.runExport(readCtx, s, *exportPath, code); xerr != nil {
 				failed = true
 				fmt.Fprintf(c.stderr, "tracectl: exporting session %s: %v\n", s.ID, xerr)
 				*exportPath = ""
@@ -328,7 +329,7 @@ func sameFile(a, b string) bool {
 
 // runExport writes the events of the session run recorded to path, as
 // export -o does, and says how to read the file.
-func (c *cli) runExport(ctx context.Context, s *client.Session, path string) (err error) {
+func (c *cli) runExport(ctx context.Context, s *client.Session, path string, commandStatus int) (err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // events may hold sensitive payloads
 	if err != nil {
 		return err
@@ -346,7 +347,8 @@ func (c *cli) runExport(ctx context.Context, s *client.Session, path string) (er
 	if err := f.Chmod(0o600); err != nil {
 		return err
 	}
-	n, err := s.Export(ctx, f)
+	// With the status of the command: a later job that has the file alone then fails as this run does.
+	n, err := s.Export(ctx, f, func(m *core.ExportSession) { m.CommandStatus = &commandStatus })
 	if err != nil {
 		return err
 	}

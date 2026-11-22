@@ -146,6 +146,11 @@ Rolling back:
 
 ### Added
 
+- `tracectl run --export` writes the exit status of its command into the file (`command_status` in
+  `tsession_session`), and `tracectl --from FILE ... --fail-on-error` fails on a status other than 0: a run whose
+  tests failed without a failed event passed a gate that had the artifact alone. `client.Session.Export` takes
+  functions that edit the verdict before it is written. The README has a two-job CI example and the exit
+  statuses of `--from` in one place.
 - `docs/LIMITS.md`: what the tool does not record, what a verdict can miss, and what the preflight and an
   export cannot tell, in one place; the README links it from its first screen and says what adopting it costs.
   `docs/PROTOCOL.md` documents `name`, `name_auto` and `events` of an export's `tsession_session`.
@@ -436,6 +441,10 @@ Rolling back:
 
 ### Fixed
 
+- `dashboard -open` shows a file without a verdict, or of a session that had not ended, as incomplete with the
+  reason: a gate asked through the dashboard passed where `tracectl --from` on the same file did not.
+- `tracectl --from` on a relative name that is not there says in which directory it looked (a command copied
+  from a digest is often run elsewhere); `--from - < /dev/null` is an empty file, not "a terminal".
 - `tracectl --from`, from the re-check of the fixes above: a verdict with a count and no state is read as
   unproven (it passed as a sealed session); a `tsession_session` member written twice on the first line, or a
   member of the verdict written twice, is refused (the last one was read, so a clean verdict could follow one

@@ -386,6 +386,38 @@ go run ./cmd/dashboard -open run.ndjson      # or the UI; it prints the --cp and
 TSESSION_ARTIFACT_DIR=$PWD/artifacts go test ./...
 ```
 
+Two jobs, the second without any service: the first records and keeps the files whatever happens, the
+second gates on the artifact. `run --export` writes the status of its command into the file, so the gate also
+fails for a run whose tests failed without a failed event.
+
+```yaml
+# GitHub Actions; the same three commands work in any CI system
+jobs:
+  e2e:
+    steps:
+      - run: >
+          tracectl run --name "e2e-${{ github.run_id }}"
+          --export run.ndjson --digest digest.md --report report.md
+          -- ./run-e2e.sh
+      - if: always()            # also when the tests failed: that is when the files are wanted
+        uses: actions/upload-artifact@v4
+        with: { name: tsession, path: "run.ndjson\ndigest.md\nreport.md" }
+  gate:
+    needs: e2e
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: tsession }
+      - run: tracectl --from run.ndjson report --fail-on-error --fail-on-incomplete --fail-on-empty >> "$GITHUB_STEP_SUMMARY"
+```
+
+`tracectl --from FILE <command> --fail-on-*` exits `0` when the checks hold, `3` when one does not (failed
+events or a failed command, an incomplete or unproven recording, no events), `1` when the file cannot be read as
+an export (missing, cut short, not an export) and `2` for a command that does not read. Several artifacts are
+gated one by one: `for f in artifacts/*.ndjson; do tracectl --from "$f" summary --fail-on-error || exit; done`.
+`export -o FILE` and `run --export FILE` write the file; `tracectl --from FILE` and `dashboard -open FILE` read
+it, the first for scripts and agents (strict), the second for a person (it shows what it can).
+
 An export holds recorded payloads, masked by field name only. Treat it like test data, not as something safe to
 share; whether it may go to CI storage is a question for your own data-handling policy. The opened session
 keeps its id and its name (an export from before the name was stored is named after the file, `run` above), and

@@ -1119,7 +1119,7 @@ func TestCLIRunExport(t *testing.T) {
 	// there are. (That --from reads an export like the live session is held by the integration tests; the
 	// events of this fixture carry no session id.)
 	raw, err := os.ReadFile("run.ndjson")
-	if err != nil || strings.Count(string(raw), "\n") != 3 || !strings.Contains(strings.SplitN(string(raw), "\n", 2)[0], `"tsession_session":{"events":3,"state":"SEALED"}`) {
+	if err != nil || strings.Count(string(raw), "\n") != 3 || !strings.Contains(strings.SplitN(string(raw), "\n", 2)[0], `"tsession_session":{"events":3,"command_status":0,"state":"SEALED"}`) {
 		panic(fmt.Sprintf("the export: %v\n%s", err, raw))
 	}
 	for _, tt := range []struct {

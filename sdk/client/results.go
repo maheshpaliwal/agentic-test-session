@@ -237,7 +237,11 @@ func (s *Session) Mutations(ctx context.Context, f MutationFilter) ([]Mutation, 
 // verdict (core.ExportHeader): the export of a session whose services could
 // not deliver anything says so, instead of being an empty file. Only when
 // the control plane does not know the session either is nothing written.
-func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
+//
+// Each edit is given the verdict before it is written, to add what only the
+// caller knows (tracectl run: the exit status of its command). None is
+// called when the control plane did not answer for the session.
+func (s *Session) Export(ctx context.Context, w io.Writer, edit ...func(*core.ExportSession)) (int, error) {
 	evs, err := s.Events(ctx)
 	if err != nil {
 		return 0, err
@@ -254,6 +258,9 @@ func (s *Session) Export(ctx context.Context, w io.Writer) (int, error) {
 		}
 		if len(evs) == 0 {
 			meta.StartedAt, meta.EndedAt = info.StartedAt, info.EndedAt
+		}
+		for _, fn := range edit {
+			fn(meta)
 		}
 	} else if ctx.Err() != nil {
 		return 0, ctx.Err()
